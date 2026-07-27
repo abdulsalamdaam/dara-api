@@ -108,17 +108,33 @@ class EjarController {
       }
     };
 
-    // Best-effort: list the ID's contracts so relationships resolve.
+    // Best-effort: list the ID's contracts so relationships resolve. The list
+    // resource is the ONLY source of the parties (tenants/lessors), the
+    // property_id and the unit ids — so we page until we actually find it. A
+    // broker can have hundreds of contracts; stopping at the first page silently
+    // produced a preview with no tenant/landlord/property at all.
     let listBody: EjarBody | null = null;
     let resource: JsonApiResource | null = null;
     if (idNumber) {
-      listBody = await run(() =>
-        this.client.request("getRentalContracts", { id_number: idNumber, "page[size]": 100, "page[number]": 1 }, { userId: user.id }),
-      );
-      if (listBody) {
-        const arr = Array.isArray(listBody.data) ? listBody.data : listBody.data ? [listBody.data] : [];
-        const idx = summarizeContractsBody(listBody).findIndex((s) => s.contractNumber === contractNumber);
-        resource = idx >= 0 ? arr[idx] : null;
+      const PAGE = 100;
+      const MAX_PAGES = 20;
+      for (let p = 1; p <= MAX_PAGES && !resource; p++) {
+        const body = await run(() =>
+          this.client.request("getRentalContracts", { id_number: idNumber, "page[size]": PAGE, "page[number]": p }, { userId: user.id }),
+        );
+        if (!body) break;
+        if (p === 1) listBody = body;
+        const arr = Array.isArray(body.data) ? body.data : body.data ? [body.data] : [];
+        if (arr.length === 0) break;
+        const idx = summarizeContractsBody(body).findIndex((s) => s.contractNumber === contractNumber);
+        if (idx >= 0) {
+          resource = arr[idx];
+          listBody = body;
+          break;
+        }
+        const total = Number(body.meta?.count ?? 0);
+        if (total && p * PAGE >= total) break;
+        if (!total && arr.length < PAGE) break;
       }
     }
     if (!resource) resource = { type: "rental-contract", id: contractNumber, attributes: { contract_number: contractNumber } };

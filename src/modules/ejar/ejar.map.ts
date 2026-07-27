@@ -3,13 +3,23 @@
 // Field names verified against the REAL UAT responses (captured in
 // ejar_api_logs):
 //   GetRentalContracts   — dates start_time/end_time, total_value,
-//                          security_deposit_value, inline tenants/lessors/units.
+//                          security_deposit_value, inline tenants/lessors/units,
+//                          plus broker_name, unified_number, company_cr_number,
+//                          period/days_remaining, contract_activities.
 //   RentalFinancialData  — rent in included[rental_fees].total_rent_amount.
 //   RentalContractInvoices — invoices in included[payments]: invoice_amount,
 //                          invoice_due_date, payment_status.{ar,en}.
 //   NationalAddress      — NO street address; included has property coordinates
 //                          + property_type and a unit (unit_number, floor_number,
 //                          unit_type). All bilingual fields are {ar,en}.
+//   GetProperties        — address/district/city/region (name_ar+name_en),
+//                          owners[], title deed, usage, utilities, amenities.
+//   GetUnits             — area/room_count/floor, owners[], meters, deed,
+//                          availability, usage, unified_numbers.
+//
+// Everything Ejar sends is surfaced: the flat `contract` object is what the
+// import writes, and the extra blocks (parties / contractInfo / financial /
+// activities / raw) exist so the wizard can show the full record BEFORE import.
 // READ-ONLY: nothing is pushed to NHC.
 
 import type { EjarBody, JsonApiResource } from "./ejar.types";
@@ -35,6 +45,23 @@ function bilingual(v: unknown): string | null {
     return (o.ar as string) || (o.name_ar as string) || (o.en as string) || (o.name_en as string) || null;
   }
   return v == null || `${v}`.trim() === "" ? null : `${v}`;
+}
+
+/**
+ * Some GetProperties columns come back encrypted (base64 blobs with a trailing
+ * newline, e.g. unified_numbers / companies_cr_numbers). Showing those as data
+ * is worse than showing nothing — drop them.
+ */
+function isEncrypted(v: string): boolean {
+  return /[+/=]/.test(v) && /^[A-Za-z0-9+/]{16,}={0,2}\s*$/.test(v);
+}
+
+/** A string list attribute (lessor_names, utilities, …), cleaned of blobs. */
+function strList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x) => (x == null ? "" : `${x}`.trim()))
+    .filter((x) => x !== "" && !isEncrypted(x));
 }
 
 /** Included resources of a given JSON:API type. */
@@ -93,6 +120,7 @@ export interface EjarContractSummary {
   endDate: string | null;
   propertyName: string | null;
   tenantName: string | null;
+  landlordName: string | null;
   monthlyRent: string | null;
   annualRent: string | null;
 }
@@ -100,6 +128,7 @@ export interface EjarContractSummary {
 export function summarizeContract(res: JsonApiResource): EjarContractSummary {
   const a = res.attributes || {};
   const tenant = party(a.tenants, "tenant");
+  const lessor = party(a.lessors, "lessor");
   return {
     id: res.id,
     contractNumber: pick(a, "contract_number", "contractNumber", "number") || res.id,
@@ -110,6 +139,7 @@ export function summarizeContract(res: JsonApiResource): EjarContractSummary {
     endDate: pick(a, "end_time", "end_date", "endDate", "contract_end_date", "to_date"),
     propertyName: pick(a, "property_name", "propertyName", "property"),
     tenantName: pick(tenant, "name", "full_name", "party_name") || pick(a, "tenant_name", "tenantName"),
+    landlordName: pick(lessor, "name", "full_name", "party_name") || pick(a, "lessor_name", "landlord_name"),
     monthlyRent: pick(a, "monthly_rent", "monthlyRent", "rent_amount", "installment_value"),
     annualRent: pick(a, "total_value", "annual_rent", "annualRent", "total_contract_value", "yearly_rent"),
   };
@@ -126,9 +156,12 @@ export interface EjarInvoiceRow {
   id: string;
   number: string | null;
   dueDate: string | null;
+  issueDate: string | null;
+  lateDate: string | null;
   amount: string | null;
   remaining: string | null;
   status: string | null;
+  scheduleNumber: string | null;
 }
 
 /** Real invoices live in included[type=payments], not in `data`. */
@@ -138,10 +171,13 @@ export function summarizeInvoices(body?: EjarBody | null): EjarInvoiceRow[] {
     return {
       id: r.id,
       number: pick(a, "sequence_number", "invoice_number", "number", "reference"),
-      dueDate: pick(a, "invoice_due_date", "due_date", "dueDate", "invoice_issue_date"),
+      dueDate: pick(a, "invoice_due_date", "due_date", "dueDate"),
+      issueDate: pick(a, "invoice_issue_date", "issue_date"),
+      lateDate: pick(a, "invoice_late_date", "late_date"),
       amount: pick(a, "invoice_amount", "amount", "total", "total_amount"),
       remaining: pick(a, "invoice_remaining_amount", "remaining_amount"),
       status: bilingual(a.payment_status) || pick(a, "status", "payment_status"),
+      scheduleNumber: pick(a, "payment_schedule_sequence_number"),
     };
   });
 }
@@ -161,37 +197,345 @@ export interface EjarContractDetail {
   unitsBody?: EjarBody | null;
 }
 
+/* ── Parties ──
+ * Ejar inlines `tenants` / `lessors` on the contract. Each entry is either an
+ * individual (name + id_number + phone_number + email) or an organization
+ * (name + registration_number + unified_number + organization_type) and may
+ * carry role="…representative". We surface EVERY party, not just the primary
+ * one, because a contract can legitimately have several of each.
+ */
+export interface EjarPartyInfo {
+  group: "tenant" | "lessor" | "broker";
+  role: string | null;
+  isRepresentative: boolean;
+  name: string | null;
+  partyType: string | null;
+  idType: string | null;
+  idNumber: string | null;
+  phone: string | null;
+  email: string | null;
+  unifiedNumber: string | null;
+  registrationNumber: string | null;
+  organizationType: string | null;
+  vat: string | null;
+}
+
+function mapParty(p: Attrs, group: EjarPartyInfo["group"]): EjarPartyInfo {
+  const role = pick(p, "role");
+  return {
+    group,
+    role,
+    isRepresentative: (role || "").toLowerCase().includes("representative"),
+    name: pick(p, "name", "full_name", "party_name", "owner_name"),
+    partyType: pick(p, "type", "party_type", "owner_type"),
+    idType: pick(p, "id_type", "owner_id_type"),
+    idNumber: pick(p, "id_number", "national_id", "identity_number", "owner_id"),
+    phone: pick(p, "phone_number", "phone", "mobile"),
+    email: pick(p, "email"),
+    unifiedNumber: pick(p, "unified_number"),
+    registrationNumber: pick(p, "registration_number", "cr_number", "commercial_registration"),
+    organizationType: pick(p, "organization_type"),
+    vat: pick(p, "vat"),
+  };
+}
+
+export interface EjarParties {
+  tenants: EjarPartyInfo[];
+  lessors: EjarPartyInfo[];
+  brokers: EjarPartyInfo[];
+}
+
+export function mapEjarParties(detail: EjarContractDetail): EjarParties {
+  const a = detail.contract.attributes || {};
+  const list = (v: unknown, group: EjarPartyInfo["group"]) =>
+    (Array.isArray(v) ? (v as Attrs[]) : []).map((p) => mapParty(p, group));
+
+  const brokers: EjarPartyInfo[] = [];
+  const brokerName = pick(a, "broker_name");
+  const brokerId = pick(a, "broker_national_id");
+  if (brokerName || brokerId) {
+    brokers.push({
+      group: "broker",
+      role: "broker",
+      isRepresentative: false,
+      name: brokerName,
+      partyType: null,
+      idType: brokerId ? "national_id" : null,
+      idNumber: brokerId,
+      phone: null,
+      email: null,
+      unifiedNumber: pick(a, "unified_number"),
+      registrationNumber: pick(a, "company_cr_number"),
+      organizationType: null,
+      vat: null,
+    });
+  }
+  return { tenants: list(a.tenants, "tenant"), lessors: list(a.lessors, "lessor"), brokers };
+}
+
+/* ── Contract facts (everything the list endpoint returns, labelled) ── */
+export interface EjarContractInfo {
+  ejarId: string | null;
+  contractNumber: string | null;
+  contractType: string | null;
+  status: string | null;
+  statusNormalized: string;
+  startDate: string | null;
+  endDate: string | null;
+  createdTime: string | null;
+  periodDays: string | null;
+  daysRemaining: string | null;
+  totalValue: string | null;
+  securityDeposit: string | null;
+  paymentFrequency: string | null;
+  installmentCount: string | null;
+  installmentValue: string | null;
+  ejarFee: string | null;
+  autoRenewal: string | null;
+  subleaseAllowed: string | null;
+  classification: string | null;
+  unitCount: string | null;
+  tenantCount: string | null;
+  lessorCount: string | null;
+  brokerName: string | null;
+  brokerNationalId: string | null;
+  unifiedNumber: string | null;
+  companyCrNumber: string | null;
+  propertyId: string | null;
+  propertyName: string | null;
+  propertyType: string | null;
+  region: string | null;
+  latitude: string | null;
+  longitude: string | null;
+}
+
+const yesNo = (v: unknown): string | null => (typeof v === "boolean" ? (v ? "true" : "false") : pick({ v }, "v"));
+
+export function mapEjarContractInfo(detail: EjarContractDetail): EjarContractInfo {
+  const a = detail.contract.attributes || {};
+  const region = (a.region && typeof a.region === "object" ? (a.region as Attrs) : {}) as Attrs;
+  return {
+    ejarId: pick(a, "contract_id") || detail.contract.id,
+    contractNumber: pick(a, "contract_number"),
+    contractType: pick(a, "contract_type"),
+    status: pick(a, "status"),
+    statusNormalized: normalizeStatus(pick(a, "status")),
+    startDate: pick(a, "start_time", "start_date"),
+    endDate: pick(a, "end_time", "end_date"),
+    createdTime: pick(a, "created_time"),
+    periodDays: pick(a, "period"),
+    daysRemaining: pick(a, "days_remaining"),
+    totalValue: pick(a, "total_value"),
+    securityDeposit: pick(a, "security_deposit_value"),
+    paymentFrequency: pick(a, "payment_frequency"),
+    installmentCount: pick(a, "installment_count"),
+    installmentValue: pick(a, "installment_value"),
+    ejarFee: pick(a, "contract_creation_ejar_fee"),
+    autoRenewal: yesNo(a.auto_renewal_enabled),
+    subleaseAllowed: yesNo(a.sublease_allowed),
+    classification: yesNo(a.classification),
+    unitCount: pick(a, "unit_count"),
+    tenantCount: pick(a, "tenant_count"),
+    lessorCount: pick(a, "lessor_count"),
+    brokerName: pick(a, "broker_name"),
+    brokerNationalId: pick(a, "broker_national_id"),
+    unifiedNumber: pick(a, "unified_number"),
+    companyCrNumber: pick(a, "company_cr_number"),
+    propertyId: pick(a, "property_id"),
+    propertyName: pick(a, "property_name"),
+    propertyType: pick(a, "property_type"),
+    region: pick(region, "name_ar", "name_en") || pick(a, "region"),
+    latitude: pick(a, "latitude"),
+    longitude: pick(a, "longitude"),
+  };
+}
+
+/* ── Contract activity trail ── */
+export interface EjarActivityRow {
+  type: string | null;
+  timestamp: string | null;
+  person: string | null;
+}
+
+export function mapEjarActivities(detail: EjarContractDetail): EjarActivityRow[] {
+  const a = detail.contract.attributes || {};
+  const rows = Array.isArray(a.contract_activities) ? (a.contract_activities as Attrs[]) : [];
+  return rows
+    .map((r) => ({
+      type: pick(r, "activity_type", "type", "status"),
+      timestamp: pick(r, "timestamp", "created_at", "date"),
+      person: pick(r, "person", "actor", "name"),
+    }))
+    .sort((x, y) => String(y.timestamp || "").localeCompare(String(x.timestamp || "")));
+}
+
+/* ── Financials ── */
+export interface EjarFinancialInfo {
+  totalRentAmount: string | null;
+  paymentFrequency: string | null;
+  recurringPayment: string | null;
+  totalValue: string | null;
+  securityDeposit: string | null;
+  ejarFee: string | null;
+  installmentCount: string | null;
+  installmentValue: string | null;
+  invoiceCount: number;
+  invoiceTotal: string | null;
+  invoiceRemaining: string | null;
+}
+
+function sumOf(values: Array<string | null>): string | null {
+  const nums = values.map((v) => Number(v)).filter((n) => Number.isFinite(n));
+  return nums.length ? String(nums.reduce((s, n) => s + n, 0)) : null;
+}
+
+export function mapEjarFinancial(detail: EjarContractDetail, invoices: EjarInvoiceRow[]): EjarFinancialInfo {
+  const a = detail.contract.attributes || {};
+  const fee = { ...rentalFee(detail.financial), ...rentalFee(detail.invoices) };
+  return {
+    totalRentAmount: pick(fee, "total_rent_amount", "total_rent", "rent_amount"),
+    paymentFrequency: bilingual(fee.payment_frequency) || pick(a, "payment_frequency"),
+    recurringPayment: bilingual(fee.recurring_payment),
+    totalValue: pick(a, "total_value"),
+    securityDeposit: pick(a, "security_deposit_value"),
+    ejarFee: pick(a, "contract_creation_ejar_fee"),
+    installmentCount: pick(a, "installment_count"),
+    installmentValue: pick(a, "installment_value"),
+    invoiceCount: invoices.length,
+    invoiceTotal: sumOf(invoices.map((i) => i.amount)),
+    invoiceRemaining: sumOf(invoices.map((i) => i.remaining)),
+  };
+}
+
+/* ── Property / units ── */
+export interface EjarOwnerInfo {
+  name: string | null;
+  id: string | null;
+  idType: string | null;
+  type: string | null;
+}
+
+function mapOwners(v: unknown): EjarOwnerInfo[] {
+  if (!Array.isArray(v)) return [];
+  return (v as Attrs[]).map((o) => ({
+    name: pick(o, "owner_name", "name"),
+    id: pick(o, "owner_id", "id_number", "id"),
+    idType: pick(o, "owner_id_type", "id_type"),
+    type: pick(o, "owner_type", "type"),
+  }));
+}
+
 export interface EjarPropertyInfo {
   ejarId: string | null;
   name: string | null;
   propertyType: string | null;
+  propertyUsage: string | null;
+  address: string | null;
   district: string | null;
   street: string | null;
   city: string | null;
   region: string | null;
   postalCode: string | null;
   deedNumber: string | null;
+  deedType: string | null;
   yearBuilt: string | null;
+  constructionDate: string | null;
+  contractStatus: string | null;
+  compoundName: string | null;
+  partOfCompound: string | null;
+  parkingCount: string | null;
+  elevatorCount: string | null;
+  unitsCount: string | null;
   latitude: string | null;
   longitude: string | null;
+  owners: EjarOwnerInfo[];
+  lessorNames: string[];
+  brokerIds: string[];
+  unifiedNumbers: string[];
+  crNumbers: string[];
+  utilities: string[];
+  amenities: string[];
 }
 
 export interface EjarUnitInfo {
   ejarId: string | null;
   unitNumber: string | null;
   unitType: string | null;
+  unitUsage: string | null;
   floor: string | null;
   area: string | null;
   rooms: string | null;
   rentPrice: string | null;
+  availability: string | null;
+  contracted: string | null;
+  contractStatus: string | null;
+  isVerified: string | null;
+  furnished: string | null;
+  furnishType: string | null;
+  finishing: string | null;
+  direction: string | null;
+  deedNumber: string | null;
+  deedType: string | null;
+  parkingLots: string | null;
+  includeMezzanine: string | null;
+  width: string | null;
+  height: string | null;
+  length: string | null;
+  frontLength: string | null;
+  waterMeter: string | null;
+  gasMeter: string | null;
+  electricityMeter: string | null;
+  establishedDate: string | null;
+  constructionDate: string | null;
+  region: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  propertyId: string | null;
+  rentalContractId: string | null;
+  owners: EjarOwnerInfo[];
+  lessorNames: string[];
+  unifiedNumbers: string[];
+  brokerIds: string[];
+  crNumbers: string[];
+  amenities: string[];
+  utilities: string[];
+}
+
+export interface EjarNationalAddressInfo {
+  contractNumber: string | null;
+  contractStatus: string | null;
+  contractEndDate: string | null;
+  propertyType: string | null;
+  unitType: string | null;
+  unitNumber: string | null;
+  floorNumber: string | null;
+  region: string | null;
+  latitude: string | null;
+  longitude: string | null;
+}
+
+/** Raw Ejar payloads, kept alongside the mapped view so nothing is hidden. */
+export interface EjarRawBlocks {
+  contract: Record<string, unknown> | null;
+  property: Record<string, unknown> | null;
+  units: Array<Record<string, unknown>>;
+  nationalAddress: Record<string, unknown> | null;
+  financial: Record<string, unknown> | null;
+  invoices: Array<Record<string, unknown>>;
 }
 
 export interface EjarImportPreview {
+  /** Flat payload the import endpoint writes. */
   contract: Record<string, unknown>;
+  contractInfo: EjarContractInfo;
+  parties: EjarParties;
+  financial: EjarFinancialInfo;
+  activities: EjarActivityRow[];
   invoices: EjarInvoiceRow[];
-  nationalAddress: Record<string, string | null>;
+  nationalAddress: EjarNationalAddressInfo;
   property: EjarPropertyInfo;
   units: EjarUnitInfo[];
+  raw: EjarRawBlocks;
 }
 
 /** Find a resource in a body's `data` array by id. */
@@ -216,15 +560,32 @@ export function mapEjarProperty(detail: EjarContractDetail): EjarPropertyInfo {
     ejarId: pid,
     name: pick(a, "property_name") || pick(p, "name"),
     propertyType: pick(a, "property_type") || pick(p, "property_type"),
+    propertyUsage: pick(p, "property_usage"),
+    address: pick(p, "address"),
     district: localizedName(p.district),
     street: pick(p, "street_name", "street"),
     city: localizedName(p.city),
     region: pick(region, "name_ar", "name_en") || localizedName(p.region),
     postalCode: pick(p, "postcode", "postal_code"),
     deedNumber: pick(p, "title_deed_number", "deed_number"),
+    deedType: pick(p, "title_deed_type"),
     yearBuilt: pick(p, "building_year", "year_built"),
+    constructionDate: pick(p, "construction_date"),
+    contractStatus: pick(p, "contract_status"),
+    compoundName: pick(p, "compound_name"),
+    partOfCompound: yesNo(p.part_of_compound),
+    parkingCount: pick(p, "parking_count"),
+    elevatorCount: pick(p, "elevator_count"),
+    unitsCount: Array.isArray(p.units) ? String((p.units as unknown[]).length) : pick(a, "unit_count"),
     latitude: pick(a, "latitude") || pick(p, "latitude"),
     longitude: pick(a, "longitude") || pick(p, "longitude"),
+    owners: mapOwners(p.owners),
+    lessorNames: strList(p.lessor_names),
+    brokerIds: strList(p.brokers_national_ids),
+    unifiedNumbers: strList(p.unified_numbers),
+    crNumbers: strList(p.companies_cr_numbers),
+    utilities: strList(p.utilities),
+    amenities: strList(p.amenities_and_facilities ?? p.amenities),
   };
 }
 
@@ -236,14 +597,49 @@ export function mapEjarUnits(detail: EjarContractDetail): EjarUnitInfo[] {
   return units.map((u) => {
     const uid = pick(u, "id", "unit_id");
     const full = findData(detail.unitsBody, uid);
+    const region = (full.region && typeof full.region === "object" ? (full.region as Attrs) : {}) as Attrs;
     return {
       ejarId: uid,
       unitNumber: pick(u, "unit_number") || pick(full, "unit_number"),
-      unitType: pick(u, "unit_type") || pick(full, "unit_type"),
+      unitType: pick(u, "unit_type") || pick(full, "unit_type", "unit_type_name"),
+      unitUsage: pick(full, "unit_usage"),
       floor: pick(full, "floor_number") || pick(naUnit, "floor_number"),
       area: pick(full, "area"),
       rooms: pick(full, "room_count", "bedrooms"),
       rentPrice: pick(full, "last_rental_price", "rent_price"),
+      availability: pick(full, "availability"),
+      contracted: yesNo(full.contracted),
+      contractStatus: pick(full, "contract_status"),
+      isVerified: yesNo(full.is_verified),
+      furnished: yesNo(full.furnished),
+      furnishType: pick(full, "furnish_type"),
+      finishing: pick(full, "unit_finishing"),
+      direction: pick(full, "direction"),
+      deedNumber: pick(full, "title_deed_number"),
+      deedType: pick(full, "title_deed_type"),
+      parkingLots: pick(full, "number_of_parking_lots"),
+      includeMezzanine: yesNo(full.include_mezzanine),
+      width: pick(full, "width"),
+      height: pick(full, "height"),
+      length: pick(full, "length"),
+      frontLength: pick(full, "unit_front_length"),
+      waterMeter: pick(full, "water_meter_number"),
+      gasMeter: pick(full, "gas_meter_number"),
+      electricityMeter: pick(full, "electricity_meter_number"),
+      establishedDate: pick(full, "established_date"),
+      constructionDate: pick(full, "construction_date"),
+      region: pick(region, "name_ar", "name_en"),
+      latitude: pick(full, "latitude"),
+      longitude: pick(full, "longitude"),
+      propertyId: pick(full, "property_id") || pick(a, "property_id"),
+      rentalContractId: pick(full, "rental_contract_id"),
+      owners: mapOwners(full.owners),
+      lessorNames: strList(full.lessor_names),
+      unifiedNumbers: strList(full.unified_numbers),
+      brokerIds: strList(full.brokers_national_ids),
+      crNumbers: strList(full.companies_cr_numbers),
+      amenities: strList(full.amenities),
+      utilities: strList(full.utilities),
     };
   });
 }
@@ -255,11 +651,12 @@ export function mapEjarToContract(detail: EjarContractDetail): EjarImportPreview
   const tenant = party(a.tenants, "tenant") || {};
   const tenantRep = representative(a.tenants);
   const lessor = party(a.lessors, "lessor") || {};
+  const lessorRep = representative(a.lessors);
   const region = (a.region && typeof a.region === "object" ? (a.region as Attrs) : {}) as Attrs;
 
   // Rent: RentalFinancialData.total_rent_amount is authoritative; fall back to
   // the list's total_value.
-  const fee = rentalFee(detail.financial);
+  const fee = { ...rentalFee(detail.financial), ...rentalFee(detail.invoices) };
   const totalRent = pick(fee, "total_rent_amount", "total_rent", "rent_amount") || summary.annualRent;
 
   // Real invoices → a custom payment schedule (exact amounts + due dates).
@@ -269,11 +666,17 @@ export function mapEjarToContract(detail: EjarContractDetail): EjarImportPreview
     .map((inv) => ({ dueDate: String(inv.dueDate).slice(0, 10), amount: String(Number(inv.amount)) }));
 
   // National address: no street — coordinates + property/unit descriptors.
+  const naContract = (Array.isArray(detail.nationalAddress?.data)
+    ? detail.nationalAddress?.data[0]
+    : detail.nationalAddress?.data)?.attributes || {};
   const naProp = includedByType(detail.nationalAddress, "national_address_properties")[0]?.attributes || {};
   const naUnit = includedByType(detail.nationalAddress, "national_address_units")[0]?.attributes || {};
   const coords = (naProp.coordinates && typeof naProp.coordinates === "object" ? naProp.coordinates : {}) as Attrs;
   const listUnit = (Array.isArray(a.units) && (a.units as Attrs[])[0]) || {};
-  const nationalAddress = {
+  const nationalAddress: EjarNationalAddressInfo = {
+    contractNumber: pick(naContract, "contract_no") || summary.contractNumber,
+    contractStatus: bilingual(naContract.contract_status),
+    contractEndDate: pick(naContract, "contract_end_date"),
     propertyType: bilingual(naProp.property_type) || pick(a, "property_type"),
     unitType: bilingual(naUnit.unit_type) || pick(listUnit, "unit_type"),
     unitNumber: pick(naUnit, "unit_number") || pick(listUnit, "unit_number"),
@@ -308,10 +711,12 @@ export function mapEjarToContract(detail: EjarContractDetail): EjarImportPreview
     companyOrgType: pick(tenant, "organization_type"),
     repName: pick(tenantRep, "name", "full_name"),
     repIdNumber: pick(tenantRep, "id_number", "national_id", "identity_number"),
-    landlordName: pick(lessor, "name", "full_name", "party_name"),
-    landlordIdNumber: pick(lessor, "id_number", "national_id", "identity_number"),
+    landlordName: pick(lessor, "name", "full_name", "party_name") || summary.landlordName,
+    landlordIdNumber: pick(lessor, "id_number", "national_id", "identity_number", "registration_number"),
     landlordPhone: pick(lessor, "phone_number", "phone", "mobile"),
     landlordEmail: pick(lessor, "email"),
+    landlordRepName: pick(lessorRep, "name", "full_name"),
+    landlordRepIdNumber: pick(lessorRep, "id_number", "national_id", "identity_number"),
     propertyName: summary.propertyName,
     notes: [`مستورد من إيجار — عقد رقم ${summary.contractNumber}`, nationalAddress.propertyType, unitLabel]
       .filter(Boolean)
@@ -322,5 +727,32 @@ export function mapEjarToContract(detail: EjarContractDetail): EjarImportPreview
     if (contract[k] === null || contract[k] === undefined || contract[k] === "") delete contract[k];
   }
 
-  return { contract, invoices, nationalAddress, property: mapEjarProperty(detail), units: mapEjarUnits(detail) };
+  const property = mapEjarProperty(detail);
+  const units = mapEjarUnits(detail);
+  const pid = pick(a, "property_id");
+  const rawProperty = Object.keys(findData(detail.propertiesBody, pid)).length
+    ? findData(detail.propertiesBody, pid)
+    : null;
+
+  return {
+    contract,
+    contractInfo: mapEjarContractInfo(detail),
+    parties: mapEjarParties(detail),
+    financial: mapEjarFinancial(detail, invoices),
+    activities: mapEjarActivities(detail),
+    invoices,
+    nationalAddress,
+    property,
+    units,
+    raw: {
+      contract: (a as Record<string, unknown>) || null,
+      property: rawProperty,
+      units: units
+        .map((u) => findData(detail.unitsBody, u.ejarId))
+        .filter((r) => Object.keys(r).length > 0) as Array<Record<string, unknown>>,
+      nationalAddress: detail.nationalAddress ? ({ data: detail.nationalAddress.data, included: detail.nationalAddress.included } as Record<string, unknown>) : null,
+      financial: Object.keys(fee).length ? (fee as Record<string, unknown>) : null,
+      invoices: includedByType(detail.invoices, "payments").map((r) => (r.attributes || {}) as Record<string, unknown>),
+    },
+  };
 }
