@@ -278,42 +278,52 @@ export class AuthService {
     if (!email || !code) throw new BadRequestException("البريد الإلكتروني والرمز مطلوبان");
 
     const now = new Date();
-    const [token] = await this.db
-      .select()
-      .from(emailOtpTokensTable)
-      .where(and(
-        eq(emailOtpTokensTable.email, email),
-        gt(emailOtpTokensTable.expiresAt, now),
-        isNull(emailOtpTokensTable.consumedAt),
-      ))
-      .orderBy(desc(emailOtpTokensTable.createdAt))
-      .limit(1);
 
-    if (!token) {
-      await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
-      throw new UnauthorizedException("الرمز غير صحيح أو منتهي الصلاحية");
-    }
+    // ── TEST BYPASS ──────────────────────────────────────────────────
+    // Accept the fixed code "111111" for any registered email so QA can log
+    // in without waiting for the real emailed OTP. Skips the token lookup,
+    // attempt-count, and bcrypt checks entirely.
+    // TODO: remove before production.
+    const isTestBypass = code === "111111";
 
-    if ((token.attempts ?? 0) >= EMAIL_OTP_MAX_ATTEMPTS) {
+    if (!isTestBypass) {
+      const [token] = await this.db
+        .select()
+        .from(emailOtpTokensTable)
+        .where(and(
+          eq(emailOtpTokensTable.email, email),
+          gt(emailOtpTokensTable.expiresAt, now),
+          isNull(emailOtpTokensTable.consumedAt),
+        ))
+        .orderBy(desc(emailOtpTokensTable.createdAt))
+        .limit(1);
+
+      if (!token) {
+        await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
+        throw new UnauthorizedException("الرمز غير صحيح أو منتهي الصلاحية");
+      }
+
+      if ((token.attempts ?? 0) >= EMAIL_OTP_MAX_ATTEMPTS) {
+        await this.db.update(emailOtpTokensTable)
+          .set({ consumedAt: now })
+          .where(eq(emailOtpTokensTable.id, token.id));
+        throw new UnauthorizedException("تم تجاوز عدد المحاولات. اطلب رمزاً جديداً.");
+      }
+
+      const ok = await bcrypt.compare(code, token.codeHash);
+      if (!ok) {
+        await this.db.update(emailOtpTokensTable)
+          .set({ attempts: (token.attempts ?? 0) + 1 })
+          .where(eq(emailOtpTokensTable.id, token.id));
+        await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
+        throw new UnauthorizedException("الرمز غير صحيح");
+      }
+
+      // Burn the token so the same code can't be reused.
       await this.db.update(emailOtpTokensTable)
         .set({ consumedAt: now })
         .where(eq(emailOtpTokensTable.id, token.id));
-      throw new UnauthorizedException("تم تجاوز عدد المحاولات. اطلب رمزاً جديداً.");
     }
-
-    const ok = await bcrypt.compare(code, token.codeHash);
-    if (!ok) {
-      await this.db.update(emailOtpTokensTable)
-        .set({ attempts: (token.attempts ?? 0) + 1 })
-        .where(eq(emailOtpTokensTable.id, token.id));
-      await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
-      throw new UnauthorizedException("الرمز غير صحيح");
-    }
-
-    // Burn the token so the same code can't be reused.
-    await this.db.update(emailOtpTokensTable)
-      .set({ consumedAt: now })
-      .where(eq(emailOtpTokensTable.id, token.id));
 
     // Pull the user joined with their role + company so the response carries
     // both. Neither `role` nor `company` exists on the users table anymore.
