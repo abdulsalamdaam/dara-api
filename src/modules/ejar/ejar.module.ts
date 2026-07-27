@@ -3,9 +3,13 @@ import {
   NotFoundException, Param, Post, Query, ServiceUnavailableException, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, sql } from "drizzle-orm";
-import { contractsTable, paymentsTable, propertiesTable, unitsTable, contractUnitsTable } from "@oqudk/database";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import {
+  contractsTable, paymentsTable, propertiesTable, unitsTable, contractUnitsTable,
+  ownersTable, deedsTable, tenantsTable,
+} from "@oqudk/database";
 import { buildInstallments } from "../contracts/installments";
+import { resolveLookupId } from "../../common/lookups-resolve";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard, type AuthUser } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -15,10 +19,26 @@ import { scopeId } from "../../common/scope";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { isEjarEndpointKey, type EjarBody, type JsonApiResource } from "./ejar.types";
-import { mapEjarToContract, summarizeContractsBody } from "./ejar.map";
+import { mapEjarToContract, summarizeContractsBody, type EjarPartyInfo } from "./ejar.map";
+import {
+  EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
+  EJAR_FURNISHING, EJAR_DEED_TYPE, EJAR_UNIT_STATUS, mapEjarValue, lookupOrOther, partyKind, asBool,
+} from "./ejar.import";
 
 const PAYMENT_FREQ = new Set(["monthly", "quarterly", "semi_annual", "annual", "custom"]);
 const HEALTH_CONTRACT = "10732702933";
+
+/**
+ * Drop null/undefined keys before an UPDATE. Re-importing a contract refreshes
+ * the property/unit with the latest Ejar detail, but Ejar leaves plenty of
+ * fields empty — without this, a refresh would wipe values the user had filled
+ * in by hand.
+ */
+function onlyPresent<T extends Record<string, unknown>>(values: T): Partial<T> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(values)) if (v !== null && v !== undefined) out[k] = v;
+  return out as Partial<T>;
+}
 
 /**
  * Ejar (NHC) integration — the sensitive, credential-holding backend. The web
@@ -29,7 +49,7 @@ const HEALTH_CONTRACT = "10732702933";
 @ApiBearerAuth("user-jwt")
 @Controller("ejar")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
-class EjarController {
+export class EjarController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly client: EjarClientService,
@@ -169,18 +189,35 @@ class EjarController {
   }
 
   /**
-   * Import a reviewed Ejar contract as a full local record: it creates (or
-   * reuses, by Ejar UUID) the Property + Unit, links the Contract to the Unit,
-   * and generates the payment schedule. Does NOT go through /api/contracts
-   * (which requires selecting an existing local unit and blocks occupied ones)
-   * — a unit may legitimately sit on several Ejar contracts. Scoped to the
-   * caller's account; deduped on (user_id, contract_number).
+   * Import a reviewed Ejar contract as a FULL local record, so it shows up
+   * everywhere in the portal rather than only under Contracts. Down the whole
+   * hierarchy — Deed → Property → Unit → Contract (Landlord ↔ Tenant):
+   *
+   *   Landlord (owners)  from the Ejar lessor — reused by ID number, else name
+   *   Deed    (deeds)    from title_deed_number/_type, linked to the landlord
+   *   Property           reused by Ejar UUID; type/usage/city/region resolved
+   *                      to `lookups` FKs so every dropdown renders
+   *   Unit(s)            reused by Ejar UUID; type/direction/finishing FKs,
+   *                      meters, dimensions, rooms, parking, amenities
+   *   Tenant  (tenants)  from the Ejar tenant — reused by national ID
+   *   Contract           linked to the tenant + unit(s), schedule generated
+   *
+   * Does NOT go through /api/contracts (which requires selecting an existing
+   * local unit and blocks occupied ones) — a unit may legitimately sit on
+   * several Ejar contracts. Scoped to the caller's account; deduped on
+   * (user_id, contract_number).
    */
   @Post("import")
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async import(
     @CurrentUser() user: AuthUser,
-    @Body() body: { contract?: Record<string, unknown>; property?: Record<string, unknown>; units?: Array<Record<string, unknown>> },
+    @Body() body: {
+      contract?: Record<string, unknown>;
+      property?: Record<string, unknown>;
+      units?: Array<Record<string, unknown>>;
+      parties?: { tenants?: EjarPartyInfo[]; lessors?: EjarPartyInfo[]; brokers?: EjarPartyInfo[] };
+      contractInfo?: Record<string, unknown>;
+    },
   ) {
     const src = body?.contract || {};
     const ownerId = scopeId(user);
@@ -194,11 +231,26 @@ class EjarController {
       .limit(1);
     if (dup) throw new ConflictException(`العقد ${num} مستورد مسبقًا (#${dup.id}).`);
 
-    // 1) Property — reuse by Ejar UUID, else create.
-    const propertyId = await this.upsertProperty(ownerId, body?.property || {});
-    // 2) Unit(s) — reuse by Ejar UUID under that property, else create. A unit
+    const prop = body?.property || {};
+    const primary = (list?: EjarPartyInfo[]) =>
+      list?.find((p) => !p.isRepresentative) || list?.[0] || null;
+    const lessor = primary(body?.parties?.lessors);
+    const tenantParty = primary(body?.parties?.tenants);
+    const created: string[] = [];
+    const linked: string[] = [];
+
+    // 1) Landlord — the Ejar lessor becomes a real owners row so the property
+    //    and the Landlords tab both point at the same person.
+    const landlordId = await this.upsertLandlord(ownerId, lessor, src, created, linked);
+    // 2) Deed — Ejar gives the title deed number/type on the property + unit.
+    const deedId = await this.upsertDeed(ownerId, prop, landlordId, lessor, created, linked);
+    // 3) Property — reuse by Ejar UUID, else create; enriched either way.
+    const propertyId = await this.upsertProperty(ownerId, prop, landlordId, deedId, created, linked);
+    // 4) Unit(s) — reuse by Ejar UUID under that property, else create. A unit
     //    can already be linked to another contract — that's allowed (Ejar reuse).
-    const unitIds = await this.upsertUnits(ownerId, propertyId, body?.units || []);
+    const unitIds = await this.upsertUnits(ownerId, propertyId, body?.units || [], created, linked);
+    // 5) Tenant — so the contract joins the Tenants tab like a manual one.
+    const tenantId = await this.upsertTenant(ownerId, tenantParty, src, created, linked);
 
     const today = new Date().toISOString().slice(0, 10);
     const num2 = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -228,18 +280,20 @@ class EjarController {
       ? (src.status as string)
       : "active";
 
-    const [created] = await this.db
+    const [contract] = await this.db
       .insert(contractsTable)
       .values({
         userId: ownerId,
         contractNumber: num,
         ejarSource: "ejar",
         ejarContractNumber: num,
+        tenantId,
         tenantType: str(src.tenantType),
         tenantName: str(src.tenantName) || "—",
         tenantIdNumber: str(src.tenantIdNumber),
         tenantPhone: str(src.tenantPhone),
         tenantEmail: str(src.tenantEmail),
+        tenantTaxNumber: str(src.companyUnified),
         companyUnified: str(src.companyUnified),
         companyOrgType: str(src.companyOrgType),
         repName: str(src.repName),
@@ -248,6 +302,10 @@ class EjarController {
         landlordIdNumber: str(src.landlordIdNumber),
         landlordPhone: str(src.landlordPhone),
         landlordEmail: str(src.landlordEmail),
+        landlordTaxNumber: str(lessor?.unifiedNumber),
+        // Ejar's created_time is when the contract was registered — the closest
+        // thing it has to a signing date.
+        signingDate: str(body?.contractInfo?.createdTime)?.slice(0, 10) || null,
         startDate: str(src.startDate)?.slice(0, 10) || today,
         endDate: str(src.endDate)?.slice(0, 10) || today,
         monthlyRent: String(monthly),
@@ -258,24 +316,28 @@ class EjarController {
         notes: [str(src.notes), src.propertyName ? `العقار: ${src.propertyName}` : null].filter(Boolean).join(" — ") || null,
       })
       .returning();
+    created.push("contract");
 
-    // 3) Link the contract to its unit(s). The (contract_id, unit_id) unique
+    // 6) Link the contract to its unit(s). The (contract_id, unit_id) unique
     //    index only stops linking the SAME unit twice to the SAME contract — a
     //    unit can still belong to many contracts, so imports never collide.
     if (unitIds.length > 0) {
       await this.db
         .insert(contractUnitsTable)
-        .values(unitIds.map((unitId) => ({ contractId: created.id, unitId })))
+        .values(unitIds.map((unitId) => ({ contractId: contract.id, unitId })))
         .onConflictDoNothing();
+      if (status === "active" || status === "pending") {
+        await this.db.update(unitsTable).set({ status: "rented" }).where(inArray(unitsTable.id, unitIds));
+      }
     }
 
-    // 4) Generate the payment schedule from the real Ejar invoices (custom) or
+    // 7) Generate the payment schedule from the real Ejar invoices (custom) or
     //    the mapped frequency. Mirrors the manual-create path so the Payment
     //    Log shows the actual amounts + due dates — not a synthetic 0.
     let installmentsCreated = 0;
     try {
       const rows = buildInstallments(
-        created.id, ownerId, created.startDate, created.endDate, created.monthlyRent, freq,
+        contract.id, ownerId, contract.startDate, contract.endDate, contract.monthlyRent, freq,
         null, false, 0, "percent", null, 0, customSchedule.length ? customSchedule : null,
       );
       if (rows.length > 0) {
@@ -285,82 +347,322 @@ class EjarController {
     } catch (e) {
       // Never let schedule generation fail the import — the contract is saved.
     }
-    return { ...created, propertyId, unitIds, installmentsCreated };
+    return { ...contract, propertyId, unitIds, landlordId, deedId, tenantId, installmentsCreated, created, linked };
   }
 
-  /** Reuse the imported property by Ejar UUID (per account), else create it. */
-  private async upsertProperty(ownerId: number, p: Record<string, unknown>): Promise<number | null> {
+  /**
+   * The Ejar lessor becomes a real landlord (owners) row — matched on ID
+   * number first (the stable key), then name. Blank fields on an existing
+   * landlord are backfilled; populated ones are left alone so a locally
+   * curated record is never overwritten by Ejar.
+   */
+  private async upsertLandlord(
+    scope: number,
+    lessor: EjarPartyInfo | null,
+    src: Record<string, unknown>,
+    created: string[],
+    linked: string[],
+  ): Promise<number | null> {
+    const str = (v: unknown) => (v == null || v === "" ? null : String(v));
+    const name = str(lessor?.name) || str(src.landlordName);
+    const idNumber = str(lessor?.idNumber) || str(lessor?.registrationNumber) || str(src.landlordIdNumber);
+    if (!name && !idNumber) return null;
+
+    const where = idNumber
+      ? and(eq(ownersTable.userId, scope), eq(ownersTable.idNumber, idNumber), isNull(ownersTable.deletedAt))
+      : and(eq(ownersTable.userId, scope), eq(ownersTable.name, name!), isNull(ownersTable.deletedAt));
+    const [found] = await this.db.select().from(ownersTable).where(where).limit(1);
+    if (found) {
+      const fill: Record<string, unknown> = {};
+      if (!found.phone && (lessor?.phone || src.landlordPhone)) fill.phone = str(lessor?.phone) || str(src.landlordPhone);
+      if (!found.email && (lessor?.email || src.landlordEmail)) fill.email = str(lessor?.email) || str(src.landlordEmail);
+      if (!found.idNumber && idNumber) fill.idNumber = idNumber;
+      if (!found.taxNumber && lessor?.unifiedNumber) fill.taxNumber = str(lessor.unifiedNumber);
+      if (Object.keys(fill).length) await this.db.update(ownersTable).set(fill).where(eq(ownersTable.id, found.id));
+      linked.push("landlord");
+      return found.id;
+    }
+    const [row] = await this.db
+      .insert(ownersTable)
+      .values({
+        userId: scope,
+        name: name || idNumber!,
+        type: partyKind(lessor?.partyType),
+        idNumber,
+        phone: str(lessor?.phone) || str(src.landlordPhone),
+        email: str(lessor?.email) || str(src.landlordEmail),
+        taxNumber: str(lessor?.unifiedNumber),
+        status: "active",
+        notes: "مستورد من إيجار",
+      })
+      .returning({ id: ownersTable.id });
+    created.push("landlord");
+    return row?.id ?? null;
+  }
+
+  /**
+   * Ejar reports the title deed on the property (and each unit). Deed numbers
+   * are unique per account, so a second contract on the same property reuses
+   * the existing deed instead of colliding on the unique index.
+   */
+  private async upsertDeed(
+    scope: number,
+    p: Record<string, unknown>,
+    landlordId: number | null,
+    lessor: EjarPartyInfo | null,
+    created: string[],
+    linked: string[],
+  ): Promise<number | null> {
+    const deedNumber = p.deedNumber == null || p.deedNumber === "" ? null : String(p.deedNumber);
+    if (!deedNumber) return null;
+    const [found] = await this.db
+      .select({ id: deedsTable.id, ownerId: deedsTable.ownerId })
+      .from(deedsTable)
+      .where(and(eq(deedsTable.userId, scope), eq(deedsTable.deedNumber, deedNumber), isNull(deedsTable.deletedAt)))
+      .limit(1);
+    if (found) {
+      if (!found.ownerId && landlordId) {
+        await this.db.update(deedsTable).set({ ownerId: landlordId }).where(eq(deedsTable.id, found.id));
+      }
+      linked.push("deed");
+      return found.id;
+    }
+    const [row] = await this.db
+      .insert(deedsTable)
+      .values({
+        userId: scope,
+        deedNumber,
+        deedType: mapEjarValue(EJAR_DEED_TYPE, p.deedType) || "electronic",
+        ownerId: landlordId,
+        ownerNationalId: lessor?.idNumber ?? null,
+        issuingAuthority: "إيجار (الهيئة العامة للعقار)",
+        notes: "مستورد من إيجار",
+      })
+      .returning({ id: deedsTable.id });
+    created.push("deed");
+    return row?.id ?? null;
+  }
+
+  /**
+   * Reuse the imported property by Ejar UUID (per account), else create it.
+   * Either way the row is written with the full Ejar detail — type/usage/city/
+   * region resolved to `lookups` FKs so every dropdown in the portal renders
+   * the imported property exactly like a manually created one.
+   */
+  private async upsertProperty(
+    ownerId: number,
+    p: Record<string, unknown>,
+    landlordId: number | null,
+    deedId: number | null,
+    created: string[],
+    linked: string[],
+  ): Promise<number | null> {
     const str = (v: unknown) => (v == null || v === "" ? null : String(v));
     const int = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Math.trunc(Number(v)));
     const ejarId = str(p.ejarId);
+
+    const type = lookupOrOther(mapEjarValue(EJAR_PROPERTY_TYPE, p.propertyType), p.propertyType);
+    const usageKey = mapEjarValue(EJAR_USAGE, p.propertyUsage);
+    const list = (v: unknown) => (Array.isArray(v) ? (v as unknown[]).map(String).filter(Boolean) : []);
+    const extras = [
+      ...list(p.utilities).map((x) => `خدمة: ${x}`),
+      ...list(p.amenities).map((x) => `مرفق: ${x}`),
+    ];
+
+    const values = {
+      name: str(p.name) || "عقار (إيجار)",
+      district: str(p.district),
+      street: str(p.street),
+      postalCode: str(p.postalCode),
+      deedNumber: str(p.deedNumber),
+      deedId,
+      ownerId: landlordId,
+      yearBuilt: int(p.yearBuilt),
+      elevators: int(p.elevatorCount),
+      parkings: int(p.parkingCount),
+      typeLookupId: await resolveLookupId(this.db, "property_type", type.key),
+      typeOther: type.other,
+      usageLookupId: await resolveLookupId(this.db, "property_usage", usageKey),
+      regionLookupId: await resolveLookupId(this.db, "region", p.regionKey ?? p.region),
+      cityLookupId: await resolveLookupId(this.db, "city", p.city),
+      notes: [str(p.address), str(p.compoundName) && `مجمع: ${p.compoundName}`, ...extras, "مستورد من إيجار"]
+        .filter(Boolean)
+        .join(" — "),
+      ejarId,
+      ejarSource: "ejar",
+    };
+
     if (ejarId) {
       const [found] = await this.db
         .select({ id: propertiesTable.id })
         .from(propertiesTable)
         .where(and(eq(propertiesTable.userId, ownerId), eq(propertiesTable.ejarId, ejarId)))
         .limit(1);
-      if (found) return found.id;
+      if (found) {
+        // Refresh it — a re-import brings newer Ejar detail — but only with
+        // values Ejar actually sent, so a field the user filled in locally is
+        // never blanked out. The deed FK is 1:1, so it goes through linkDeed.
+        const { deedId: newDeed, ...rest } = values;
+        await this.db.update(propertiesTable).set(onlyPresent(rest)).where(eq(propertiesTable.id, found.id));
+        if (newDeed) await this.linkDeed(found.id, newDeed);
+        linked.push("property");
+        return found.id;
+      }
     }
     const [row] = await this.db
       .insert(propertiesTable)
-      .values({
-        userId: ownerId,
-        name: str(p.name) || "عقار (إيجار)",
-        district: str(p.district),
-        street: str(p.street),
-        postalCode: str(p.postalCode),
-        deedNumber: str(p.deedNumber),
-        yearBuilt: int(p.yearBuilt),
-        typeOther: str(p.propertyType),
-        notes: [str(p.city), str(p.region)].filter(Boolean).join("، ") || null,
-        ejarId,
-        ejarSource: "ejar",
-      })
+      .values({ userId: ownerId, ...values })
       .returning({ id: propertiesTable.id });
+    created.push("property");
     return row?.id ?? null;
   }
 
-  /** Reuse imported units by Ejar UUID, else create them under the property. */
-  private async upsertUnits(ownerId: number, propertyId: number | null, units: Array<Record<string, unknown>>): Promise<number[]> {
+  /** properties.deed_id is uniquely indexed — only claim a free deed. */
+  private async linkDeed(propertyId: number, deedId: number) {
+    const [taken] = await this.db
+      .select({ id: propertiesTable.id })
+      .from(propertiesTable)
+      .where(eq(propertiesTable.deedId, deedId))
+      .limit(1);
+    if (!taken) await this.db.update(propertiesTable).set({ deedId }).where(eq(propertiesTable.id, propertyId));
+  }
+
+  /**
+   * Reuse imported units by Ejar UUID, else create them under the property —
+   * with the full GetUnits detail (rooms, meters, dimensions, direction,
+   * finishing, furnishing, parking, amenities) so the Units tab shows a
+   * complete record rather than a bare unit number.
+   */
+  private async upsertUnits(
+    ownerId: number,
+    propertyId: number | null,
+    units: Array<Record<string, unknown>>,
+    created: string[],
+    linked: string[],
+  ): Promise<number[]> {
     if (!propertyId || units.length === 0) return [];
     const str = (v: unknown) => (v == null || v === "" ? null : String(v));
     const int = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Math.trunc(Number(v)));
     const numr = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : String(Number(v)));
     const ids: number[] = [];
-    let created = 0;
+    let newUnits = 0;
+
     for (const u of units) {
       const ejarId = str(u.ejarId);
+      const type = lookupOrOther(mapEjarValue(EJAR_UNIT_TYPE, u.unitType), u.unitType);
+      const furnishRaw = u.furnishType ?? (asBool(u.furnished) === true ? "furnished" : asBool(u.furnished) === false ? "unfurnished" : null);
+      const amenities = [
+        ...(Array.isArray(u.amenities) ? (u.amenities as unknown[]).map(String) : []),
+        ...(Array.isArray(u.utilities) ? (u.utilities as unknown[]).map(String) : []),
+      ].filter(Boolean);
+
+      const values = {
+        unitNumber: str(u.unitNumber) || "—",
+        floor: int(u.floor),
+        area: numr(u.area),
+        bedrooms: int(u.rooms),
+        rentPrice: numr(u.rentPrice),
+        parkingSpaces: int(u.parkingLots),
+        electricityMeter: str(u.electricityMeter),
+        waterMeter: str(u.waterMeter),
+        gasMeter: str(u.gasMeter),
+        unitWidth: numr(u.width),
+        unitHeight: numr(u.height),
+        unitLength: numr(u.length),
+        facadeLength: numr(u.frontLength),
+        hasMezzanine: asBool(u.includeMezzanine),
+        furnishing: mapEjarValue(EJAR_FURNISHING, furnishRaw),
+        amenities: amenities.length ? amenities.join(", ") : null,
+        typeLookupId: await resolveLookupId(this.db, "unit_type", type.key),
+        typeOther: type.other,
+        directionLookupId: await resolveLookupId(this.db, "unit_direction", mapEjarValue(EJAR_DIRECTION, u.direction)),
+        finishingLookupId: await resolveLookupId(this.db, "unit_finishing", mapEjarValue(EJAR_FINISHING, u.finishing)),
+        status: (mapEjarValue(EJAR_UNIT_STATUS, u.availability) || "rented") as "available" | "rented" | "maintenance" | "reserved",
+        notes: [str(u.deedNumber) && `صك: ${u.deedNumber}`, str(u.unitUsage) && `الاستخدام: ${u.unitUsage}`, "مستورد من إيجار"]
+          .filter(Boolean)
+          .join(" — "),
+        ejarId,
+        ejarSource: "ejar",
+      };
+
       if (ejarId) {
         const [found] = await this.db
           .select({ id: unitsTable.id })
           .from(unitsTable)
           .where(and(eq(unitsTable.propertyId, propertyId), eq(unitsTable.ejarId, ejarId)))
           .limit(1);
-        if (found) { ids.push(found.id); continue; }
+        if (found) {
+          // Same rule as the property: refresh with what Ejar sent, never null
+          // out a field somebody filled in locally.
+          await this.db.update(unitsTable).set(onlyPresent(values)).where(eq(unitsTable.id, found.id));
+          ids.push(found.id);
+          linked.push("unit");
+          continue;
+        }
       }
       const [row] = await this.db
         .insert(unitsTable)
-        .values({
-          propertyId,
-          unitNumber: str(u.unitNumber) || "—",
-          floor: int(u.floor),
-          area: numr(u.area),
-          rentPrice: numr(u.rentPrice),
-          typeOther: str(u.unitType),
-          status: "rented",
-          ejarId,
-          ejarSource: "ejar",
-        })
+        .values({ propertyId, ...values })
         .returning({ id: unitsTable.id });
-      if (row) { ids.push(row.id); created++; }
+      if (row) { ids.push(row.id); newUnits++; created.push("unit"); }
     }
-    if (created > 0) {
+    if (newUnits > 0) {
       await this.db
         .update(propertiesTable)
-        .set({ totalUnits: sql`${propertiesTable.totalUnits} + ${created}` })
+        .set({ totalUnits: sql`${propertiesTable.totalUnits} + ${newUnits}` })
         .where(eq(propertiesTable.id, propertyId));
     }
     return ids;
+  }
+
+  /**
+   * The Ejar tenant becomes a real tenants row, matched on national ID (or
+   * the CR number for organizations) then name, so the imported contract
+   * shows up under Tenants and in the tenant portal like a manual one.
+   */
+  private async upsertTenant(
+    scope: number,
+    party: EjarPartyInfo | null,
+    src: Record<string, unknown>,
+    created: string[],
+    linked: string[],
+  ): Promise<number | null> {
+    const str = (v: unknown) => (v == null || v === "" ? null : String(v));
+    const name = str(party?.name) || str(src.tenantName);
+    const nationalId = str(party?.idNumber) || str(party?.registrationNumber) || str(src.tenantIdNumber);
+    if (!name && !nationalId) return null;
+
+    const where = nationalId
+      ? and(eq(tenantsTable.userId, scope), eq(tenantsTable.nationalId, nationalId), isNull(tenantsTable.deletedAt))
+      : and(eq(tenantsTable.userId, scope), eq(tenantsTable.name, name!), isNull(tenantsTable.deletedAt));
+    const [found] = await this.db.select().from(tenantsTable).where(where).limit(1);
+    if (found) {
+      const fill: Record<string, unknown> = {};
+      if (!found.phone && (party?.phone || src.tenantPhone)) fill.phone = str(party?.phone) || str(src.tenantPhone);
+      if (!found.email && (party?.email || src.tenantEmail)) fill.email = str(party?.email) || str(src.tenantEmail);
+      if (!found.nationalId && nationalId) fill.nationalId = nationalId;
+      if (!found.taxNumber && party?.unifiedNumber) fill.taxNumber = str(party.unifiedNumber);
+      if (Object.keys(fill).length) await this.db.update(tenantsTable).set(fill).where(eq(tenantsTable.id, found.id));
+      linked.push("tenant");
+      return found.id;
+    }
+    const [row] = await this.db
+      .insert(tenantsTable)
+      .values({
+        userId: scope,
+        name: name || nationalId!,
+        type: partyKind(party?.partyType ?? src.tenantType),
+        nationalId,
+        phone: str(party?.phone) || str(src.tenantPhone),
+        email: str(party?.email) || str(src.tenantEmail),
+        taxNumber: str(party?.unifiedNumber) || str(src.companyUnified),
+        status: "active",
+        isDemo: "false",
+        notes: "مستورد من إيجار",
+      })
+      .returning({ id: tenantsTable.id });
+    created.push("tenant");
+    return row?.id ?? null;
   }
 
   @Get("logs")

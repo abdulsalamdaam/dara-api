@@ -436,6 +436,9 @@ export interface EjarPropertyInfo {
   city: string | null;
   region: string | null;
   postalCode: string | null;
+  /** Ejar's region *key* ("riyadh") — matches the `region` lookup key, unlike
+   *  `region` above which holds the display name ("الرياض"). */
+  regionKey: string | null;
   deedNumber: string | null;
   deedType: string | null;
   yearBuilt: string | null;
@@ -567,6 +570,7 @@ export function mapEjarProperty(detail: EjarContractDetail): EjarPropertyInfo {
     city: localizedName(p.city),
     region: pick(region, "name_ar", "name_en") || localizedName(p.region),
     postalCode: pick(p, "postcode", "postal_code"),
+    regionKey: pick(region, "key") || pick((p.region && typeof p.region === "object" ? (p.region as Attrs) : {}), "key"),
     deedNumber: pick(p, "title_deed_number", "deed_number"),
     deedType: pick(p, "title_deed_type"),
     yearBuilt: pick(p, "building_year", "year_built"),
