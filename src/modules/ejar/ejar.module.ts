@@ -32,6 +32,18 @@ const PAYMENT_FREQ = new Set(["monthly", "quarterly", "semi_annual", "annual", "
 const HEALTH_CONTRACT = "10732702933";
 
 /**
+ * Candidate GetRentalContracts filters for a contract-number-only lookup,
+ * tried in order until one returns the contract. See the note at the call
+ * site: the parameter name is unconfirmed by NHC, so this is deliberately a
+ * short list rather than a single guess. Once NHC confirms, keep one entry.
+ */
+const CONTRACT_NUMBER_FILTERS = (n: string): Array<Record<string, string | number>> => [
+  { contract_number: n, skip_filter_id_number: "true", "page[size]": 10, "page[number]": 1 },
+  { contract_numbers: n, skip_filter_id_number: "true", "page[size]": 10, "page[number]": 1 },
+  { id_number: n, "page[size]": 10, "page[number]": 1 },
+];
+
+/**
  * Drop null/undefined keys before an UPDATE. Re-importing a contract refreshes
  * the property/unit with the latest Ejar detail, but Ejar leaves plenty of
  * fields empty — without this, a refresh would wipe values the user had filled
@@ -138,6 +150,13 @@ export class EjarController {
     // produced a preview with no tenant/landlord/property at all.
     let listBody: EjarBody | null = null;
     let resource: JsonApiResource | null = null;
+    const pick = (body: EjarBody | null) => {
+      if (!body) return null;
+      const arr = Array.isArray(body.data) ? body.data : body.data ? [body.data] : [];
+      const idx = summarizeContractsBody(body).findIndex((s) => s.contractNumber === contractNumber);
+      return idx >= 0 ? arr[idx] : null;
+    };
+
     if (idNumber) {
       const PAGE = 100;
       const MAX_PAGES = 20;
@@ -149,9 +168,9 @@ export class EjarController {
         if (p === 1) listBody = body;
         const arr = Array.isArray(body.data) ? body.data : body.data ? [body.data] : [];
         if (arr.length === 0) break;
-        const idx = summarizeContractsBody(body).findIndex((s) => s.contractNumber === contractNumber);
-        if (idx >= 0) {
-          resource = arr[idx];
+        const hit = pick(body);
+        if (hit) {
+          resource = hit;
           listBody = body;
           break;
         }
@@ -159,7 +178,30 @@ export class EjarController {
         if (total && p * PAGE >= total) break;
         if (!total && arr.length < PAGE) break;
       }
+    } else {
+      // Contract-number-only lookup. GetRentalContracts is documented as
+      // id_number-keyed, but GetProperties/GetUnits accept an id filter plus
+      // `skip_filter_id_number`, so the same shape very likely works here.
+      // NHC has not confirmed the parameter name, so try the plausible ones and
+      // fall through — every attempt is logged, making it obvious in the Ejar
+      // log which (if any) the gateway accepted. When NHC confirms it, delete
+      // the losing candidates.
+      for (const params of CONTRACT_NUMBER_FILTERS(contractNumber)) {
+        const body = await run(() => this.client.request("getRentalContracts", params, { userId: user.id }));
+        const hit = pick(body);
+        if (hit) {
+          resource = hit;
+          listBody = body;
+          break;
+        }
+      }
     }
+    // Falling back to a stub means the detail endpoints (which ARE keyed by
+    // contract number) still populate rent, invoices and the national address,
+    // but the parties/property/units — which only the list resource carries —
+    // will be empty. `partiesResolved` tells the client to say so out loud
+    // instead of rendering a preview with silent gaps.
+    const partiesResolved = !!resource;
     if (!resource) resource = { type: "rental-contract", id: contractNumber, attributes: { contract_number: contractNumber } };
 
     // Ejar identifiers to enrich the property + unit(s).
@@ -188,7 +230,7 @@ export class EjarController {
       nationalAddress: na, financial: fin, invoices: inv,
       propertiesBody: propsBody, unitsBody,
     });
-    return { ...preview, logs };
+    return { ...preview, logs, partiesResolved, lookupMode: idNumber ? "nationalId" : "contractNumber" };
   }
 
   /**
