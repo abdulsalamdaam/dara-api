@@ -54,7 +54,7 @@ function stubClient(opts: { answersContractFilter: boolean; calls: Call[] }) {
 
 const runPreview = async (answersContractFilter: boolean) => {
   const calls: Call[] = [];
-  const ctl = new EjarController(null as never, stubClient({ answersContractFilter, calls }) as never, null as never);
+  const ctl = new EjarController(null as never, stubClient({ answersContractFilter, calls }) as never, null as never, null as never);
   const res = (await ctl.preview({ id: 1 } as never, { contract_number: CONTRACT_NO })) as never as {
     partiesResolved: boolean; lookupMode: string;
     parties: { tenants: unknown[]; lessors: unknown[] };
@@ -121,7 +121,7 @@ test("national-ID lookup still resolves the contract from the list", async () =>
       return { body: null, log };
     },
   };
-  const ctl = new EjarController(null as never, client as never, null as never);
+  const ctl = new EjarController(null as never, client as never, null as never, null as never);
   const res = (await ctl.preview({ id: 1 } as never, { id_number: "1025071984", contract_number: CONTRACT_NO })) as never as {
     partiesResolved: boolean; lookupMode: string; parties: { tenants: unknown[] };
   };

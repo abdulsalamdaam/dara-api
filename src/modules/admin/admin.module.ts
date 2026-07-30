@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
@@ -13,6 +13,8 @@ import { ALL_PERMISSIONS, ROLE_PRESETS } from "../../common/permissions";
 import { EmailService } from "../email/email.service";
 import { isPackagePlan } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
+import { EjarModule } from "../ejar/ejar.module";
+import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 
 /** Subscription window: starts now; ends at the given date or +1 year. */
 function subscriptionWindow(endsAtIso?: string): { startedAt: Date; endsAt: Date } {
@@ -35,7 +37,36 @@ class AdminController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly email: EmailService,
+    private readonly ejarPolicy: EjarPolicyService,
   ) {}
+
+  /**
+   * Manual-record-creation policy. Everything is meant to come through Ejar, so
+   * the Add buttons are off by default and come back automatically when the
+   * gateway is down. This lets a super-admin force either state regardless —
+   * precedence is admin override > health > default (disabled).
+   */
+  @Get("manual-add")
+  async getManualAdd() {
+    return this.ejarPolicy.getPolicy();
+  }
+
+  @Put("manual-add")
+  async setManualAdd(@Body() body: { override?: ManualAddOverride }) {
+    const v = body?.override;
+    if (v !== "auto" && v !== "force_enabled" && v !== "force_disabled") {
+      throw new BadRequestException("override must be auto | force_enabled | force_disabled");
+    }
+    await this.ejarPolicy.setOverride(v);
+    return this.ejarPolicy.getPolicy();
+  }
+
+  /** Re-run the Ejar connectivity probe now instead of waiting for the hour. */
+  @Post("manual-add/recheck")
+  async recheckEjar() {
+    await this.ejarPolicy.refreshHealth();
+    return this.ejarPolicy.getPolicy();
+  }
 
   @Get("stats")
   async stats() {
@@ -533,5 +564,5 @@ class AdminController {
   }
 }
 
-@Module({ controllers: [AdminController] })
+@Module({ imports: [EjarModule], controllers: [AdminController] })
 export class AdminModule {}

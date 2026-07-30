@@ -85,7 +85,7 @@ test("import persists every mapped Ejar field across all six tables", { skip: !H
   const p = preview();
 
   const rows = await inRollback(async (tx) => {
-    const ctl = new EjarController(tx as never, null as never, null as never);
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
     const res = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-SPEC-1"))) as never as {
       id: number; propertyId: number; unitIds: number[];
       landlordId: number; deedId: number; tenantId: number;
@@ -184,7 +184,7 @@ test("re-import reuses every entity instead of duplicating", { skip: !HAS_DB && 
   const p = preview();
 
   const { first, second } = await inRollback(async (tx) => {
-    const ctl = new EjarController(tx as never, null as never, null as never);
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
     const a = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-SPEC-A"))) as never as Record<string, never>;
     const b = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-SPEC-B"))) as never as Record<string, never>;
     return { first: a, second: b };

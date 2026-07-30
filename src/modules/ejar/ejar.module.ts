@@ -18,6 +18,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
+import { EjarPolicyService, type ManualAddOverride } from "./ejar.policy.service";
 import { isEjarEndpointKey, type EjarBody, type JsonApiResource } from "./ejar.types";
 import {
   mapEjarToContract, summarizeContractsBody,
@@ -69,6 +70,7 @@ export class EjarController {
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly client: EjarClientService,
     private readonly logs: EjarLogService,
+    private readonly policy: EjarPolicyService,
   ) {}
 
   /** Run one whitelisted endpoint; returns the unwrapped Body + the log row. */
@@ -439,11 +441,14 @@ export class EjarController {
           onlyPresent({
             receiptNumber: inv.number,
             status: (paid ? "paid" : partly ? "partially_paid" : null) as never,
+            // Deliberately no Ejar payment status here: the row's own `status`
+            // column already carries it, and repeating "غير مدفوعة" in the
+            // description froze a moment-in-time verdict into text that never
+            // updates once the installment is collected locally.
             description: [
               inv.number && `فاتورة إيجار رقم ${inv.number}`,
               inv.issueDate && `تاريخ الإصدار ${inv.issueDate}`,
               inv.lateDate && `تاريخ التأخر ${inv.lateDate}`,
-              inv.status && `الحالة لدى إيجار: ${inv.status}`,
             ]
               .filter(Boolean)
               .join(" — ") || null,
@@ -824,6 +829,20 @@ export class EjarController {
     return row?.id ?? null;
   }
 
+  /**
+   * Whether manual record creation (Deeds / Properties / Units / Landlords /
+   * Tenants / Contracts) is currently allowed, and why. Everything should come
+   * through Ejar, so the default is "disabled" — but a failing gateway
+   * re-enables manual entry automatically so an outage doesn't stop the
+   * business, and a super-admin can force it either way.
+   *
+   * Read-only and cached: no user request ever waits on the Ejar gateway.
+   */
+  @Get("manual-add-policy")
+  async manualAddPolicy() {
+    return this.policy.getPolicy();
+  }
+
   @Get("logs")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async listLogs(@Query("endpoint") endpoint?: string, @Query("status") status?: string, @Query("limit") limit?: string) {
@@ -896,6 +915,7 @@ export class EjarController {
 
 @Module({
   controllers: [EjarController],
-  providers: [EjarClientService, EjarLogService],
+  providers: [EjarClientService, EjarLogService, EjarPolicyService],
+  exports: [EjarPolicyService],
 })
 export class EjarModule {}

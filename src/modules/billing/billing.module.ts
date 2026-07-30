@@ -298,9 +298,25 @@ class SimpleInvoicesController {
    */
   @Get("readiness")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async readiness(@CurrentUser() user: AuthUser, @Query("contractId") contractId?: string) {
-    const id = contractId ? Number(contractId) : null;
-    return checkInvoiceReadiness(this.db, scopeId(user), Number.isFinite(id as number) ? id : null);
+  async readiness(
+    @CurrentUser() user: AuthUser,
+    @Query("contractId") contractId?: string,
+    @Query("paymentId") paymentId?: string,
+  ) {
+    const uid = scopeId(user);
+    let id = contractId ? Number(contractId) : null;
+    // "Create invoice from installment" only knows the payment — resolve its
+    // contract here so the UI can pre-check from that entry point too, instead
+    // of discovering the problem when the user hits save.
+    if (!Number.isFinite(id as number) && paymentId) {
+      const [pay] = await this.db
+        .select({ contractId: paymentsTable.contractId })
+        .from(paymentsTable)
+        .where(and(eq(paymentsTable.id, Number(paymentId)), eq(paymentsTable.userId, uid)))
+        .limit(1);
+      id = pay?.contractId ?? null;
+    }
+    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
   }
 
   @Post()

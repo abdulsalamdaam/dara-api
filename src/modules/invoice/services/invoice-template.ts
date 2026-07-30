@@ -513,9 +513,17 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
     ? `<img src="${escapeHtml(brand.logoUrl)}" alt="logo" class="logo" />`
     : "";
 
+  // Tahoma sits early in the Arabic fallback chain because it is one of the
+  // few widely installed faces that shapes Arabic correctly — without it a
+  // renderer missing the webfont produces disconnected, overlapping glyphs.
   const fontStack = language === "ar"
-    ? `'Noto Sans Arabic', 'Tajawal', -apple-system, 'Helvetica Neue', Arial, sans-serif`
+    ? `'IBM Plex Sans Arabic', 'Noto Sans Arabic', 'Tajawal', Tahoma, -apple-system, 'Helvetica Neue', Arial, sans-serif`
     : `-apple-system, 'Helvetica Neue', Arial, sans-serif`;
+  // The PDF renderer has no access to the portal's self-hosted fonts, so the
+  // document must fetch its own. @import has to be the first rule.
+  const fontImport = language === "ar"
+    ? `@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');`
+    : "";
 
   return `<!doctype html>
 <html lang="${language}" dir="${dir}">
@@ -523,6 +531,7 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
 <meta charset="utf-8" />
 <title>${escapeHtml(docTitle(invoice, t))} ${escapeHtml(invoice.invoiceNumber)}</title>
 <style>
+  ${fontImport}
   @page { size: A4; margin: 18mm 16mm; }
   * { box-sizing: border-box; }
   body {

@@ -31,3 +31,4 @@ export * from "./subscriptionPayments";
 export * from "./expenses";
 export * from "./landlordPayouts";
 export * from "./ejarApiLogs";
+export * from "./appSettings";

@@ -161,6 +161,18 @@ export async function ensureSchema(): Promise<void> {
         await client.query(`alter table ${tbl} add column if not exists ejar_source text`);
         await client.query(`alter table ${tbl} add column if not exists ejar_raw jsonb`);
       }
+      // Platform settings — the manual-add override and the cached Ejar
+      // connectivity verdict that together decide whether the "Add" buttons
+      // are live. Global by design (one Ejar connection per deployment).
+      await client.query(`
+        create table if not exists app_settings (
+          id serial primary key,
+          key text not null,
+          value jsonb,
+          updated_at timestamptz not null default now()
+        )
+      `);
+      await client.query(`create unique index if not exists app_settings_key_uniq on app_settings (key)`);
       await client.query(`
         create table if not exists ejar_api_logs (
           id serial primary key,
