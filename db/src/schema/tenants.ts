@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, pgEnum, integer, boolean, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, pgEnum, integer, boolean, numeric, jsonb } from "drizzle-orm/pg-core";
 
 export const tenantTypeEnum = pgEnum("tenant_type", ["individual", "company"]);
 export const tenantStatusEnum = pgEnum("tenant_status", ["active", "inactive"]);
@@ -44,6 +44,11 @@ export const tenantsTable = pgTable("tenants", {
   isDemo: text("is_demo").default("false"),
   // Draft records are saved incomplete and finished later.
   isDraft: boolean("is_draft").notNull().default(false),
+  // Provenance for Ejar (NHC) imports — `ejarRaw` is the verbatim party
+  // object from the contract (id_type, vat, organization_type, role…), see
+  // contracts.ejarRaw.
+  ejarSource: text("ejar_source"),
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   tokenVersion: integer("token_version").notNull().default(0),
   lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
   fcmToken: text("fcm_token"),

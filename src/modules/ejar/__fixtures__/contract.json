@@ -1,0 +1,80 @@
+{
+ "id": "3a4bd3e2-4252-43b5-9aab-61b98f79ea87",
+ "type": "contracts",
+ "attributes": {
+  "units": [
+   {
+    "id": "7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743",
+    "unit_type": "apartment",
+    "unit_number": "2003-89"
+   }
+  ],
+  "period": 88,
+  "region": {
+   "key": "riyadh",
+   "name_ar": "الرياض",
+   "name_en": "Riyadh"
+  },
+  "status": "active",
+  "lessors": [
+   {
+    "vat": 0,
+    "name": "روابي عبدالله محمد السلامه",
+    "role": "lessor",
+    "type": "individual",
+    "email": "a.hassan.c@nhci.sa",
+    "id_type": "national_id",
+    "id_number": "1082683978",
+    "phone_number": "+966554108029"
+   }
+  ],
+  "tenants": [
+   {
+    "vat": 0,
+    "name": "معاذ محمد بن سالم العصيمي",
+    "role": "tenant",
+    "type": "individual",
+    "email": "r.almganhi.c@nhci.sa",
+    "id_type": "national_id",
+    "id_number": "1104100571",
+    "phone_number": "+966578484848"
+   }
+  ],
+  "end_time": "2026-05-19",
+  "latitude": 24.82746838,
+  "longitude": 46.63711705,
+  "start_time": "2026-02-20",
+  "unit_count": 1,
+  "broker_name": "امجد عبدالمجيد احمد قصاص",
+  "contract_id": "3a4bd3e2-4252-43b5-9aab-61b98f79ea87",
+  "property_id": "162bc5ab-abca-4ccd-a412-b02a71f8105c",
+  "total_value": 200,
+  "created_time": "2025-11-21",
+  "lessor_count": 1,
+  "tenant_count": 1,
+  "contract_type": "residential",
+  "property_name": "Test Property 3072036095",
+  "property_type": "building",
+  "classification": false,
+  "days_remaining": 21,
+  "unified_number": "lNJzZ+0BvR2G/8ELz9Kfig==\n",
+  "contract_number": "10712337384",
+  "payment_history": [],
+  "sublease_allowed": false,
+  "company_cr_number": "4030315655",
+  "installment_count": 0,
+  "installment_value": null,
+  "payment_frequency": "one_time_pay",
+  "broker_national_id": "1025071984",
+  "contract_activities": [
+   {
+    "person": null,
+    "timestamp": "2026-02-19T22:30:00.871849",
+    "activity_type": "active"
+   }
+  ],
+  "auto_renewal_enabled": true,
+  "security_deposit_value": 200,
+  "contract_creation_ejar_fee": 125
+ }
+}

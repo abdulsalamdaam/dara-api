@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { usersTable } from "./users";
@@ -40,6 +40,9 @@ export const deedsTable = pgTable("deeds", {
   issuingAuthority: text("issuing_authority"),
   notes: text("notes"),
 
+  // Provenance for Ejar (NHC) imports — see contracts.ejarRaw.
+  ejarSource: text("ejar_source"),
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   isDemo: boolean("is_demo").notNull().default(false),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

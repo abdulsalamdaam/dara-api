@@ -39,6 +39,15 @@ export const contractsTable = pgTable("contracts", {
   // platform rather than entered manually. Drives the "imported" badge and
   // keeps the two creation paths distinguishable.
   ejarSource: text("ejar_source"),
+  /**
+   * Verbatim Ejar payload for this record. Ejar returns far more than we have
+   * typed columns for (contract_activities, period/days_remaining, broker
+   * identity, auto_renewal/sublease flags, the *_numbers arrays, coordinates…).
+   * Rather than grow a column per field, the raw attributes are snapshotted
+   * here on import so nothing is ever silently dropped and any of it can be
+   * promoted to a real column later without re-fetching from NHC.
+   */
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   // financial
   startDate: date("start_date").notNull(),
   endDate: date("end_date").notNull(),

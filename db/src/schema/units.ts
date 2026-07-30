@@ -72,6 +72,8 @@ export const unitsTable = pgTable("units", {
   // reuse the same local unit and lets one unit sit on multiple contracts.
   ejarId: text("ejar_id"),
   ejarSource: text("ejar_source"),
+  /** Verbatim GetUnits attributes — see contracts.ejarRaw. */
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

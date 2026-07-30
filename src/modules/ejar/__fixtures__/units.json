@@ -1,0 +1,83 @@
+{
+ "data": [
+  {
+   "id": "7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743",
+   "type": "units",
+   "attributes": {
+    "area": 440,
+    "width": null,
+    "height": null,
+    "length": null,
+    "owners": [
+     {
+      "owner_id": "1082683978",
+      "owner_name": "روابي عبدالله محمد السلامه",
+      "owner_type": "individual",
+      "owner_id_type": "national_id"
+     }
+    ],
+    "region": {
+     "key": "riyadh",
+     "name_ar": "الرياض",
+     "name_en": "Riyadh"
+    },
+    "latitude": 24.827468381024,
+    "amenities": [],
+    "direction": null,
+    "furnished": null,
+    "longitude": 46.6371170548146,
+    "unit_type": "apartment",
+    "utilities": [],
+    "contracted": true,
+    "room_count": 5,
+    "unit_usage": "residential_families",
+    "is_verified": true,
+    "property_id": "162bc5ab-abca-4ccd-a412-b02a71f8105c",
+    "unit_number": "2003-89",
+    "availability": "occupied",
+    "floor_number": 40,
+    "furnish_type": null,
+    "lessor_names": [
+     "روابي عبدالله محمد السلامه"
+    ],
+    "unit_finishing": null,
+    "unit_type_name": null,
+    "contract_status": "registered",
+    "title_deed_type": "paper_title_deed",
+    "unified_numbers": [
+     "7005319798",
+     "7023417145"
+    ],
+    "agreement_status": null,
+    "established_date": null,
+    "gas_meter_number": null,
+    "property_id_type": "ejar_uuid",
+    "construction_date": null,
+    "include_mezzanine": false,
+    "last_rental_price": 200,
+    "title_deed_number": "3265555514",
+    "unit_front_length": 0,
+    "rental_contract_id": "bef2914e-d096-4e9f-ab29-f1cdfb231529",
+    "water_meter_number": null,
+    "brokers_national_ids": [
+     "1025071984",
+     "1082683978"
+    ],
+    "companies_cr_numbers": [
+     "1010717364",
+     "4030315655"
+    ],
+    "number_of_parking_lots": 0,
+    "electricity_meter_number": null
+   }
+  }
+ ],
+ "meta": {
+  "count": 1
+ },
+ "links": {
+  "last": "https://uat-ejar3.housingapps.sa/units?id_number=1025071984&page=1&per_page=5&skip_filter_id_number=true&unit_ids=7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743",
+  "self": "https://uat-ejar3.housingapps.sa/units?id_number=1025071984&page=1&per_page=5&skip_filter_id_number=true&unit_ids=7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743",
+  "first": "https://uat-ejar3.housingapps.sa/units?id_number=1025071984&page=1&per_page=5&skip_filter_id_number=true&unit_ids=7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743"
+ }
+}

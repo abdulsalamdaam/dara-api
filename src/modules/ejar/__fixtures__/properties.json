@@ -1,0 +1,580 @@
+{
+ "data": [
+  {
+   "id": "162bc5ab-abca-4ccd-a412-b02a71f8105c",
+   "type": "properties",
+   "attributes": {
+    "city": {
+     "name_ar": "الرياض",
+     "name_en": "Riyadh"
+    },
+    "name": "Test Property 3072036095",
+    "units": [
+     {
+      "unit_id": "5a1e4d08-d8a2-402d-9811-61f841c5f19b",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "38571073-1c70-4c3c-893f-b5654ef351a9",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a7e35d06-abfe-4e9d-8642-2333fb2dcc12",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b488bf25-9e69-4859-b27a-7d8ddcf60fbf",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "da86e97f-d5b5-4885-8c01-4d0b8d6857e0",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "9c1cca32-d4cf-4a72-bb38-b149b39d3ab5",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "be9166b5-9bf4-44c8-a5bc-26faf25068b0",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "907f83c0-42dc-445a-be2d-78e378849e13",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "c8115cdc-6757-4254-819e-1c6b89a037d0",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "e6f2ede0-dd7d-4b94-a51a-52e4b2caf78f",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "62285b82-8061-49d5-82d1-424fc08370c1",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "f4db4415-2be5-4ef4-96eb-cbee6d8478de",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "dcdf7a46-a831-41ad-bdaa-536d5ba5cea8",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "d9368985-3f83-425e-980f-55384aa0e125",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b71e4983-c0a0-4e7c-af16-cba8744d5a28",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "9e05f962-4ae7-492c-a52e-7d1971ddadc9",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "cf2667ff-e67a-4585-9cfa-353ece69087e",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "35be2ba0-fd03-43ed-84bb-2f72d82f3c1c",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a444c17e-a923-4717-9c77-4d5b9d5c45cd",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "3d9d067d-5a33-4eee-b1af-9ec2ba776f39",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "71170517-4de2-4935-bc5d-e5f017b07440",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "dab06d90-aa5a-4897-b6d8-c2eb6adee8f0",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "6522da39-17fa-4074-92dd-14d324b13ca8",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7b54d5fe-1d53-46a9-8e56-d5409ed3d7b3",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "0fb78a39-80a9-47fa-9424-056d18d1efc2",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "d78fd106-7333-411e-b019-81723c0207d9",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "c86d7c6d-0272-43ec-bb50-21627baebf25",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "03c7f64d-c9f6-4c14-b0b2-e5d0a1feb02f",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7b1203b0-83c3-4cf9-8bd5-bbae0c5a8743",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7c3bfa6d-8db0-483c-bce3-f39d7eac087e",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "fc00b66a-3186-4bd8-b259-0c15b0def162",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "03af22be-e424-4cf7-bd27-f416c3deac69",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b14f30bf-5501-407c-9803-3fd9095e755d",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "afca7160-aca0-4a20-8ccb-0e4450426d99",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "60fe1dff-5915-460d-802d-0ab08d4d06ba",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b266831d-72d4-45cb-948c-6620882f5557",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "499f64a8-46a3-4849-bf2d-1e3b4f8f54b9",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "ae6ed0bf-7d2a-4e75-b402-a6d62e603441",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "3a0aaf49-817b-4f16-8ab0-a43f278b4fc4",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "e7064a09-4737-4ad5-b56e-4f4e8896d480",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "2878da62-dffa-4a51-9f42-62912f80fda8",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "437a5d7f-8910-4a26-9b74-84199d240bca",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "944681f8-775d-4005-9ec8-4fbd247be4c0",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "31fe67f2-6fe7-468b-a210-7d86da2fa5c1",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "5835a04b-7a07-4ee7-9bca-1c94630d299e",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "e1f5ba20-f7fd-46d4-bbb6-6952bcdb6410",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7d173fac-1a92-4f58-a1c8-a2aa8d86c9a1",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7b855564-64bd-4e10-b9da-871ba2b19cdf",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "d2317c5d-2a5c-47be-a830-263b0e03e196",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "4fa19a72-327c-4662-b2d4-6ded324596ad",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "74c80599-e4f0-4294-9216-0c8794c4d00f",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "ed66cce4-1c2b-4e7b-a9f2-d32fbf22de21",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7b699780-656c-4879-884b-67877fe22365",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "62ee75b7-51d9-4bb9-8890-559002ddf973",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "116578a7-8c5e-4c06-aea3-62f85e7513ab",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a5812f67-1ef5-491b-8936-d90fe14295b1",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "8d825dd8-c118-417d-90fa-b829befc4c45",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "cff609cb-0261-4909-b5dd-8e57761bff3a",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "0e13b31e-23c8-48ed-82e9-e5029f5ef8d8",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7b22e187-5b3b-468a-859b-cb179072c998",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b9e1f8a7-b447-4c71-b6fe-13f6c8e55ad5",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "63c335fe-6f1b-45c2-ba65-fa18eec7bd55",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "6df222fe-10b4-43e5-b7a1-54e831016899",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "de4fb944-d2cf-4e98-a6c5-79a92f804530",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "b3b95688-2c6a-40b3-af6f-86f7df2bfd5a",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "6a423093-9b4e-4d0a-a310-74c67dbcf5e3",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7a8be52d-c0d3-4f55-837a-63d40be05f42",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "ee932d31-3951-41d0-84dd-7d328ac5dbde",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "0f19c9b5-7cff-4cf4-8790-a42895579faf",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "fb276c62-3807-49f8-b5b8-14c2546b87a8",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "05f79d33-6456-4cf8-8a8f-db9a3d80e06a",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "2b20cad5-0f87-4be4-b4f7-3787ac3efb87",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7df6f222-174c-4fd4-8fd1-956fad1a0a5f",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "0a957ccb-ce78-46a5-ab35-3b709efb92d6",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "226e2075-1893-45f6-b066-7728f8b5f0a9",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "4aa64e50-fa3d-4ca6-82af-14a7601d7abf",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "1e105f26-27f4-48a3-b412-84b161c05f24",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "bf689d53-aee2-42c6-ab91-9faa802ee6b6",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "4a1b7bcc-43ab-4e6f-82ad-a61eade75286",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "00dbc78d-d870-4c56-ae1d-6e4332c1205a",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "f0686196-3720-45d3-b127-8a7a0e415f5c",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "828ecefc-96e2-4eb6-904d-f91ec8dd0d82",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "50d4c947-f95e-468b-ac7b-4be774b69bcb",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "0008ca0c-0ce9-4d3e-8568-d6bfbfe95b28",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "5d077903-dd94-421b-8de4-70873465df4b",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a137fad5-2a0c-4128-8a71-3efa6c9c65d1",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "372f3ad4-b9ca-4200-bf8c-ceaf066781ea",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "cd649336-6e1e-4087-9c55-8d3ccbb97603",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7ed91be8-6b3d-4637-bbee-aa19c491be74",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "42c696e8-c353-4f3f-adf5-d4d25f8df66c",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "2790bcd8-4e93-47e3-b89d-2bbdfa8ab5fa",
+      "availability": "available",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7805fc40-c0c9-429d-b4e6-c6b8701a067b",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "71e3fafe-151a-4a6a-aa19-27364436464c",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "f25727f2-1938-4e1f-9a0a-1263a8940d29",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a7a37f14-19f1-4b53-8228-4241b125f540",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "ec252696-b6e5-4b37-9c34-3e7448e29d29",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "7eed0d90-9ac5-45eb-af3a-b1c287d815bd",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "f485b333-8edc-4e8a-860d-3eb2798f35dd",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "63f66b4b-a3f1-46a7-987a-e17c7d17d61e",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "42a79898-63a3-465d-bca4-e1afa13bae1a",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     },
+     {
+      "unit_id": "a33e243d-7f9c-4ce2-9110-4959d2eff9c9",
+      "availability": "occupied",
+      "unit_id_type": "ejar_uuid"
+     }
+    ],
+    "owners": [
+     {
+      "owner_id": "1082683978",
+      "owner_name": "روابي عبدالله محمد السلامه",
+      "owner_type": "individual",
+      "owner_id_type": "other"
+     }
+    ],
+    "region": {
+     "key": "riyadh",
+     "name_ar": "الرياض",
+     "name_en": "Riyadh"
+    },
+    "address": "رقم 212 الرياض الياسمين الرياض 13325",
+    "district": {
+     "name_ar": "الياسمين",
+     "name_en": "AL-YASMEEN"
+    },
+    "latitude": 24.82746838,
+    "postcode": "13325",
+    "longitude": 46.63711705,
+    "utilities": [],
+    "street_name": "رقم 212",
+    "lessor_names": [
+     "روابي عبدالله محمد السلامه"
+    ],
+    "building_year": 2000,
+    "compound_name": null,
+    "parking_count": null,
+    "property_type": "building",
+    "elevator_count": null,
+    "property_usage": "residential_families",
+    "contract_status": "registered",
+    "title_deed_type": "paper_title_deed",
+    "unified_numbers": [
+     "lNJzZ+0BvR2G/8ELz9Kfig==\n",
+     "ZSe/ElBfirSEGskGE46hZw==\n"
+    ],
+    "part_of_compound": false,
+    "construction_date": null,
+    "title_deed_number": "3265555514",
+    "brokers_national_ids": [
+     "1025071984",
+     "1082683978"
+    ],
+    "companies_cr_numbers": [
+     "g5yrSj5fYyQuh8qdi5FWzw==\n",
+     "yM/xZZ3mMnzXtV3y1msa6Q==\n"
+    ],
+    "amenities_and_facilities": []
+   }
+  }
+ ],
+ "meta": {
+  "count": 1
+ },
+ "links": {
+  "last": "https://uat-ejar3.housingapps.sa/properties?id_number=1025071984&page=1&per_page=5&property_ids=162bc5ab-abca-4ccd-a412-b02a71f8105c&skip_filter_id_number=true",
+  "self": "https://uat-ejar3.housingapps.sa/properties?id_number=1025071984&page=1&per_page=5&property_ids=162bc5ab-abca-4ccd-a412-b02a71f8105c&skip_filter_id_number=true",
+  "first": "https://uat-ejar3.housingapps.sa/properties?id_number=1025071984&page=1&per_page=5&property_ids=162bc5ab-abca-4ccd-a412-b02a71f8105c&skip_filter_id_number=true"
+ }
+}

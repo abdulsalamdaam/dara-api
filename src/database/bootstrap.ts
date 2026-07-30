@@ -150,6 +150,17 @@ export async function ensureSchema(): Promise<void> {
       await client.query(`alter table units add column if not exists ejar_source text`);
       await client.query(`create index if not exists properties_ejar_id_idx on properties (user_id, ejar_id)`);
       await client.query(`create index if not exists units_ejar_id_idx on units (ejar_id)`);
+      // Verbatim Ejar payload per imported entity. Ejar returns many fields we
+      // have no typed column for; snapshotting them keeps the import lossless
+      // and lets any of them be promoted to a real column later without
+      // re-fetching from NHC.
+      await client.query(`alter table contracts add column if not exists ejar_raw jsonb`);
+      await client.query(`alter table properties add column if not exists ejar_raw jsonb`);
+      await client.query(`alter table units add column if not exists ejar_raw jsonb`);
+      for (const tbl of ["tenants", "owners", "deeds"]) {
+        await client.query(`alter table ${tbl} add column if not exists ejar_source text`);
+        await client.query(`alter table ${tbl} add column if not exists ejar_raw jsonb`);
+      }
       await client.query(`
         create table if not exists ejar_api_logs (
           id serial primary key,

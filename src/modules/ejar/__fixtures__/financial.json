@@ -1,0 +1,38 @@
+{
+ "data": [
+  {
+   "id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+   "type": "rental_financial_data_contracts",
+   "attributes": {
+    "contract_no": "10712337384"
+   },
+   "relationships": {
+    "rental_fee": {
+     "data": {
+      "id": "58380",
+      "type": "rental_fees"
+     }
+    }
+   }
+  }
+ ],
+ "meta": {
+  "count": 1
+ },
+ "included": [
+  {
+   "id": "58380",
+   "type": "rental_fees",
+   "attributes": {
+    "contract_id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+    "payment_frequency": {
+     "ar": "دفعة واحدة",
+     "en": "One payment"
+    },
+    "recurring_payment": null,
+    "total_rent_amount": "200.0"
+   },
+   "relationships": {}
+  }
+ ]
+}

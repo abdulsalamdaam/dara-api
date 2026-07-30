@@ -19,7 +19,10 @@ import { scopeId } from "../../common/scope";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { isEjarEndpointKey, type EjarBody, type JsonApiResource } from "./ejar.types";
-import { mapEjarToContract, summarizeContractsBody, type EjarPartyInfo } from "./ejar.map";
+import {
+  mapEjarToContract, summarizeContractsBody,
+  type EjarPartyInfo, type EjarInvoiceRow, type EjarRawBlocks,
+} from "./ejar.map";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
   EJAR_FURNISHING, EJAR_DEED_TYPE, EJAR_UNIT_STATUS, mapEjarValue, lookupOrOther, partyKind, asBool,
@@ -217,6 +220,8 @@ export class EjarController {
       units?: Array<Record<string, unknown>>;
       parties?: { tenants?: EjarPartyInfo[]; lessors?: EjarPartyInfo[]; brokers?: EjarPartyInfo[] };
       contractInfo?: Record<string, unknown>;
+      invoices?: EjarInvoiceRow[];
+      raw?: Partial<EjarRawBlocks>;
     },
   ) {
     const src = body?.contract || {};
@@ -232,25 +237,32 @@ export class EjarController {
     if (dup) throw new ConflictException(`العقد ${num} مستورد مسبقًا (#${dup.id}).`);
 
     const prop = body?.property || {};
-    const primary = (list?: EjarPartyInfo[]) =>
-      list?.find((p) => !p.isRepresentative) || list?.[0] || null;
+    const raw = body?.raw || {};
+    // Ejar returns each side as a list that may hold the party AND its
+    // representative (وكيل). The row we create describes the real party;
+    // `isRepresentative` + `original*` carry the agent, matching how the
+    // tenant/landlord wizards already read those columns.
+    const primary = (list?: EjarPartyInfo[]) => list?.find((p) => !p.isRepresentative) || list?.[0] || null;
+    const agent = (list?: EjarPartyInfo[]) => list?.find((p) => p.isRepresentative) || null;
     const lessor = primary(body?.parties?.lessors);
+    const lessorRep = agent(body?.parties?.lessors);
     const tenantParty = primary(body?.parties?.tenants);
+    const tenantRep = agent(body?.parties?.tenants);
     const created: string[] = [];
     const linked: string[] = [];
 
     // 1) Landlord — the Ejar lessor becomes a real owners row so the property
     //    and the Landlords tab both point at the same person.
-    const landlordId = await this.upsertLandlord(ownerId, lessor, src, created, linked);
+    const landlordId = await this.upsertLandlord(ownerId, lessor, lessorRep, src, created, linked);
     // 2) Deed — Ejar gives the title deed number/type on the property + unit.
     const deedId = await this.upsertDeed(ownerId, prop, landlordId, lessor, created, linked);
     // 3) Property — reuse by Ejar UUID, else create; enriched either way.
-    const propertyId = await this.upsertProperty(ownerId, prop, landlordId, deedId, created, linked);
+    const propertyId = await this.upsertProperty(ownerId, prop, landlordId, deedId, raw.property, created, linked);
     // 4) Unit(s) — reuse by Ejar UUID under that property, else create. A unit
     //    can already be linked to another contract — that's allowed (Ejar reuse).
-    const unitIds = await this.upsertUnits(ownerId, propertyId, body?.units || [], created, linked);
+    const unitIds = await this.upsertUnits(ownerId, propertyId, body?.units || [], raw.units || {}, created, linked);
     // 5) Tenant — so the contract joins the Tenants tab like a manual one.
-    const tenantId = await this.upsertTenant(ownerId, tenantParty, src, created, linked);
+    const tenantId = await this.upsertTenant(ownerId, tenantParty, tenantRep, src, created, linked);
 
     const today = new Date().toISOString().slice(0, 10);
     const num2 = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -314,6 +326,7 @@ export class EjarController {
         depositAmount: num2(src.depositAmount) != null ? String(num2(src.depositAmount)) : null,
         status: status as never,
         notes: [str(src.notes), src.propertyName ? `العقار: ${src.propertyName}` : null].filter(Boolean).join(" — ") || null,
+        ejarRaw: raw.contract ?? null,
       })
       .returning();
     created.push("contract");
@@ -341,13 +354,61 @@ export class EjarController {
         null, false, 0, "percent", null, 0, customSchedule.length ? customSchedule : null,
       );
       if (rows.length > 0) {
-        await this.db.insert(paymentsTable).values(rows);
-        installmentsCreated = rows.length;
+        const inserted = await this.db.insert(paymentsTable).values(rows).returning({ id: paymentsTable.id, dueDate: paymentsTable.dueDate });
+        installmentsCreated = inserted.length;
+        // Carry the REAL Ejar invoice identity onto the generated installments
+        // (number, issue/late dates, paid state) — matched on the due date the
+        // schedule was built from. Without this the Payment Log shows generic
+        // rows even though Ejar told us the invoice number and whether it was
+        // already paid.
+        await this.attachEjarInvoices(inserted, body?.invoices || []);
       }
     } catch (e) {
       // Never let schedule generation fail the import — the contract is saved.
     }
     return { ...contract, propertyId, unitIds, landlordId, deedId, tenantId, installmentsCreated, created, linked };
+  }
+
+  /**
+   * Stamp the real Ejar invoice onto each generated installment, matched by
+   * due date. Ejar's payment_status tells us which installments were already
+   * settled, so an imported contract's Payment Log opens in the right state
+   * instead of showing everything as pending.
+   */
+  private async attachEjarInvoices(
+    rows: Array<{ id: number; dueDate: string }>,
+    invoices: EjarInvoiceRow[],
+  ): Promise<void> {
+    if (rows.length === 0 || invoices.length === 0) return;
+    const byDue = new Map<string, EjarInvoiceRow>();
+    for (const inv of invoices) {
+      const key = String(inv.dueDate ?? "").slice(0, 10);
+      if (key && !byDue.has(key)) byDue.set(key, inv);
+    }
+    for (const row of rows) {
+      const inv = byDue.get(String(row.dueDate).slice(0, 10));
+      if (!inv) continue;
+      const paid = /paid|مدفوع/i.test(inv.status || "") && !/unpaid|غير مدفوع/i.test(inv.status || "");
+      const remaining = Number(inv.remaining);
+      const partly = !paid && Number.isFinite(remaining) && remaining > 0 && remaining < Number(inv.amount);
+      await this.db
+        .update(paymentsTable)
+        .set(
+          onlyPresent({
+            receiptNumber: inv.number,
+            status: (paid ? "paid" : partly ? "partially_paid" : null) as never,
+            description: [
+              inv.number && `فاتورة إيجار رقم ${inv.number}`,
+              inv.issueDate && `تاريخ الإصدار ${inv.issueDate}`,
+              inv.lateDate && `تاريخ التأخر ${inv.lateDate}`,
+              inv.status && `الحالة لدى إيجار: ${inv.status}`,
+            ]
+              .filter(Boolean)
+              .join(" — ") || null,
+          }),
+        )
+        .where(eq(paymentsTable.id, row.id));
+    }
   }
 
   /**
@@ -359,6 +420,7 @@ export class EjarController {
   private async upsertLandlord(
     scope: number,
     lessor: EjarPartyInfo | null,
+    rep: EjarPartyInfo | null,
     src: Record<string, unknown>,
     created: string[],
     linked: string[],
@@ -368,17 +430,30 @@ export class EjarController {
     const idNumber = str(lessor?.idNumber) || str(lessor?.registrationNumber) || str(src.landlordIdNumber);
     if (!name && !idNumber) return null;
 
+    // `original*` holds the agent acting for this landlord — the wakala flow
+    // the owner wizard already renders.
+    const repFields = rep
+      ? {
+          isRepresentative: true,
+          originalOwnerName: str(rep.name),
+          originalOwnerIdNumber: str(rep.idNumber),
+          originalOwnerPhone: str(rep.phone),
+          originalOwnerEmail: str(rep.email),
+        }
+      : {};
+
     const where = idNumber
       ? and(eq(ownersTable.userId, scope), eq(ownersTable.idNumber, idNumber), isNull(ownersTable.deletedAt))
       : and(eq(ownersTable.userId, scope), eq(ownersTable.name, name!), isNull(ownersTable.deletedAt));
     const [found] = await this.db.select().from(ownersTable).where(where).limit(1);
     if (found) {
-      const fill: Record<string, unknown> = {};
+      const fill: Record<string, unknown> = { ...repFields };
       if (!found.phone && (lessor?.phone || src.landlordPhone)) fill.phone = str(lessor?.phone) || str(src.landlordPhone);
       if (!found.email && (lessor?.email || src.landlordEmail)) fill.email = str(lessor?.email) || str(src.landlordEmail);
       if (!found.idNumber && idNumber) fill.idNumber = idNumber;
       if (!found.taxNumber && lessor?.unifiedNumber) fill.taxNumber = str(lessor.unifiedNumber);
-      if (Object.keys(fill).length) await this.db.update(ownersTable).set(fill).where(eq(ownersTable.id, found.id));
+      if (lessor?.raw) { fill.ejarRaw = lessor.raw; fill.ejarSource = "ejar"; }
+      if (Object.keys(fill).length) await this.db.update(ownersTable).set(onlyPresent(fill)).where(eq(ownersTable.id, found.id));
       linked.push("landlord");
       return found.id;
     }
@@ -394,6 +469,9 @@ export class EjarController {
         taxNumber: str(lessor?.unifiedNumber),
         status: "active",
         notes: "مستورد من إيجار",
+        ejarSource: "ejar",
+        ejarRaw: lessor?.raw ?? null,
+        ...repFields,
       })
       .returning({ id: ownersTable.id });
     created.push("landlord");
@@ -437,6 +515,13 @@ export class EjarController {
         ownerNationalId: lessor?.idNumber ?? null,
         issuingAuthority: "إيجار (الهيئة العامة للعقار)",
         notes: "مستورد من إيجار",
+        ejarSource: "ejar",
+        ejarRaw: {
+          title_deed_number: p.deedNumber ?? null,
+          title_deed_type: p.deedType ?? null,
+          owners: p.owners ?? [],
+          property_ejar_id: p.ejarId ?? null,
+        },
       })
       .returning({ id: deedsTable.id });
     created.push("deed");
@@ -454,6 +539,7 @@ export class EjarController {
     p: Record<string, unknown>,
     landlordId: number | null,
     deedId: number | null,
+    rawAttrs: Record<string, unknown> | null | undefined,
     created: string[],
     linked: string[],
   ): Promise<number | null> {
@@ -470,6 +556,12 @@ export class EjarController {
     ];
 
     const values = {
+      // Facilities/utilities keep the shape the property form reads back
+      // ({ counts: {...} }) so an imported property edits like a manual one.
+      amenitiesData: extras.length
+        ? JSON.stringify({ counts: Object.fromEntries([...list(p.amenities), ...list(p.utilities)].map((k) => [k, 1])) })
+        : null,
+      ejarRaw: rawAttrs ?? null,
       name: str(p.name) || "عقار (إيجار)",
       district: str(p.district),
       street: str(p.street),
@@ -537,6 +629,7 @@ export class EjarController {
     ownerId: number,
     propertyId: number | null,
     units: Array<Record<string, unknown>>,
+    rawUnits: Record<string, Record<string, unknown>>,
     created: string[],
     linked: string[],
   ): Promise<number[]> {
@@ -573,6 +666,13 @@ export class EjarController {
         hasMezzanine: asBool(u.includeMezzanine),
         furnishing: mapEjarValue(EJAR_FURNISHING, furnishRaw),
         amenities: amenities.length ? amenities.join(", ") : null,
+        amenitiesData: amenities.length
+          ? JSON.stringify({ counts: Object.fromEntries(amenities.map((k) => [k, 1])) })
+          : null,
+        // Ejar has no "year built" on a unit — construction_date is the build
+        // date and established_date the registration date; prefer the former.
+        yearBuilt: str(u.constructionDate) || str(u.establishedDate),
+        ejarRaw: (ejarId && rawUnits[ejarId]) || null,
         typeLookupId: await resolveLookupId(this.db, "unit_type", type.key),
         typeOther: type.other,
         directionLookupId: await resolveLookupId(this.db, "unit_direction", mapEjarValue(EJAR_DIRECTION, u.direction)),
@@ -623,6 +723,7 @@ export class EjarController {
   private async upsertTenant(
     scope: number,
     party: EjarPartyInfo | null,
+    rep: EjarPartyInfo | null,
     src: Record<string, unknown>,
     created: string[],
     linked: string[],
@@ -632,17 +733,30 @@ export class EjarController {
     const nationalId = str(party?.idNumber) || str(party?.registrationNumber) || str(src.tenantIdNumber);
     if (!name && !nationalId) return null;
 
+    // Same wakala mapping as the landlord: the row is the real tenant, the
+    // `original*` block is the representative Ejar returned alongside it.
+    const repFields = rep
+      ? {
+          isRepresentative: true,
+          originalTenantName: str(rep.name),
+          originalTenantIdNumber: str(rep.idNumber),
+          originalTenantPhone: str(rep.phone),
+          originalTenantEmail: str(rep.email),
+        }
+      : {};
+
     const where = nationalId
       ? and(eq(tenantsTable.userId, scope), eq(tenantsTable.nationalId, nationalId), isNull(tenantsTable.deletedAt))
       : and(eq(tenantsTable.userId, scope), eq(tenantsTable.name, name!), isNull(tenantsTable.deletedAt));
     const [found] = await this.db.select().from(tenantsTable).where(where).limit(1);
     if (found) {
-      const fill: Record<string, unknown> = {};
+      const fill: Record<string, unknown> = { ...repFields };
       if (!found.phone && (party?.phone || src.tenantPhone)) fill.phone = str(party?.phone) || str(src.tenantPhone);
       if (!found.email && (party?.email || src.tenantEmail)) fill.email = str(party?.email) || str(src.tenantEmail);
       if (!found.nationalId && nationalId) fill.nationalId = nationalId;
       if (!found.taxNumber && party?.unifiedNumber) fill.taxNumber = str(party.unifiedNumber);
-      if (Object.keys(fill).length) await this.db.update(tenantsTable).set(fill).where(eq(tenantsTable.id, found.id));
+      if (party?.raw) { fill.ejarRaw = party.raw; fill.ejarSource = "ejar"; }
+      if (Object.keys(fill).length) await this.db.update(tenantsTable).set(onlyPresent(fill)).where(eq(tenantsTable.id, found.id));
       linked.push("tenant");
       return found.id;
     }
@@ -659,6 +773,9 @@ export class EjarController {
         status: "active",
         isDemo: "false",
         notes: "مستورد من إيجار",
+        ejarSource: "ejar",
+        ejarRaw: party?.raw ?? null,
+        ...repFields,
       })
       .returning({ id: tenantsTable.id });
     created.push("tenant");

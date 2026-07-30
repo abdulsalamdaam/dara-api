@@ -218,11 +218,14 @@ export interface EjarPartyInfo {
   registrationNumber: string | null;
   organizationType: string | null;
   vat: string | null;
+  /** The verbatim Ejar party object — persisted to tenants/owners.ejar_raw. */
+  raw: Record<string, unknown>;
 }
 
 function mapParty(p: Attrs, group: EjarPartyInfo["group"]): EjarPartyInfo {
   const role = pick(p, "role");
   return {
+    raw: p as Record<string, unknown>,
     group,
     role,
     isRepresentative: (role || "").toLowerCase().includes("representative"),
@@ -255,6 +258,7 @@ export function mapEjarParties(detail: EjarContractDetail): EjarParties {
   const brokerId = pick(a, "broker_national_id");
   if (brokerName || brokerId) {
     brokers.push({
+      raw: { broker_name: brokerName, broker_national_id: brokerId },
       group: "broker",
       role: "broker",
       isRepresentative: false,
@@ -517,11 +521,16 @@ export interface EjarNationalAddressInfo {
   longitude: string | null;
 }
 
-/** Raw Ejar payloads, kept alongside the mapped view so nothing is hidden. */
+/**
+ * Raw Ejar payloads, kept alongside the mapped view so nothing is hidden —
+ * and persisted verbatim into each entity's `ejar_raw` column on import.
+ * `units` is keyed by the unit's Ejar UUID so the import can attach the right
+ * block to the right row.
+ */
 export interface EjarRawBlocks {
   contract: Record<string, unknown> | null;
   property: Record<string, unknown> | null;
-  units: Array<Record<string, unknown>>;
+  units: Record<string, Record<string, unknown>>;
   nationalAddress: Record<string, unknown> | null;
   financial: Record<string, unknown> | null;
   invoices: Array<Record<string, unknown>>;
@@ -751,9 +760,11 @@ export function mapEjarToContract(detail: EjarContractDetail): EjarImportPreview
     raw: {
       contract: (a as Record<string, unknown>) || null,
       property: rawProperty,
-      units: units
-        .map((u) => findData(detail.unitsBody, u.ejarId))
-        .filter((r) => Object.keys(r).length > 0) as Array<Record<string, unknown>>,
+      units: Object.fromEntries(
+        units
+          .map((u) => [u.ejarId ?? "", findData(detail.unitsBody, u.ejarId)] as const)
+          .filter(([id, attrs]) => id && Object.keys(attrs).length > 0),
+      ) as Record<string, Record<string, unknown>>,
       nationalAddress: detail.nationalAddress ? ({ data: detail.nationalAddress.data, included: detail.nationalAddress.included } as Record<string, unknown>) : null,
       financial: Object.keys(fee).length ? (fee as Record<string, unknown>) : null,
       invoices: includedByType(detail.invoices, "payments").map((r) => (r.attributes || {}) as Record<string, unknown>),

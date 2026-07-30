@@ -1,0 +1,66 @@
+{
+ "data": [
+  {
+   "id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+   "type": "rental_invoices_contracts",
+   "attributes": {
+    "contract_no": "10712337384"
+   },
+   "relationships": {
+    "rental_fee": {
+     "data": {
+      "id": "58380",
+      "type": "rental_fees"
+     }
+    }
+   }
+  }
+ ],
+ "meta": {
+  "count": 1
+ },
+ "included": [
+  {
+   "id": "58380",
+   "type": "rental_fees",
+   "attributes": {
+    "contract_id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+    "payment_frequency": {
+     "ar": "دفعة واحدة",
+     "en": "One payment"
+    },
+    "recurring_payment": null,
+    "total_rent_amount": "200.0"
+   },
+   "relationships": {
+    "payments": {
+     "data": [
+      {
+       "id": "254349",
+       "type": "payments"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "254349",
+   "type": "payments",
+   "attributes": {
+    "rental_fee_id": 58380,
+    "invoice_amount": "200.0",
+    "payment_status": {
+     "ar": "غير مدفوعة",
+     "en": "Unpaid"
+    },
+    "sequence_number": "2606219553956001",
+    "invoice_due_date": "2026-08-30",
+    "invoice_late_date": "2026-09-09",
+    "invoice_issue_date": "2026-08-20",
+    "invoice_remaining_amount": "200.0",
+    "payment_schedule_sequence_number": "2606219553956001"
+   },
+   "relationships": {}
+  }
+ ]
+}

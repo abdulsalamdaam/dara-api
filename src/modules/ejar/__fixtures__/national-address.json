@@ -1,0 +1,68 @@
+{
+ "data": [
+  {
+   "id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+   "type": "national_address_contracts",
+   "attributes": {
+    "contract_no": "10712337384",
+    "contract_status": {
+     "ar": "مسجل",
+     "en": "Registered"
+    },
+    "contract_end_date": "2027-08-19"
+   },
+   "relationships": {
+    "property": {
+     "data": {
+      "id": "60726",
+      "type": "national_address_properties"
+     }
+    }
+   }
+  }
+ ],
+ "meta": {
+  "count": 1
+ },
+ "included": [
+  {
+   "id": "60726",
+   "type": "national_address_properties",
+   "attributes": {
+    "contract_id": "061bfa72-2a35-4f22-816b-1cae3c55ff34",
+    "coordinates": {
+     "latitude": 24.827468381024,
+     "longitude": 46.6371170548146
+    },
+    "property_type": {
+     "ar": "عمارة",
+     "en": "Building"
+    }
+   },
+   "relationships": {
+    "units": {
+     "data": [
+      {
+       "id": "58735",
+       "type": "national_address_units"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "58735",
+   "type": "national_address_units",
+   "attributes": {
+    "unit_type": {
+     "ar": "شقة",
+     "en": "Apartment"
+    },
+    "property_id": 60726,
+    "unit_number": "2003-89",
+    "floor_number": "40"
+   },
+   "relationships": {}
+  }
+ ]
+}

@@ -48,6 +48,8 @@ export const propertiesTable = pgTable("properties", {
   // reuse the same local property instead of duplicating it.
   ejarId: text("ejar_id"),
   ejarSource: text("ejar_source"),
+  /** Verbatim GetProperties attributes — see contracts.ejarRaw. */
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   // Management / commission fee % charged by the managing account (broker /
   // office) to the property's landlord. When > 0, issuing a rent invoice for a
   // tenant also generates a commission invoice (فاتورة عمولة) for the landlord.

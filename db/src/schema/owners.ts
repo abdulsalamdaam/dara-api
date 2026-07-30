@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, pgEnum, numeric, integer, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, pgEnum, numeric, integer, boolean, jsonb } from "drizzle-orm/pg-core";
 import { lookupsTable } from "./lookups";
 
 export const ownerTypeEnum = pgEnum("owner_type", ["individual", "company"]);
@@ -56,6 +56,9 @@ export const ownersTable = pgTable("owners", {
   isDefault: boolean("is_default").notNull().default(false),
   // Lookups-FK refactor (phase 3) — backfilled from the `nationality` text.
   nationalityLookupId: integer("nationality_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
+  // Provenance for Ejar (NHC) imports — see contracts.ejarRaw.
+  ejarSource: text("ejar_source"),
+  ejarRaw: jsonb("ejar_raw").$type<Record<string, unknown>>(),
   // Expo push token for the owner's mobile (landlord) app — mirrors tenants.ts.
   fcmToken: text("fcm_token"),
   fcmPlatform: text("fcm_platform"),
