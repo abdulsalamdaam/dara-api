@@ -12,6 +12,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
@@ -70,6 +71,19 @@ export class InvoicesController {
     if (!body.profile) throw new BadRequestException("profile required");
     if (!Array.isArray(body.lines) || body.lines.length === 0)
       throw new BadRequestException("at least one line required");
+    // Same guard as the plain billing path — a contract-linked e-invoice must
+    // have complete tenant/landlord data and an onboarded landlord, otherwise
+    // ZATCA rejects it after we have already burned an ICV.
+    if (body.contractId) {
+      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), body.contractId);
+      if (!readiness.ok) {
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
+        });
+      }
+    }
     return this.invoices.issue(scopeId(user), body);
   }
 

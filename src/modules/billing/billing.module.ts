@@ -20,6 +20,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
@@ -290,6 +291,18 @@ class SimpleInvoicesController {
     return { ...doc, collectedAmount: collected, notesAdjustment, netTotal, balanceDue, relatedNotes };
   }
 
+  /**
+   * Can an invoice be issued for this contract? The UI calls this when the
+   * Create Invoice screen opens so it can block the button and show exactly
+   * what is missing, instead of letting the user fill a form and fail on save.
+   */
+  @Get("readiness")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  async readiness(@CurrentUser() user: AuthUser, @Query("contractId") contractId?: string) {
+    const id = contractId ? Number(contractId) : null;
+    return checkInvoiceReadiness(this.db, scopeId(user), Number.isFinite(id as number) ? id : null);
+  }
+
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
@@ -348,6 +361,21 @@ class SimpleInvoicesController {
           paidDate: body?.issueDate, method: body?.method, paymentIds,
           description: items[0]?.description || DEPOSIT_DESC,
           notes: body?.notes,
+        });
+      }
+    }
+
+    // Refuse to issue a tax invoice against parties that are not invoice-ready
+    // (no VAT number, no email, landlord not onboarded with ZATCA…). Receipt
+    // vouchers and commission docs are exempt — a voucher is not a tax invoice,
+    // and the deposit diversion above has already returned by this point.
+    if (type === "invoice" && !body?.kind) {
+      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
+      if (!readiness.ok) {
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
         });
       }
     }
