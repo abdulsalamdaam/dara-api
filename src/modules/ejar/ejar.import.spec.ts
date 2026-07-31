@@ -376,6 +376,39 @@ test("fees chosen on the confirm step become installments alongside the rent", {
   assert.ok(rentRows.length > 0, "the rent installments are still generated");
 });
 
+test("a custom-schedule fee produces one installment per hand-built row", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  const p = preview();
+  const pays = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, {
+      ...payload(p, "TEST-EJAR-CUSTOMFEE"),
+      additionalFees: [
+        {
+          id: "c1", typeKey: "maintenance", name: "صيانة مجدولة", amount: "", recurrence: "custom", vat: false,
+          customSchedule: [
+            { dueDate: "2026-03-01", amount: "100" },
+            { dueDate: "2026-06-01", amount: "250" },
+            // Rows the editor can leave half-filled — must be discarded.
+            { dueDate: "", amount: "80" },
+            { dueDate: "2026-09-01", amount: "0" },
+          ],
+        },
+      ],
+    })) as never as { id: number };
+    return (tx as never as typeof db).select().from(paymentsTable).where(eq(paymentsTable.contractId, res.id));
+  });
+
+  const feeRows = (pays as Array<Record<string, unknown>>)
+    .filter((r) => r.description === "صيانة مجدولة")
+    .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+
+  assert.equal(feeRows.length, 2, "only the complete schedule rows become installments");
+  assert.equal(String(feeRows[0].dueDate), "2026-03-01");
+  assert.equal(Number(feeRows[0].amount), 100);
+  assert.equal(String(feeRows[1].dueDate), "2026-06-01");
+  assert.equal(Number(feeRows[1].amount), 250);
+});
+
 test("importing without fees behaves exactly as before", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   const p = preview();
   const out = await inRollback(async (tx) => {
