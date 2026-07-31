@@ -178,6 +178,18 @@ export async function ensureSchema(): Promise<void> {
       await client.query(`alter table deeds add column if not exists deed_owners jsonb`);
       // Optional Google Maps link; Ejar imports fill it from the coordinates.
       await client.query(`alter table properties add column if not exists map_url text`);
+      // Backfill properties imported before map_url existed — their coordinates
+      // are already in the ejar_raw snapshot, which is exactly what that column
+      // was for. Idempotent: only fills rows that have none.
+      await client.query(`
+        update properties
+           set map_url = 'https://www.google.com/maps?q=' || (ejar_raw->>'latitude') || ',' || (ejar_raw->>'longitude')
+         where map_url is null
+           and ejar_raw ? 'latitude' and ejar_raw ? 'longitude'
+           and (ejar_raw->>'latitude') ~ '^-?[0-9.]+$'
+           and (ejar_raw->>'longitude') ~ '^-?[0-9.]+$'
+           and (ejar_raw->>'latitude')::numeric <> 0
+      `);
       // Deed types move from a hard-coded pair to the central lookups table.
       // The `electronic` / `paper` keys are kept verbatim so existing deeds
       // stay valid and need no backfill; the other two are new options.
