@@ -44,12 +44,6 @@ const CONTRACT_NUMBER_FILTERS = (n: string): Array<Record<string, string | numbe
   { id_number: n, "page[size]": 10, "page[number]": 1 },
 ];
 
-/**
- * The owners named on the deed, taken from the Ejar property's `owners` list.
- * Deduped on name+id because the same person often appears on both the
- * property and its units. Returns null (not []) when Ejar sent none, so a
- * re-import can't blank a list the user filled in by hand — see onlyPresent().
- */
 /** A Google Maps link from Ejar coordinates, or null when it sent none. */
 function mapsUrl(lat: unknown, lng: unknown): string | null {
   const a = Number(lat), b = Number(lng);
@@ -57,6 +51,12 @@ function mapsUrl(lat: unknown, lng: unknown): string | null {
   return `https://www.google.com/maps?q=${a},${b}`;
 }
 
+/**
+ * The owners named on the deed, taken from the Ejar property's `owners` list.
+ * Deduped on name+id because the same person often appears on both the
+ * property and its units. Returns null (not []) when Ejar sent none, so a
+ * re-import can't blank a list the user filled in by hand — see onlyPresent().
+ */
 function deedOwnersFrom(p: Record<string, unknown>): Array<{ name: string; idNumber: string | null }> | null {
   const raw = Array.isArray(p.owners) ? (p.owners as Array<Record<string, unknown>>) : [];
   const seen = new Set<string>();
@@ -399,6 +399,8 @@ export class EjarController {
         landlordPhone: str(src.landlordPhone),
         landlordEmail: str(src.landlordEmail),
         landlordTaxNumber: str(lessor?.unifiedNumber),
+        landlordRepName: str(src.landlordRepName),
+        landlordRepIdNumber: str(src.landlordRepIdNumber),
         // Ejar's created_time is when the contract was registered — the closest
         // thing it has to a signing date.
         signingDate: str(body?.contractInfo?.createdTime)?.slice(0, 10) || null,

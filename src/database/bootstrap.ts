@@ -178,6 +178,9 @@ export async function ensureSchema(): Promise<void> {
       await client.query(`alter table deeds add column if not exists deed_owners jsonb`);
       // Optional Google Maps link; Ejar imports fill it from the coordinates.
       await client.query(`alter table properties add column if not exists map_url text`);
+      // Landlord's representative — mirrors the tenant's rep_name/rep_id_number.
+      await client.query(`alter table contracts add column if not exists landlord_rep_name text`);
+      await client.query(`alter table contracts add column if not exists landlord_rep_id_number text`);
       // Backfill properties imported before map_url existed — their coordinates
       // are already in the ejar_raw snapshot, which is exactly what that column
       // was for. Idempotent: only fills rows that have none.

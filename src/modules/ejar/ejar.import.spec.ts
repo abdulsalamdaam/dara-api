@@ -311,9 +311,12 @@ test("lessor_representative and tenant_representative are pulled onto the record
   assert.equal(tenant.originalTenantName, "امجد عبدالمجيد احمد قصاص");
   assert.equal(tenant.originalTenantIdNumber, "1025071984");
 
-  // The contract keeps the tenant's representative in its own columns too.
+  // The contract keeps BOTH representatives in its own columns, so the contract
+  // page can show them without joining back to owners/tenants.
   assert.equal(contract.repName, "امجد عبدالمجيد احمد قصاص");
   assert.equal(contract.repIdNumber, "1025071984");
+  assert.equal(contract.landlordRepName, "روابي عبدالله محمد السلامه");
+  assert.equal(contract.landlordRepIdNumber, "1082683978");
   // …and the landlord fields stay the REAL lessor, not the agent.
   assert.equal(contract.landlordName, "هند محمد بن شجاع العتيبي");
 });

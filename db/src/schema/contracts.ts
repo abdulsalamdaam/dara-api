@@ -78,6 +78,13 @@ export const contractsTable = pgTable("contracts", {
   companyOrgType: text("company_org_type"),
   // landlord (مؤجر) info from PDF
   landlordName: text("landlord_name"),
+  /**
+   * The landlord's representative (وكيل المؤجر). Mirrors repName/repIdNumber
+   * on the tenant side — Ejar returns a `lessor_representative` party on ~16%
+   * of contracts and it was being dropped for want of somewhere to put it.
+   */
+  landlordRepName: text("landlord_rep_name"),
+  landlordRepIdNumber: text("landlord_rep_id_number"),
   landlordNationality: text("landlord_nationality"),
   landlordIdNumber: text("landlord_id_number"),
   landlordPhone: text("landlord_phone"),
