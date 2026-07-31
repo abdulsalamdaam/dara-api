@@ -256,6 +256,88 @@ test("a property with no compound and no facilities writes no amenities blob", {
   assert.equal(stored, null, "nothing to say means no blob, not an empty one");
 });
 
+/** The same preview builder, but from the contract that carries both reps. */
+const previewWithReps = () =>
+  mapEjarToContract({
+    contract: fixture("contract-with-representatives") as JsonApiResource,
+    nationalAddress: fixture("national-address") as EjarBody,
+    financial: fixture("financial") as EjarBody,
+    invoices: fixture("invoices") as EjarBody,
+    propertiesBody: fixture("properties") as EjarBody,
+    unitsBody: fixture("units") as EjarBody,
+  });
+
+test("lessor_representative and tenant_representative are pulled onto the records", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  const p = previewWithReps();
+
+  // The mapper must separate each side into the real party + its agent.
+  const lessors = p.parties.lessors;
+  const tenants = p.parties.tenants;
+  assert.equal(lessors.length, 2, "fixture has a lessor and a lessor_representative");
+  assert.equal(tenants.length, 2, "fixture has a tenant and a tenant_representative");
+  assert.equal(lessors.find((x) => x.role === "lessor_representative")?.isRepresentative, true);
+  assert.equal(tenants.find((x) => x.role === "tenant_representative")?.isRepresentative, true);
+  assert.equal(lessors.find((x) => x.role === "lessor")?.isRepresentative, false);
+
+  const rows = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-REPS"))) as never as {
+      landlordId: number; tenantId: number; id: number;
+    };
+    const one = async (t: never, col: never, id: number) =>
+      (await (tx as never as typeof db).select().from(t).where(eq(col, id)).limit(1))[0];
+    return {
+      landlord: await one(ownersTable as never, ownersTable.id as never, res.landlordId),
+      tenant: await one(tenantsTable as never, tenantsTable.id as never, res.tenantId),
+      contract: await one(contractsTable as never, contractsTable.id as never, res.id),
+    };
+  });
+
+  const landlord = rows.landlord as Record<string, unknown>;
+  const tenant = rows.tenant as Record<string, unknown>;
+  const contract = rows.contract as Record<string, unknown>;
+
+  // Landlord row = the real lessor; the agent lands in the wakala block that
+  // the owner wizard and details screen already render.
+  assert.equal(landlord.name, "هند محمد بن شجاع العتيبي");
+  assert.equal(landlord.isRepresentative, true, "the landlord HAS a representative");
+  assert.equal(landlord.originalOwnerName, "روابي عبدالله محمد السلامه");
+  assert.equal(landlord.originalOwnerIdNumber, "1082683978");
+  assert.ok(landlord.originalOwnerPhone, "the agent's phone is carried across");
+
+  // Same shape on the tenant side.
+  assert.equal(tenant.name, "فهده غنيم عبدالله الغنيم");
+  assert.equal(tenant.isRepresentative, true, "the tenant HAS a representative");
+  assert.equal(tenant.originalTenantName, "امجد عبدالمجيد احمد قصاص");
+  assert.equal(tenant.originalTenantIdNumber, "1025071984");
+
+  // The contract keeps the tenant's representative in its own columns too.
+  assert.equal(contract.repName, "امجد عبدالمجيد احمد قصاص");
+  assert.equal(contract.repIdNumber, "1025071984");
+  // …and the landlord fields stay the REAL lessor, not the agent.
+  assert.equal(contract.landlordName, "هند محمد بن شجاع العتيبي");
+});
+
+test("a party list of only representatives does not file someone as their own agent", () => {
+  // 5 of 2120 UAT contracts list lessors with no plain `lessor` role. There the
+  // representative IS the only party we have, so it must not also be written
+  // into the original* block as if it represented itself.
+  const raw = JSON.parse(JSON.stringify(fixture("contract-with-representatives"))) as JsonApiResource;
+  const attrs = raw.attributes as Record<string, unknown>;
+  attrs.lessors = (attrs.lessors as Array<Record<string, unknown>>).filter((l) => l.role === "lessor_representative");
+
+  const p = mapEjarToContract({
+    contract: raw,
+    propertiesBody: fixture("properties") as EjarBody,
+    unitsBody: fixture("units") as EjarBody,
+  });
+  assert.equal(p.parties.lessors.length, 1);
+  assert.equal(p.parties.lessors[0].isRepresentative, true);
+  // The flat contract payload still names them as the landlord — they are the
+  // only lessor-side party Ejar gave us.
+  assert.equal(p.contract.landlordName, p.parties.lessors[0].name);
+});
+
 test("re-import reuses every entity instead of duplicating", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   assert.ok(userId, "needs at least one user row");
   const p = preview();

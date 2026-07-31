@@ -1,0 +1,94 @@
+{
+ "id": "8ea09936-31ed-45ac-8e43-4f4419d8bdff",
+ "type": "contracts",
+ "attributes": {
+  "units": [
+   {
+    "id": "135d9f67-7027-4d7b-9386-2bdaf668c4db",
+    "unit_type": "apartment",
+    "unit_number": "222-2"
+   }
+  ],
+  "period": 364,
+  "region": {
+   "key": "riyadh",
+   "name_ar": "الرياض",
+   "name_en": "Riyadh"
+  },
+  "status": "active",
+  "lessors": [
+   {
+    "vat": 0,
+    "name": "هند محمد بن شجاع العتيبي",
+    "role": "lessor",
+    "type": "individual",
+    "email": "bee@email.com",
+    "id_type": "national_id",
+    "id_number": "1056996794",
+    "phone_number": "+966555235544"
+   },
+   {
+    "vat": 0,
+    "name": "روابي عبدالله محمد السلامه",
+    "role": "lessor_representative",
+    "type": "individual",
+    "email": "a.hassan.c@nhci.sa",
+    "id_type": "national_id",
+    "id_number": "1082683978",
+    "phone_number": "+966554108029"
+   }
+  ],
+  "tenants": [
+   {
+    "vat": 0,
+    "name": "فهده غنيم عبدالله الغنيم",
+    "role": "tenant",
+    "type": "individual",
+    "email": "bomanager98@gmail.com",
+    "id_type": "national_id",
+    "id_number": "1000118818",
+    "phone_number": "+966575246618"
+   },
+   {
+    "vat": 0,
+    "name": "امجد عبدالمجيد احمد قصاص",
+    "role": "tenant_representative",
+    "type": "individual",
+    "email": "test@email.com",
+    "id_type": "national_id",
+    "id_number": "1025071984",
+    "phone_number": "+966567251284"
+   }
+  ],
+  "end_time": "2026-12-22",
+  "latitude": 25.92472434,
+  "longitude": 44.88397513,
+  "start_time": "2025-12-23",
+  "unit_count": 1,
+  "broker_name": "امجد عبدالمجيد احمد قصاص",
+  "contract_id": "8ea09936-31ed-45ac-8e43-4f4419d8bdff",
+  "property_id": "31da20e4-5678-409b-a627-52cffd8e74be",
+  "total_value": 1200,
+  "created_time": "2025-12-23",
+  "lessor_count": 2,
+  "tenant_count": 2,
+  "contract_type": "residential",
+  "property_name": "Property with rep",
+  "property_type": "building",
+  "classification": false,
+  "days_remaining": 337,
+  "unified_number": "7005319798",
+  "contract_number": "10144499756",
+  "payment_history": [],
+  "sublease_allowed": false,
+  "company_cr_number": "4030315655",
+  "installment_count": 0,
+  "installment_value": null,
+  "payment_frequency": "one_time_pay",
+  "broker_national_id": "1025071984",
+  "contract_activities": [],
+  "auto_renewal_enabled": true,
+  "security_deposit_value": 500,
+  "contract_creation_ejar_fee": 125
+ }
+}

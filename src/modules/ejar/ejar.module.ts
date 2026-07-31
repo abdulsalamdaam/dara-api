@@ -316,7 +316,18 @@ export class EjarController {
     // `isRepresentative` + `original*` carry the agent, matching how the
     // tenant/landlord wizards already read those columns.
     const primary = (list?: EjarPartyInfo[]) => list?.find((p) => !p.isRepresentative) || list?.[0] || null;
-    const agent = (list?: EjarPartyInfo[]) => list?.find((p) => p.isRepresentative) || null;
+    /**
+     * The representative, but only when there is a distinct real party for it
+     * to represent. Some contracts list ONLY representatives (5 of 2120 in the
+     * UAT data) — there `primary()` already falls back to the representative,
+     * and returning it here too would file the same person as both the
+     * landlord and their own agent.
+     */
+    const agent = (list?: EjarPartyInfo[]) => {
+      const rep = list?.find((p) => p.isRepresentative) || null;
+      if (!rep) return null;
+      return list?.some((p) => !p.isRepresentative) ? rep : null;
+    };
     const lessor = primary(body?.parties?.lessors);
     const lessorRep = agent(body?.parties?.lessors);
     const tenantParty = primary(body?.parties?.tenants);
