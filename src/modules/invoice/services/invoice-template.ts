@@ -524,6 +524,10 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
   const fontImport = language === "ar"
     ? `@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');`
     : "";
+  // letter-spacing and uppercase are Latin typography. Applied to Arabic they
+  // pull apart the cursive joins, and any renderer that splits text per
+  // character to honour the tracking loses contextual shaping entirely.
+  const latinOnlyTracking = language === "ar" ? "" : "text-transform: uppercase; letter-spacing: 0.05em;";
 
   return `<!doctype html>
 <html lang="${language}" dir="${dir}">
@@ -559,14 +563,14 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
   .badge-fail { background: #fee2e2; color: #991b1b; }
   .parties { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   .party { border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; }
-  .party h3 { font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .party h3 { font-size: 11px; color: #64748b; ${latinOnlyTracking} margin-bottom: 6px; }
   .party .name { font-weight: 600; font-size: 13px; }
   .party .row { color: #334155; font-size: 11px; }
   table.lines { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
   table.lines th, table.lines td {
     border-bottom: 1px solid #e2e8f0; padding: 6px 8px; text-align: ${dir === "rtl" ? "right" : "left"};
   }
-  table.lines th { background: #f8fafc; color: #64748b; font-size: 10px; text-transform: uppercase; }
+  table.lines th { background: #f8fafc; color: #64748b; font-size: 10px; ${language === "ar" ? "" : "text-transform: uppercase;"} }
   table.lines .num { text-align: ${dir === "rtl" ? "left" : "right"}; }
   .totals { ${dir === "rtl" ? "margin-right" : "margin-left"}: auto; width: 280px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 12px; }
   .totals .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; }
