@@ -30,9 +30,24 @@ export interface InvoiceBlocker {
   action: "edit_tenant" | "edit_landlord" | "zatca_settings" | "edit_contract";
 }
 
+/**
+ * Something the user must acknowledge rather than fix. A tenant with no VAT
+ * number is usually correct — individuals are not VAT-registered — but it is
+ * also exactly what a forgotten field looks like, so we ask instead of
+ * assuming either way.
+ */
+export interface InvoiceConfirmation {
+  key: "tenantNoVat";
+  entity: "tenant";
+  id: number | null;
+  name: string | null;
+}
+
 export interface InvoiceReadiness {
   ok: boolean;
   blockers: InvoiceBlocker[];
+  /** Must be acknowledged by the caller before an invoice can be issued. */
+  confirmations: InvoiceConfirmation[];
   tenantId: number | null;
   ownerId: number | null;
 }
@@ -92,9 +107,10 @@ export async function checkInvoiceReadiness(
   contractId: number | null | undefined,
 ): Promise<InvoiceReadiness> {
   const blockers: InvoiceBlocker[] = [];
+  const confirmations: InvoiceConfirmation[] = [];
   if (!contractId) {
     // A free-standing document has no parties to validate against.
-    return { ok: true, blockers: [], tenantId: null, ownerId: null };
+    return { ok: true, blockers: [], confirmations: [], tenantId: null, ownerId: null };
   }
 
   const [contract] = await db
@@ -104,7 +120,7 @@ export async function checkInvoiceReadiness(
     .limit(1);
   if (!contract) {
     return {
-      ok: false, tenantId: null, ownerId: null,
+      ok: false, tenantId: null, ownerId: null, confirmations: [],
       blockers: [{ entity: "contract", id: Number(contractId), name: null, missing: ["contract"], action: "edit_contract" }],
     };
   }
@@ -144,6 +160,12 @@ export async function checkInvoiceReadiness(
     }
     if (missing.length) {
       blockers.push({ entity: "tenant", id: tenant.id, name: tenant.name, missing, action: "edit_tenant" });
+    }
+    // An individual tenant with no VAT number is normal, but indistinguishable
+    // from a field someone forgot — so the user confirms it explicitly rather
+    // than the invoice quietly going out without one.
+    if (!tenantIsCompany && blank(tenant.taxNumber)) {
+      confirmations.push({ key: "tenantNoVat", entity: "tenant", id: tenant.id, name: tenant.name });
     }
   }
 
@@ -205,7 +227,7 @@ export async function checkInvoiceReadiness(
     }
   }
 
-  return { ok: blockers.length === 0, blockers, tenantId, ownerId };
+  return { ok: blockers.length === 0, blockers, confirmations, tenantId, ownerId };
 }
 
 /** Human-readable one-liner for an API error message. */

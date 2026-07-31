@@ -387,6 +387,17 @@ class SimpleInvoicesController {
     // and the deposit diversion above has already returned by this point.
     if (type === "invoice" && !body?.kind) {
       const readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
+      // A tenant with no VAT number needs an explicit acknowledgement — the
+      // client ticks a box rather than the invoice quietly going out without
+      // one. Enforced here so the check cannot be skipped by calling the API
+      // directly.
+      if (readiness.confirmations.length > 0 && !body?.confirmations?.tenantNoVat) {
+        throw new BadRequestException({
+          error: "invoice_needs_confirmation",
+          message: "يرجى تأكيد أن المستأجر لا يملك رقماً ضريبياً قبل إصدار الفاتورة",
+          readiness,
+        });
+      }
       if (!readiness.ok) {
         throw new BadRequestException({
           error: "invoice_not_ready",

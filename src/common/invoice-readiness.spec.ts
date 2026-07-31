@@ -198,3 +198,32 @@ test("a document with no contract is not blocked", { skip: !HAS_DB && "DATABASE_
   assert.equal(r.ok, true);
   assert.equal(r.blockers.length, 0);
 });
+
+test("an individual tenant with no VAT asks for confirmation, not a blocker", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ tenantType: "individual", zatca: "onboarded" }, async ({ tx, tenantId }) => {
+    await tx.update(tenantsTable).set({ taxNumber: null }).where(eq(tenantsTable.id, tenantId));
+  }, (r, ctx) => {
+    // Still issuable — an individual is not VAT-registered — but the user has
+    // to say so rather than the invoice going out on an assumption.
+    assert.equal(r.ok, true, "no VAT on an individual is not a blocker");
+    assert.equal(r.confirmations.length, 1);
+    assert.equal(r.confirmations[0].key, "tenantNoVat");
+    assert.equal(r.confirmations[0].id, ctx.tenantId);
+  });
+});
+
+test("a tenant WITH a VAT number needs no confirmation", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ tenantType: "individual", zatca: "onboarded" }, async () => {}, (r) => {
+    assert.equal(r.confirmations.length, 0);
+  });
+});
+
+test("a company tenant with no VAT stays a hard blocker, not a confirmation", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ tenantType: "company", zatca: "onboarded" }, async ({ tx, tenantId }) => {
+    await tx.update(tenantsTable).set({ taxNumber: null }).where(eq(tenantsTable.id, tenantId));
+  }, (r) => {
+    assert.equal(r.ok, false);
+    assert.ok(blockerFor(r, "tenant")!.missing.includes("vatNumber"));
+    assert.equal(r.confirmations.length, 0, "a company must HAVE one — nothing to confirm");
+  });
+});
