@@ -221,6 +221,41 @@ test("the imported deed type is a real deed_type lookup option", { skip: !HAS_DB
   );
 });
 
+test("a compound property imports into the shape the property form reads", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  // The UAT fixture property is not in a compound, so drive the true path
+  // explicitly: what matters is that the import writes the SAME amenitiesData
+  // keys the add/edit form writes and the detail view reads back.
+  const p = preview();
+  const stored = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const body = payload(p, "TEST-EJAR-COMPOUND");
+    const res = (await ctl.import({ id: userId } as never, {
+      ...body,
+      property: { ...(body.property as Record<string, unknown>), partOfCompound: "true", compoundName: "مجمع الياسمين" } as never,
+    })) as never as { propertyId: number };
+    const [row] = await (tx as never as typeof db).select().from(propertiesTable).where(eq(propertiesTable.id, res.propertyId));
+    return (row as { amenitiesData: string | null }).amenitiesData;
+  });
+
+  assert.ok(stored, "amenitiesData must be written when Ejar reports a compound");
+  const parsed = JSON.parse(stored!) as { inCompound?: boolean; compoundName?: string; counts?: Record<string, number> };
+  assert.equal(parsed.inCompound, true);
+  assert.equal(parsed.compoundName, "مجمع الياسمين");
+  assert.ok(parsed.counts !== undefined, "the facilities block stays alongside it");
+});
+
+test("a property with no compound and no facilities writes no amenities blob", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  // The fixture property: part_of_compound false, empty amenities/utilities.
+  const p = preview();
+  const stored = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-NOCOMPOUND"))) as never as { propertyId: number };
+    const [row] = await (tx as never as typeof db).select().from(propertiesTable).where(eq(propertiesTable.id, res.propertyId));
+    return (row as { amenitiesData: string | null }).amenitiesData;
+  });
+  assert.equal(stored, null, "nothing to say means no blob, not an empty one");
+});
+
 test("re-import reuses every entity instead of duplicating", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   assert.ok(userId, "needs at least one user row");
   const p = preview();

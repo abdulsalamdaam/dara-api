@@ -643,9 +643,19 @@ export class EjarController {
     const values = {
       // Facilities/utilities keep the shape the property form reads back
       // ({ counts: {...} }) so an imported property edits like a manual one.
-      amenitiesData: extras.length
-        ? JSON.stringify({ counts: Object.fromEntries([...list(p.amenities), ...list(p.utilities)].map((k) => [k, 1])) })
-        : null,
+      // Same JSON shape the property form writes and the detail view reads:
+      // facility counts plus the compound flag. Written whenever Ejar gave us
+      // either, so an imported property shows "داخل مجمع" like a manual one.
+      amenitiesData: (() => {
+        const inCompound = asBool(p.partOfCompound) === true || !!str(p.compoundName);
+        const facilities = [...list(p.amenities), ...list(p.utilities)];
+        if (!facilities.length && !inCompound) return null;
+        return JSON.stringify({
+          counts: Object.fromEntries(facilities.map((k) => [k, 1])),
+          inCompound,
+          compoundName: str(p.compoundName) || "",
+        });
+      })(),
       ejarRaw: rawAttrs ?? null,
       name: str(p.name) || "عقار (إيجار)",
       district: str(p.district),
@@ -662,7 +672,7 @@ export class EjarController {
       usageLookupId: await resolveLookupId(this.db, "property_usage", usageKey),
       regionLookupId: await resolveLookupId(this.db, "region", p.regionKey ?? p.region),
       cityLookupId: await resolveLookupId(this.db, "city", p.city),
-      notes: [str(p.address), str(p.compoundName) && `مجمع: ${p.compoundName}`, ...extras, "مستورد من إيجار"]
+      notes: [str(p.address), ...extras, "مستورد من إيجار"]
         .filter(Boolean)
         .join(" — "),
       // Ejar gives coordinates, not a link. Turn them into the Maps URL the
