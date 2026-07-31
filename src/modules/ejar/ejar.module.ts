@@ -19,6 +19,7 @@ import { scopeId } from "../../common/scope";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { EjarPolicyService, type ManualAddOverride } from "./ejar.policy.service";
+import { computeEjarLocks, isLockEntity, type EjarLockEntity } from "./ejar.locks";
 import { isEjarEndpointKey, type EjarBody, type JsonApiResource } from "./ejar.types";
 import {
   mapEjarToContract, summarizeContractsBody,
@@ -935,6 +936,51 @@ export class EjarController {
   @Get("manual-add-policy")
   async manualAddPolicy() {
     return this.policy.getPolicy();
+  }
+
+  /**
+   * Which fields of an imported record must stay read-only. Answered here
+   * rather than widened onto each entity's GET: the field→Ejar-attribute map
+   * belongs in one place, and `ejar_raw` never has to be shipped to the browser
+   * just so a form can decide what to disable.
+   */
+  @Get("locks")
+  async locks(
+    @CurrentUser() user: AuthUser,
+    @Query("entity") entity?: string,
+    @Query("id") id?: string,
+  ) {
+    const rowId = Number(id);
+    if (!isLockEntity(entity) || !Number.isFinite(rowId)) {
+      throw new BadRequestException("entity must be one of property|unit|deed|tenant|landlord, with a numeric id");
+    }
+    const scope = scopeId(user);
+    const row = await this.loadLockRow(entity, rowId, scope);
+    return computeEjarLocks(entity, row);
+  }
+
+  /** The provenance columns for one record, scoped to the caller's account. */
+  private async loadLockRow(entity: EjarLockEntity, id: number, scope: number) {
+    if (entity === "unit") {
+      // Units are scoped through their property.
+      const [row] = await this.db
+        .select({ ejarSource: unitsTable.ejarSource, ejarRaw: unitsTable.ejarRaw })
+        .from(unitsTable)
+        .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
+        .where(and(eq(unitsTable.id, id), eq(propertiesTable.userId, scope)))
+        .limit(1);
+      return row ?? null;
+    }
+    const table = entity === "property" ? propertiesTable
+      : entity === "deed" ? deedsTable
+      : entity === "tenant" ? tenantsTable
+      : ownersTable;
+    const [row] = await this.db
+      .select({ ejarSource: table.ejarSource, ejarRaw: table.ejarRaw })
+      .from(table)
+      .where(and(eq(table.id, id), eq(table.userId, scope)))
+      .limit(1);
+    return row ?? null;
   }
 
   @Get("logs")
