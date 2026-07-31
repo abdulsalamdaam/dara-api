@@ -173,6 +173,139 @@ export async function ensureSchema(): Promise<void> {
         )
       `);
       await client.query(`create unique index if not exists app_settings_key_uniq on app_settings (key)`);
+      // Property/unit taxonomy. Rows are matched by KEY and relabelled rather
+      // than replaced: properties and units point here through *_lookup_id, so
+      // swapping in a fresh set would blank the type on every existing record.
+      await client.query(`
+        with target(category, key, label_ar, label_en, sort_order) as (values
+          ('property_type', 'land', 'أرض', 'Land', 1),
+          ('property_type', 'apartment_building', 'عمارة', 'Building', 2),
+          ('property_type', 'tower', 'برج', 'Tower', 3),
+          ('property_type', 'villa', 'فيلا', 'Villa', 4),
+          ('property_type', 'plaza', 'مجمع تجاري مفتوح (بلازا)', 'Open Commercial Complex (Plaza)', 5),
+          ('property_type', 'mall', 'مجمع تجاري مغلق (مول)', 'Closed Commercial Complex (Mall)', 6),
+          ('property_type', 'factory', 'مصنع', 'Factory', 7),
+          ('property_type', 'chalet', 'استراحة', 'Rest House', 8),
+          ('property_type', 'farm', 'مزرعة', 'Farm', 9),
+          ('property_usage', 'families', 'سكن عائلات', 'Family Residential', 1),
+          ('property_usage', 'individuals', 'سكن أفراد', 'Individual Residential', 2),
+          ('property_usage', 'commercial', 'تجاري', 'Commercial', 3),
+          ('property_usage', 'mixed', 'سكني - تجاري', 'Residential - Commercial', 4),
+          ('property_usage', 'group_housing', 'السكن الجماعي', 'Group Housing', 5),
+          ('property_usage', 'residential_investment', 'سكن استثماري', 'Residential Investment', 6),
+          ('property_usage', 'industrial', 'صناعي', 'Industrial', 7),
+          ('property_usage', 'agricultural', 'زراعي', 'Agricultural', 8),
+          ('unit_type', 'kiosk', 'كشك', 'Kiosk', 1),
+          ('unit_type', 'shop', 'محل', 'Shop', 2),
+          ('unit_type', 'workshop', 'ورشة', 'Workshop', 3),
+          ('unit_type', 'land', 'أرض', 'Land', 4),
+          ('unit_type', 'leasedLand', 'أرض مسورة', 'Fenced Land', 5),
+          ('unit_type', 'station', 'محطة', 'Station', 6),
+          ('unit_type', 'office', 'مكتب', 'Office', 7),
+          ('unit_type', 'warehouse', 'مستودع', 'Warehouse', 8),
+          ('unit_type', 'showroom', 'معرض', 'Showroom', 9),
+          ('unit_type', 'atm', 'صراف', 'Exchange Office', 10),
+          ('unit_type', 'cinema', 'سينما', 'Cinema', 11),
+          ('unit_type', 'powerStation', 'محطة كهرباء', 'Power Station', 12),
+          ('unit_type', 'telecomTower', 'برج اتصالات', 'Telecommunications Tower', 13),
+          ('unit_type', 'hotel', 'فندق', 'Hotel', 14),
+          ('unit_type', 'parkingLot', 'مواقف سيارات', 'Car Parking', 15),
+          ('unit_type', 'plaza', 'مجمع تجاري مفتوح (بلازا)', 'Open Commercial Complex (Plaza)', 16),
+          ('unit_type', 'mall', 'مجمع تجاري مغلق (مول)', 'Closed Commercial Complex (Mall)', 17),
+          ('unit_type', 'floor', 'دور', 'Floor', 18),
+          ('unit_type', 'apartment', 'شقة', 'Apartment', 19),
+          ('unit_type', 'villa', 'فيلا', 'Villa', 20),
+          ('unit_type', 'building', 'عمارة', 'Building', 21),
+          ('unit_type', 'tower', 'برج', 'Tower', 22),
+          ('unit_type', 'duplex', 'شقة ثنائية الدور (دوبلكس)', 'Duplex Apartment', 23),
+          ('unit_type', 'studio', 'شقة صغيرة (استوديو)', 'Studio Apartment', 24),
+          ('unit_type', 'annex', 'شقة ملحق', 'Annex Apartment', 25),
+          ('unit_type', 'apartmentWithAnnex', 'شقة وملحق علوي', 'Apartment with Upper Annex', 26),
+          ('unit_type', 'floorWithAnnex', 'دور وملحق علوي', 'Floor with Upper Annex', 27),
+          ('unit_type', 'rooftopVilla', 'فيلا سطح', 'Rooftop Villa', 28),
+          ('unit_type', 'driverRoom', 'غرفة سائق', 'Driver''s Room', 29),
+          ('unit_type', 'chalet', 'استراحة', 'Rest House', 30),
+          ('unit_type', 'sharedRoom', 'غرفة بمساحة مشتركة', 'Shared Room', 31),
+          ('unit_type', 'hotelRoom', 'غرفة فندقية', 'Hotel Room', 32),
+          ('unit_type', 'traditionalHouse', 'بيت شعبي', 'Traditional House', 33),
+          ('unit_type', 'twoFloorApartment', 'شقة دورين', 'Two-Floor Apartment', 34),
+          ('unit_type', 'educational_complex', 'مجمع تعليمي', 'Educational Complex', 35),
+          ('unit_type', 'car_wash', 'مغسلة سيارات', 'Car Wash', 36)
+        )
+        insert into lookups (category, key, label_ar, label_en, sort_order, is_active, company_id)
+        select t.category, t.key, t.label_ar, t.label_en, t.sort_order, true, null
+        from target t
+        where not exists (
+          select 1 from lookups l
+          where l.category = t.category and l.key = t.key and l.company_id is null
+        )
+      `);
+      await client.query(`
+        with target(category, key, label_ar, label_en, sort_order) as (values
+          ('property_type', 'land', 'أرض', 'Land', 1),
+          ('property_type', 'apartment_building', 'عمارة', 'Building', 2),
+          ('property_type', 'tower', 'برج', 'Tower', 3),
+          ('property_type', 'villa', 'فيلا', 'Villa', 4),
+          ('property_type', 'plaza', 'مجمع تجاري مفتوح (بلازا)', 'Open Commercial Complex (Plaza)', 5),
+          ('property_type', 'mall', 'مجمع تجاري مغلق (مول)', 'Closed Commercial Complex (Mall)', 6),
+          ('property_type', 'factory', 'مصنع', 'Factory', 7),
+          ('property_type', 'chalet', 'استراحة', 'Rest House', 8),
+          ('property_type', 'farm', 'مزرعة', 'Farm', 9),
+          ('property_usage', 'families', 'سكن عائلات', 'Family Residential', 1),
+          ('property_usage', 'individuals', 'سكن أفراد', 'Individual Residential', 2),
+          ('property_usage', 'commercial', 'تجاري', 'Commercial', 3),
+          ('property_usage', 'mixed', 'سكني - تجاري', 'Residential - Commercial', 4),
+          ('property_usage', 'group_housing', 'السكن الجماعي', 'Group Housing', 5),
+          ('property_usage', 'residential_investment', 'سكن استثماري', 'Residential Investment', 6),
+          ('property_usage', 'industrial', 'صناعي', 'Industrial', 7),
+          ('property_usage', 'agricultural', 'زراعي', 'Agricultural', 8),
+          ('unit_type', 'kiosk', 'كشك', 'Kiosk', 1),
+          ('unit_type', 'shop', 'محل', 'Shop', 2),
+          ('unit_type', 'workshop', 'ورشة', 'Workshop', 3),
+          ('unit_type', 'land', 'أرض', 'Land', 4),
+          ('unit_type', 'leasedLand', 'أرض مسورة', 'Fenced Land', 5),
+          ('unit_type', 'station', 'محطة', 'Station', 6),
+          ('unit_type', 'office', 'مكتب', 'Office', 7),
+          ('unit_type', 'warehouse', 'مستودع', 'Warehouse', 8),
+          ('unit_type', 'showroom', 'معرض', 'Showroom', 9),
+          ('unit_type', 'atm', 'صراف', 'Exchange Office', 10),
+          ('unit_type', 'cinema', 'سينما', 'Cinema', 11),
+          ('unit_type', 'powerStation', 'محطة كهرباء', 'Power Station', 12),
+          ('unit_type', 'telecomTower', 'برج اتصالات', 'Telecommunications Tower', 13),
+          ('unit_type', 'hotel', 'فندق', 'Hotel', 14),
+          ('unit_type', 'parkingLot', 'مواقف سيارات', 'Car Parking', 15),
+          ('unit_type', 'plaza', 'مجمع تجاري مفتوح (بلازا)', 'Open Commercial Complex (Plaza)', 16),
+          ('unit_type', 'mall', 'مجمع تجاري مغلق (مول)', 'Closed Commercial Complex (Mall)', 17),
+          ('unit_type', 'floor', 'دور', 'Floor', 18),
+          ('unit_type', 'apartment', 'شقة', 'Apartment', 19),
+          ('unit_type', 'villa', 'فيلا', 'Villa', 20),
+          ('unit_type', 'building', 'عمارة', 'Building', 21),
+          ('unit_type', 'tower', 'برج', 'Tower', 22),
+          ('unit_type', 'duplex', 'شقة ثنائية الدور (دوبلكس)', 'Duplex Apartment', 23),
+          ('unit_type', 'studio', 'شقة صغيرة (استوديو)', 'Studio Apartment', 24),
+          ('unit_type', 'annex', 'شقة ملحق', 'Annex Apartment', 25),
+          ('unit_type', 'apartmentWithAnnex', 'شقة وملحق علوي', 'Apartment with Upper Annex', 26),
+          ('unit_type', 'floorWithAnnex', 'دور وملحق علوي', 'Floor with Upper Annex', 27),
+          ('unit_type', 'rooftopVilla', 'فيلا سطح', 'Rooftop Villa', 28),
+          ('unit_type', 'driverRoom', 'غرفة سائق', 'Driver''s Room', 29),
+          ('unit_type', 'chalet', 'استراحة', 'Rest House', 30),
+          ('unit_type', 'sharedRoom', 'غرفة بمساحة مشتركة', 'Shared Room', 31),
+          ('unit_type', 'hotelRoom', 'غرفة فندقية', 'Hotel Room', 32),
+          ('unit_type', 'traditionalHouse', 'بيت شعبي', 'Traditional House', 33),
+          ('unit_type', 'twoFloorApartment', 'شقة دورين', 'Two-Floor Apartment', 34),
+          ('unit_type', 'educational_complex', 'مجمع تعليمي', 'Educational Complex', 35),
+          ('unit_type', 'car_wash', 'مغسلة سيارات', 'Car Wash', 36)
+        )
+        update lookups l
+           set label_ar = t.label_ar, label_en = t.label_en,
+               sort_order = t.sort_order, is_active = true
+          from target t
+         where l.category = t.category and l.key = t.key and l.company_id is null
+           and (l.label_ar is distinct from t.label_ar
+             or l.label_en is distinct from t.label_en
+             or l.sort_order is distinct from t.sort_order
+             or l.is_active is not true)
+      `);
       // Owners named on the deed document itself (co-owners), distinct from
       // deeds.owner_id which is the landlord the deed is filed under.
       await client.query(`alter table deeds add column if not exists deed_owners jsonb`);

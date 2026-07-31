@@ -25,6 +25,8 @@ export const EJAR_PROPERTY_TYPE: Record<string, string> = {
   mall: "mall",
   plaza: "plaza",
   commercial_complex: "plaza",
+  factory: "factory",
+  farm: "farm",
 };
 
 /** contracts.units[].unit_type / units.unit_type → `unit_type`. */
@@ -63,13 +65,17 @@ export const EJAR_UNIT_TYPE: Record<string, string> = {
   plaza: "plaza",
   shopping_mall: "mall",
   mall: "mall",
+  educational_complex: "educational_complex",
+  car_wash: "car_wash",
 };
 
 /** properties.property_usage / units.unit_usage → `property_usage`. */
 export const EJAR_USAGE: Record<string, string> = {
-  residential_families: "individuals",
+  // `families` and `group_housing` now exist as their own options, so these no
+  // longer have to collapse into the generic "individuals".
+  residential_families: "families",
   residential_singles: "individuals",
-  communal_housing: "individuals",
+  communal_housing: "group_housing",
   residential: "individuals",
   commercial: "commercial",
   mixed: "mixed",
