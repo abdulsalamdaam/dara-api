@@ -45,6 +45,35 @@ const CONTRACT_NUMBER_FILTERS = (n: string): Array<Record<string, string | numbe
 ];
 
 /**
+ * The owners named on the deed, taken from the Ejar property's `owners` list.
+ * Deduped on name+id because the same person often appears on both the
+ * property and its units. Returns null (not []) when Ejar sent none, so a
+ * re-import can't blank a list the user filled in by hand — see onlyPresent().
+ */
+/** A Google Maps link from Ejar coordinates, or null when it sent none. */
+function mapsUrl(lat: unknown, lng: unknown): string | null {
+  const a = Number(lat), b = Number(lng);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || (a === 0 && b === 0)) return null;
+  return `https://www.google.com/maps?q=${a},${b}`;
+}
+
+function deedOwnersFrom(p: Record<string, unknown>): Array<{ name: string; idNumber: string | null }> | null {
+  const raw = Array.isArray(p.owners) ? (p.owners as Array<Record<string, unknown>>) : [];
+  const seen = new Set<string>();
+  const out: Array<{ name: string; idNumber: string | null }> = [];
+  for (const o of raw) {
+    const name = o?.name == null ? "" : String(o.name).trim();
+    if (!name) continue;
+    const idNumber = o?.id == null || String(o.id).trim() === "" ? null : String(o.id).trim();
+    const key = `${name}|${idNumber ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, idNumber });
+  }
+  return out.length ? out : null;
+}
+
+/**
  * Drop null/undefined keys before an UPDATE. Re-importing a contract refreshes
  * the property/unit with the latest Ejar detail, but Ejar leaves plenty of
  * fields empty — without this, a refresh would wipe values the user had filled
@@ -565,6 +594,10 @@ export class EjarController {
           || (p.deedType == null || String(p.deedType).trim() === "" ? "electronic" : String(p.deedType).trim()),
         ownerId: landlordId,
         ownerNationalId: lessor?.idNumber ?? null,
+        // Ejar names the deed's own owners on the property (and unit). They are
+        // the document's co-owners, which is not necessarily the landlord this
+        // deed is filed under, so they are kept as their own list.
+        deedOwners: deedOwnersFrom(p),
         issuingAuthority: "إيجار (الهيئة العامة للعقار)",
         notes: "مستورد من إيجار",
         ejarSource: "ejar",
@@ -632,6 +665,9 @@ export class EjarController {
       notes: [str(p.address), str(p.compoundName) && `مجمع: ${p.compoundName}`, ...extras, "مستورد من إيجار"]
         .filter(Boolean)
         .join(" — "),
+      // Ejar gives coordinates, not a link. Turn them into the Maps URL the
+      // property screen actually shows; a user can still overwrite it.
+      mapUrl: mapsUrl(p.latitude, p.longitude),
       ejarId,
       ejarSource: "ejar",
     };

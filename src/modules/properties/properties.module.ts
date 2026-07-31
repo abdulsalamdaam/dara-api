@@ -244,6 +244,7 @@ class PropertiesController {
       postalCode: body.postalCode ?? null,
       buildingNumber: body.buildingNumber ?? null,
       additionalNumber: body.additionalNumber ?? null,
+      mapUrl: body.mapUrl ?? null,
       amenitiesData: body.amenitiesData ?? null,
       notes: body.notes ?? null,
       imageKey: body.imageKey ?? null,
@@ -286,7 +287,7 @@ class PropertiesController {
     const id = parseInt(propertyId, 10);
     const owner = scopeId(user);
     const updateData: Record<string, unknown> = {};
-    const fields = ["name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators", "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber", "amenitiesData", "notes", "imageKey", "images", "isDraft", "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId"];
+    const fields = ["name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators", "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber", "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft", "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId"];
     for (const field of fields) if (body[field] !== undefined) updateData[field] = body[field];
     if (body.managementFeePercent !== undefined) {
       updateData.managementFeePercent = body.managementFeePercent == null || body.managementFeePercent === ""

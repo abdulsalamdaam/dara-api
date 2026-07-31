@@ -136,6 +136,12 @@ test("import persists every mapped Ejar field across all six tables", { skip: !H
   assert.equal(deed.deedType, "paper", "paper_title_deed maps to our deed_type");
   assert.equal(deed.ownerId, landlord.id);
   assert.ok(deed.ejarRaw);
+  // Owners printed on the deed come from the Ejar property's owners list, and
+  // are distinct from ownerId (the landlord the deed is filed under).
+  const deedOwners = deed.deedOwners as Array<{ name: string; idNumber: string | null }> | null;
+  assert.ok(Array.isArray(deedOwners) && deedOwners.length > 0, "deed owners must be captured from Ejar");
+  assert.equal(deedOwners![0].name, "روابي عبدالله محمد السلامه");
+  assert.equal(deedOwners![0].idNumber, "1082683978");
 
   // ── Property: the field the audit called out, plus address + lookups
   assert.equal(property.yearBuilt, 2000, "building_year must persist");
@@ -150,6 +156,13 @@ test("import persists every mapped Ejar field across all six tables", { skip: !H
   assert.ok(property.regionLookupId, "region resolves to a lookup FK");
   assert.ok(property.cityLookupId, "city resolves to a lookup FK");
   assert.ok(property.ejarRaw, "property keeps the verbatim GetProperties attributes");
+  // Ejar sends coordinates, not a link — the import turns them into the Maps
+  // URL the property screen shows.
+  assert.match(
+    String(property.mapUrl),
+    /^https:\/\/www\.google\.com\/maps\?q=24\.8274.*,46\.6371/,
+    `map link should be built from the Ejar coordinates, got: ${property.mapUrl}`,
+  );
 
   // ── Unit
   assert.equal(unit.unitNumber, "2003-89");

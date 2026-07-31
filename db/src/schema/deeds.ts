@@ -29,6 +29,14 @@ export const deedsTable = pgTable("deeds", {
   ownerId: integer("owner_id").references(() => ownersTable.id, { onDelete: "set null" }),
   // National ID of the deed owner — captured for electronic deeds.
   ownerNationalId: text("owner_national_id"),
+  /**
+   * The owners named ON THE DEED itself, which is not the same thing as
+   * `ownerId` (the landlord the deed is filed under in this account). A deed
+   * can name several co-owners, and Ejar returns them as a list on the
+   * property/unit. Optional and free-standing: they are a record of what the
+   * document says, not links to `owners` rows.
+   */
+  deedOwners: jsonb("deed_owners").$type<Array<{ name: string; idNumber?: string | null }>>(),
   issueDate: timestamp("issue_date", { withTimezone: true }),
   // Hijri form of the issue date as entered by the user (e.g. "1445-03-15").
   // issueDate above always holds the Gregorian equivalent.

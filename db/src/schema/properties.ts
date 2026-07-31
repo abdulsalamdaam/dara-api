@@ -44,6 +44,13 @@ export const propertiesTable = pgTable("properties", {
   images: jsonb("images"),
   isDraft: boolean("is_draft").notNull().default(false),
   isDemo: boolean("is_demo").notNull().default(false),
+  /**
+   * Optional Google Maps link for the property. Free-form so a user can paste
+   * whatever share link they have; Ejar imports get one generated from the
+   * coordinates it returns (we have no lat/lng columns, and a link is what the
+   * UI actually needs).
+   */
+  mapUrl: text("map_url"),
   // Provenance for Ejar (NHC) imports — the Ejar property UUID lets a re-import
   // reuse the same local property instead of duplicating it.
   ejarId: text("ejar_id"),

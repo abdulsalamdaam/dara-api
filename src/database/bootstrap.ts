@@ -173,6 +173,11 @@ export async function ensureSchema(): Promise<void> {
         )
       `);
       await client.query(`create unique index if not exists app_settings_key_uniq on app_settings (key)`);
+      // Owners named on the deed document itself (co-owners), distinct from
+      // deeds.owner_id which is the landlord the deed is filed under.
+      await client.query(`alter table deeds add column if not exists deed_owners jsonb`);
+      // Optional Google Maps link; Ejar imports fill it from the coordinates.
+      await client.query(`alter table properties add column if not exists map_url text`);
       // Deed types move from a hard-coded pair to the central lookups table.
       // The `electronic` / `paper` keys are kept verbatim so existing deeds
       // stay valid and need no backfill; the other two are new options.

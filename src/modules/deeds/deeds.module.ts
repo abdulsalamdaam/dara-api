@@ -35,6 +35,16 @@ const deedCreateSchema = z.object({
   documentName: z.string().trim().optional().nullable(),
   ownerId: z.coerce.number().int().positive().optional().nullable(),
   ownerNationalId: z.string().trim().optional().nullable(),
+  // Co-owners named on the deed document. Optional; a row with no name is
+  // dropped so an empty form line never persists as a blank owner.
+  deedOwners: z
+    .array(z.object({
+      name: z.string().trim().min(1),
+      idNumber: z.string().trim().optional().nullable(),
+    }))
+    .optional()
+    .nullable()
+    .transform((v) => (v == null ? v : v.filter((o) => o.name.trim() !== ""))),
   issueDate: z.coerce.date().optional().nullable(),
   issueDateHijri: z.string().trim().optional().nullable(),
   copyDate: z.coerce.date().optional().nullable(),
@@ -160,6 +170,7 @@ class DeedsController {
       documentName: body.documentName ?? null,
       ownerId: body.ownerId ?? null,
       ownerNationalId: body.ownerNationalId ?? null,
+      deedOwners: body.deedOwners ?? null,
       issueDate: body.issueDate ?? null,
       issueDateHijri: body.issueDateHijri ?? null,
       copyDate: body.copyDate ?? null,
