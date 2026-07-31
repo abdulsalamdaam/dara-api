@@ -295,6 +295,12 @@ export class EjarController {
       contractInfo?: Record<string, unknown>;
       invoices?: EjarInvoiceRow[];
       raw?: Partial<EjarRawBlocks>;
+      /**
+       * Optional additional fees chosen on the confirm-import step. Same shape
+       * the manual contract wizard sends, so both paths produce identical
+       * fee installments.
+       */
+      additionalFees?: Array<Record<string, unknown>>;
     },
   ) {
     const src = body?.contract || {};
@@ -359,6 +365,28 @@ export class EjarController {
           .filter((e) => e.dueDate && Number(e.amount) > 0)
       : [];
 
+    // Fees are optional; drop anything without a positive amount so an empty
+    // row left behind in the modal can never create a zero-value installment.
+    const additionalFees = (Array.isArray(body?.additionalFees) ? body.additionalFees : [])
+      .map((f) => ({
+        id: String(f?.id ?? ""),
+        typeKey: str(f?.typeKey),
+        name: str(f?.name) || "رسوم",
+        amount: String(f?.amount ?? ""),
+        recurrence: String(f?.recurrence ?? "one_time"),
+        dueDate: "",
+        paymentMethod: "separate",
+        vat: !!f?.vat,
+        ...(f?.recurrence === "custom" && Array.isArray(f?.customSchedule)
+          ? {
+              customSchedule: (f.customSchedule as Array<{ dueDate?: unknown; amount?: unknown }>)
+                .map((e) => ({ dueDate: String(e?.dueDate ?? "").slice(0, 10), amount: String(e?.amount ?? "") }))
+                .filter((e) => e.dueDate && Number(e.amount) > 0),
+            }
+          : {}),
+      }))
+      .filter((f) => (f.recurrence === "custom" ? (f.customSchedule?.length ?? 0) > 0 : Number(f.amount) > 0));
+
     const freqRaw = String(src.paymentFrequency || "").toLowerCase();
     const freq = customSchedule.length
       ? "custom"
@@ -413,6 +441,7 @@ export class EjarController {
         status: status as never,
         notes: [str(src.notes), src.propertyName ? `العقار: ${src.propertyName}` : null].filter(Boolean).join(" — ") || null,
         ejarRaw: raw.contract ?? null,
+        additionalFees: additionalFees.length ? (additionalFees as never) : null,
       })
       .returning();
     created.push("contract");
@@ -437,7 +466,8 @@ export class EjarController {
     try {
       const rows = buildInstallments(
         contract.id, ownerId, contract.startDate, contract.endDate, contract.monthlyRent, freq,
-        null, false, 0, "percent", null, 0, customSchedule.length ? customSchedule : null,
+        additionalFees.length ? (additionalFees as never) : null,
+        false, 0, "percent", null, 0, customSchedule.length ? customSchedule : null,
       );
       if (rows.length > 0) {
         const inserted = await this.db.insert(paymentsTable).values(rows).returning({ id: paymentsTable.id, dueDate: paymentsTable.dueDate });

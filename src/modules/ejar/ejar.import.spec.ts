@@ -341,6 +341,52 @@ test("a party list of only representatives does not file someone as their own ag
   assert.equal(p.contract.landlordName, p.parties.lessors[0].name);
 });
 
+test("fees chosen on the confirm step become installments alongside the rent", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  const p = preview();
+  const out = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, {
+      ...payload(p, "TEST-EJAR-FEES"),
+      additionalFees: [
+        { id: "f1", typeKey: "maintenance", name: "صيانة", amount: "500", recurrence: "one_time", vat: false },
+        // VAT-bearing fee: 300 + 15% = 345.
+        { id: "f2", typeKey: "services", name: "خدمات", amount: "300", recurrence: "one_time", vat: true },
+        // Junk rows the modal can leave behind — must not become installments.
+        { id: "f3", typeKey: "", name: "", amount: "", recurrence: "one_time" },
+        { id: "f4", typeKey: "admin", name: "إداري", amount: "0", recurrence: "one_time" },
+      ],
+    })) as never as { id: number };
+    const [contract] = await (tx as never as typeof db).select().from(contractsTable).where(eq(contractsTable.id, res.id));
+    const pays = await (tx as never as typeof db).select().from(paymentsTable).where(eq(paymentsTable.contractId, res.id));
+    return { contract, pays };
+  });
+
+  const stored = (out.contract as unknown as { additionalFees: Array<{ name: string }> | null }).additionalFees;
+  assert.ok(Array.isArray(stored), "fees are persisted on the contract");
+  assert.equal(stored!.length, 2, "blank and zero-amount rows are dropped");
+
+  const feeRows = (out.pays as Array<Record<string, unknown>>).filter((r) => r.description === "صيانة" || r.description === "خدمات");
+  assert.equal(feeRows.length, 2, "each valid fee produced an installment");
+  const byName = Object.fromEntries(feeRows.map((r) => [String(r.description), Number(r.amount)]));
+  assert.equal(byName["صيانة"], 500);
+  assert.equal(byName["خدمات"], 345, "15% VAT is applied on top when the fee opts in");
+
+  // The rent schedule is untouched — fees are additional, not a replacement.
+  const rentRows = (out.pays as Array<Record<string, unknown>>).filter((r) => r.description !== "صيانة" && r.description !== "خدمات");
+  assert.ok(rentRows.length > 0, "the rent installments are still generated");
+});
+
+test("importing without fees behaves exactly as before", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  const p = preview();
+  const out = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-NOFEES"))) as never as { id: number };
+    const [contract] = await (tx as never as typeof db).select().from(contractsTable).where(eq(contractsTable.id, res.id));
+    return contract as unknown as { additionalFees: unknown };
+  });
+  assert.equal(out.additionalFees, null, "no fees means null, not an empty array");
+});
+
 test("re-import reuses every entity instead of duplicating", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   assert.ok(userId, "needs at least one user row");
   const p = preview();
