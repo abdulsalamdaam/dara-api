@@ -43,7 +43,7 @@ Schema is managed by Drizzle. Two ways to apply:
 
 ## Post-deploy verification
 ```bash
-curl https://api.oqudk.com/api/healthz
+curl https://api.dara-sa.net/api/healthz
 # → {"status":"ok"}
 ```
 

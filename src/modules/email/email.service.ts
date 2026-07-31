@@ -6,17 +6,29 @@ import { Injectable, Logger } from "@nestjs/common";
  * always reference a hosted PNG. Defaults to the web project's
  * `/logo.png`; override via env when the asset moves.
  */
-const EMAIL_LOGO_URL = process.env.EMAIL_LOGO_URL || "https://oqudk.com/logo.png";
+/**
+ * One place the brand's domain is written down. Everything else in this file
+ * derives from it, so a domain move is a single edit (or a single env var)
+ * rather than a hunt through email bodies — which is exactly how the previous
+ * domain ended up hardcoded in a dozen places.
+ */
+const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.net";
+const SITE_URL = process.env.SITE_URL || `https://${SITE_DOMAIN}`;
+
+/** Shown to recipients as the contact address in email bodies. */
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || `hello@${SITE_DOMAIN}`;
+
+const EMAIL_LOGO_URL = process.env.EMAIL_LOGO_URL || `${SITE_URL}/logo.png`;
 
 /**
  * Tenant mobile-app download links. Default to the marketing site until the
  * store listings go live; override per-store via env when published.
  */
-const APP_IOS_URL = process.env.APP_IOS_URL || "https://oqudk.com";
-const APP_ANDROID_URL = process.env.APP_ANDROID_URL || "https://oqudk.com";
+const APP_IOS_URL = process.env.APP_IOS_URL || SITE_URL;
+const APP_ANDROID_URL = process.env.APP_ANDROID_URL || SITE_URL;
 
 /** Portal base URL — used to build email-verification links. */
-const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || "https://app.oqudk.com";
+const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || `https://app.${SITE_DOMAIN}`;
 export function buildVerifyEmailLink(token: string): string {
   return `${APP_PUBLIC_URL.replace(/\/$/, "")}/verify-email?token=${encodeURIComponent(token)}`;
 }
@@ -70,20 +82,20 @@ export interface ContactEmailPayload {
 export class EmailService {
   private readonly log = new Logger(EmailService.name);
   private readonly apiKey = process.env.RESEND_API_KEY || "";
-  private readonly from = process.env.RESEND_FROM || "Oqudk <hello@oqudk.com>";
+  private readonly from = process.env.RESEND_FROM || `Oqudk <hello@${SITE_DOMAIN}>`;
   private readonly adminEmail = process.env.ADMIN_NOTIFY_EMAIL || "";
   /**
    * Default Reply-To. Sending `noreply@`-style addresses tanks deliverability;
    * giving every email a real mailbox to reply to keeps spam filters happier.
    */
-  private readonly replyTo = process.env.RESEND_REPLY_TO || "hello@oqudk.com";
+  private readonly replyTo = process.env.RESEND_REPLY_TO || `hello@${SITE_DOMAIN}`;
   /**
    * One-click List-Unsubscribe (RFC 8058). Pleases Gmail's bulk-sender
    * policy and adds ~1 point on mail-tester. The URL must accept a POST
    * with no body and the mailto must route to a real inbox.
    */
-  private readonly listUnsubscribeUrl = process.env.LIST_UNSUBSCRIBE_URL || "https://oqudk.com/email/unsubscribe";
-  private readonly listUnsubscribeMailto = process.env.LIST_UNSUBSCRIBE_MAILTO || "unsubscribe@oqudk.com";
+  private readonly listUnsubscribeUrl = process.env.LIST_UNSUBSCRIBE_URL || `${SITE_URL}/email/unsubscribe`;
+  private readonly listUnsubscribeMailto = process.env.LIST_UNSUBSCRIBE_MAILTO || `unsubscribe@${SITE_DOMAIN}`;
 
   isConfigured(): boolean {
     return Boolean(this.apiKey);
@@ -223,7 +235,7 @@ export class EmailService {
       </p>
       ${appButtons()}
       <p style="margin:16px 0 0;color:#64748b;font-size:13px;">
-        إذا واجهت أي مشكلة لا تتردد في التواصل معنا على hello@oqudk.com.
+        إذا واجهت أي مشكلة لا تتردد في التواصل معنا على ${SUPPORT_EMAIL}.
       </p>
     `);
     return this.send({
@@ -403,19 +415,19 @@ export class EmailService {
         يسعدنا إعلامك بأن حسابك في <strong>عقودك · Oqudk</strong> قد تم تفعيله بنجاح. يمكنك الآن تسجيل الدخول وإدارة عقاراتك.
       </p>
       <div style="margin:24px 0;text-align:center;">
-        <a href="https://oqudk.com/login" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+        <a href="${SITE_URL}/login" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
           تسجيل الدخول
         </a>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        إذا واجهت أي مشكلة في الدخول لا تتردد في التواصل معنا على hello@oqudk.com.
+        إذا واجهت أي مشكلة في الدخول لا تتردد في التواصل معنا على ${SUPPORT_EMAIL}.
       </p>
     `);
     return this.send({
       to,
       subject: "تم تفعيل حسابك في عقودك · Account approved",
       html,
-      text: `مرحباً ${name}، تم تفعيل حسابك في عقودك. يمكنك الآن تسجيل الدخول عبر https://oqudk.com/login`,
+      text: `مرحباً ${name}، تم تفعيل حسابك في عقودك. يمكنك الآن تسجيل الدخول عبر ${SITE_URL}/login`,
     });
   }
 
@@ -440,7 +452,7 @@ export class EmailService {
            </div>`
         : ""}
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        إذا كان لديك أي استفسار يمكنك التواصل مع فريقنا على hello@oqudk.com.
+        إذا كان لديك أي استفسار يمكنك التواصل مع فريقنا على ${SUPPORT_EMAIL}.
       </p>
     `);
     return this.send({
@@ -606,7 +618,7 @@ function layout(inner: string): string {
     <tr>
       <td style="padding:20px 8px 0;text-align:center;color:#94a3b8;font-size:12px;">
         <div style="margin-bottom:6px;">© ${new Date().getFullYear()} عقودك · Oqudk — منصة إدارة العقارات</div>
-        <div><a href="https://oqudk.com" style="color:#94a3b8;text-decoration:none;">oqudk.com</a></div>
+        <div><a href="${SITE_URL}" style="color:#94a3b8;text-decoration:none;">${SITE_DOMAIN}</a></div>
       </td>
     </tr>
   </table>

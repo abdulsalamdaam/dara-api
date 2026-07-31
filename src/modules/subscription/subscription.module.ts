@@ -11,7 +11,7 @@ import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, type BillingCy
 import { deriveSubscription } from "../../common/subscription";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
 
-const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.oqudk.com").replace(/\/$/, "");
+const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.net").replace(/\/$/, "");
 
 /** Open / renew the subscription window for `cycle` starting now. */
 function nextEndDate(cycle: BillingCycle, from = new Date()): Date {

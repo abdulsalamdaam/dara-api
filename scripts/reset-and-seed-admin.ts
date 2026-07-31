@@ -11,15 +11,15 @@
  * Run (from the milkia-api repo root):
  *
  *   tsx --env-file=.env scripts/reset-and-seed-admin.ts --yes \
- *       --email=admin@oqudk.com --password='YourStrongPass123' --name='مدير النظام'
+ *       --email=admin@dara-sa.net --password='YourStrongPass123' --name='مدير النظام'
  *
  * or via the package script:
  *
- *   pnpm db:reset -- --yes --email=admin@oqudk.com --password='YourStrongPass123'
+ *   pnpm db:reset -- --yes --email=admin@dara-sa.net --password='YourStrongPass123'
  *
  * Flags / env:
  *   --yes                 REQUIRED. Without it the script refuses to run.
- *   --email=    | SUPER_ADMIN_EMAIL      (default: admin@oqudk.com)
+ *   --email=    | SUPER_ADMIN_EMAIL      (default: admin@dara-sa.net)
  *   --password= | SUPER_ADMIN_PASSWORD   (default: a random strong one, printed)
  *   --name=     | SUPER_ADMIN_NAME       (default: "مدير النظام")
  *
@@ -61,7 +61,7 @@ async function main() {
     process.exit(1);
   }
 
-  const email = argVal("email", "SUPER_ADMIN_EMAIL", "admin@oqudk.com").trim().toLowerCase();
+  const email = argVal("email", "SUPER_ADMIN_EMAIL", "admin@dara-sa.net").trim().toLowerCase();
   const name = argVal("name", "SUPER_ADMIN_NAME", "مدير النظام");
   let password = argVal("password", "SUPER_ADMIN_PASSWORD", "");
   let generated = false;
