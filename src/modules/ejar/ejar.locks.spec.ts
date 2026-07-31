@@ -85,3 +85,29 @@ test("deed: the fields the import writes are locked", () => {
   const noOwners = computeEjarLocks("deed", { ejarSource: "ejar", ejarRaw: { ...raw, owners: [] } }).locked;
   assert.ok(!noOwners.includes("deedOwners"));
 });
+
+test("records imported before ejar_raw existed still lock, from their values", () => {
+  // No snapshot — the fallback reads the row's own columns instead.
+  const legacyProperty = {
+    ejarSource: "ejar", ejarRaw: null,
+    name: "عقار", typeLookupId: 34, cityLookupId: 84, district: "الياسمين",
+    street: null, postalCode: null, elevators: null,
+  };
+  const { isEjar, locked } = computeEjarLocks("property", legacyProperty);
+  assert.equal(isEjar, true, "a legacy import must not be treated as manual");
+  assert.ok(locked.includes("name"));
+  assert.ok(locked.includes("type"));
+  assert.ok(locked.includes("city"));
+  assert.ok(locked.includes("district"));
+  // Columns the import left empty are still the user's to fill.
+  assert.ok(!locked.includes("street"));
+  assert.ok(!locked.includes("postalCode"));
+  assert.ok(!locked.includes("elevators"));
+});
+
+test("an empty ejar_raw object falls back rather than locking nothing", () => {
+  const { locked } = computeEjarLocks("tenant", {
+    ejarSource: "ejar", ejarRaw: {}, name: "مستأجر", nationalId: "1104100571", phone: null,
+  });
+  assert.deepEqual([...locked].sort(), ["name", "nationalId"]);
+});

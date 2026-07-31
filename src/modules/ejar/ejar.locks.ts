@@ -79,6 +79,40 @@ const FIELD_SOURCES: Record<string, Record<string, string[]>> = {
   },
 };
 
+/**
+ * form field → the row column(s) holding it. Used only as a FALLBACK for
+ * records imported before `ejar_raw` existed: with no snapshot to consult, the
+ * best available reading of "came from Ejar" is "the import left a value here".
+ * Precise mode (FIELD_SOURCES) is always preferred when a snapshot exists.
+ */
+const FALLBACK_COLUMNS: Record<string, Record<string, string[]>> = {
+  property: {
+    name: ["name"], type: ["typeLookupId", "typeOther"], usageType: ["usageLookupId"],
+    city: ["cityLookupId"], region: ["regionLookupId"], district: ["district"],
+    street: ["street"], postalCode: ["postalCode"], deedNumber: ["deedNumber"],
+    yearBuilt: ["yearBuilt"], elevators: ["elevators"], parkings: ["parkings"],
+    mapUrl: ["mapUrl"], compoundName: ["amenitiesData"], inCompound: ["amenitiesData"],
+  },
+  unit: {
+    unitNumber: ["unitNumber"], type: ["typeLookupId", "typeOther"], floor: ["floor"],
+    area: ["area"], bedrooms: ["bedrooms"], rentPrice: ["rentPrice"],
+    parkingSpaces: ["parkingSpaces"], electricityMeter: ["electricityMeter"],
+    waterMeter: ["waterMeter"], gasMeter: ["gasMeter"], unitWidth: ["unitWidth"],
+    unitHeight: ["unitHeight"], unitLength: ["unitLength"], facadeLength: ["facadeLength"],
+    hasMezzanine: ["hasMezzanine"], direction: ["directionLookupId"],
+    finishing: ["finishingLookupId"], furnishing: ["furnishing"], yearBuilt: ["yearBuilt"],
+  },
+  deed: { deedNumber: ["deedNumber"], deedType: ["deedType"], deedOwners: ["deedOwners"] },
+  tenant: {
+    name: ["name"], type: ["type"], nationalId: ["nationalId"],
+    phone: ["phone"], email: ["email"], taxNumber: ["taxNumber"],
+  },
+  landlord: {
+    name: ["name"], type: ["type"], idNumber: ["idNumber"],
+    phone: ["phone"], email: ["email"], taxNumber: ["taxNumber"],
+  },
+};
+
 export type EjarLockEntity = keyof typeof FIELD_SOURCES;
 
 export function isLockEntity(v: unknown): v is EjarLockEntity {
@@ -105,13 +139,25 @@ export interface EjarLocks {
 
 export function computeEjarLocks(
   entity: EjarLockEntity,
-  row: { ejarSource?: string | null; ejarRaw?: Record<string, unknown> | null } | null | undefined,
+  row: (Record<string, unknown> & { ejarSource?: string | null; ejarRaw?: Record<string, unknown> | null }) | null | undefined,
 ): EjarLocks {
   if (!row || row.ejarSource !== "ejar") return { isEjar: false, locked: [] };
-  const raw = row.ejarRaw ?? {};
-  const sources = FIELD_SOURCES[entity];
-  const locked = Object.entries(sources)
-    .filter(([, keys]) => keys.some((k) => supplied(raw, k)))
+
+  const raw = row.ejarRaw;
+  if (raw && Object.keys(raw).length > 0) {
+    const locked = Object.entries(FIELD_SOURCES[entity])
+      .filter(([, keys]) => keys.some((k) => supplied(raw, k)))
+      .map(([field]) => field);
+    return { isEjar: true, locked };
+  }
+
+  // Imported before ejar_raw existed. Everything on the row was written by the
+  // import, so a column that holds a value came from Ejar; one left empty is
+  // still the user's to fill. Less precise than the snapshot — it cannot tell
+  // an Ejar value from one the user typed later — but it keeps legacy imports
+  // locked rather than silently editable.
+  const locked = Object.entries(FALLBACK_COLUMNS[entity])
+    .filter(([, cols]) => cols.some((c) => supplied(row, c)))
     .map(([field]) => field);
   return { isEjar: true, locked };
 }

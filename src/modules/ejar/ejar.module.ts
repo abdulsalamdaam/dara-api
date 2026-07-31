@@ -964,19 +964,19 @@ export class EjarController {
     if (entity === "unit") {
       // Units are scoped through their property.
       const [row] = await this.db
-        .select({ ejarSource: unitsTable.ejarSource, ejarRaw: unitsTable.ejarRaw })
+        .select({ unit: unitsTable })
         .from(unitsTable)
         .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
         .where(and(eq(unitsTable.id, id), eq(propertiesTable.userId, scope)))
         .limit(1);
-      return row ?? null;
+      return row?.unit ?? null;
     }
     const table = entity === "property" ? propertiesTable
       : entity === "deed" ? deedsTable
       : entity === "tenant" ? tenantsTable
       : ownersTable;
     const [row] = await this.db
-      .select({ ejarSource: table.ejarSource, ejarRaw: table.ejarRaw })
+      .select()
       .from(table)
       .where(and(eq(table.id, id), eq(table.userId, scope)))
       .limit(1);
