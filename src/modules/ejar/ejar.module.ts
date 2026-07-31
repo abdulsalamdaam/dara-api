@@ -557,7 +557,12 @@ export class EjarController {
       .values({
         userId: scope,
         deedNumber,
-        deedType: mapEjarValue(EJAR_DEED_TYPE, p.deedType) || "electronic",
+        // A recognised Ejar type becomes the matching `deed_type` lookup key;
+        // anything else is kept verbatim as a custom ("Other") value, which the
+        // text column and the LookupOtherSelect both support. Only a completely
+        // absent type falls back to the column default.
+        deedType: mapEjarValue(EJAR_DEED_TYPE, p.deedType)
+          || (p.deedType == null || String(p.deedType).trim() === "" ? "electronic" : String(p.deedType).trim()),
         ownerId: landlordId,
         ownerNationalId: lessor?.idNumber ?? null,
         issuingAuthority: "إيجار (الهيئة العامة للعقار)",

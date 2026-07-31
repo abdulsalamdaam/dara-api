@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import {
   db, getPool, contractsTable, propertiesTable, unitsTable, ownersTable, deedsTable,
-  tenantsTable, paymentsTable, contractUnitsTable, usersTable,
+  tenantsTable, paymentsTable, contractUnitsTable, usersTable, lookupsTable,
 } from "@oqudk/database";
 import { mapEjarToContract } from "./ejar.map";
 import { EjarController } from "./ejar.module";
@@ -107,18 +107,22 @@ test("import persists every mapped Ejar field across all six tables", { skip: !H
   });
 
   const { res, contract, property, unit, landlord, deed, tenant, links, payments } = rows as never as Record<string, never> & {
-    res: { created: string[]; installmentsCreated: number };
+    res: { created: string[]; linked: string[]; installmentsCreated: number };
     contract: Record<string, unknown>; property: Record<string, unknown>; unit: Record<string, unknown>;
     landlord: Record<string, unknown>; deed: Record<string, unknown>; tenant: Record<string, unknown>;
     links: unknown[]; payments: Array<Record<string, unknown>>;
   };
 
-  // Every entity in the hierarchy was written.
+  // Every entity in the hierarchy is accounted for — created if new, linked if
+  // an earlier import (or a real one made through the app) already produced it.
+  // Asserting "all six created" would make this test depend on a pristine
+  // database, and it is pointed at a live one.
   assert.deepEqual(
-    [...res.created].sort(),
+    [...res.created, ...res.linked].sort(),
     ["contract", "deed", "landlord", "property", "tenant", "unit"],
-    "a first import must create all six entities",
+    "every entity in the hierarchy must be created or reused",
   );
+  assert.ok(res.created.includes("contract"), "the contract itself is always new");
 
   // ── Landlord
   assert.equal(landlord.name, "روابي عبدالله محمد السلامه");
@@ -177,6 +181,31 @@ test("import persists every mapped Ejar field across all six tables", { skip: !H
   const stamped = payments.filter((x) => x.receiptNumber);
   assert.ok(stamped.length > 0, "the real Ejar invoice number is stamped on the installment");
   assert.ok(String(stamped[0].description).includes("فاتورة إيجار رقم"));
+});
+
+test("the imported deed type is a real deed_type lookup option", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  // The end-to-end link between the import and the Deeds dropdown: whatever the
+  // import writes into deeds.deed_type has to be a key the LookupOtherSelect
+  // can render, or the field comes up blank on an imported deed.
+  const p = preview();
+  const deedType = await inRollback(async (tx) => {
+    const ctl = new EjarController(tx as never, null as never, null as never, null as never);
+    const res = (await ctl.import({ id: userId } as never, payload(p, "TEST-EJAR-DEEDTYPE"))) as never as { deedId: number };
+    const [row] = await (tx as never as typeof db).select().from(deedsTable).where(eq(deedsTable.id, res.deedId));
+    return (row as { deedType: string }).deedType;
+  });
+
+  const options = await db
+    .select({ key: lookupsTable.key })
+    .from(lookupsTable)
+    .where(eq(lookupsTable.category, "deed_type"));
+  const keys = options.map((o) => o.key);
+
+  assert.ok(keys.length >= 4, `deed_type lookups must be seeded, found: ${keys.join(", ")}`);
+  assert.ok(
+    keys.includes(deedType),
+    `import wrote deed_type "${deedType}" but the options are: ${keys.join(", ")}`,
+  );
 });
 
 test("re-import reuses every entity instead of duplicating", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {

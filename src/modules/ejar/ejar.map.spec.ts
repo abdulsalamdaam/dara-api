@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mapEjarToContract } from "./ejar.map";
+import { EJAR_DEED_TYPE, mapEjarValue } from "./ejar.import";
 import type { EjarBody, JsonApiResource } from "./ejar.types";
 
 const fixture = (name: string) =>
@@ -124,4 +125,24 @@ test("the business-critical fields land in typed preview fields, not only raw", 
 
   // National address
   assert.ok(p.nationalAddress.latitude && p.nationalAddress.longitude);
+});
+
+test("Ejar deed types map onto the seeded deed_type lookup keys", () => {
+  // Keys must match the lookups table exactly, otherwise an imported deed shows
+  // a blank dropdown.
+  const VALID = new Set(["electronic", "paper", "hojjat_esthkam", "real_estate_registry"]);
+  for (const [ejarValue, key] of Object.entries(EJAR_DEED_TYPE)) {
+    assert.ok(VALID.has(key), `${ejarValue} maps to "${key}", which is not a deed_type option`);
+  }
+
+  // The value the UAT fixtures actually carry.
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "paper_title_deed"), "paper");
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "electronic_title_deed"), "electronic");
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "hojjat_esthkam"), "hojjat_esthkam");
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "real_estate_registry_title_deed"), "real_estate_registry");
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "PAPER_TITLE_DEED"), "paper", "matching is case-insensitive");
+
+  // Unknown types must NOT be forced into a real option — the import keeps them
+  // verbatim as a custom ("Other") value instead of mislabelling the deed.
+  assert.equal(mapEjarValue(EJAR_DEED_TYPE, "some_future_ejar_type"), null);
 });

@@ -115,14 +115,31 @@ export const EJAR_FURNISHING: Record<string, string> = {
   not_furnished: "none",
 };
 
-/** properties/units.title_deed_type → deeds.deed_type ("electronic" | "paper"). */
+/**
+ * properties/units.title_deed_type → the `deed_type` lookup key.
+ *
+ * Keys match the lookups table exactly (electronic | paper | hojjat_esthkam |
+ * real_estate_registry) so an imported deed renders in the dropdown like a
+ * hand-entered one. Anything unrecognised is left unmapped and handled by the
+ * caller as a custom ("Other") value rather than being forced into
+ * "electronic", which used to silently mislabel unknown Ejar deed types.
+ */
 export const EJAR_DEED_TYPE: Record<string, string> = {
   paper_title_deed: "paper",
+  paper_deed: "paper",
   paper: "paper",
   electronic_title_deed: "electronic",
   electronic_deed: "electronic",
   electronic: "electronic",
   instrument: "electronic",
+  hojjat_esthkam: "hojjat_esthkam",
+  hujjat_esthkam: "hojjat_esthkam",
+  hojat_estehkam: "hojjat_esthkam",
+  esthkam: "hojjat_esthkam",
+  real_estate_registry_title_deed: "real_estate_registry",
+  real_estate_registry: "real_estate_registry",
+  registry_title_deed: "real_estate_registry",
+  real_estate_registry_deed: "real_estate_registry",
 };
 
 /** units.availability → units.status. */

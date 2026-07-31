@@ -173,6 +173,26 @@ export async function ensureSchema(): Promise<void> {
         )
       `);
       await client.query(`create unique index if not exists app_settings_key_uniq on app_settings (key)`);
+      // Deed types move from a hard-coded pair to the central lookups table.
+      // The `electronic` / `paper` keys are kept verbatim so existing deeds
+      // stay valid and need no backfill; the other two are new options.
+      // NOT EXISTS rather than ON CONFLICT: the unique index includes the
+      // nullable company_id, and Postgres treats NULLs as distinct, so the
+      // conflict target never matches a system row.
+      await client.query(`
+        insert into lookups (category, key, label_ar, label_en, sort_order, company_id)
+        select v.category, v.key, v.label_ar, v.label_en, v.sort_order, null
+        from (values
+          ('deed_type', 'electronic',           'صك ملكية إلكتروني', 'Electronic Title Deed',           1),
+          ('deed_type', 'paper',                'صك ملكية ورقي',     'Paper Title Deed',                2),
+          ('deed_type', 'hojjat_esthkam',       'حجة استحكام',       'Hojjat Esthkam',                  3),
+          ('deed_type', 'real_estate_registry', 'صك السجل العقاري',  'Real Estate Registry Title Deed', 4)
+        ) as v(category, key, label_ar, label_en, sort_order)
+        where not exists (
+          select 1 from lookups l
+          where l.category = v.category and l.key = v.key and l.company_id is null
+        )
+      `);
       await client.query(`
         create table if not exists ejar_api_logs (
           id serial primary key,
