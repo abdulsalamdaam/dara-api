@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc } from "drizzle-orm";
 import { listQuerySchema } from "../../common/pagination";
-import { unitsTable, propertiesTable, contractsTable, contractUnitsTable } from "@oqudk/database";
+import { unitsTable, propertiesTable, contractsTable, contractUnitsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

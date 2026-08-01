@@ -4,7 +4,7 @@ import {
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { notificationsTable, tenantsTable } from "@oqudk/database";
+import { notificationsTable, tenantsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";

@@ -7,7 +7,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import type { Observable } from "rxjs";
 import { tap } from "rxjs/operators";
 import { and, desc, eq } from "drizzle-orm";
-import { auditLogsTable, usersTable } from "@oqudk/database";
+import { auditLogsTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

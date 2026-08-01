@@ -1,6 +1,6 @@
-# oqudk-backend
+# dara-backend
 
-Oqudk property-management API (NestJS 10 + Drizzle ORM + Postgres).
+Dara property-management API (NestJS 10 + Drizzle ORM + Postgres).
 
 ## Quick start
 
@@ -15,9 +15,9 @@ pnpm dev                     # → http://localhost:4000/api/healthz
 
 - `src/`  — NestJS application
 - `db/`   — Drizzle schema, migrations, seed scripts (inlined; was previously
-  a `@oqudk/database` workspace package)
+  a `@dara/database` workspace package)
 
-The compiled output uses `tsc-alias` to rewrite `@oqudk/database` imports to
+The compiled output uses `tsc-alias` to rewrite `@dara/database` imports to
 relative paths, so source code keeps the original alias and runtime stays
 plain Node `require`.
 
@@ -28,5 +28,5 @@ See `coolify.md` for env vars and the health check path.
 
 ## Companion web
 
-Frontend lives in **oqudk-landing** (Next.js). Deploy this API first,
+Frontend lives in **dara-landing** (Next.js). Deploy this API first,
 then point the web's `NEXT_PUBLIC_API_URL` at it.

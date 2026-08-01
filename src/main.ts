@@ -9,7 +9,22 @@ async function bootstrap() {
   // Run schema initializer BEFORE the Nest factory builds providers — many
   // providers query the DB at construction time, which would crash on a
   // fresh empty DB. ensureSchema is a no-op when tables already exist.
-  await ensureSchema();
+  //
+  // Deliberately non-fatal. This runs on EVERY boot and rethrows on any failed
+  // passive migration; letting that escape rejects bootstrap(), kills the
+  // process, and Coolify restarts it — a crash loop in which the proxy has no
+  // healthy backend and every request, including login, gets a 503. A schema
+  // problem should degrade the endpoints that need it, not take the whole API
+  // down, so it is logged loudly and boot continues.
+  try {
+    await ensureSchema();
+  } catch (err: any) {
+    Logger.error(
+      `ensureSchema failed — starting anyway; endpoints touching the affected ` +
+        `tables may error: ${err?.stack || err?.message || err}`,
+      "Bootstrap",
+    );
+  }
 
   const app = await NestFactory.create(AppModule);
 
@@ -32,7 +47,7 @@ async function bootstrap() {
    * @ApiBearerAuth("tenant-jwt").
    */
   const swaggerConfig = new DocumentBuilder()
-    .setTitle("Oqudk API")
+    .setTitle("Dara API")
     .setDescription("Property-management API for landlords, tenants, and admins.")
     .setVersion("1.0")
     .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" }, "user-jwt")
@@ -49,4 +64,16 @@ async function bootstrap() {
   Logger.log(`Swagger UI    on http://localhost:${port}/api/docs`, "Bootstrap");
 }
 
-bootstrap();
+// A rejected bootstrap() used to surface only as an unhandled rejection and a
+// bare non-zero exit, which reads in Coolify as "container keeps restarting"
+// with no cause. Log the stack, then exit explicitly.
+bootstrap().catch((err) => {
+  Logger.error(`Fatal: API failed to start — ${err?.stack || err?.message || err}`, "Bootstrap");
+  process.exit(1);
+});
+
+// Never let a stray rejection from a background task (email send, webhook,
+// push) take the process down and 503 every in-flight request.
+process.on("unhandledRejection", (reason: any) => {
+  Logger.error(`Unhandled rejection: ${reason?.stack || reason}`, "Process");
+});

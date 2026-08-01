@@ -21,8 +21,8 @@
     "types": ["node", "multer", "express"],
     "baseUrl": ".",
     "paths": {
-      "@oqudk/database": ["./db/src/index"],
-      "@oqudk/database/schema": ["./db/src/schema/index"]
+      "@dara/database": ["./db/src/index"],
+      "@dara/database/schema": ["./db/src/schema/index"]
     }
   },
   "include": ["src", "db/src"]

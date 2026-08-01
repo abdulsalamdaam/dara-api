@@ -1,4 +1,4 @@
-import type { Invoice, InvoiceLine, ZatcaResponse } from "@oqudk/database";
+import type { Invoice, InvoiceLine, ZatcaResponse } from "@dara/database";
 
 /**
  * Bilingual invoice HTML template (Arabic / English) used to print PDFs.
@@ -463,7 +463,7 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
   const language = (ctx.language ?? invoice.language ?? "ar") as "ar" | "en";
   const t = STRINGS[language];
   const dir = language === "ar" ? "rtl" : "ltr";
-  const brandColor = brand?.color ?? "#1e40af";
+  const brandColor = brand?.color ?? "#042698";
   const seller = invoice.sellerSnapshot;
   const buyer = invoice.buyerSnapshot;
   const totals = invoice.totals;
@@ -513,17 +513,19 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
     ? `<img src="${escapeHtml(brand.logoUrl)}" alt="logo" class="logo" />`
     : "";
 
+  // Readex Pro is the Dara brand face and covers Arabic and Latin, so both
+  // languages share one stack and one webfont request.
+  //
   // Tahoma sits early in the Arabic fallback chain because it is one of the
   // few widely installed faces that shapes Arabic correctly — without it a
   // renderer missing the webfont produces disconnected, overlapping glyphs.
   const fontStack = language === "ar"
-    ? `'IBM Plex Sans Arabic', 'Noto Sans Arabic', 'Tajawal', Tahoma, -apple-system, 'Helvetica Neue', Arial, sans-serif`
-    : `-apple-system, 'Helvetica Neue', Arial, sans-serif`;
+    ? `'Readex Pro', 'Noto Sans Arabic', 'Tajawal', Tahoma, -apple-system, 'Helvetica Neue', Arial, sans-serif`
+    : `'Readex Pro', -apple-system, 'Helvetica Neue', Arial, sans-serif`;
   // The PDF renderer has no access to the portal's self-hosted fonts, so the
   // document must fetch its own. @import has to be the first rule.
-  const fontImport = language === "ar"
-    ? `@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap');`
-    : "";
+  const fontImport =
+    `@import url('https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300;400;500;600;700&display=swap');`;
   // letter-spacing and uppercase are Latin typography. Applied to Arabic they
   // pull apart the cursive joins, and any renderer that splits text per
   // character to honour the tracking loses contextual shaping entirely.
@@ -540,7 +542,7 @@ export function renderInvoiceHtml(ctx: RenderContext): string {
   * { box-sizing: border-box; }
   body {
     font-family: ${fontStack};
-    color: #0f172a;
+    color: #010f35;
     margin: 0;
     font-size: 12px;
     line-height: 1.5;

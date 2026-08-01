@@ -1,4 +1,4 @@
-# Deploying oqudk-api on Coolify
+# Deploying dara-api on Coolify
 
 ## Resource type
 **Application → Dockerfile**. Source: this repo. Branch: `main`.

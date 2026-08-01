@@ -1,7 +1,7 @@
 import { Logger } from "@nestjs/common";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { pool } from "@oqudk/database";
+import { pool } from "@dara/database";
 
 const log = new Logger("DBBootstrap");
 

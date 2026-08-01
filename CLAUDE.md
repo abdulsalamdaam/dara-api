@@ -6,7 +6,7 @@
 - Only stop if blocked by missing information that cannot be inferred; in
   that case, read the relevant files first and try to resolve it before asking.
 
-# Project: Oqudk (عقودك) — API
+# Project: Dara (دارا) — API
 
 Saudi property-management SaaS. This repo is the **backend API**. It is one
 of three repos:
@@ -15,12 +15,12 @@ of three repos:
 - `milkia-api` — this repo (NestJS + Drizzle + Postgres).
 - `MilkiaMobile` — Expo app for tenants.
 
-Brand is **Oqudk / عقودك**. Folder names still say "milkia" (legacy).
+Brand is **Dara / دارا**. Folder names still say "milkia" (legacy).
 
 ## Stack
 - NestJS 10, TypeScript.
 - Drizzle ORM + PostgreSQL. The schema package is imported as
-  `@oqudk/database` — a tsconfig `paths` alias to `db/src`, rewritten at
+  `@dara/database` — a tsconfig `paths` alias to `db/src`, rewritten at
   build time by `tsc-alias`.
 - Run: `pnpm dev`, `pnpm build`, `pnpm typecheck`.
 - Global prefix `/api`. Swagger at `/api/docs`. Deployed via Coolify.

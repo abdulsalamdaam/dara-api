@@ -6,7 +6,7 @@ import { QrService } from "./qr.service";
 import { CsrService } from "./csr.service";
 import { InvoiceBuilderService } from "./invoice-builder.service";
 import { InvoiceSignerService } from "./invoice-signer.service";
-import type { SellerSnapshot } from "@oqudk/database";
+import type { SellerSnapshot } from "@dara/database";
 
 /** Skip signing tests in environments without openssl/xmllint/xsltproc. */
 function hasCliTools(): boolean {

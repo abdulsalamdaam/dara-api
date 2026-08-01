@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import { eq, sql } from "drizzle-orm";
-import { appSettingsTable } from "@oqudk/database";
+import { appSettingsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EjarClientService } from "./ejar.client.service";
 

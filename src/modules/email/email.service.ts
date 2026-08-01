@@ -18,7 +18,15 @@ const SITE_URL = process.env.SITE_URL || `https://${SITE_DOMAIN}`;
 /** Shown to recipients as the contact address in email bodies. */
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || `hello@${SITE_DOMAIN}`;
 
-const EMAIL_LOGO_URL = process.env.EMAIL_LOGO_URL || `${SITE_URL}/logo.png`;
+/**
+ * Hard ceiling on a single Resend call. Must stay well under the proxy
+ * timeouts in front of the API (Cloudflare cuts at 100s) so a slow provider
+ * surfaces as a fast, logged failure instead of a gateway error on login.
+ */
+const EMAIL_SEND_TIMEOUT_MS = Number(process.env.EMAIL_SEND_TIMEOUT_MS || 10_000);
+
+const EMAIL_LOGO_URL =
+  process.env.EMAIL_LOGO_URL || `${SITE_URL}/brand/dara-lockup-email.png`;
 
 /**
  * Tenant mobile-app download links. Default to the marketing site until the
@@ -82,7 +90,7 @@ export interface ContactEmailPayload {
 export class EmailService {
   private readonly log = new Logger(EmailService.name);
   private readonly apiKey = process.env.RESEND_API_KEY || "";
-  private readonly from = process.env.RESEND_FROM || `Oqudk <hello@${SITE_DOMAIN}>`;
+  private readonly from = process.env.RESEND_FROM || `Dara <hello@${SITE_DOMAIN}>`;
   private readonly adminEmail = process.env.ADMIN_NOTIFY_EMAIL || "";
   /**
    * Default Reply-To. Sending `noreply@`-style addresses tanks deliverability;
@@ -121,6 +129,12 @@ export class EmailService {
       this.log.log(`Resend send → from=${fromAddress} to=${Array.isArray(input.to) ? input.to.join(",") : input.to} subject=${input.subject} category=${input.category ?? (input.marketing ? "marketing" : "transactional")}`);
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
+        // Node's fetch has no default request timeout — only undici's 300s
+        // headers timeout. Login AWAITS this send, so a slow Resend used to
+        // hold the request open for minutes, past every proxy timeout in
+        // front of us (Cloudflare 100s, Traefik) and tying up a DB pool slot
+        // the whole time. Email is best-effort; 10s then give up.
+        signal: AbortSignal.timeout(EMAIL_SEND_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
@@ -158,13 +172,13 @@ export class EmailService {
     if (!to) return false;
     const safeCode = escapeHtml(code);
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">رمز الدخول · Login code</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">رمز الدخول · Login code</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         استخدم الرمز التالي لإكمال تسجيل الدخول. صالح لمدة ${ttlMinutes} دقيقة.<br/>
         Use the code below to finish signing in. Valid for ${ttlMinutes} minutes.
       </p>
       <div style="margin:24px 0;text-align:center;">
-        <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#0f172a;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
+        <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#010f35;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
           ${safeCode}
         </div>
       </div>
@@ -175,9 +189,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: `رمز الدخول · Oqudk login code: ${code}`,
+      subject: `رمز الدخول · Dara login code: ${code}`,
       html,
-      text: `Your Oqudk login code: ${code}\nValid for ${ttlMinutes} minutes.`,
+      text: `Your Dara login code: ${code}\nValid for ${ttlMinutes} minutes.`,
       category: "otp_login",
     });
   }
@@ -192,15 +206,15 @@ export class EmailService {
     const safeCode = escapeHtml(code);
     const intro = isEmployee
       ? "تمت إضافتك كموظف. لتفعيل دخولك، أدخل رمز التأكيد التالي في صفحة التحقق."
-      : "شكراً لتسجيلك في عقودك. لتأكيد بريدك الإلكتروني، أدخل رمز التحقق التالي.";
+      : "شكراً لتسجيلك في دارا. لتأكيد بريدك الإلكتروني، أدخل رمز التحقق التالي.";
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         ${intro}<br/>
         Enter the verification code below to confirm your email. Valid for ${ttlMinutes} minutes.
       </p>
       <div style="margin:24px 0;text-align:center;">
-        <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#0f172a;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
+        <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#010f35;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
           ${safeCode}
         </div>
       </div>
@@ -211,9 +225,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: `رمز تأكيد البريد · Oqudk verification code: ${code}`,
+      subject: `رمز تأكيد البريد · Dara verification code: ${code}`,
       html,
-      text: `مرحباً ${name}، رمز تأكيد بريدك في عقودك: ${code} (صالح ${ttlMinutes} دقيقة).`,
+      text: `مرحباً ${name}، رمز تأكيد بريدك في دارا: ${code} (صالح ${ttlMinutes} دقيقة).`,
     });
   }
 
@@ -226,12 +240,12 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        يسعدنا انضمامك إلى <strong>عقودك</strong>. لمتابعة عقد إيجارك ومدفوعاتك وتقديم طلبات الصيانة بسهولة، حمّل تطبيق عقودك على جوالك.
+        يسعدنا انضمامك إلى <strong>دارا</strong>. لمتابعة عقد إيجارك ومدفوعاتك وتقديم طلبات الصيانة بسهولة، حمّل تطبيق دارا على جوالك.
       </p>
       <p style="margin:0 0 4px;color:#334155;line-height:1.7;">
-        Welcome aboard! Download the Oqudk app to follow your lease, payments and maintenance requests on the go.
+        Welcome aboard! Download the Dara app to follow your lease, payments and maintenance requests on the go.
       </p>
       ${appButtons()}
       <p style="margin:16px 0 0;color:#64748b;font-size:13px;">
@@ -240,9 +254,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: "أهلاً بك في عقودك · Welcome to Oqudk",
+      subject: "أهلاً بك في دارا · Welcome to Dara",
       html,
-      text: `مرحباً ${name}، يسعدنا انضمامك إلى عقودك. حمّل التطبيق: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
+      text: `مرحباً ${name}، يسعدنا انضمامك إلى دارا. حمّل التطبيق: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
     });
   }
 
@@ -254,20 +268,20 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">حمّل تطبيق عقودك 📱</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">حمّل تطبيق دارا 📱</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        مرحباً ${safeName}، هذا تذكير ودّي بتحميل تطبيق <strong>عقودك</strong>. عبر التطبيق يمكنك متابعة عقدك ومدفوعاتك وتقديم طلبات الصيانة في أي وقت.
+        مرحباً ${safeName}، هذا تذكير ودّي بتحميل تطبيق <strong>دارا</strong>. عبر التطبيق يمكنك متابعة عقدك ومدفوعاتك وتقديم طلبات الصيانة في أي وقت.
       </p>
       <p style="margin:0 0 4px;color:#334155;line-height:1.7;">
-        Hi ${safeName}, a friendly reminder to download the Oqudk app to manage your lease, payments and maintenance requests anytime.
+        Hi ${safeName}, a friendly reminder to download the Dara app to manage your lease, payments and maintenance requests anytime.
       </p>
       ${appButtons()}
     `);
     return this.send({
       to,
-      subject: "تذكير بتحميل تطبيق عقودك · Get the Oqudk app",
+      subject: "تذكير بتحميل تطبيق دارا · Get the Dara app",
       html,
-      text: `${name}، حمّل تطبيق عقودك: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
+      text: `${name}، حمّل تطبيق دارا: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
     });
   }
 
@@ -275,9 +289,9 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        شكراً لتسجيلك في <strong>عقودك</strong>. تم استلام طلبك بنجاح، وسيقوم فريقنا بمراجعة الحساب وتفعيله خلال وقت قصير.
+        شكراً لتسجيلك في <strong>دارا</strong>. تم استلام طلبك بنجاح، وسيقوم فريقنا بمراجعة الحساب وتفعيله خلال وقت قصير.
       </p>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         سنرسل لك بريداً آخر فور تفعيل الحساب لتتمكّن من الدخول وإدارة عقاراتك.
@@ -288,9 +302,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: "أهلاً بك في عقودك",
+      subject: "أهلاً بك في دارا",
       html,
-      text: `مرحباً ${name}، شكراً لتسجيلك في عقودك. سيقوم فريقنا بمراجعة حسابك وتفعيله قريباً.`,
+      text: `مرحباً ${name}، شكراً لتسجيلك في دارا. سيقوم فريقنا بمراجعة حسابك وتفعيله قريباً.`,
       category: "welcome",
     });
   }
@@ -310,23 +324,23 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const link = buildVerifyEmailLink(token);
     const intro = isEmployee
-      ? "تمت إضافتك كموظف في حساب على منصة <strong>عقودك</strong>. لتفعيل دخولك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه."
-      : "شكراً لتسجيلك في <strong>عقودك</strong>. لإكمال طلبك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه، ثم سيقوم فريقنا بمراجعة الحساب وتفعيله.";
+      ? "تمت إضافتك كموظف في حساب على منصة <strong>دارا</strong>. لتفعيل دخولك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه."
+      : "شكراً لتسجيلك في <strong>دارا</strong>. لإكمال طلبك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه، ثم سيقوم فريقنا بمراجعة الحساب وتفعيله.";
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
       <p style="margin:0 0 18px;color:#334155;line-height:1.7;">${intro}</p>
       <p style="margin:0 0 24px;text-align:center;">
-        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
           تأكيد البريد الإلكتروني
         </a>
       </p>
       <p style="margin:0 0 8px;color:#64748b;font-size:13px;">أو انسخ الرابط التالي والصقه في المتصفح:</p>
-      <p style="margin:0 0 16px;word-break:break-all;"><a href="${link}" style="color:#2563eb;font-size:13px;">${link}</a></p>
+      <p style="margin:0 0 16px;word-break:break-all;"><a href="${link}" style="color:#042698;font-size:13px;">${link}</a></p>
       <p style="margin:24px 0 0;color:#94a3b8;font-size:12px;">الرابط صالح لمدة 7 أيام. إذا لم تطلب هذا، يمكنك تجاهل الرسالة.</p>
     `);
     return this.send({
       to,
-      subject: "تأكيد بريدك الإلكتروني · عقودك",
+      subject: "تأكيد بريدك الإلكتروني · دارا",
       html,
       text: `مرحباً ${name}، يرجى تأكيد بريدك الإلكتروني عبر الرابط: ${link} (صالح 7 أيام).`,
     });
@@ -335,7 +349,7 @@ export class EmailService {
   async sendMaintenanceAcknowledgment(to: string, payload: MaintenanceEmailPayload): Promise<boolean> {
     if (!to) return false;
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">تم استلام طلب الصيانة ✅</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تم استلام طلب الصيانة ✅</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         شكراً لتواصلك معنا. تم تسجيل طلب الصيانة الخاص بك (رقم <strong>#${payload.id}</strong>) وسيتم التواصل معك في أقرب وقت ممكن.
       </p>
@@ -344,7 +358,7 @@ export class EmailService {
       ${row("الحالة الحالية", payload.status || "open")}
       <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#64748b;font-size:12px;margin-bottom:6px;">تفاصيل طلبك</div>
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
         هذه رسالة تأكيد تلقائية — لا حاجة للرد عليها.
@@ -374,7 +388,7 @@ export class EmailService {
     };
     const newLabel = statusLabels[String(payload.status)] || String(payload.status || "—");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">تحديث على طلب الصيانة #${payload.id}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تحديث على طلب الصيانة #${payload.id}</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         نود إعلامك بأن حالة طلب الصيانة الخاص بك قد تم تحديثها.
       </p>
@@ -386,7 +400,7 @@ export class EmailService {
       ${row("الأولوية", payload.priority || "medium")}
       <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#64748b;font-size:12px;margin-bottom:6px;">طلبك الأصلي</div>
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
         ${payload.status === "completed"
@@ -409,13 +423,13 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">تم تفعيل حسابك ✅</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تم تفعيل حسابك ✅</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         مرحباً ${safeName}،<br/>
-        يسعدنا إعلامك بأن حسابك في <strong>عقودك · Oqudk</strong> قد تم تفعيله بنجاح. يمكنك الآن تسجيل الدخول وإدارة عقاراتك.
+        يسعدنا إعلامك بأن حسابك في <strong>دارا · Dara</strong> قد تم تفعيله بنجاح. يمكنك الآن تسجيل الدخول وإدارة عقاراتك.
       </p>
       <div style="margin:24px 0;text-align:center;">
-        <a href="${SITE_URL}/login" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+        <a href="${SITE_URL}/login" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
           تسجيل الدخول
         </a>
       </div>
@@ -425,9 +439,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: "تم تفعيل حسابك في عقودك · Account approved",
+      subject: "تم تفعيل حسابك في دارا · Account approved",
       html,
-      text: `مرحباً ${name}، تم تفعيل حسابك في عقودك. يمكنك الآن تسجيل الدخول عبر ${SITE_URL}/login`,
+      text: `مرحباً ${name}، تم تفعيل حسابك في دارا. يمكنك الآن تسجيل الدخول عبر ${SITE_URL}/login`,
     });
   }
 
@@ -440,15 +454,15 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const safeReason = reason ? escapeHtml(reason) : "";
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">طلب التسجيل</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">طلب التسجيل</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         ${safeName}،<br/>
-        نعتذر، لم نتمكّن من قبول طلب تسجيلك في <strong>عقودك · Oqudk</strong> في الوقت الحالي.
+        نعتذر، لم نتمكّن من قبول طلب تسجيلك في <strong>دارا · Dara</strong> في الوقت الحالي.
       </p>
       ${safeReason
         ? `<div style="margin-top:16px;padding:12px;background:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
              <div style="color:#991b1b;font-size:12px;margin-bottom:6px;">السبب</div>
-             <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${safeReason}</div>
+             <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${safeReason}</div>
            </div>`
         : ""}
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
@@ -457,9 +471,9 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: "بشأن طلب تسجيلك في عقودك",
+      subject: "بشأن طلب تسجيلك في دارا",
       html,
-      text: `${name}، نعتذر، لم نتمكّن من قبول طلب تسجيلك في عقودك في الوقت الحالي.${reason ? ` السبب: ${reason}` : ""}`,
+      text: `${name}، نعتذر، لم نتمكّن من قبول طلب تسجيلك في دارا في الوقت الحالي.${reason ? ` السبب: ${reason}` : ""}`,
     });
   }
 
@@ -471,13 +485,13 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(payload.name || "");
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:22px;">شكراً لتواصلك معنا</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">شكراً لتواصلك معنا</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         ${safeName ? `${safeName}، ` : ""}استلمنا رسالتك (رقم <strong>#${payload.id}</strong>) وسيقوم فريقنا بالرد عليك في أقرب وقت ممكن.
       </p>
       <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#64748b;font-size:12px;margin-bottom:6px;">نسخة من رسالتك</div>
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
         إذا أردت إضافة معلومات يمكنك الرد على هذا البريد مباشرة.
@@ -485,7 +499,7 @@ export class EmailService {
     `);
     return this.send({
       to,
-      subject: `استلمنا رسالتك #${payload.id} — عقودك`,
+      subject: `استلمنا رسالتك #${payload.id} — دارا`,
       html,
       text: `استلمنا رسالتك رقم #${payload.id}. سنرد عليك قريباً.`,
     });
@@ -498,7 +512,7 @@ export class EmailService {
       return false;
     }
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:20px;">طلب صيانة جديد #${payload.id}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">طلب صيانة جديد #${payload.id}</h1>
       ${row("الوحدة", payload.unitLabel || "—")}
       ${row("العقار", payload.propertyName || "—")}
       ${row("المستأجر", payload.tenantName || "—")}
@@ -507,7 +521,7 @@ export class EmailService {
       ${row("الحالة", payload.status || "open")}
       <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#64748b;font-size:12px;margin-bottom:6px;">الوصف</div>
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
     `);
     return this.send({
@@ -524,14 +538,14 @@ export class EmailService {
       return false;
     }
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:20px;">رسالة جديدة من نموذج التواصل #${payload.id}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">رسالة جديدة من نموذج التواصل #${payload.id}</h1>
       ${row("الاسم", payload.name || "—")}
       ${row("البريد", payload.email || "—")}
       ${row("الجوال", payload.phone || "—")}
       ${row("المصدر", payload.source || "—")}
       <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#64748b;font-size:12px;margin-bottom:6px;">الرسالة</div>
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
     `);
     return this.send({
@@ -548,20 +562,20 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard/settings?section=support`;
     const html = layout(`
-      <h1 style="color:#0f172a;margin:0 0 16px;font-size:20px;">رد جديد على تذكرة الدعم #${ticketId}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">رد جديد على تذكرة الدعم #${ticketId}</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         ${safeName ? `${safeName}، ` : ""}وصلك رد من فريق الدعم على تذكرتك رقم <strong>#${ticketId}</strong>:
       </p>
       <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#0f172a;line-height:1.7;white-space:pre-wrap;">${escapeHtml(message)}</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(message)}</div>
       </div>
       <div style="margin-top:20px;text-align:center;">
-        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">عرض المحادثة والرد</a>
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">عرض المحادثة والرد</a>
       </div>
     `);
     return this.send({
       to,
-      subject: `رد على تذكرة الدعم #${ticketId} — عقودك`,
+      subject: `رد على تذكرة الدعم #${ticketId} — دارا`,
       html,
       text: `وصلك رد على تذكرة الدعم #${ticketId}:\n\n${message}`,
     });
@@ -580,15 +594,15 @@ function escapeHtml(value: string): string {
 /** Two app-store call-to-action buttons used in tenant-facing emails. */
 function appButtons(): string {
   return `<div style="margin:24px 0;text-align:center;">
-    <a href="${APP_IOS_URL}" style="display:inline-block;margin:4px 6px;background:#0f172a;color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">App Store · آب ستور</a>
-    <a href="${APP_ANDROID_URL}" style="display:inline-block;margin:4px 6px;background:linear-gradient(135deg,#2563eb,#4f46e5);color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">Google Play · جوجل بلاي</a>
+    <a href="${APP_IOS_URL}" style="display:inline-block;margin:4px 6px;background:#010f35;color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">App Store · آب ستور</a>
+    <a href="${APP_ANDROID_URL}" style="display:inline-block;margin:4px 6px;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">Google Play · جوجل بلاي</a>
   </div>`;
 }
 
 function row(label: string, value: string): string {
   return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f5f9;">
     <span style="color:#64748b;font-size:13px;">${escapeHtml(label)}</span>
-    <span style="color:#0f172a;font-weight:500;">${escapeHtml(value)}</span>
+    <span style="color:#010f35;font-weight:500;">${escapeHtml(value)}</span>
   </div>`;
 }
 
@@ -598,14 +612,14 @@ function layout(inner: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>عقودك · Oqudk</title>
+  <title>دارا · Dara</title>
 </head>
-<body style="margin:0;padding:32px 16px;background:#eef2f7;font-family:-apple-system,'Segoe UI',Tahoma,Arial,'IBM Plex Sans Arabic',sans-serif;color:#0f172a;">
+<body style="margin:0;padding:32px 16px;background:#eef2f7;font-family:-apple-system,'Segoe UI',Tahoma,Arial,'IBM Plex Sans Arabic',sans-serif;color:#010f35;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;margin:0 auto;">
     <!-- Logo header — soft brand-blue gradient banner -->
     <tr>
-      <td style="background:linear-gradient(135deg,#eff6ff 0%,#e0e7ff 100%);border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;border:1px solid #e2e8f0;border-bottom:0;">
-        <img src="${EMAIL_LOGO_URL}" alt="عقودك · Oqudk" width="160" height="102" style="display:inline-block;height:auto;max-width:160px;border:0;outline:none;text-decoration:none;">
+      <td style="background:linear-gradient(135deg,#eaf9ff 0%,#dbe4ea 100%);border-radius:16px 16px 0 0;padding:28px 24px;text-align:center;border:1px solid #e2e8f0;border-bottom:0;">
+        <img src="${EMAIL_LOGO_URL}" alt="دارا · Dara" width="160" height="74" style="display:inline-block;height:auto;max-width:160px;border:0;outline:none;text-decoration:none;">
       </td>
     </tr>
     <!-- Main content card -->
@@ -617,7 +631,7 @@ function layout(inner: string): string {
     <!-- Footer -->
     <tr>
       <td style="padding:20px 8px 0;text-align:center;color:#94a3b8;font-size:12px;">
-        <div style="margin-bottom:6px;">© ${new Date().getFullYear()} عقودك · Oqudk — منصة إدارة العقارات</div>
+        <div style="margin-bottom:6px;">© ${new Date().getFullYear()} دارا · Dara — منصة إدارة العقارات</div>
         <div><a href="${SITE_URL}" style="color:#94a3b8;text-decoration:none;">${SITE_DOMAIN}</a></div>
       </td>
     </tr>

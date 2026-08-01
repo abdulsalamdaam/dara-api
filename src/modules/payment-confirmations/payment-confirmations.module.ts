@@ -10,7 +10,7 @@ import { and, desc, eq, inArray, isNull, ne, or, ilike, count } from "drizzle-or
 import {
   paymentConfirmationsTable, paymentsTable, contractsTable, contractUnitsTable,
   tenantsTable, unitsTable, propertiesTable, notificationsTable, simpleInvoicesTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";

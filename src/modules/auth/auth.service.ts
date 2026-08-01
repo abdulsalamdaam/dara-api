@@ -3,7 +3,7 @@ import { JwtService } from "@nestjs/jwt";
 import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
 import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
-import { companiesTable, emailOtpTokensTable, loginLogsTable, ownersTable, rolesTable, tenantsTable, usersTable } from "@oqudk/database";
+import { companiesTable, emailOtpTokensTable, loginLogsTable, ownersTable, rolesTable, tenantsTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import type { TenantPayload } from "../../common/guards/tenant-auth.guard";

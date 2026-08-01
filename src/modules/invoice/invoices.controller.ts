@@ -5,7 +5,7 @@ import {
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import type { Response } from "express";
 import { eq, and, isNull } from "drizzle-orm";
-import { usersTable, companiesTable } from "@oqudk/database";
+import { usersTable, companiesTable } from "@dara/database";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

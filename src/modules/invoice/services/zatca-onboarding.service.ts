@@ -7,7 +7,7 @@ import {
   invoicesTable,
   invoiceLinesTable,
   ownersTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../../database/database.module";
 import { CsrService } from "./csr.service";
 import { ZatcaApiService, SANDBOX_OTP, type ZatcaEnv } from "./zatca-api.service";

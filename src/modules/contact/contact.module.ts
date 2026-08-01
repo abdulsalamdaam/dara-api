@@ -4,7 +4,7 @@ import { Throttle } from "@nestjs/throttler";
 import { IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { Request } from "express";
-import { contactSubmissionsTable } from "@oqudk/database";
+import { contactSubmissionsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";

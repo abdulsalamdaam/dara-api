@@ -8,7 +8,7 @@ import {
 } from "@nestjs/common";
 import bcrypt from "bcryptjs";
 import { eq, and, asc, isNotNull, isNull } from "drizzle-orm";
-import { rolesTable, usersTable, type User } from "@oqudk/database";
+import { rolesTable, usersTable, type User } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EmailService } from "../email/email.service";
 import { newEmailVerifyToken } from "../../common/email-verification";

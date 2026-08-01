@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Inject, Module, Post, Patch, Delete, Param, Query, BadRequestException, NotFoundException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, or, isNull, asc } from "drizzle-orm";
-import { lookupsTable } from "@oqudk/database";
+import { lookupsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

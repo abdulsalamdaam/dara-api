@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Inject, Module, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, desc, eq } from "drizzle-orm";
-import { usersTable, subscriptionPaymentsTable } from "@oqudk/database";
+import { usersTable, subscriptionPaymentsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -163,7 +163,7 @@ class SubscriptionController {
     const planLabel = resolvePackage(plan).labelAr;
     const invoice = await createMoyasarInvoice({
       amountSar: amount,
-      description: `اشتراك عقودك — ${planLabel} (${cycle === "yearly" ? "سنوي" : "شهري"})`,
+      description: `اشتراك دارا — ${planLabel} (${cycle === "yearly" ? "سنوي" : "شهري"})`,
       callbackUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing&paid=1`,
       successUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing&paid=1`,
       backUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing`,

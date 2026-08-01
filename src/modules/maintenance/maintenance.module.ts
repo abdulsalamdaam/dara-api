@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, desc, eq, isNull, or, ilike, count } from "drizzle-orm";
-import { maintenanceRequestsTable, contractsTable, contractUnitsTable, unitsTable, propertiesTable, tenantsTable } from "@oqudk/database";
+import { maintenanceRequestsTable, contractsTable, contractUnitsTable, unitsTable, propertiesTable, tenantsTable } from "@dara/database";
 import { listQuerySchema } from "../../common/pagination";
 import { notifyTenant } from "../../common/notify";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";

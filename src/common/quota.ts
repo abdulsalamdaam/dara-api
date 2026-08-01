@@ -5,7 +5,7 @@
  */
 import { ForbiddenException } from "@nestjs/common";
 import { and, count, eq, isNull, isNotNull } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, ownersTable } from "@oqudk/database";
+import { usersTable, propertiesTable, unitsTable, ownersTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
 import { resolvePackage } from "./packages";
 

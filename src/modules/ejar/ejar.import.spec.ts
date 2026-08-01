@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import {
   db, getPool, contractsTable, propertiesTable, unitsTable, ownersTable, deedsTable,
   tenantsTable, paymentsTable, contractUnitsTable, usersTable, lookupsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { mapEjarToContract } from "./ejar.map";
 import { EjarController } from "./ejar.module";
 import type { EjarBody, JsonApiResource } from "./ejar.types";

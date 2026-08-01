@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Inject, Module, Post, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull } from "drizzle-orm";
-import { usersTable, ownersTable, companiesTable, tenantsTable } from "@oqudk/database";
+import { usersTable, ownersTable, companiesTable, tenantsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

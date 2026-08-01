@@ -4,7 +4,7 @@
  * the row is always saved. Returns the saved notification.
  */
 import { eq } from "drizzle-orm";
-import { notificationsTable, tenantsTable } from "@oqudk/database";
+import { notificationsTable, tenantsTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
 import { sendExpoPush } from "./push";
 

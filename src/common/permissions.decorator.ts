@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetad
 import { Reflector } from "@nestjs/core";
 import type { Permission } from "./permissions";
 
-const PERMISSIONS_META = "oqudk:required-permissions";
+const PERMISSIONS_META = "dara:required-permissions";
 
 /**
  * Mark a controller or handler as requiring one or more permission keys.

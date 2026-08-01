@@ -9,7 +9,7 @@ import {
   contractUnitsTable, unitsTable, propertiesTable, companiesTable, usersTable,
   tenantsTable, ownersTable, invoicesTable,
   type BuyerSnapshot,
-} from "@oqudk/database";
+} from "@dara/database";
 import type { InvoiceLineInput } from "../invoice/services/invoice-builder.service";
 import { listQuerySchema } from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";

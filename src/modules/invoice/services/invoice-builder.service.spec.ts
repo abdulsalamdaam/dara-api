@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { InvoiceBuilderService } from "./invoice-builder.service";
-import type { SellerSnapshot } from "@oqudk/database";
+import type { SellerSnapshot } from "@dara/database";
 
 const seller: SellerSnapshot = {
   name: "Test Seller Co.",

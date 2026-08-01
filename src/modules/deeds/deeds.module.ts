@@ -5,7 +5,7 @@ import {
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, desc, asc, ilike, or, sql, count } from "drizzle-orm";
 import { z } from "zod/v4";
-import { deedsTable, propertiesTable } from "@oqudk/database";
+import { deedsTable, propertiesTable } from "@dara/database";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";

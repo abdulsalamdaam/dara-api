@@ -4,7 +4,7 @@ import { and, eq, isNull, inArray, sql } from "drizzle-orm";
 import {
   ownersTable, deedsTable, propertiesTable, unitsTable, tenantsTable,
   contractsTable, contractUnitsTable, paymentsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";

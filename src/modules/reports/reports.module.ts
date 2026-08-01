@@ -7,7 +7,7 @@ import {
   contractsTable, contractUnitsTable, unitsTable, propertiesTable, ownersTable, tenantsTable,
   paymentsTable, paymentCollectionsTable, simpleInvoicesTable, maintenanceRequestsTable,
   expensesTable, landlordPayoutsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

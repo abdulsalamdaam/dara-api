@@ -2,7 +2,7 @@ import { Body, Controller, Get, Inject, Module, NotFoundException, Param, Patch,
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, simpleInvoicesTable } from "@oqudk/database";
+import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, simpleInvoicesTable } from "@dara/database";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 const ADVANCE_NOTE = "إيجار مدفوع مقدماً";

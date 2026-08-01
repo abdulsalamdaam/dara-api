@@ -14,7 +14,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import {
   contractsTable, contractUnitsTable, unitsTable, propertiesTable,
   ownersTable, tenantsTable, zatcaCredentialsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import type { Drizzle } from "../database/database.module";
 
 /** One thing standing between the user and a valid invoice. */

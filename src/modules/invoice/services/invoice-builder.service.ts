@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
-import type { SellerSnapshot, BuyerSnapshot, InvoiceTotals } from "@oqudk/database";
+import type { SellerSnapshot, BuyerSnapshot, InvoiceTotals } from "@dara/database";
 
 const NS = {
   inv: "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2",

@@ -1,7 +1,7 @@
 import { Controller, Get, Inject, Module } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { count } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, contractsTable } from "@oqudk/database";
+import { usersTable, propertiesTable, unitsTable, contractsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 
 @ApiTags("stats")

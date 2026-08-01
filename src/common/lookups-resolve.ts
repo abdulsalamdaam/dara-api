@@ -4,7 +4,7 @@
  * foreign keys authoritative regardless of what the client sends.
  */
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
-import { lookupsTable } from "@oqudk/database";
+import { lookupsTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
 
 export async function resolveLookupId(

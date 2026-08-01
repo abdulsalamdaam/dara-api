@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, Inject, Module, NotFoundExc
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsOptional, IsString, MaxLength } from "class-validator";
 import { and, eq, isNull } from "drizzle-orm";
-import { companiesTable, usersTable } from "@oqudk/database";
+import { companiesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";

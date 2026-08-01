@@ -3,7 +3,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsInt, IsOptional, IsString, MinLength } from "class-validator";
 import { Throttle } from "@nestjs/throttler";
 import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, simpleInvoicesTable, deedsTable, unitsTable, propertiesTable, maintenanceRequestsTable, tenantsTable, companiesTable, usersTable } from "@oqudk/database";
+import { contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, simpleInvoicesTable, deedsTable, unitsTable, propertiesTable, maintenanceRequestsTable, tenantsTable, companiesTable, usersTable } from "@dara/database";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";

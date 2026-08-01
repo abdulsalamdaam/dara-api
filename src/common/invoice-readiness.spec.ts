@@ -13,7 +13,7 @@ import { eq } from "drizzle-orm";
 import {
   db, getPool, usersTable, ownersTable, tenantsTable, propertiesTable, unitsTable,
   contractsTable, contractUnitsTable, zatcaCredentialsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { checkInvoiceReadiness } from "./invoice-readiness";
 
 const HAS_DB = !!process.env.DATABASE_URL;
@@ -92,12 +92,12 @@ async function withScenario<T>(
           sellerStreet: "S", sellerBuildingNo: "1", sellerDistrict: "D",
           sellerCity: "R", sellerPostalZone: "12211",
           // CSR fields the table requires but that play no part in this guard.
-          serialNumber: "1-Oqudk|2-Test|3-0001",
+          serialNumber: "1-Dara|2-Test|3-0001",
           organizationIdentifier: "300000000000003",
           organizationUnitName: "Test Unit",
           locationAddress: "Riyadh",
           industryCategory: "Real Estate",
-          commonName: "Oqudk Test",
+          commonName: "Dara Test",
           sandboxCertPem: done ? "CERT" : null,
           sandboxPrivateKeyEnc: done ? "KEY" : null,
           sandboxBinarySecurityToken: done ? "TOKEN" : null,

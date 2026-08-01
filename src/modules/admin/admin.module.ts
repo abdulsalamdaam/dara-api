@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get,
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable } from "@oqudk/database";
+import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
@@ -226,7 +226,7 @@ class AdminController {
   }
 
   /**
-   * "Admin Users" = Oqudk internal team (super_admin + admin only).
+   * "Admin Users" = Dara internal team (super_admin + admin only).
    * Customer landlords (role='user' or 'demo') live under /admin/companies.
    * This separation keeps the company team panel decoupled from customer data.
    */
@@ -340,7 +340,7 @@ class AdminController {
 
     const result = await sendExpoPush([{
       to: tenant.fcmToken,
-      title: body.title || "عقودك",
+      title: body.title || "دارا",
       body: body.body || `مرحباً ${tenant.name}، هذه رسالة تجريبية.`,
       data: body.data || { type: "test" },
     }]);

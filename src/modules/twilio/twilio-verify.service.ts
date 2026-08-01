@@ -2,6 +2,9 @@ import { BadRequestException, Injectable, Logger, ServiceUnavailableException } 
 
 export type VerifyChannel = "sms" | "call" | "whatsapp" | "email";
 
+/** Hard ceiling on a single Twilio Verify call. */
+const TWILIO_TIMEOUT_MS = Number(process.env.TWILIO_TIMEOUT_MS || 10_000);
+
 @Injectable()
 export class TwilioVerifyService {
   private readonly log = new Logger(TwilioVerifyService.name);
@@ -44,6 +47,9 @@ export class TwilioVerifyService {
     const body = new URLSearchParams({ To: normalizedTo, Channel: ch });
     const res = await fetch(`${this.base()}/Verifications`, {
       method: "POST",
+      // Bounded so a slow Twilio can't hold the request past the proxy
+      // timeouts in front of the API. See EmailService.send for the same fix.
+      signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
       headers: { Authorization: this.auth(), "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
@@ -64,6 +70,7 @@ export class TwilioVerifyService {
     const body = new URLSearchParams({ To: normalizedTo, Code: code });
     const res = await fetch(`${this.base()}/VerificationCheck`, {
       method: "POST",
+      signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
       headers: { Authorization: this.auth(), "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });

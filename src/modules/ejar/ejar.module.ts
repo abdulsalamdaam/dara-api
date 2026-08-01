@@ -7,7 +7,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   contractsTable, paymentsTable, propertiesTable, unitsTable, contractUnitsTable,
   ownersTable, deedsTable, tenantsTable,
-} from "@oqudk/database";
+} from "@dara/database";
 import { buildInstallments } from "../contracts/installments";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";

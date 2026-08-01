@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { Drizzle } from "../../database/database.module";
-import { propertiesTable, unitsTable, contractsTable, paymentsTable } from "@oqudk/database";
+import { propertiesTable, unitsTable, contractsTable, paymentsTable } from "@dara/database";
 
 export async function seedDemoData(db: Drizzle, demoUserId: number): Promise<void> {
   const [prop1] = await db.insert(propertiesTable).values({

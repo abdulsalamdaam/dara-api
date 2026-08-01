@@ -1,7 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { desc, eq } from "drizzle-orm";
-import { supportTicketsTable, supportMessagesTable, usersTable, companiesTable } from "@oqudk/database";
+import { supportTicketsTable, supportMessagesTable, usersTable, companiesTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
