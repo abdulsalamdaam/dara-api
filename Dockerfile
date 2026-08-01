@@ -35,4 +35,13 @@ COPY --from=builder /app/db/data.sql ./db/data.sql
 COPY --from=builder /app/package.json ./package.json
 
 EXPOSE 4000
+
+# Neither container declared a healthcheck, so the proxy had no readiness
+# signal and routed to the container the moment it started — before Nest was
+# listening. That is the ~5s window at every deploy where requests (login
+# included) came back 502/503. start-period covers ensureSchema + the module
+# graph; the endpoint itself is a pure liveness probe with no DB dependency.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||4000)+'/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 CMD ["node", "dist/src/main.js"]
