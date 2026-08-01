@@ -11,9 +11,9 @@
 Saudi property-management SaaS. This repo is the **backend API**. It is one
 of three repos:
 
-- `milkia-web` — Next.js landlord/admin portal + landing page.
-- `milkia-api` — this repo (NestJS + Drizzle + Postgres).
-- `MilkiaMobile` — Expo app for tenants.
+- `dara-web` — Next.js landlord/admin portal + landing page.
+- `dara-api` — this repo (NestJS + Drizzle + Postgres).
+- `dara-mobile` — Expo app for tenants.
 
 Brand is **Dara / دارا**. Folder names still say "milkia" (legacy).
 

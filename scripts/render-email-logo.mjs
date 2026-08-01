@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Render the new public/logo.svg (from milkia-web) into an email-optimized
+ * Render the new public/logo.svg (from dara-web) into an email-optimized
  * base64 PNG and update src/modules/email/email-assets.ts in place.
  *
  * Email constraints:
@@ -15,10 +15,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const SHARP_PATH = "/Users/aldawsari/Desktop/milkia-web/node_modules/.pnpm/sharp@0.34.5/node_modules/sharp/lib/index.js";
+const SHARP_PATH = "/Users/aldawsari/Desktop/Rent--  Project/dara-web/node_modules/.pnpm/sharp@0.34.5/node_modules/sharp/lib/index.js";
 const { default: sharp } = await import(SHARP_PATH);
 
-const SVG_SRC   = "/Users/aldawsari/Desktop/milkia-web/public/logo.svg";
+const SVG_SRC   = "/Users/aldawsari/Desktop/Rent--  Project/dara-web/public/logo.svg";
 const ASSETS_TS = path.resolve("src/modules/email/email-assets.ts");
 
 if (!fs.existsSync(SVG_SRC)) {

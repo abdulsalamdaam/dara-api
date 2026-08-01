@@ -8,7 +8,7 @@
  *      employee presets) — identical to what the API does on boot.
  *   3. Create a single super-admin user.
  *
- * Run (from the milkia-api repo root):
+ * Run (from the dara-api repo root):
  *
  *   tsx --env-file=.env scripts/reset-and-seed-admin.ts --yes \
  *       --email=admin@dara-sa.net --password='YourStrongPass123' --name='مدير النظام'

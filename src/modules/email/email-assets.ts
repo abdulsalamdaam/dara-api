@@ -8,7 +8,7 @@
  *
  * To regenerate after the brand SVG changes:
  *   node scripts/render-email-logo.mjs
- * The script reads /Users/aldawsari/Desktop/milkia-web/public/logo.svg,
+ * The script reads /Users/aldawsari/Desktop/dara-web/public/logo.svg,
  * rasterizes via sharp at 320 wide (2× of the email's 160px display),
  * and updates LOGO_DATA_URI below in place.
  */
