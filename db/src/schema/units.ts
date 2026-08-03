@@ -68,6 +68,15 @@ export const unitsTable = pgTable("units", {
   typeOther: text("type_other"),
   directionLookupId: integer("direction_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
   finishingLookupId: integer("finishing_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
+  /**
+   * Unit usage. Normally NULL, meaning "inherit the property's usage" — which
+   * is how every unit behaved before this column existed, and still the
+   * default. It is only ever set when the parent property's usage is `mixed`
+   * (سكني - تجاري), where the whole point is that individual units differ.
+   * Kept nullable rather than backfilled so an inherited unit keeps tracking
+   * its property if that property's usage is later corrected.
+   */
+  usageLookupId: integer("usage_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
   // Provenance for Ejar (NHC) imports — the Ejar unit UUID lets a re-import
   // reuse the same local unit and lets one unit sit on multiple contracts.
   ejarId: text("ejar_id"),

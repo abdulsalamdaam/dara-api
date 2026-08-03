@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc } from "drizzle-orm";
 import { listQuerySchema } from "../../common/pagination";
-import { unitsTable, propertiesTable, contractsTable, contractUnitsTable } from "@dara/database";
+import { unitsTable, propertiesTable, contractsTable, contractUnitsTable , lookupsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -17,6 +17,9 @@ import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolv
 const UNIT_LOOKUP_SPEC = [
   { idField: "typeLookupId", out: "type", mode: "key" as const },
   { idField: "finishingLookupId", out: "finishing", mode: "key" as const },
+  // NULL here means "inherit the property's usage" — the client renders the
+  // parent's value read-only in that case.
+  { idField: "usageLookupId", out: "usage", mode: "key" as const },
 ];
 
 /** Surface the free-text "Other" type when the row has no lookup FK. Mutates in place. */
@@ -41,6 +44,40 @@ const UNIT_FIELDS = [
   // Lookups-FK refactor — FK ids alongside the legacy text columns.
   "typeLookupId", "finishingLookupId",
 ] as const;
+
+/**
+ * Resolve the usage to store on a unit.
+ *
+ * Units inherit their property's usage — that is what every unit did before
+ * the column existed. The single exception is a property whose usage is
+ * `mixed` (سكني - تجاري), where units genuinely differ and the user picks per
+ * unit. Anywhere else an override is silently dropped rather than rejected:
+ * the client should not be offering the control at all, and failing the whole
+ * save over a field the user could not see would be worse than ignoring it.
+ *
+ * Returns `undefined` when the caller supplied nothing, so PATCH can tell
+ * "leave alone" apart from "clear it".
+ */
+async function resolveUnitUsage(
+  db: any,
+  propertyUsageLookupId: number | null,
+  requested: unknown,
+): Promise<number | null | undefined> {
+  if (requested === undefined) return undefined;
+  const [propUsage] = propertyUsageLookupId
+    ? await db.select({ key: lookupsTable.key }).from(lookupsTable).where(eq(lookupsTable.id, propertyUsageLookupId))
+    : [undefined];
+  // Not mixed → always inherit, i.e. store NULL.
+  if (propUsage?.key !== "mixed") return null;
+  if (requested === null || requested === "") return null;
+  // Accept either a lookup key ("commercial") or a raw id, matching how the
+  // type and finishing fields are already handled.
+  if (typeof requested === "number" || /^\d+$/.test(String(requested))) {
+    const n = Number(requested);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return await resolveLookupId(db, "property_usage", String(requested));
+}
 
 @ApiTags("units")
 @ApiBearerAuth("user-jwt")
@@ -163,6 +200,24 @@ class UnitsController {
     // Enforce the subscription package's unit quota.
     await assertWithinQuota(this.db, scopeId(user), "units");
 
+    // A property declares how many units it has (properties.total_units). Stop
+    // the list from exceeding it — otherwise occupancy rates, unit counts and
+    // every report built on them silently disagree with the property record.
+    // Only enforced when totalUnits is actually set; legacy rows leave it null.
+    const declared = Number(prop.totalUnits ?? 0);
+    if (declared > 0) {
+      const [{ existing }] = await this.db
+        .select({ existing: count() })
+        .from(unitsTable)
+        .where(and(eq(unitsTable.propertyId, id), isNull(unitsTable.deletedAt)));
+      if (Number(existing) >= declared) {
+        throw new BadRequestException(
+          `لا يمكن إضافة وحدة جديدة: العقار مُسجَّل بـ ${declared} وحدة وتم إضافتها بالكامل. ` +
+          `عدّل عدد وحدات العقار أولاً إذا كان الرقم غير صحيح.`,
+        );
+      }
+    }
+
     const isDraft = Boolean(body.isDraft ?? false);
     // Draft units only need a unit number; type falls back to the schema default.
     if (!body.unitNumber || (!isDraft && !body.type)) {
@@ -181,6 +236,7 @@ class UnitsController {
     // A custom "Other" type that matches no lookup stays as raw text on the row.
     values.typeOther = unitTypeLookupId == null && body.type ? String(body.type).trim() || null : null;
     values.finishingLookupId = body.finishingLookupId ?? await resolveLookupId(this.db, "unit_finishing", body.finishing);
+    values.usageLookupId = (await resolveUnitUsage(this.db, prop.usageLookupId, body.usage ?? body.usageLookupId)) ?? null;
 
     const [unit] = await this.db.insert(unitsTable).values(values as any).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
@@ -206,6 +262,15 @@ class UnitsController {
       updateData.typeOther = unitTypeLookupId == null && body.type ? String(body.type).trim() || null : null;
     }
     if (body.finishing !== undefined) updateData.finishingLookupId = body.finishingLookupId ?? await resolveLookupId(this.db, "unit_finishing", body.finishing);
+    if (body.usage !== undefined || body.usageLookupId !== undefined) {
+      const [parent] = await this.db
+        .select({ usageLookupId: propertiesTable.usageLookupId })
+        .from(unitsTable)
+        .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+        .where(eq(unitsTable.id, id));
+      const resolved = await resolveUnitUsage(this.db, parent?.usageLookupId ?? null, body.usage ?? body.usageLookupId);
+      if (resolved !== undefined) updateData.usageLookupId = resolved;
+    }
     const [unit] = await this.db.update(unitsTable).set(updateData).where(eq(unitsTable.id, id)).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
   }

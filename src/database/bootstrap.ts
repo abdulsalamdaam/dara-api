@@ -110,6 +110,14 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure simple_invoices.zatca_status/zatca_error failed: ${err?.message || err}`);
     }
 
+    // Unit-level usage override. NULL keeps the historical behaviour of
+    // inheriting the property's usage; only mixed-use properties set it.
+    try {
+      await client.query(`alter table units add column if not exists usage_lookup_id integer references lookups(id) on delete set null`);
+    } catch (err: any) {
+      log.warn(`ensure units.usage_lookup_id failed: ${err?.message || err}`);
+    }
+
     // Owner (landlord) push token columns — mirrors the tenants.fcm_* columns.
     try {
       await client.query(`alter table owners add column if not exists fcm_token text`);
