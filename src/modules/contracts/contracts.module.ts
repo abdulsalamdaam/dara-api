@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
-import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable } from "@dara/database";
+import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, lookupsTable } from "@dara/database";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 
@@ -13,6 +13,7 @@ function parseRentTerms(raw: any): { year: number; amount: number }[] {
     .filter((t) => Number.isFinite(t.year) && t.year > 0 && Number.isFinite(t.amount) && t.amount > 0);
 }
 import { listQuerySchema } from "../../common/pagination";
+import { rentVatFromUsage } from "../../common/usage-vat";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -237,6 +238,51 @@ class ContractsController {
     return { data, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
+
+  /**
+   * Rent VAT for a contract.
+   *
+   * Residential rent is exempt, everything else is taxable at 15% — see
+   * common/usage-vat.ts. Derived here rather than trusted from the request so
+   * a stale client (or an Ejar import, which never goes through the wizard)
+   * cannot produce a residential contract carrying VAT, or a commercial one
+   * without it.
+   *
+   * The caller's choice is honoured only where usage genuinely does not
+   * decide: a mixed-use property whose unit has no usage of its own.
+   */
+  private async resolveRentVat(body: any, requested: boolean): Promise<boolean> {
+    const unitId = Number(body?.unitId ?? (Array.isArray(body?.unitIds) ? body.unitIds[0] : null));
+    if (!Number.isFinite(unitId) || unitId <= 0) return requested;
+
+    const [row] = await this.db
+      .select({
+        propertyUsageId: propertiesTable.usageLookupId,
+        unitUsageId: unitsTable.usageLookupId,
+      })
+      .from(unitsTable)
+      .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+      .where(eq(unitsTable.id, unitId));
+    if (!row) return requested;
+
+    // Resolve both FKs to their lookup keys in one query.
+    const ids = [row.propertyUsageId, row.unitUsageId].filter((v): v is number => v != null);
+    const keyById = new Map<number, string>();
+    if (ids.length) {
+      const rows = await this.db
+        .select({ id: lookupsTable.id, key: lookupsTable.key })
+        .from(lookupsTable)
+        .where(inArray(lookupsTable.id, ids));
+      for (const r of rows) keyById.set(r.id, r.key);
+    }
+
+    const verdict = rentVatFromUsage(
+      row.propertyUsageId != null ? keyById.get(row.propertyUsageId) ?? null : null,
+      row.unitUsageId != null ? keyById.get(row.unitUsageId) ?? null : null,
+    );
+    return verdict === null ? requested : verdict;
+  }
+
   @Post()
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
@@ -310,7 +356,7 @@ class ContractsController {
       depositMethod: body.depositMethod ?? null,
       prepaidRent: body.prepaidRent != null ? String(body.prepaidRent) : "0",
       prepaidMethod: body.prepaidMethod ?? null,
-      vatEnabled: Boolean(body.vatEnabled ?? false),
+      vatEnabled: await this.resolveRentVat(body, Boolean(body.vatEnabled ?? false)),
       escalationType: body.escalationType === "amount" ? "amount" : "percent",
       escalationRate: body.escalationRate != null ? String(body.escalationRate) : "0",
       agencyFee: body.agencyFee ? String(body.agencyFee) : null,
