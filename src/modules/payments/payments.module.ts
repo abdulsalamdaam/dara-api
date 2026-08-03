@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists } from "drizzle-orm";
+import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, simpleInvoicesTable } from "@dara/database";
 
@@ -16,6 +16,27 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
+
+/**
+ * The displayed status of an installment.
+ *
+ * `payments.status` defaults to 'pending' and nothing ever sweeps it to
+ * 'overdue', so a stored value alone reports a long-past installment as
+ * "قادم". That is most visible on Ejar imports, which insert a whole historic
+ * schedule at once and only override the rows Ejar says were settled.
+ *
+ * Deriving it here — rather than writing 'overdue' at import time and adding a
+ * sweeper — means it can never go stale, and matches what the tenant portal
+ * already does. Settled states are returned untouched.
+ */
+function liveStatus(stored: string, dueDate: string | null): string {
+  if (stored === "paid" || stored === "cancelled" || stored === "settled_external" || stored === "partially_paid") {
+    return stored;
+  }
+  if (!dueDate) return stored;
+  const today = new Date().toISOString().slice(0, 10);
+  return String(dueDate).slice(0, 10) < today ? "overdue" : "pending";
+}
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 @ApiTags("payments")
@@ -105,11 +126,17 @@ class PaymentsController {
         .where(where) : Promise.resolve([{ total: 0 }]),
       // Status totals across ALL the user's payments (ignores search/status
       // filter) so the summary cards stay consistent while the table pages.
+      // Same derivation as the rows, done in SQL so the summary cards cannot
+      // disagree with the table: an unsettled installment past its due date
+      // counts as overdue regardless of the stored value.
       usePaginated ? this.db.select({
-        status: paymentsTable.status,
+        status: sql<string>`case
+          when ${paymentsTable.status} in ('paid','cancelled','settled_external','partially_paid') then ${paymentsTable.status}::text
+          when ${paymentsTable.dueDate} < current_date then 'overdue'
+          else 'pending' end`,
         cnt: count(),
         amount: sum(paymentsTable.amount),
-      }).from(paymentsTable).where(baseWhere).groupBy(paymentsTable.status) : Promise.resolve([]),
+      }).from(paymentsTable).where(baseWhere).groupBy(sql`1`) : Promise.resolve([]),
       // Actual money collected across all collections (covers partial ones).
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
         .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.userId, scopeId(user)))
@@ -137,7 +164,7 @@ class PaymentsController {
         collectedAmount: round2(collMap.get(r.id) ?? 0),
         dueDate: r.dueDate,
         paidDate: r.paidDate,
-        status: r.status,
+        status: liveStatus(r.status as string, r.dueDate as unknown as string),
         receiptNumber: r.receiptNumber,
         attachmentKey: r.attachmentKey,
         description: r.description,
