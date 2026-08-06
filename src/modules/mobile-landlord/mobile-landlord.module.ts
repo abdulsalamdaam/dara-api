@@ -12,6 +12,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { liveStatus } from "../../common/payment-status";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
 import { UploadsService } from "../uploads/uploads.service";
@@ -169,15 +170,15 @@ class LandlordMobileController {
     const activeContractsCount = contracts.filter((c) => c.status === "active").length;
     const monthlyRecurring = contracts.filter((c) => c.status === "active").reduce((s, c) => s + this.num(c.monthlyRent), 0);
 
-    const payments = await this.db.select({ status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate })
+    const payments = await this.db.select({ status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate, dueDate: paymentsTable.dueDate })
       .from(paymentsTable).where(and(eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
         ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])));
     const now = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
     const collectedTotal = payments.filter((p) => p.status === "paid").reduce((s, p) => s + this.num(p.amount), 0);
     const monthlyRevenue = payments.filter((p) => p.status === "paid" && p.paidDate?.startsWith(monthKey)).reduce((s, p) => s + this.num(p.amount), 0);
-    const pendingDue = payments.filter((p) => p.status === "pending" || p.status === "overdue").reduce((s, p) => s + this.num(p.amount), 0);
-    const overduePaymentsCount = payments.filter((p) => p.status === "overdue").length;
+    const pendingDue = payments.filter((p) => { const st = liveStatus(p.status as string, p.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, p) => s + this.num(p.amount), 0);
+    const overduePaymentsCount = payments.filter((p) => liveStatus(p.status as string, p.dueDate) === "overdue").length;
 
     let tenantsCount: number;
     if (scope.contractIds != null) {
@@ -828,13 +829,15 @@ class LandlordMobileController {
     // Financial summary across the property's contracts.
     const cIds = contracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status })
+      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
+    // Derived, not stored — nothing ever writes 'overdue', so reading the
+    // stored column reported every property/unit as having none.
     const finance = {
       collected: pays.filter((x) => x.status === "paid").reduce((s, x) => s + this.num(x.amount), 0),
-      outstanding: pays.filter((x) => x.status === "pending" || x.status === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
-      overdue: pays.filter((x) => x.status === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
+      outstanding: pays.filter((x) => { const st = liveStatus(x.status as string, x.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, x) => s + this.num(x.amount), 0),
+      overdue: pays.filter((x) => liveStatus(x.status as string, x.dueDate) === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
     };
     const result: any = {
       ...p,
@@ -893,13 +896,15 @@ class LandlordMobileController {
     // Financial summary for this unit (across its contracts).
     const cIds = allContracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status })
+      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
+    // Derived, not stored — nothing ever writes 'overdue', so reading the
+    // stored column reported every property/unit as having none.
     const finance = {
       collected: pays.filter((x) => x.status === "paid").reduce((s, x) => s + this.num(x.amount), 0),
-      outstanding: pays.filter((x) => x.status === "pending" || x.status === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
-      overdue: pays.filter((x) => x.status === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
+      outstanding: pays.filter((x) => { const st = liveStatus(x.status as string, x.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, x) => s + this.num(x.amount), 0),
+      overdue: pays.filter((x) => liveStatus(x.status as string, x.dueDate) === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
     };
     // Sign each attached document.
     const docs = Array.isArray((u as any).documents) ? (u as any).documents : [];

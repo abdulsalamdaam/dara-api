@@ -45,6 +45,21 @@ const UNIT_FIELDS = [
   "typeLookupId", "finishingLookupId",
 ] as const;
 
+/** True when a property's usage is `mixed` (سكني - تجاري). */
+async function isMixedProperty(db: any, propertyUsageLookupId: number | null): Promise<boolean> {
+  if (!propertyUsageLookupId) return false;
+  const [row] = await db
+    .select({ key: lookupsTable.key })
+    .from(lookupsTable)
+    .where(eq(lookupsTable.id, propertyUsageLookupId));
+  return row?.key === "mixed";
+}
+
+/** Raised when a mixed-use property's unit arrives without its own usage. */
+const USAGE_REQUIRED_MSG =
+  "استخدام الوحدة مطلوب: العقار مسجَّل كـ (سكني - تجاري)، فلا يمكن اشتقاق استخدام الوحدة منه. " +
+  "اختر استخدام هذه الوحدة.";
+
 /**
  * Resolve the usage to store on a unit.
  *
@@ -64,11 +79,8 @@ async function resolveUnitUsage(
   requested: unknown,
 ): Promise<number | null | undefined> {
   if (requested === undefined) return undefined;
-  const [propUsage] = propertyUsageLookupId
-    ? await db.select({ key: lookupsTable.key }).from(lookupsTable).where(eq(lookupsTable.id, propertyUsageLookupId))
-    : [undefined];
   // Not mixed → always inherit, i.e. store NULL.
-  if (propUsage?.key !== "mixed") return null;
+  if (!(await isMixedProperty(db, propertyUsageLookupId))) return null;
   if (requested === null || requested === "") return null;
   // Accept either a lookup key ("commercial") or a raw id, matching how the
   // type and finishing fields are already handled.
@@ -128,6 +140,11 @@ class UnitsController {
         amenities: unitsTable.amenities,
         amenitiesData: unitsTable.amenitiesData,
         finishingLookupId: unitsTable.finishingLookupId,
+        // Needed by UNIT_LOOKUP_SPEC to produce `usage`. Without it the list
+        // silently returned no usage at all, so the edit modal always reopened
+        // on "inherit" and the contract wizard could not read a mixed-use
+        // unit's own usage to decide VAT.
+        usageLookupId: unitsTable.usageLookupId,
         facadeLength: unitsTable.facadeLength,
         unitLength: unitsTable.unitLength,
         unitWidth: unitsTable.unitWidth,
@@ -237,6 +254,13 @@ class UnitsController {
     values.typeOther = unitTypeLookupId == null && body.type ? String(body.type).trim() || null : null;
     values.finishingLookupId = body.finishingLookupId ?? await resolveLookupId(this.db, "unit_finishing", body.finishing);
     values.usageLookupId = (await resolveUnitUsage(this.db, prop.usageLookupId, body.usage ?? body.usageLookupId)) ?? null;
+    // On a mixed-use property there is nothing to inherit — the unit's own
+    // usage is the only thing that decides whether its rent carries VAT, so it
+    // cannot be left empty. A draft is exempt, like `type` above: it is
+    // explicitly incomplete and cannot be contracted against yet.
+    if (!isDraft && values.usageLookupId == null && (await isMixedProperty(this.db, prop.usageLookupId))) {
+      throw new BadRequestException(USAGE_REQUIRED_MSG);
+    }
 
     const [unit] = await this.db.insert(unitsTable).values(values as any).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
@@ -269,6 +293,11 @@ class UnitsController {
         .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
         .where(eq(unitsTable.id, id));
       const resolved = await resolveUnitUsage(this.db, parent?.usageLookupId ?? null, body.usage ?? body.usageLookupId);
+      // Same rule as create: a mixed-use property's unit may not be cleared
+      // back to "inherit", because there is nothing coherent to inherit.
+      if (resolved === null && (await isMixedProperty(this.db, parent?.usageLookupId ?? null))) {
+        throw new BadRequestException(USAGE_REQUIRED_MSG);
+      }
       if (resolved !== undefined) updateData.usageLookupId = resolved;
     }
     const [unit] = await this.db.update(unitsTable).set(updateData).where(eq(unitsTable.id, id)).returning();

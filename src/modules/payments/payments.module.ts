@@ -14,29 +14,10 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { liveStatus, liveStatusSql } from "../../common/payment-status";
 
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
 
-/**
- * The displayed status of an installment.
- *
- * `payments.status` defaults to 'pending' and nothing ever sweeps it to
- * 'overdue', so a stored value alone reports a long-past installment as
- * "قادم". That is most visible on Ejar imports, which insert a whole historic
- * schedule at once and only override the rows Ejar says were settled.
- *
- * Deriving it here — rather than writing 'overdue' at import time and adding a
- * sweeper — means it can never go stale, and matches what the tenant portal
- * already does. Settled states are returned untouched.
- */
-function liveStatus(stored: string, dueDate: string | null): string {
-  if (stored === "paid" || stored === "cancelled" || stored === "settled_external" || stored === "partially_paid") {
-    return stored;
-  }
-  if (!dueDate) return stored;
-  const today = new Date().toISOString().slice(0, 10);
-  return String(dueDate).slice(0, 10) < today ? "overdue" : "pending";
-}
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 @ApiTags("payments")
@@ -77,8 +58,12 @@ class PaymentsController {
         ilike(contractsTable.contractNumber, `%${q.search}%`),
       ));
     }
-    if (status) conds.push(eq(paymentsTable.status, status as any));
-    else if (statusIn && statusIn.length > 0) conds.push(inArray(paymentsTable.status, statusIn as any));
+    // Filter on the DERIVED status, not the stored column. Nothing is ever
+    // stored as 'overdue', so filtering on the column left the "متأخرة" tab
+    // permanently empty and dumped its rows into "قادمة" — while the summary
+    // card above, which already derived correctly, counted them as overdue.
+    if (status) conds.push(eq(liveStatusSql, status));
+    else if (statusIn && statusIn.length > 0) conds.push(inArray(liveStatusSql, statusIn));
     if (contractIds && contractIds.length > 0) conds.push(inArray(paymentsTable.contractId, contractIds));
     // Deposits are not installments — they live on the contract as a receipt
     // voucher, so never surface them in the financial schedule (covers legacy
@@ -130,10 +115,7 @@ class PaymentsController {
       // disagree with the table: an unsettled installment past its due date
       // counts as overdue regardless of the stored value.
       usePaginated ? this.db.select({
-        status: sql<string>`case
-          when ${paymentsTable.status} in ('paid','cancelled','settled_external','partially_paid') then ${paymentsTable.status}::text
-          when ${paymentsTable.dueDate} < current_date then 'overdue'
-          else 'pending' end`,
+        status: liveStatusSql,
         cnt: count(),
         amount: sum(paymentsTable.amount),
       }).from(paymentsTable).where(baseWhere).groupBy(sql`1`) : Promise.resolve([]),

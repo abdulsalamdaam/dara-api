@@ -7,6 +7,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { liveStatus } from "../../common/payment-status";
 
 @ApiTags("dashboard")
 @ApiBearerAuth("user-jwt")
@@ -65,7 +66,10 @@ class DashboardController {
       .select()
       .from(paymentsTable)
       .where(and(eq(paymentsTable.userId, userId), isNull(paymentsTable.deletedAt)));
-    overduePaymentsCount = payments.filter(p => p.status === "overdue").length;
+    // Derived, not stored: nothing ever writes 'overdue', so filtering the
+    // stored column made this counter permanently zero.
+    const paymentStatus = (p: typeof payments[number]) => liveStatus(p.status as string, p.dueDate as unknown as string);
+    overduePaymentsCount = payments.filter(p => paymentStatus(p) === "overdue").length;
 
     const now = new Date();
     const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -79,7 +83,7 @@ class DashboardController {
       .reduce((s, p) => s + num(p.amount), 0);
 
     pendingDue = payments
-      .filter(p => p.status === "pending" || p.status === "overdue")
+      .filter(p => { const s = paymentStatus(p); return s === "pending" || s === "overdue"; })
       .reduce((s, p) => s + num(p.amount), 0);
 
     const occupancyRate = unitCount > 0 ? Math.round((rentedUnitsCount / unitCount) * 100) : 0;

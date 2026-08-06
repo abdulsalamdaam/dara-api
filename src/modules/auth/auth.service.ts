@@ -10,7 +10,7 @@ import type { TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { TwilioVerifyService } from "../twilio/twilio-verify.service";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
-import { isPackagePlan } from "../../common/packages";
+import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 
 const MAX_FAILED = 5;
@@ -397,6 +397,13 @@ export class AuthService {
     // The plan/cycle the user picked on the landing page — shown to the admin
     // before approval so they assign the package the user actually wants.
     const desiredPackagePlan = isPackagePlan(input.desiredPackagePlan) ? input.desiredPackagePlan : null;
+    // Some plans are restricted to companies (see PackageDef.requiresUserType).
+    // Reject rather than silently downgrade: the user chose a plan and a price
+    // on the landing page, and quietly giving them a different one would only
+    // surface as a surprise on the invoice.
+    if (desiredPackagePlan && !planAllowedForUserType(desiredPackagePlan, userType)) {
+      throw new BadRequestException(planUserTypeError(desiredPackagePlan));
+    }
     const desiredBillingCycle = input.desiredBillingCycle === "yearly" ? "yearly" : input.desiredBillingCycle === "monthly" ? "monthly" : null;
     if (!email || !name) throw new BadRequestException("الاسم والبريد الإلكتروني مطلوبة");
 

@@ -16,12 +16,22 @@ export type PackageMode = "tenant" | "landlord";
 /** Sentinel for "unlimited" — large enough to never gate in practice. */
 export const UNLIMITED = 1_000_000;
 
+/** Account type stored on `users.user_type`. */
+export type UserAccountType = "individual" | "company";
+
 export interface PackageDef {
   key: PackagePlan;
   labelAr: string;
   labelEn: string;
   /** tenant = personal contract tracker; landlord = full portal. */
   mode: PackageMode;
+  /**
+   * When set, only this account type may hold the plan. Enforced on every
+   * path that writes `users.package_plan` — self-registration, admin approval
+   * and admin package changes — because the UI hiding an option is a
+   * convenience, not a control.
+   */
+  requiresUserType?: UserAccountType;
   /** Landlord (owner) records — unlimited on every plan. */
   maxLandlords: number;
   maxProperties: number;
@@ -41,6 +51,10 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     labelAr: "المستأجرين",
     labelEn: "Tenants",
     mode: "tenant",
+    // Sold to corporate tenants only — a company tracking the units it leases
+    // (staff housing, branches). An individual renting their own home is not
+    // the buyer for this, so the plan is closed to individual accounts.
+    requiresUserType: "company",
     // A tenant adds the landlord(s) they rent from — don't gate that.
     maxLandlords: UNLIMITED,
     maxProperties: 50,
@@ -113,6 +127,35 @@ export function isPackagePlan(plan: string | null | undefined): plan is PackageP
 /** The product mode (tenant tracker vs landlord portal) for a plan. */
 export function packageMode(plan: string | null | undefined): PackageMode {
   return resolvePackage(plan).mode;
+}
+
+/** The account type a plan is restricted to, or null when it is open to all. */
+export function planRequiredUserType(plan: string | null | undefined): UserAccountType | null {
+  return resolvePackage(plan).requiresUserType ?? null;
+}
+
+/**
+ * Whether an account of `userType` may hold `plan`.
+ *
+ * An unknown/missing userType is treated as "individual", matching how
+ * registration normalises it — the restriction has to fail closed, or the
+ * check could be skipped by simply omitting the field.
+ */
+export function planAllowedForUserType(
+  plan: string | null | undefined,
+  userType: string | null | undefined,
+): boolean {
+  const required = planRequiredUserType(plan);
+  if (!required) return true;
+  return (userType === "company" ? "company" : "individual") === required;
+}
+
+/** User-facing refusal message for a plan an account type may not hold. */
+export function planUserTypeError(plan: string | null | undefined): string {
+  const def = resolvePackage(plan);
+  return def.requiresUserType === "company"
+    ? `باقة "${def.labelAr}" متاحة للمنشآت والشركات فقط. اختر نوع الحساب "منشأة" أو اختر باقة أخرى.`
+    : `باقة "${def.labelAr}" غير متاحة لهذا النوع من الحسابات.`;
 }
 
 /* ── Subscription pricing (SAR) ────────────────────────────────────────────

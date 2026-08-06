@@ -11,7 +11,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { seedDemoData } from "./demo-seed";
 import { ALL_PERMISSIONS, ROLE_PRESETS } from "../../common/permissions";
 import { EmailService } from "../email/email.service";
-import { isPackagePlan } from "../../common/packages";
+import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
@@ -477,13 +477,18 @@ class AdminController {
   @Patch("registrations/:id/approve")
   async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean } | undefined) {
     const uid = parseInt(id, 10);
-    const [existing] = await this.db.select({ desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle })
+    const [existing] = await this.db.select({ desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle, userType: usersTable.userType })
       .from(usersTable).where(eq(usersTable.id, uid));
     // Plan precedence: admin override → the plan the user picked on the
     // landing → basic.
     const plan = isPackagePlan(body?.packagePlan) ? body!.packagePlan
       : isPackagePlan(existing?.desiredPlan) ? existing!.desiredPlan!
       : "basic";
+    // Company-only plans stay company-only even when an admin assigns them —
+    // approval is the other door into `users.package_plan`.
+    if (!planAllowedForUserType(plan, existing?.userType)) {
+      throw new BadRequestException(planUserTypeError(plan));
+    }
     const cycle = existing?.desiredCycle === "yearly" ? "yearly" : "monthly";
 
     // Default flow: approve the account but require payment to activate the
@@ -511,6 +516,12 @@ class AdminController {
   async changePackage(@Param("userId") userId: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string }) {
     const id = parseInt(userId, 10);
     const plan = isPackagePlan(body?.packagePlan) ? body!.packagePlan : "basic";
+    const [target] = await this.db.select({ userType: usersTable.userType })
+      .from(usersTable).where(eq(usersTable.id, id));
+    if (!target) throw new NotFoundException("User not found");
+    if (!planAllowedForUserType(plan, target.userType)) {
+      throw new BadRequestException(planUserTypeError(plan));
+    }
     const win = subscriptionWindow(body?.subscriptionEndsAt);
     const [user] = await this.db.update(usersTable)
       .set({ packagePlan: plan, subscriptionStartedAt: win.startedAt, subscriptionEndsAt: win.endsAt })
