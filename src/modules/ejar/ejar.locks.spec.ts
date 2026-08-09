@@ -64,7 +64,8 @@ test("false and 0 count as supplied values, not as empty", () => {
 test("party records lock name and identity but not what Ejar omitted", () => {
   const individual = { name: "مرزوق", type: "individual", id_number: "1051133120", phone_number: "+966551231145", email: "a@b.c" };
   const { locked } = computeEjarLocks("tenant", { ejarSource: "ejar", ejarRaw: individual });
-  assert.deepEqual([...locked].sort(), ["email", "name", "nationalId", "phone", "type"].sort());
+  // Contact details are exempt even though Ejar supplied them — see below.
+  assert.deepEqual([...locked].sort(), ["name", "nationalId", "type"].sort());
   // No unified_number on an individual, so the tax number stays editable.
   assert.ok(!locked.includes("taxNumber"));
 
@@ -73,7 +74,37 @@ test("party records lock name and identity but not what Ejar omitted", () => {
   const orgLocks = computeEjarLocks("tenant", { ejarSource: "ejar", ejarRaw: org }).locked;
   assert.ok(orgLocks.includes("nationalId"), "registration_number also locks the ID field");
   assert.ok(orgLocks.includes("taxNumber"));
-  assert.ok(!orgLocks.includes("phone"), "no phone in the payload — still editable");
+});
+
+test("phone and email stay editable on imported parties, identity does not", () => {
+  // Contact details go stale — a tenant changes their number and the landlord
+  // must still be able to reach them. Identity fields are the whole point of
+  // the lock and must not leak through this exemption.
+  const raw = {
+    name: "مرزوق", type: "individual", id_number: "1051133120",
+    phone_number: "+966551231145", email: "a@b.c", unified_number: "7030955236",
+  };
+  for (const entity of ["tenant", "landlord"] as const) {
+    const { locked } = computeEjarLocks(entity, { ejarSource: "ejar", ejarRaw: raw });
+    assert.ok(!locked.includes("phone"), `${entity}: phone must be editable`);
+    assert.ok(!locked.includes("email"), `${entity}: email must be editable`);
+    assert.ok(locked.includes("name"), `${entity}: name must stay locked`);
+    assert.ok(locked.includes("taxNumber"), `${entity}: tax number must stay locked`);
+    const idField = entity === "tenant" ? "nationalId" : "idNumber";
+    assert.ok(locked.includes(idField), `${entity}: ${idField} must stay locked`);
+  }
+});
+
+test("phone and email are editable on legacy imports too (no ejar_raw)", () => {
+  // Records imported before the snapshot existed fall back to reading columns;
+  // the exemption has to apply on that path as well or half the estate stays
+  // frozen.
+  const row = { ejarSource: "ejar", name: "مرزوق", nationalId: "1051133120", phone: "0551231145", email: "a@b.c" };
+  const { locked } = computeEjarLocks("tenant", row);
+  assert.ok(!locked.includes("phone"));
+  assert.ok(!locked.includes("email"));
+  assert.ok(locked.includes("name"), "legacy imports still lock identity");
+  assert.ok(locked.includes("nationalId"));
 });
 
 test("deed: the fields the import writes are locked", () => {

@@ -9,6 +9,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { assertNationalAddress } from "../../common/national-address";
+import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
 import { listQuerySchema } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
@@ -72,6 +73,7 @@ class TenantsController {
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
     assertNationalAddress(body);
+    assertCompanyCommercialReg(body);
     const [tenant] = await this.db.insert(tenantsTable).values({
       userId: scopeId(user),
       name: body.name,
@@ -131,6 +133,18 @@ class TenantsController {
     const [prior] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
     if (!prior) throw new NotFoundException("غير موجود");
+
+    // Only checked when the request actually touches the identity fields.
+    // Enforcing it on every PATCH would block an unrelated edit — a phone
+    // change, say — on a legacy company row that predates the requirement,
+    // and Ejar-imported rows are inserted outside this controller entirely.
+    if (body.type !== undefined || body.nationalId !== undefined) {
+      assertCompanyCommercialReg({
+        type: body.type ?? prior.type,
+        nationalId: body.nationalId !== undefined ? body.nationalId : prior.nationalId,
+        isDraft: body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior.isDraft),
+      });
+    }
 
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];

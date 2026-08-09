@@ -113,6 +113,24 @@ const FALLBACK_COLUMNS: Record<string, Record<string, string[]>> = {
   },
 };
 
+/**
+ * Fields that stay editable even when Ejar supplied them.
+ *
+ * Contact details are the one class of imported data that legitimately goes
+ * stale: a tenant changes their number or mailbox and the landlord has to be
+ * able to reach them, send an invoice, or trigger an OTP. Freezing them turned
+ * a correct record into an unusable one with no way out.
+ *
+ * Ejar stays the system of record for everything that identifies the party —
+ * name, ID / CR number, tax number — and for the property itself. Those still
+ * lock, so this cannot be used to edit an imported record into disagreeing
+ * with Ejar about *who* or *what* it is.
+ *
+ * Listed once and applied to every entity: the names are shared by the tenant
+ * and landlord maps, and no other entity has them.
+ */
+const ALWAYS_EDITABLE = new Set(["phone", "email"]);
+
 export type EjarLockEntity = keyof typeof FIELD_SOURCES;
 
 export function isLockEntity(v: unknown): v is EjarLockEntity {
@@ -146,7 +164,7 @@ export function computeEjarLocks(
   const raw = row.ejarRaw;
   if (raw && Object.keys(raw).length > 0) {
     const locked = Object.entries(FIELD_SOURCES[entity])
-      .filter(([, keys]) => keys.some((k) => supplied(raw, k)))
+      .filter(([field, keys]) => !ALWAYS_EDITABLE.has(field) && keys.some((k) => supplied(raw, k)))
       .map(([field]) => field);
     return { isEjar: true, locked };
   }
@@ -157,7 +175,7 @@ export function computeEjarLocks(
   // an Ejar value from one the user typed later — but it keeps legacy imports
   // locked rather than silently editable.
   const locked = Object.entries(FALLBACK_COLUMNS[entity])
-    .filter(([, cols]) => cols.some((c) => supplied(row, c)))
+    .filter(([field, cols]) => !ALWAYS_EDITABLE.has(field) && cols.some((c) => supplied(row, c)))
     .map(([field]) => field);
   return { isEjar: true, locked };
 }

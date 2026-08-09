@@ -408,7 +408,14 @@ export class AuthService {
     if (!email || !name) throw new BadRequestException("الاسم والبريد الإلكتروني مطلوبة");
 
     const existing = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email.toLowerCase()), isNull(usersTable.deletedAt)));
-    if (existing.length > 0) throw new BadRequestException("البريد الإلكتروني مسجّل مسبقاً");
+    // Carries a machine code alongside the message so the client can attach the
+    // error to the email field itself instead of string-matching Arabic.
+    if (existing.length > 0) {
+      throw new BadRequestException({
+        error: "EMAIL_TAKEN",
+        message: "البريد الإلكتروني مسجّل مسبقاً",
+      });
+    }
 
     // Resolve the system "user" role so we can link via role_id. The role
     // row is seeded by the boot migration, so it always exists; this lookup
