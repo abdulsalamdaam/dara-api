@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, ConflictException, Controller, Get, HttpException, Inject, Module,
+  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, HttpException, Inject, Module,
   NotFoundException, Param, Post, Query, ServiceUnavailableException, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
@@ -20,6 +20,7 @@ import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { EjarPolicyService, type ManualAddOverride } from "./ejar.policy.service";
 import { computeEjarLocks, isLockEntity, type EjarLockEntity } from "./ejar.locks";
+import { resolveEjarScope, scopedIdNumber, assertScopeSafeParams } from "./ejar.scope";
 import { isEjarEndpointKey, type EjarBody, type JsonApiResource } from "./ejar.types";
 import {
   mapEjarToContract, summarizeContractsBody,
@@ -113,6 +114,13 @@ export class EjarController {
       );
     }
     const params = this.cleanParams(body.params);
+    // This endpoint forwards arbitrary params to Ejar, so it is the easiest
+    // way around any scoping applied to the wizard routes. A locked account
+    // gets its own id_number pinned here too, and may not pass the flag that
+    // disables Ejar's filter.
+    const scope = await resolveEjarScope(this.db, scopeId(user));
+    assertScopeSafeParams(scope, params);
+    if (scope.locked) params.id_number = scope.idNumber ?? undefined;
     try {
       return await this.client.request(body.endpoint, params, { userId: user.id });
     } catch (err) {
@@ -132,7 +140,11 @@ export class EjarController {
     @CurrentUser() user: AuthUser,
     @Body() body: { id_number?: string; page?: number; pageSize?: number },
   ) {
-    const idNumber = body?.id_number?.trim();
+    const scope = await resolveEjarScope(this.db, scopeId(user));
+    // A tenant-package account searches its own CR and nothing else; what the
+    // client sent is ignored rather than rejected, since the wizard prefills
+    // this field from several places.
+    const idNumber = scopedIdNumber(scope, body?.id_number);
     if (!idNumber) throw new BadRequestException("id_number is required");
     const page = Math.max(1, Number(body?.page) || 1);
     const pageSize = Math.min(50, Math.max(1, Number(body?.pageSize) || 10));
@@ -157,7 +169,8 @@ export class EjarController {
     @CurrentUser() user: AuthUser,
     @Body() body: { id_number?: string; contract_number?: string; partyType?: number },
   ) {
-    const idNumber = body?.id_number?.trim();
+    const scope = await resolveEjarScope(this.db, scopeId(user));
+    const idNumber = scopedIdNumber(scope, body?.id_number);
     const contractNumber = body?.contract_number?.trim();
     const partyType = body?.partyType ?? 0;
     if (!contractNumber) throw new BadRequestException("contract_number is required");
@@ -234,6 +247,15 @@ export class EjarController {
     // will be empty. `partiesResolved` tells the client to say so out loud
     // instead of rendering a preview with silent gaps.
     const partiesResolved = !!resource;
+    // For a locked account, "not found under your CR" means the contract is
+    // not yours. Falling back to the stub would still call the detail
+    // endpoints — which are keyed by contract number alone and have no scoping
+    // of their own — and hand back its financials and national address.
+    if (!resource && scope.locked) {
+      throw new ForbiddenException(
+        "هذا العقد غير مرتبط بالسجل التجاري لحسابك · This contract is not linked to your account's commercial registration.",
+      );
+    }
     if (!resource) resource = { type: "rental-contract", id: contractNumber, attributes: { contract_number: contractNumber } };
 
     // Ejar identifiers to enrich the property + unit(s).

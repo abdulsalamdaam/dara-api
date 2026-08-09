@@ -61,6 +61,11 @@ export class RegisterDto {
   @IsString()
   companyName?: string;
 
+  /** Commercial registration (10 digits). Required for the tenant package. */
+  @IsOptional()
+  @IsString()
+  commercialReg?: string;
+
   /** Account holder type — "individual" | "company". */
   @IsOptional()
   @IsIn(["individual", "company"])

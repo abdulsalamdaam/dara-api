@@ -10,7 +10,7 @@ import type { TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { TwilioVerifyService } from "../twilio/twilio-verify.service";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
-import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
+import { isPackagePlan, packageMode, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 
 const MAX_FAILED = 5;
@@ -391,7 +391,7 @@ export class AuthService {
    * row stays well-formed. If/when password login is re-enabled, users can
    * set a real password via a future "set password" flow.
    */
-  async register(input: { email: string; password?: string; name: string; phone?: string; company?: string; companyName?: string; userType?: "individual" | "company"; desiredPackagePlan?: string; desiredBillingCycle?: string }) {
+  async register(input: { email: string; password?: string; name: string; phone?: string; company?: string; companyName?: string; commercialReg?: string; userType?: "individual" | "company"; desiredPackagePlan?: string; desiredBillingCycle?: string }) {
     const { email, password, name, phone } = input;
     const userType = input.userType === "company" ? "company" : "individual";
     // The plan/cycle the user picked on the landing page — shown to the admin
@@ -415,6 +415,18 @@ export class AuthService {
       throw new BadRequestException({
         error: "COMPANY_NAME_REQUIRED",
         message: "اسم المنشأة مطلوب لحسابات الشركات",
+      });
+    }
+    // The tenant package scopes every Ejar lookup to the account's own CR
+    // (see ejar.scope.ts), so without one the product cannot search at all.
+    // Collect it at signup rather than let the user discover the dead end
+    // later. Other plans may add it in company settings whenever they like.
+    const commercialReg = String(input.commercialReg ?? "").trim();
+    const needsCr = userType === "company" && packageMode(desiredPackagePlan) === "tenant";
+    if (needsCr && !/^\d{10}$/.test(commercialReg)) {
+      throw new BadRequestException({
+        error: "COMMERCIAL_REG_REQUIRED",
+        message: "رقم السجل التجاري (10 أرقام) مطلوب لباقة المستأجرين",
       });
     }
 
@@ -451,7 +463,7 @@ export class AuthService {
     if (userType === "company") {
       const [company] = await this.db
         .insert(companiesTable)
-        .values({ name: companyName })
+        .values({ name: companyName, commercialReg: commercialReg || null })
         .returning({ id: companiesTable.id });
       companyId = company?.id ?? null;
     }
