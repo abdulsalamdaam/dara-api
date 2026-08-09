@@ -227,3 +227,23 @@ export const EMPLOYEE_PRESETS: Record<string, { labelAr: string; labelEn: string
     ],
   },
 };
+
+/**
+ * Role keys belonging to Dara's own staff rather than to a customer account.
+ */
+export const STAFF_ROLE_KEYS = ["super_admin", "admin"] as const;
+
+/**
+ * Is this row a customer account (a "company" in the admin portal) rather than
+ * an employee under one, or Dara staff?
+ *
+ * Defined by TOPOLOGY — no owner above it, and not staff — instead of by
+ * `roleKey === "user"`. The role key stopped being a reliable signal once a
+ * company account's owner could hold the General Manager role: the old test
+ * would have dropped those accounts from the admin's registrations list, so a
+ * new company signup could never have been approved.
+ */
+export function isCustomerAccount(row: { ownerUserId?: number | null; roleKey?: string | null }): boolean {
+  if (row.ownerUserId != null) return false;                       // an employee
+  return !(STAFF_ROLE_KEYS as readonly string[]).includes(row.roleKey ?? "");
+}

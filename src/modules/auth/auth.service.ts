@@ -391,7 +391,7 @@ export class AuthService {
    * row stays well-formed. If/when password login is re-enabled, users can
    * set a real password via a future "set password" flow.
    */
-  async register(input: { email: string; password?: string; name: string; phone?: string; company?: string; userType?: "individual" | "company"; desiredPackagePlan?: string; desiredBillingCycle?: string }) {
+  async register(input: { email: string; password?: string; name: string; phone?: string; company?: string; companyName?: string; userType?: "individual" | "company"; desiredPackagePlan?: string; desiredBillingCycle?: string }) {
     const { email, password, name, phone } = input;
     const userType = input.userType === "company" ? "company" : "individual";
     // The plan/cycle the user picked on the landing page — shown to the admin
@@ -406,6 +406,17 @@ export class AuthService {
     }
     const desiredBillingCycle = input.desiredBillingCycle === "yearly" ? "yearly" : input.desiredBillingCycle === "monthly" ? "monthly" : null;
     if (!email || !name) throw new BadRequestException("الاسم والبريد الإلكتروني مطلوبة");
+    // A company account is two things: the person signing up and the entity
+    // they sign up for. `name` is the person; the company needs its own name
+    // or the account has nothing to invoice, contract or brand under. The old
+    // signature accepted `company` and then dropped it on the floor.
+    const companyName = String(input.companyName ?? input.company ?? "").trim();
+    if (userType === "company" && !companyName) {
+      throw new BadRequestException({
+        error: "COMPANY_NAME_REQUIRED",
+        message: "اسم المنشأة مطلوب لحسابات الشركات",
+      });
+    }
 
     const existing = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email.toLowerCase()), isNull(usersTable.deletedAt)));
     // Carries a machine code alongside the message so the client can attach the
@@ -417,14 +428,33 @@ export class AuthService {
       });
     }
 
-    // Resolve the system "user" role so we can link via role_id. The role
-    // row is seeded by the boot migration, so it always exists; this lookup
-    // protects against an unconfigured DB.
-    const [userRoleRow] = await this.db
+    // Role for the account holder. An individual gets the plain "user" role;
+    // the person registering a company IS its General Manager, so they get
+    // that role — the highest employee preset, seeded from EMPLOYEE_PRESETS.
+    // Both rows are seeded by the boot migration, so they always exist; the
+    // fallback protects against an unconfigured DB.
+    const roleKey = userType === "company" ? "general" : "user";
+    const [roleRow] = await this.db
+      .select({ id: rolesTable.id })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.key, roleKey), isNull(rolesTable.companyId)))
+      .limit(1);
+    const [fallbackRoleRow] = roleRow ? [roleRow] : await this.db
       .select({ id: rolesTable.id })
       .from(rolesTable)
       .where(and(eq(rolesTable.key, "user"), isNull(rolesTable.companyId)))
       .limit(1);
+
+    // The company is a row of its own so employees added later can be scoped
+    // to it, and so the name can be shown wherever the account appears.
+    let companyId: number | null = null;
+    if (userType === "company") {
+      const [company] = await this.db
+        .insert(companiesTable)
+        .values({ name: companyName })
+        .returning({ id: companiesTable.id });
+      companyId = company?.id ?? null;
+    }
 
     const effectivePassword = password && password.length >= 6
       ? password
@@ -440,7 +470,8 @@ export class AuthService {
       isActive: false,
       accountStatus: "pending",
       phone: phone ?? null,
-      roleId: userRoleRow?.id ?? null,
+      roleId: fallbackRoleRow?.id ?? null,
+      companyId,
       userType,
       desiredPackagePlan,
       desiredBillingCycle,
@@ -560,6 +591,10 @@ export class AuthService {
         roleId: usersTable.roleId,
         roleKey: rolesTable.key,
         companyName: companiesTable.name,
+        // Needed by the client to tell a company account from an individual —
+        // e.g. so onboarding prefills a landlord with the COMPANY's name
+        // rather than the signed-in person's.
+        userType: usersTable.userType,
         ownerUserId: usersTable.ownerUserId,
         packagePlan: usersTable.packagePlan,
       })

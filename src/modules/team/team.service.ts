@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import bcrypt from "bcryptjs";
-import { eq, and, asc, isNotNull, isNull } from "drizzle-orm";
+import { eq, and, asc, isNotNull, isNull, or } from "drizzle-orm";
 import { rolesTable, usersTable, type User } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EmailService } from "../email/email.service";
@@ -67,7 +67,7 @@ export class TeamService {
 
     // Join the role so the UI gets the live role key, label and the
     // effective permission list (permissions live on the role row).
-    return this.db
+    const rows = await this.db
       .select({
         id: usersTable.id,
         email: usersTable.email,
@@ -87,11 +87,22 @@ export class TeamService {
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+      // The account holder is part of the team, not outside it: on a company
+      // account they ARE the General Manager, and a team screen that omitted
+      // them showed an org with no one at the top. Flagged as `isOwner` so the
+      // UI can render them without the remove/downgrade actions — the service
+      // refuses those anyway, since an owner has no ownerUserId to match.
       .where(and(
-        eq(usersTable.ownerUserId, actorId),
-        isNotNull(usersTable.ownerUserId),
+        or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
         isNull(usersTable.deletedAt),
-      ));
+      ))
+      .orderBy(asc(usersTable.createdAt));
+
+    // Owner first. Not done in SQL because the owner's ownerUserId is NULL and
+    // Postgres sorts NULLs last in ASC, which would bury them at the bottom.
+    return rows
+      .map((r) => ({ ...r, isOwner: r.ownerUserId == null }))
+      .sort((a, b) => Number(b.isOwner) - Number(a.isOwner));
   }
 
   async createEmployee(

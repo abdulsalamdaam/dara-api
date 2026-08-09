@@ -9,7 +9,7 @@ import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { seedDemoData } from "./demo-seed";
-import { ALL_PERMISSIONS, ROLE_PRESETS } from "../../common/permissions";
+import { ALL_PERMISSIONS, ROLE_PRESETS, isCustomerAccount } from "../../common/permissions";
 import { EmailService } from "../email/email.service";
 import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
@@ -78,10 +78,11 @@ class AdminController {
         id: usersTable.id,
         isActive: usersTable.isActive,
         roleKey: rolesTable.key,
+        ownerUserId: usersTable.ownerUserId,
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id));
-    const companies = allUsers.filter(u => u.roleKey === "user" || u.roleKey === "demo");
+    const companies = allUsers.filter(isCustomerAccount);
     const [totalProps] = await this.db.select({ count: count() }).from(propertiesTable);
     const [totalUnits] = await this.db.select({ count: count() }).from(unitsTable);
     const [totalContracts] = await this.db.select({ count: count() }).from(contractsTable);
@@ -145,12 +146,13 @@ class AdminController {
         createdAt: usersTable.createdAt,
         packagePlan: usersTable.packagePlan,
         roleKey: rolesTable.key,
+        ownerUserId: usersTable.ownerUserId,
         companyName: companiesTable.name,
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id));
-    const companies = rows.filter(u => u.roleKey === "user" || u.roleKey === "demo");
+    const companies = rows.filter(isCustomerAccount);
     return Promise.all(companies.map(async (user) => {
       const [propCount] = await this.db.select({ count: count() }).from(propertiesTable).where(eq(propertiesTable.userId, user.id));
       const [unitCount] = await this.db.select({ count: count() }).from(unitsTable)
@@ -244,6 +246,7 @@ class AdminController {
         failedLoginAttempts: usersTable.failedLoginAttempts,
         createdAt: usersTable.createdAt,
         roleKey: rolesTable.key,
+        ownerUserId: usersTable.ownerUserId,
         companyName: companiesTable.name,
       })
       .from(usersTable)
@@ -417,13 +420,14 @@ class AdminController {
         emailVerified: usersTable.emailVerified,
         emailVerifiedAt: usersTable.emailVerifiedAt,
         roleKey: rolesTable.key,
+        ownerUserId: usersTable.ownerUserId,
         companyName: companiesTable.name,
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
       .orderBy(usersTable.createdAt);
-    rows = rows.filter(u => u.roleKey === "user");
+    rows = rows.filter(isCustomerAccount);
     if (status !== "all") rows = rows.filter(u => u.accountStatus === status);
     return rows.map(u => ({
       id: u.id,
@@ -447,10 +451,10 @@ class AdminController {
   @Get("registrations/pending-count")
   async pendingCount() {
     const rows = await this.db
-      .select({ accountStatus: usersTable.accountStatus, roleKey: rolesTable.key })
+      .select({ accountStatus: usersTable.accountStatus, roleKey: rolesTable.key, ownerUserId: usersTable.ownerUserId })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id));
-    const c = rows.filter(u => u.roleKey === "user" && u.accountStatus === "pending").length;
+    const c = rows.filter(u => isCustomerAccount(u) && u.accountStatus === "pending").length;
     return { count: c };
   }
 

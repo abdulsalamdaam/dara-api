@@ -44,9 +44,22 @@ export class RegisterDto {
   @IsString()
   phone?: string;
 
+  /** Legacy alias for companyName — kept so older clients keep working. */
   @IsOptional()
   @IsString()
   company?: string;
+
+  /**
+   * The company's own name, required when userType is "company".
+   *
+   * Must be declared here: the global ValidationPipe runs with
+   * `whitelist: true`, so a property missing from the DTO is stripped before
+   * the service ever sees it — which is how `company` came to be accepted in
+   * the signature and silently discarded.
+   */
+  @IsOptional()
+  @IsString()
+  companyName?: string;
 
   /** Account holder type — "individual" | "company". */
   @IsOptional()
