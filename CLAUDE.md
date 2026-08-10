@@ -55,3 +55,12 @@ Data is scoped per landlord via `scopeId(user) = user.ownerUserId ?? user.id`.
 - Commit style: conventional prefixes + a `Co-Authored-By` trailer; push to
   `origin/main`. The deployed build can lag — redeploy on Coolify after backend
   changes.
+
+## Cross-repo notes
+Read **`DARA-NOTES.md`** in this repo before non-trivial work. It is an
+identical copy in all three Dara repos and covers what the code does not say:
+how deployment actually works (pushing to `main` does NOT deploy), verified
+Ejar API behaviour and its scoping rules, the package/role model and why
+account classification is by topology rather than role key, VAT and derived
+installment status, the Arabic font-metric fix, and per-repo gotchas including
+the tsc baseline and the ValidationPipe whitelist.
