@@ -1,0 +1,48 @@
+# Push -> deploy, without the GitHub App.
+#
+# Coolify sources these apps from the GitHub App "mlika-abdulsalam", which
+# stopped delivering push events. Repo-level webhooks cannot substitute: their
+# payload carries no `installation` object, so Coolify answers 200 and matches
+# no application. Fixing the App's webhook URL is browser-only — no personal
+# access token can manage a GitHub App — so this calls Coolify's deploy API
+# directly instead, which needs nothing from the App.
+#
+# COOLIFY_TOKEN is a repository secret (Coolify API token).
+name: Deploy to Coolify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A newer commit supersedes an in-flight deploy of an older one.
+  group: coolify-deploy-dara-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Coolify deployment
+        env:
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COOLIFY_TOKEN:-}" ]; then
+            echo "::error::COOLIFY_TOKEN secret is not set on this repository."
+            exit 1
+          fi
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            -H "Accept: application/json" \
+            "https://coolify.dara-sa.net/api/v1/deploy?uuid=c7uop7f14t07mtrsn5060uoj&force=false")
+          echo "HTTP $code"; cat /tmp/resp.json; echo
+          # A queued deploy is the success condition; anything else must fail
+          # the job loudly rather than look green while nothing ships.
+          if [ "$code" != "200" ]; then
+            echo "::error::Coolify returned $code"
+            exit 1
+          fi
+          grep -qi "deployment queued" /tmp/resp.json || {
+            echo "::error::Coolify did not queue a deployment"; exit 1; }
