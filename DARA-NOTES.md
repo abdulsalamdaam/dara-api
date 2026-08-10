@@ -33,22 +33,36 @@ ssh dara-server 'sudo -n docker exec -i coolify-db psql -U coolify -d coolify -c
    order by q.created_at desc limit 5;"'
 ```
 
-**Known broken (as of 2026-08-10):** auto-deploy stopped after 07 Aug. The apps
-are sourced from the GitHub App `mlika-abdulsalam` (app_id 3660668,
-installation 130992358), which is not delivering push events.
+**Auto-deploy now runs through GitHub Actions**, not the GitHub App.
+`.github/workflows/deploy.yml` in `dara-api` and `dara-web` calls Coolify's
+deploy API on every push to `main`, using a `COOLIFY_TOKEN` repository secret.
+The job fails loudly on any non-200 or a response that did not queue a
+deployment, so it cannot report green while nothing ships.
+
+Manual deploy (same call the workflow makes):
+
+```sh
+curl -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" \
+  "https://coolify.dara-sa.net/api/v1/deploy?uuid=<app-uuid>&force=false"
+```
+
+App UUIDs: `dara-api` = `c7uop7f14t07mtrsn5060uoj`,
+`dara-web` = `q3orrxshi028shi2eo6i79tg`.
+
+**Why not the GitHub App:** the App `mlika-abdulsalam` (app_id 3660668,
+installation 130992358) stopped delivering push events after 07 Aug, leaving a
+week of commits undeployed.
 
 - Repo-level webhooks **cannot** substitute. Tried: they return HTTP 200 but
   Coolify queues nothing, because a repo webhook payload has no `installation`
   object so a GithubApp-sourced application never matches. Don't retry this.
-- Coolify has **no API tokens** (`personal_access_tokens` is empty), so the
-  deploy API is unavailable, and there is no `app:deploy` artisan command.
-- Fix is browser-only, by the App owner, at `github.com/settings/apps/` →
-  webhook URL `https://coolify.dara-sa.net/webhooks/source/github/events`,
-  active, subscribed to Push, installed on both repos. A `gh` user token gets
-  403 on App endpoints.
+- **No personal access token can manage a GitHub App** — `/user/installations`
+  returns 403 even for a classic PAT with full admin scopes. Repairing the App's
+  webhook URL is browser-only, by the App owner, at `github.com/settings/apps/`
+  → `https://coolify.dara-sa.net/webhooks/source/github/events`. Worth doing
+  eventually, but the Actions workflow makes it non-blocking.
 
-Until then the only route is the **Deploy** button in Coolify. Deploy
-`dara-api` before `dara-web` when web changes depend on new API fields.
+Deploy `dara-api` before `dara-web` when web changes depend on new API fields.
 
 **The API `.env` `DATABASE_URL` points at production.** Running the API locally
 with default env writes to the live database. Override `DATABASE_URL` *and*
