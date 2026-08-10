@@ -33,16 +33,19 @@ jobs:
             echo "::error::COOLIFY_TOKEN secret is not set on this repository."
             exit 1
           fi
-          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $COOLIFY_TOKEN" \
-            -H "Accept: application/json" \
-            "https://coolify.dara-sa.net/api/v1/deploy?uuid=c7uop7f14t07mtrsn5060uoj&force=false")
-          echo "HTTP $code"; cat /tmp/resp.json; echo
+          deploy() {
+            name=$1; uuid=$2
+            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              -H "Accept: application/json" \
+              "https://coolify.dara-sa.net/api/v1/deploy?uuid=$uuid&force=false")
+            echo "$name: HTTP $code"; cat /tmp/resp.json; echo
+            [ "$code" = "200" ] || { echo "::error::$name returned $code"; return 1; }
+            grep -qi "deployment queued" /tmp/resp.json || {
+              echo "::error::$name did not queue a deployment"; return 1; }
+          }
+          # Staging first: a broken build fails here before production moves.
+          deploy staging rg2fzzvc8wnxd8njnyi1bqxu
+          deploy production c7uop7f14t07mtrsn5060uoj
           # A queued deploy is the success condition; anything else must fail
           # the job loudly rather than look green while nothing ships.
-          if [ "$code" != "200" ]; then
-            echo "::error::Coolify returned $code"
-            exit 1
-          fi
-          grep -qi "deployment queued" /tmp/resp.json || {
-            echo "::error::Coolify did not queue a deployment"; exit 1; }
