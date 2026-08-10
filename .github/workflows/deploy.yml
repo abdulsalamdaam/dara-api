@@ -1,23 +1,17 @@
-# Push -> deploy, without the GitHub App.
-#
-# Coolify sources these apps from the GitHub App "mlika-abdulsalam", which
-# stopped delivering push events. Repo-level webhooks cannot substitute: their
-# payload carries no `installation` object, so Coolify answers 200 and matches
-# no application. Fixing the App's webhook URL is browser-only — no personal
-# access token can manage a GitHub App — so this calls Coolify's deploy API
-# directly instead, which needs nothing from the App.
-#
-# COOLIFY_TOKEN is a repository secret (Coolify API token).
+# Branch -> environment. Coolify's GitHub App stopped delivering push events, so
+# this calls Coolify's deploy API directly instead; it needs nothing from the App.
+#   main   -> production   (dara-sa.net / api.dara-sa.net)
+#   master -> staging      (staging.dara-sa.net / api-staging.dara-sa.net)
+# COOLIFY_TOKEN is a repository secret.
 name: Deploy to Coolify
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 concurrency:
-  # A newer commit supersedes an in-flight deploy of an older one.
-  group: coolify-deploy-dara-api
+  group: coolify-${{ github.ref_name }}-dara-api
   cancel-in-progress: false
 
 jobs:
@@ -27,25 +21,23 @@ jobs:
       - name: Trigger Coolify deployment
         env:
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ -z "${COOLIFY_TOKEN:-}" ]; then
-            echo "::error::COOLIFY_TOKEN secret is not set on this repository."
-            exit 1
+            echo "::error::COOLIFY_TOKEN secret is not set."; exit 1
           fi
-          deploy() {
-            name=$1; uuid=$2
-            code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
-              -H "Accept: application/json" \
-              "https://coolify.dara-sa.net/api/v1/deploy?uuid=$uuid&force=false")
-            echo "$name: HTTP $code"; cat /tmp/resp.json; echo
-            [ "$code" = "200" ] || { echo "::error::$name returned $code"; return 1; }
-            grep -qi "deployment queued" /tmp/resp.json || {
-              echo "::error::$name did not queue a deployment"; return 1; }
-          }
-          # Staging first: a broken build fails here before production moves.
-          deploy staging rg2fzzvc8wnxd8njnyi1bqxu
-          deploy production c7uop7f14t07mtrsn5060uoj
-          # A queued deploy is the success condition; anything else must fail
-          # the job loudly rather than look green while nothing ships.
+          case "$BRANCH" in
+            main)   TARGET=production; UUID=c7uop7f14t07mtrsn5060uoj ;;
+            master) TARGET=staging;    UUID=rg2fzzvc8wnxd8njnyi1bqxu ;;
+            *) echo "No environment mapped to $BRANCH — nothing to do."; exit 0 ;;
+          esac
+          echo "Deploying $TARGET from $BRANCH"
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" -H "Accept: application/json" \
+            "https://coolify.dara-sa.net/api/v1/deploy?uuid=$UUID&force=false")
+          echo "HTTP $code"; cat /tmp/resp.json; echo
+          # A queued deploy is the only success condition — never pass silently.
+          [ "$code" = "200" ] || { echo "::error::$TARGET returned $code"; exit 1; }
+          grep -qi "deployment queued" /tmp/resp.json || {
+            echo "::error::$TARGET did not queue a deployment"; exit 1; }
