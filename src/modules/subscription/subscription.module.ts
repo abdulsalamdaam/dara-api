@@ -200,12 +200,19 @@ class SubscriptionWebhookController {
 
     // Extract the invoice id from the various event shapes Moyasar may send.
     const data = body?.data ?? body ?? {};
+    // `data.id` is the PAYMENT id on a payment event, NOT the invoice id.
+    // Falling back to it made the lookup below search moyasar_invoice_id for a
+    // payment id, which never matches: the handler returned 200 with
+    // `unmatched`, so Moyasar logged a success while the row stayed pending
+    // and the user was left on the plan-selection screen forever.
     const invoiceId: string | undefined =
-      data.invoice_id || data.id || data?.invoice?.id || data?.metadata?.invoice_id;
+      data.invoice_id || data?.invoice?.id || data?.metadata?.invoice_id;
+    // Kept separately so it can be matched on and stored, not confused above.
+    const eventPaymentId: string | undefined = data?.id;
     const metaPaymentId = data?.metadata?.subscriptionPaymentId;
 
     let paid = String(data?.status || "").toLowerCase() === "paid";
-    let paymentId: string | undefined = data?.id;
+    let paymentId: string | undefined = eventPaymentId;
 
     // Verify against Moyasar when configured (don't trust the payload alone).
     if (invoiceId && isMoyasarConfigured()) {
@@ -217,12 +224,30 @@ class SubscriptionWebhookController {
     if (!paid) return { ok: true, ignored: true };
 
     // Locate the pending subscription_payment row.
-    const [row] = invoiceId
-      ? await this.db.select().from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.moyasarInvoiceId, invoiceId))
-      : metaPaymentId
-        ? await this.db.select().from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.id, parseInt(metaPaymentId, 10)))
-        : [];
-    if (!row) return { ok: true, unmatched: true };
+    // Try every identifier the event can carry, rather than one and give up.
+    let row: typeof subscriptionPaymentsTable.$inferSelect | undefined;
+    if (invoiceId) {
+      [row] = await this.db.select().from(subscriptionPaymentsTable)
+        .where(eq(subscriptionPaymentsTable.moyasarInvoiceId, invoiceId));
+    }
+    if (!row && metaPaymentId) {
+      [row] = await this.db.select().from(subscriptionPaymentsTable)
+        .where(eq(subscriptionPaymentsTable.id, parseInt(metaPaymentId, 10)));
+    }
+    if (!row && eventPaymentId) {
+      // A payment event whose invoice_id we never saw: the payment id may
+      // already be recorded from an earlier event.
+      [row] = await this.db.select().from(subscriptionPaymentsTable)
+        .where(eq(subscriptionPaymentsTable.moyasarPaymentId, eventPaymentId));
+    }
+    if (!row) {
+      // Never silently 200 an unmatched paid event — that is how a real
+      // payment goes missing with nothing to show for it.
+      console.error("[moyasar] paid event matched no subscription_payment row", {
+        invoiceId, eventPaymentId, metaPaymentId,
+      });
+      return { ok: true, unmatched: true };
+    }
     if (row.status === "paid") return { ok: true, already: true };
 
     // Mark paid + activate/renew (start now, end one cycle later, clear pending).
