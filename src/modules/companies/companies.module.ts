@@ -8,6 +8,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 
 class CompanyDto {
   @IsString() @MaxLength(200) name!: string;
@@ -81,6 +82,10 @@ class CompaniesController {
     }
 
     if (!body.name?.trim()) throw new BadRequestException("اسم الشركة مطلوب");
+    // Same rule as registration: a company is identified by its CR, and the
+    // tenant package scopes every Ejar lookup by it — blanking it here would
+    // silently break search for that account.
+    assertCompanyCommercialReg({ type: "company", nationalId: body.commercialReg });
     const values: Record<string, unknown> = {};
     for (const f of COMPANY_FIELDS) if ((body as any)[f] !== undefined) values[f] = (body as any)[f];
 
@@ -97,6 +102,9 @@ class CompaniesController {
     if (!owner?.companyId) throw new NotFoundException("لا توجد شركة مرتبطة بهذا المستخدم. أنشئها أولاً عبر POST /companies/me.");
 
     const updateData: Record<string, unknown> = {};
+    if (body.commercialReg !== undefined) {
+      assertCompanyCommercialReg({ type: "company", nationalId: body.commercialReg });
+    }
     for (const f of COMPANY_FIELDS) if ((body as any)[f] !== undefined) updateData[f] = (body as any)[f];
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث");
 
