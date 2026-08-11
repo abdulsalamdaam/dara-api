@@ -195,7 +195,18 @@ class SubscriptionWebhookController {
     // in the Moyasar dashboard).
     const expected = process.env.MOYASAR_WEBHOOK_SECRET;
     if (expected && body?.secret_token && body.secret_token !== expected) {
-      return { ok: false };
+      // Was a bare `{ok:false}` with a 2xx, so Moyasar recorded a successful
+      // delivery and the payment silently never activated — invisible from
+      // both ends. Log it, and say so in the body.
+      console.error("[moyasar] webhook REJECTED: secret_token mismatch", {
+        expectedLen: expected.length,
+        receivedLen: String(body.secret_token).length,
+        hint: "the value in the Moyasar dashboard must equal MOYASAR_WEBHOOK_SECRET exactly",
+      });
+      return { ok: false, error: "secret_token_mismatch" };
+    }
+    if (expected && !body?.secret_token) {
+      console.warn("[moyasar] webhook has no secret_token but one is configured");
     }
 
     // Extract the invoice id from the various event shapes Moyasar may send.
