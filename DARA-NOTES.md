@@ -49,6 +49,32 @@ curl -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" \
 App UUIDs: `dara-api` = `c7uop7f14t07mtrsn5060uoj`,
 `dara-web` = `q3orrxshi028shi2eo6i79tg`.
 
+**There is a staging pair now** — four apps, not two. `main` deploys
+production, `master` deploys staging (both branches are kept identical):
+
+| app | uuid | domain | database |
+|---|---|---|---|
+| `dara-api` | `c7uop7f14t07mtrsn5060uoj` | `api.dara-sa.net` | `postgres` on `qsihs45oexmpmiy7m237kict` |
+| `dara-api-staging` | `rg2fzzvc8wnxd8njnyi1bqxu` | `api-staging.dara-sa.net` | `dara` on `d449y09yue9iiqkxfjmb9ymf` |
+| `dara-web` | `q3orrxshi028shi2eo6i79tg` | `dara-sa.net`, `app.dara-sa.net` | — |
+| `dara-web-staging` | `w1483fpizyf29c7dkzs5d1wf` | `staging.dara-sa.net`, `app-staging.dara-sa.net` | — |
+
+**Two Postgres containers.** `qsihs45…` holds production; `d449y09…` is
+staging and looks plausibly real (users, payments, contracts), so it is easy
+to debug the wrong database for twenty minutes. Confirm which one an app uses
+before believing a query: `docker exec <app> sh -lc 'echo $DATABASE_URL'`.
+
+**Staging hostnames are single-label on purpose.** Cloudflare Universal SSL
+covers `dara-sa.net` and `*.dara-sa.net`, and a wildcard matches exactly ONE
+label — so `app.staging.dara-sa.net` has no certificate and the browser fails
+the handshake (`ERR_SSL_VERSION_OR_CIPHER_MISMATCH`) without ever reaching
+Coolify. It looks like a Coolify problem and is not one. Hence
+`app-staging.dara-sa.net`, not `app.staging.…`. Multi-level wildcards need
+Cloudflare Advanced Certificate Manager (paid). `dara-web/src/lib/portal-host.ts`
+encodes the landing↔portal mapping so the middleware can never mint a host the
+certificate cannot cover — it previously prefixed a literal `app.` and
+redirected staging to `app.app-staging.dara-sa.net`.
+
 **Why not the GitHub App:** the App `mlika-abdulsalam` (app_id 3660668,
 installation 130992358) stopped delivering push events after 07 Aug, leaving a
 week of commits undeployed.
@@ -159,6 +185,26 @@ usually what you want, but check before assuming a rule is universal.
   empty while the summary card above it counted correctly. Both resolve "today"
   in **Asia/Riyadh**, not UTC.
 
+### Moyasar webhooks
+
+`secret_token` from the Moyasar dashboard must equal `MOYASAR_WEBHOOK_SECRET`
+in the API container **exactly**. When it does not, the guard returns before any
+database work and the subscription never activates. Nothing looks wrong from
+Moyasar's side: the response is a 2xx, so its dashboard records "delivered
+successfully".
+
+Subscriptions still activate, which hides this — `POST /me/subscription/pay`
+re-checks the invoice and self-heals a paid one. The tell is timing and a NULL
+column: activation lags payment by however long the user took to return to the
+billing page, and `subscription_payments.moyasar_payment_id` stays NULL because
+only the webhook path passes it. A user who pays and closes the tab is never
+activated at all.
+
+Staging and production share one Moyasar account (same `MOYASAR_SECRET_KEY`).
+The webhook looks up `metadata.subscriptionPaymentId` **by primary key with no
+user scoping**, so a staging payment can activate an unrelated production
+account. Scope that lookup before relying on staging for payment testing.
+
 ---
 
 ## 5. Fonts and Arabic typography
@@ -183,10 +229,45 @@ rewrites its vertical metrics and **must be re-run if the font is replaced**.
   compute line height from whatever `fontSize` actually applies — call sites
   override the size inline and used to keep the old size's line height.
 - Fonts are bundled into the binary: a font change needs a **new mobile build**.
+- The web font exists **twice**: `src/fonts` for next/font (hashed, app-only)
+  and `public/fonts` for the invoice PDF export, which cannot use a hashed URL.
+  `patch_font_metrics.py` lists both — patch one and the printed documents
+  regress to stock metrics (clipped Arabic descenders) with nothing wrong on
+  screen to show it.
 
 ---
 
-## 6. Repo-specific gotchas
+## 6. Invoice / voucher PDFs
+
+Rendered client-side: the document HTML (`lib/export-invoice.ts`) is written
+into a detached iframe, rasterized by html2canvas-pro and wrapped by jsPDF. No
+server Chromium. Two failure modes, both of which produce *plausible-looking*
+Arabic rather than an obvious error:
+
+- **html2canvas does not rasterize where the element lives.** It clones the
+  subtree into a sandbox parented to the HOST document and measures text there.
+  The iframe names `'Readex Pro'`; the host page loads that same file under
+  next/font's *hashed* family, so the literal name resolves to nothing in the
+  host. It then measures Tahoma and paints Readex, and every word lands at a
+  slightly wrong offset — real spaces collapse (`فاتورةإلى`) and phantom ones
+  open inside Latin runs (`a.alsbr406 @gmail .com`). It reads exactly like a
+  bidi or shaping bug and is neither. `ensureHostFontLoaded()` declares the
+  face in the host document; it must run **before** html2canvas.
+- **`foreignObjectRendering: true` is worse, not better** — it drops most of
+  the document. Do not reach for it.
+
+Also: `letter-spacing` on Arabic makes html2canvas fall back to per-character
+rendering (isolated forms at mismatched advances), which is why
+`latinOnlyTracking` is empty in RTL. Wrap user-supplied values in `<bdi>` —
+names, addresses, phones, emails, VAT ids — or the surrounding Arabic reorders
+their punctuation.
+
+Two entry points share all of this: the modal's download button and
+`use-invoice-pdf.ts` (auto-store on approve / voucher create).
+
+---
+
+## 7. Repo-specific gotchas
 
 **dara-web**
 - Tailwind v4. `@theme inline` substitutes values, it does **not** emit
@@ -203,6 +284,11 @@ rewrites its vertical metrics and **must be re-run if the font is replaced**.
   page-data collection.
 - `tsc --noEmit` has a **7-error baseline** (NewContractModal, PropertyUnitsModal,
   api/core.ts). Compare against 7, not 0.
+- The account's own landlord/tenant record is the row flagged
+  `is_account_holder` — **never** `owners[0]` and never `is_default`. Ejar
+  imports insert a party row per imported contract and the list endpoints
+  return newest-first, so `[0]` is usually an imported stranger; `is_default`
+  means "new properties auto-link here" and the user can move it anywhere.
 - Manual record creation is gated by `ManualAddGate` — off unless Ejar is down
   or an admin forces it on. `TENANT_TABS` in `DashboardPage.tsx` whitelists
   which tabs a tenant-package account may open; anything missing silently
@@ -213,6 +299,14 @@ rewrites its vertical metrics and **must be re-run if the font is replaced**.
 - `ValidationPipe({ whitelist: true })` strips any property not on the DTO.
   Adding a field to a service signature without adding it to the DTO means it
   silently never arrives.
+- `is_account_holder` (owners/tenants) is **server-owned**: deliberately absent
+  from every controller field allowlist, claimable once on create while the
+  account has none, and the row cannot be deleted. Keep it out of `FIELDS` —
+  the whole point is that no request body can move the account's identity onto
+  an Ejar-imported party.
+- A PATCH whose keys all fall outside `FIELDS` used to reach `set({})` and
+  crash the driver. Both owners and tenants now 400 instead; add the same guard
+  to any new controller that builds an update from an allowlist.
 
 **dara-mobile**
 - Expo SDK 54, EAS builds. `appVersionSource: remote` — `autoIncrement` moves
@@ -233,8 +327,13 @@ rewrites its vertical metrics and **must be re-run if the font is replaced**.
 
 ---
 
-## 7. Outstanding / flagged, not resolved
+## 8. Outstanding / flagged, not resolved
 
+- Moyasar `secret_token` does not match `MOYASAR_WEBHOOK_SECRET` — every
+  webhook is rejected and subscriptions activate only via the pay-endpoint
+  fallback. Fix in Coolify (both API apps), then redeploy. See §1.
+- The Moyasar webhook resolves `metadata.subscriptionPaymentId` by primary key
+  with no user scoping, and staging shares the production Moyasar account.
 - `TWILIO_DEV_BYPASS=true` in production — the repo's own `coolify.md` says keep
   it `false`. Phone OTP verification is bypassed.
 - The SSH private key and the Postgres password were both exposed in a chat
