@@ -53,7 +53,23 @@ export const ownersTable = pgTable("owners", {
   // When true, newly-created properties auto-link to this landlord. At most
   // one default per account — setting a new one clears the previous (enforced
   // in the owners module + a partial unique index).
+  //
+  // This is a USER preference and the user may move it to any landlord at any
+  // time. It says nothing about identity — do NOT read it as "this row is the
+  // account holder" (see isAccountHolder below).
   isDefault: boolean("is_default").notNull().default(false),
+  /**
+   * This landlord row IS the account holder — the company/person who owns the
+   * subscription, not a third party they deal with.
+   *
+   * Server-owned: written only when the account is set up (and by the one-time
+   * backfill in 0057). It is deliberately absent from the controller's field
+   * allowlist, so no PATCH/POST body can set, move or clear it. That matters
+   * because an Ejar import inserts landlords for the parties on the imported
+   * contracts, and the settings profile must never bind to one of those.
+   * `isDefault` cannot serve this purpose: the user can reassign it freely.
+   */
+  isAccountHolder: boolean("is_account_holder").notNull().default(false),
   // Lookups-FK refactor (phase 3) — backfilled from the `nationality` text.
   nationalityLookupId: integer("nationality_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
   // Provenance for Ejar (NHC) imports — see contracts.ejarRaw.

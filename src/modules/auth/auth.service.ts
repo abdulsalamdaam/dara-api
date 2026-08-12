@@ -10,7 +10,7 @@ import type { TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { TwilioVerifyService } from "../twilio/twilio-verify.service";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
-import { isPackagePlan, packageMode, planAllowedForUserType, planUserTypeError } from "../../common/packages";
+import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 
 const MAX_FAILED = 5;
@@ -417,16 +417,19 @@ export class AuthService {
         message: "اسم المنشأة مطلوب لحسابات الشركات",
       });
     }
-    // The tenant package scopes every Ejar lookup to the account's own CR
-    // (see ejar.scope.ts), so without one the product cannot search at all.
-    // Collect it at signup rather than let the user discover the dead end
-    // later. Other plans may add it in company settings whenever they like.
+    // A company is identified by its commercial registration: it is what a tax
+    // invoice must carry, what a record reconciles against in Ejar, and — for
+    // the tenant package — the key every Ejar lookup is scoped by
+    // (ejar.scope.ts fails closed without it). Required for EVERY company
+    // account, not just the tenant package: an account created without one had
+    // no path to fill it that the settings form actually enforced.
+    // `assertCompanyCommercialReg` keeps it non-empty from then on.
     const commercialReg = String(input.commercialReg ?? "").trim();
-    const needsCr = userType === "company" && packageMode(desiredPackagePlan) === "tenant";
+    const needsCr = userType === "company";
     if (needsCr && !/^\d{10}$/.test(commercialReg)) {
       throw new BadRequestException({
         error: "COMMERCIAL_REG_REQUIRED",
-        message: "رقم السجل التجاري (10 أرقام) مطلوب لباقة المستأجرين",
+        message: "رقم السجل التجاري (10 أرقام) مطلوب لحسابات المنشآت",
       });
     }
 

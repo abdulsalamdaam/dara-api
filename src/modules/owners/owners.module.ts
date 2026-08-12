@@ -97,6 +97,15 @@ class OwnersController {
       await this.db.update(ownersTable).set({ isDefault: false })
         .where(and(eq(ownersTable.userId, scopeId(user)), eq(ownersTable.isDefault, true)));
     }
+    // "This landlord is my own account" — claimable ONCE, on create only, and
+    // only while the account has no such record (a managing office finishing
+    // its profile in settings). It is not in FIELDS, so PATCH can never move it
+    // onto another row; and an Ejar import writes rows directly, never through
+    // this controller, so an imported party can never claim it either.
+    const [heldBy] = await this.db.select({ id: ownersTable.id }).from(ownersTable)
+      .where(and(eq(ownersTable.userId, scopeId(user)), eq(ownersTable.isAccountHolder, true), isNull(ownersTable.deletedAt)))
+      .limit(1);
+    const claimsAccountHolder = !heldBy && Boolean(body.isAccountHolder ?? false);
     const [owner] = await this.db.insert(ownersTable).values({
       userId: scopeId(user),
       name: body.name,
@@ -126,6 +135,7 @@ class OwnersController {
       nationalAddressStreet: body.nationalAddressStreet ?? null,
       isDraft: Boolean(body.isDraft ?? false),
       isDefault: wantsDefault,
+      isAccountHolder: claimsAccountHolder,
       isDemo: "false",
     }).returning();
     return owner;
@@ -154,6 +164,11 @@ class OwnersController {
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // Anything not on FIELDS is dropped — including `isAccountHolder`, which is
+    // server-owned. A body made up entirely of such keys leaves nothing to set,
+    // and `set({})` is a driver-level crash; refuse it as the bad request it is
+    // rather than a 500. (Same guard companies/me already has.)
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     // Promoting this landlord to default? Clear the flag on every other row
     // first (single default per account) so the target update can't clash.
     if (body.isDefault === true) {
@@ -179,11 +194,19 @@ class OwnersController {
   @RequirePermissions(PERMISSIONS.OWNERS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("ownerId") ownerId: string) {
     const id = parseInt(ownerId, 10);
-    const [target] = await this.db.select({ isDefault: ownersTable.isDefault }).from(ownersTable)
+    const [target] = await this.db
+      .select({ isDefault: ownersTable.isDefault, isAccountHolder: ownersTable.isAccountHolder })
+      .from(ownersTable)
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     if (!target) throw new NotFoundException("Landlord not found");
-    // The default landlord (and the sole landlord) represent the account
-    // holder — they can't be deleted.
+    // The account holder's own landlord row is its identity — deleting it would
+    // strand the settings profile with no record to bind to (and the next
+    // Ejar-imported landlord is NOT an acceptable stand-in). Unlike isDefault,
+    // this refusal cannot be worked around by promoting a different row.
+    if (target.isAccountHolder) {
+      throw new BadRequestException("لا يمكن حذف سجل المؤجر الذي يمثّل حسابك · The landlord record representing your own account cannot be deleted.");
+    }
+    // The default landlord and the sole landlord are likewise protected.
     const [{ cnt }] = await this.db.select({ cnt: count() }).from(ownersTable)
       .where(and(eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     if (target.isDefault || Number(cnt) <= 1) {

@@ -35,24 +35,42 @@ class PackageController {
     const usage = await packageUsage(this.db, ownerId);
 
     // Settings completeness — drives the post-payment "complete your settings"
-    // lock. Complete when EITHER the account company OR the default landlord
-    // carries an identity + address (lenient on purpose, so a filled account is
-    // never falsely locked out). Tenant-mode accounts are never gated here.
+    // lock. Complete when EITHER the account company OR the account's own party
+    // record carries an identity + national address (lenient on purpose, so a
+    // filled account is never falsely locked out).
     const filled = (v: unknown) => v != null && String(v).trim() !== "";
+    /** The national-address block every party must carry for a tax invoice. */
+    const partyComplete = (p: {
+      name: string | null; buildingNumber: string | null; nationalAddressStreet: string | null;
+      nationalAddressDistrict: string | null; nationalAddressCity: string | null; postalCode: string | null;
+    }) => filled(p.name) && filled(p.buildingNumber) && filled(p.nationalAddressStreet)
+      && filled(p.nationalAddressDistrict) && filled(p.nationalAddressCity) && filled(p.postalCode);
+
     let companyComplete = false;
     if (owner?.companyId) {
       const [co] = await this.db.select().from(companiesTable).where(eq(companiesTable.id, owner.companyId));
       companyComplete = !!co && filled(co.name) && filled(co.city) && filled(co.address);
     }
-    // Any non-deleted landlord with a complete national address satisfies the
-    // lock — not only the one flagged `is_default` (older records may not carry
-    // the flag, which would otherwise keep a fully-filled account locked).
-    const acctOwners = await this.db.select().from(ownersTable)
-      .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
-    const ownerComplete = acctOwners.some((o) => filled(o.name) && filled(o.buildingNumber)
-      && filled(o.nationalAddressStreet) && filled(o.nationalAddressDistrict)
-      && filled(o.nationalAddressCity) && filled(o.postalCode));
-    const settingsComplete = plan.mode === "tenant" ? true : (companyComplete || ownerComplete);
+    let settingsComplete: boolean;
+    if (plan.mode === "tenant") {
+      // Tenant-package accounts used to be exempt, so a paid account landed on
+      // Settings with nothing holding it there and could skip its own details
+      // entirely. Same gate as everyone else now — but read from the account's
+      // OWN tenant row, never from a party an Ejar import brought in (an
+      // imported tenant with a filled address would otherwise open the lock).
+      const acctTenants = await this.db.select().from(tenantsTable)
+        .where(and(eq(tenantsTable.userId, ownerId), isNull(tenantsTable.deletedAt)));
+      const self = acctTenants.find((t) => t.isAccountHolder)
+        ?? acctTenants.filter((t) => !t.ejarSource)[0];
+      settingsComplete = companyComplete || (!!self && partyComplete(self));
+    } else {
+      // Any non-deleted landlord satisfies the lock — not only the account
+      // holder (older records may not carry the flag, which would otherwise
+      // keep a fully-filled account locked).
+      const acctOwners = await this.db.select().from(ownersTable)
+        .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
+      settingsComplete = companyComplete || acctOwners.some(partyComplete);
+    }
     const endsAt = owner?.subscriptionEndsAt ?? null;
     const daysRemaining = endsAt ? Math.ceil((new Date(endsAt).getTime() - Date.now()) / 86_400_000) : null;
 
@@ -125,24 +143,45 @@ class PackageController {
       const userType = body?.userType === "company" ? "company" : "individual";
       userPatch.userType = userType;
 
+      // Registration already created the company row with its name + CR; the
+      // wizard doesn't ask for either again. Read them so the landlord record
+      // below can be seeded from the same identity.
+      const [priorCompany] = owner?.companyId
+        ? await this.db.select({ name: companiesTable.name, commercialReg: companiesTable.commercialReg })
+            .from(companiesTable).where(eq(companiesTable.id, owner.companyId))
+        : [];
+
       if (userType === "company" && body?.company) {
         const c = body.company;
-        const values: any = {
-          name: (c.name || owner?.name || "").trim() || "—",
-          vatNumber: c.vatNumber ?? null,
-          commercialReg: c.commercialReg ?? null,
-          officialEmail: c.officialEmail ?? null,
-          companyPhone: c.companyPhone ?? userPatch.phone ?? null,
-          city: c.city ?? null,
-          address: c.address ?? null,
-          logoKey: c.logoKey ?? null,
+        // Only write what the wizard actually collected. Spreading a fixed
+        // shape with `?? null` blanked the company name and the commercial
+        // registration captured at registration — the wizard never asks for
+        // the CR, so every company that finished onboarding lost it and the
+        // settings form then showed an empty (but required) field.
+        const values: any = {};
+        const put = (k: string, v: unknown) => {
+          if (v == null || String(v).trim() === "") return;
+          values[k] = String(v).trim();
         };
+        put("name", c.name);
+        put("vatNumber", c.vatNumber);
+        put("commercialReg", c.commercialReg);
+        put("officialEmail", c.officialEmail);
+        put("companyPhone", c.companyPhone ?? userPatch.phone);
+        put("city", c.city);
+        put("address", c.address);
+        put("logoKey", c.logoKey);
         // The user references its company via users.companyId.
         if (owner?.companyId) {
-          await this.db.update(companiesTable).set(values).where(eq(companiesTable.id, owner.companyId));
+          if (Object.keys(values).length) {
+            await this.db.update(companiesTable).set(values).where(eq(companiesTable.id, owner.companyId));
+          }
           userPatch.companyId = owner.companyId;
         } else {
-          const [created] = await this.db.insert(companiesTable).values(values as any).returning({ id: companiesTable.id });
+          const [created] = await this.db
+            .insert(companiesTable)
+            .values({ ...values, name: values.name || owner?.name || "—" } as any)
+            .returning({ id: companiesTable.id });
           userPatch.companyId = created!.id;
         }
       }
@@ -157,24 +196,57 @@ class PackageController {
         if (!existing) {
           await this.db.insert(ownersTable).values({
             userId: ownerId,
-            name: (l.name || body?.company?.name || owner?.name || "").trim() || "—",
-            idNumber: l.idNumber ?? null,
+            // A company account's own landlord IS the company, so it carries
+            // the company name — not the general manager's personal name.
+            name: (userType === "company"
+              ? (body?.company?.name || priorCompany?.name || l.name)
+              : (l.name || owner?.name) || "").trim() || "—",
+            type: userType,
+            // For a company the "ID number" column holds the CR (see
+            // common/commercial-reg.ts) — take the one already on file.
+            idNumber: (userType === "company"
+              ? (l.idNumber || body?.company?.commercialReg || priorCompany?.commercialReg)
+              : l.idNumber) ?? null,
             phone: l.phone ?? userPatch.phone ?? null,
             email: l.email ?? null,
             iban: l.iban ?? null,
             taxNumber: l.taxNumber ?? null,
+            // Identity: this row IS the account holder. Server-owned and not in
+            // the controller's field allowlist, so no request can move it onto
+            // an Ejar-imported landlord later.
+            isAccountHolder: true,
+            // Convenience, and separately reassignable: new properties auto-link
+            // here until the user picks a different default.
+            isDefault: true,
           } as any);
         }
       }
     } else {
       // Tenant package — onboarding IS adding the account holder as a tenant.
       const tn = body?.tenant ?? {};
+      // A company tenant account is the COMPANY; registration already stored
+      // its name and CR, and the wizard doesn't ask for either again.
+      const isCompanyAccount = owner?.userType === "company";
+      const [priorCompany] = owner?.companyId
+        ? await this.db.select({ name: companiesTable.name, commercialReg: companiesTable.commercialReg })
+            .from(companiesTable).where(eq(companiesTable.id, owner.companyId))
+        : [];
+      // Only ever update the account holder's OWN tenant row. Matching any
+      // tenant would let an Ejar-imported party be overwritten with the
+      // account's identity when the import ran before setup finished.
       const [existing] = await this.db.select({ id: tenantsTable.id }).from(tenantsTable)
-        .where(and(eq(tenantsTable.userId, ownerId), isNull(tenantsTable.deletedAt)));
+        .where(and(
+          eq(tenantsTable.userId, ownerId),
+          eq(tenantsTable.isAccountHolder, true),
+          isNull(tenantsTable.deletedAt),
+        ));
       const values: any = {
-        name: (tn.name || body?.name || owner?.name || "").trim() || "—",
-        type: tn.type === "company" ? "company" : "individual",
-        nationalId: tn.nationalId ?? null,
+        name: (isCompanyAccount
+          ? (priorCompany?.name || tn.name || body?.name)
+          : (tn.name || body?.name || owner?.name) || "").trim() || "—",
+        type: isCompanyAccount ? "company" : (tn.type === "company" ? "company" : "individual"),
+        // For a company the national-ID column holds the CR.
+        nationalId: (isCompanyAccount ? (tn.nationalId || priorCompany?.commercialReg) : tn.nationalId) ?? null,
         phone: tn.phone ?? userPatch.phone ?? owner?.phone ?? null,
         email: tn.email ?? null,
         taxNumber: tn.taxNumber ?? null,
@@ -185,7 +257,7 @@ class PackageController {
       if (existing) {
         await this.db.update(tenantsTable).set(values).where(eq(tenantsTable.id, existing.id));
       } else {
-        await this.db.insert(tenantsTable).values({ userId: ownerId, ...values } as any);
+        await this.db.insert(tenantsTable).values({ userId: ownerId, ...values, isAccountHolder: true } as any);
       }
     }
 

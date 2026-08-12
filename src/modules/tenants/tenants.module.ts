@@ -74,6 +74,12 @@ class TenantsController {
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
     assertNationalAddress(body);
     assertCompanyCommercialReg(body);
+    // "This tenant is my own account" — claimable once, on create only, while
+    // the account has no such record. See owners.create for the reasoning.
+    const [heldBy] = await this.db.select({ id: tenantsTable.id }).from(tenantsTable)
+      .where(and(eq(tenantsTable.userId, scopeId(user)), eq(tenantsTable.isAccountHolder, true), isNull(tenantsTable.deletedAt)))
+      .limit(1);
+    const claimsAccountHolder = !heldBy && Boolean(body.isAccountHolder ?? false);
     const [tenant] = await this.db.insert(tenantsTable).values({
       userId: scopeId(user),
       name: body.name,
@@ -100,6 +106,7 @@ class TenantsController {
       originalTenantPhone: body.originalTenantPhone ?? null,
       originalTenantEmail: body.originalTenantEmail ?? null,
       isDraft: Boolean(body.isDraft ?? false),
+      isAccountHolder: claimsAccountHolder,
       isDemo: "false",
     }).returning();
     // Optional welcome email (opt-in via the add-tenant checkbox). Best-effort
@@ -148,6 +155,10 @@ class TenantsController {
 
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // Keys outside FIELDS are dropped — `isAccountHolder` among them, since it
+    // is server-owned. A body of nothing but such keys would reach `set({})`,
+    // which crashes the driver; refuse it as a bad request instead.
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [tenant] = await this.db.update(tenantsTable).set(updateData)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt))).returning();
     if (!tenant) throw new NotFoundException("غير موجود");
@@ -173,6 +184,14 @@ class TenantsController {
   @RequirePermissions(PERMISSIONS.TENANTS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const tid = parseInt(id, 10);
+    // A tenant-package account's own tenant row is its identity — the settings
+    // profile binds to it. Same protection as the account holder's landlord.
+    const [target] = await this.db.select({ isAccountHolder: tenantsTable.isAccountHolder })
+      .from(tenantsTable)
+      .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
+    if (target?.isAccountHolder) {
+      throw new BadRequestException("لا يمكن حذف سجل المستأجر الذي يمثّل حسابك · The tenant record representing your own account cannot be deleted.");
+    }
     await this.db.update(tenantsTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
     return { success: true };

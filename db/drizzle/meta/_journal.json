@@ -400,6 +400,13 @@
       "when": 1779141300000,
       "tag": "0056_collection_optional_payment",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1779141360000,
+      "tag": "0057_account_holder_party",
+      "breakpoints": true
     }
   ]
 }

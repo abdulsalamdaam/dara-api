@@ -44,6 +44,12 @@ export const tenantsTable = pgTable("tenants", {
   isDemo: text("is_demo").default("false"),
   // Draft records are saved incomplete and finished later.
   isDraft: boolean("is_draft").notNull().default(false),
+  /**
+   * This tenant row IS the account holder — a tenant-package account tracking
+   * its own leases, not a third party. Server-owned; see owners.isAccountHolder
+   * for why this is a column of its own and never in a field allowlist.
+   */
+  isAccountHolder: boolean("is_account_holder").notNull().default(false),
   // Provenance for Ejar (NHC) imports — `ejarRaw` is the verbatim party
   // object from the contract (id_type, vat, organization_type, role…), see
   // contracts.ejarRaw.
