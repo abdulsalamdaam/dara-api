@@ -117,8 +117,16 @@ export class TeamService {
     if (!email) throw new BadRequestException("Email is required");
 
     // Team-member cap driven by the owner account's subscription package.
+    // The plan must be read from the OWNER, not the actor: an employee with
+    // team-manage permission carries no packagePlan of its own, so
+    // resolvePackage(actor.packagePlan) fell back to the default plan and
+    // enforced the wrong seat limit — too few or too many depending on what the
+    // account actually pays for. The seat count was already owner-scoped.
     const ownerId = actor.ownerUserId ?? actor.id;
-    const pkg = resolvePackage(actor.packagePlan);
+    const [ownerRow] = ownerId === actor.id
+      ? [actor]
+      : await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
+    const pkg = resolvePackage((ownerRow ?? actor).packagePlan);
     const used = await employeeCount(this.db, ownerId);
     if (used >= pkg.maxUsers) {
       const limit = pkg.maxUsers >= UNLIMITED ? "∞" : String(pkg.maxUsers);
