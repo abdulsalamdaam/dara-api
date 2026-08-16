@@ -4,18 +4,34 @@
  * beyond the plan returns a clear error from the backend.
  */
 import { ForbiddenException } from "@nestjs/common";
-import { and, count, eq, isNull, isNotNull } from "drizzle-orm";
+import { and, count, eq, isNull, or } from "drizzle-orm";
 import { usersTable, propertiesTable, unitsTable, ownersTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
 import { resolvePackage } from "./packages";
 
 export type QuotaResource = "properties" | "units" | "landlords" | "users";
 
-/** Count the team members (employees) under an owner account. */
+/**
+ * Seats consumed against `maxUsers` — the account holder PLUS their employees.
+ *
+ * The owner used to be excluded, on the reasoning that they are not an
+ * "employee". But maxUsers is a seat allowance: the owner holds a login, a role
+ * and a permission set exactly like everyone else on the team, and they appear
+ * in the team list as such. Excluding them meant a "3 users" plan quietly
+ * granted four logins, and the Settings usage row read 0/3 for an account that
+ * already had someone signed in — which is what it looked like to the user.
+ *
+ * Counted by topology (`id = owner OR ownerUserId = owner`) rather than by role
+ * key, for the same reason isCustomerAccount() is: a company owner holds the
+ * `general` role, so a role test would misclassify them.
+ */
 export async function employeeCount(db: Drizzle, ownerId: number): Promise<number> {
   const [r] = await db
     .select({ c: count() }).from(usersTable)
-    .where(and(eq(usersTable.ownerUserId, ownerId), isNotNull(usersTable.ownerUserId), isNull(usersTable.deletedAt)));
+    .where(and(
+      or(eq(usersTable.id, ownerId), eq(usersTable.ownerUserId, ownerId)),
+      isNull(usersTable.deletedAt),
+    ));
   return Number(r?.c ?? 0);
 }
 
