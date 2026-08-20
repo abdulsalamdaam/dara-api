@@ -11,6 +11,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { assertNationalAddress } from "../../common/national-address";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
+import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { listQuerySchema } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 
@@ -24,7 +25,35 @@ const FIELDS = [
   "isRepresentative", "representativeDocUrl",
   "originalTenantName", "originalTenantIdNumber", "originalTenantPhone", "originalTenantEmail",
   "isDraft",
+  // Financial profile — collected by the tenant wizard's Financial step. These
+  // columns existed but were never on the allowlist, so every value the form
+  // sent was silently dropped on update.
+  "employer", "monthlyIncome",
 ] as const;
+
+/**
+ * Nationality (الجنسية) is written to BOTH the lookup FK (authoritative, so it
+ * can be filtered/reported on) and the legacy free-text column (which older
+ * readers — the mobile app, Ejar-imported rows — still read). Handled outside
+ * FIELDS because the client sends one human value and the server derives both.
+ */
+const NATIONALITY_SPEC = [{ idField: "nationalityLookupId", out: "nationality", mode: "labelAr" as const }];
+
+/**
+ * Attach the display nationality: the lookup label when the FK is set, else
+ * whatever text the row already carried (legacy + Ejar-imported rows).
+ */
+async function attachTenantNationality(db: Drizzle, rows: any[]): Promise<void> {
+  const legacy = rows.map((r) => r?.nationality ?? null);
+  await attachLookupLabels(db, rows, NATIONALITY_SPEC);
+  rows.forEach((r, i) => { if (r && r.nationality == null) r.nationality = legacy[i]; });
+}
+
+/** Resolve a human nationality value to { text, lookupId } for persistence. */
+async function nationalityValues(db: Drizzle, raw: unknown): Promise<{ nationality: string | null; nationalityLookupId: number | null }> {
+  const text = raw == null || String(raw).trim() === "" ? null : String(raw).trim();
+  return { nationality: text, nationalityLookupId: await resolveLookupId(db, "nationality", text) };
+}
 
 @ApiTags("tenants")
 @ApiBearerAuth("user-jwt")
@@ -64,6 +93,7 @@ class TenantsController {
         ? this.db.select({ total: count() }).from(tenantsTable).where(where)
         : Promise.resolve([{ total: 0 }]),
     ]);
+    await attachTenantNationality(this.db, rows as any[]);
     if (!usePaginated) return rows;
     return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
@@ -105,6 +135,9 @@ class TenantsController {
       originalTenantIdNumber: body.originalTenantIdNumber ?? null,
       originalTenantPhone: body.originalTenantPhone ?? null,
       originalTenantEmail: body.originalTenantEmail ?? null,
+      employer: body.employer ?? null,
+      monthlyIncome: body.monthlyIncome != null && body.monthlyIncome !== "" ? String(body.monthlyIncome) : null,
+      ...(await nationalityValues(this.db, body.nationality)),
       isDraft: Boolean(body.isDraft ?? false),
       isAccountHolder: claimsAccountHolder,
       isDemo: "false",
@@ -114,6 +147,7 @@ class TenantsController {
     if (body.sendWelcomeEmail && tenant?.email) {
       void this.email.sendTenantWelcome(tenant.email, tenant.name);
     }
+    await attachTenantNationality(this.db, [tenant] as any[]);
     return tenant;
   }
 
@@ -155,6 +189,11 @@ class TenantsController {
 
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // Nationality is derived, not copied: one incoming value, two columns. An
+    // explicit "" clears both, hence the `undefined` check.
+    if (body.nationality !== undefined) {
+      Object.assign(updateData, await nationalityValues(this.db, body.nationality));
+    }
     // Keys outside FIELDS are dropped — `isAccountHolder` among them, since it
     // is server-owned. A body of nothing but such keys would reach `set({})`,
     // which crashes the driver; refuse it as a bad request instead.
@@ -177,6 +216,7 @@ class TenantsController {
     if (body.sendWelcomeEmail && prior.isDraft && !tenant.isDraft && tenant.email) {
       void this.email.sendTenantWelcome(tenant.email, tenant.name);
     }
+    await attachTenantNationality(this.db, [tenant] as any[]);
     return tenant;
   }
 

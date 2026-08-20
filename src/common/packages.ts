@@ -41,11 +41,13 @@ export interface PackageDef {
 }
 
 export const PACKAGES: Record<PackagePlan, PackageDef> = {
-  // Tenant package — a self-managed personal tracker (1 unit, no team, no
-  // financials/reports/maintenance). The account holder IS the tenant.
-  // Landing limits: Tenant 50 units / 1 user, Basic 500 / 3, Pro 1,000 / 6,
-  // Enterprise unlimited. The landing "users" count includes the account
-  // holder, so maxUsers (added employees) = that number − 1.
+  // Tenant package — a self-managed tracker for a company's own leases. The
+  // account holder IS the tenant. It runs the same portal, the same
+  // getting-started checklist and the same seat model as the other plans;
+  // only the quotas differ.
+  // Landing limits: Tenant 50 units / 3 users, Basic 500 / 3, Pro 1,000 / 6,
+  // Enterprise unlimited. `maxUsers` counts ADDED employees — the account
+  // holder is not billed against it (see listEmployees).
   tenant: {
     key: "tenant",
     labelAr: "المستأجرين",
@@ -59,7 +61,10 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     maxLandlords: UNLIMITED,
     maxProperties: 50,
     maxUnits: 50,
-    maxUsers: 1,
+    // A corporate tenant is a team too (the person who signs, the one who pays,
+    // the one who tracks renewals). One seat made it a single-user product and
+    // was the odd one out among the plans — three matches Basic.
+    maxUsers: 3,
   },
   basic: {
     key: "basic",

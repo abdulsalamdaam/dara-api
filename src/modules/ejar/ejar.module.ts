@@ -594,6 +594,9 @@ export class EjarController {
       if (!found.email && (lessor?.email || src.landlordEmail)) fill.email = str(lessor?.email) || str(src.landlordEmail);
       if (!found.idNumber && idNumber) fill.idNumber = idNumber;
       if (!found.taxNumber && lessor?.unifiedNumber) fill.taxNumber = str(lessor.unifiedNumber);
+      if (!found.nationalityLookupId && lessor?.nationality) {
+        fill.nationalityLookupId = await resolveLookupId(this.db, "nationality", lessor.nationality);
+      }
       if (lessor?.raw) { fill.ejarRaw = lessor.raw; fill.ejarSource = "ejar"; }
       if (Object.keys(fill).length) await this.db.update(ownersTable).set(onlyPresent(fill)).where(eq(ownersTable.id, found.id));
       linked.push("landlord");
@@ -609,6 +612,7 @@ export class EjarController {
         phone: str(lessor?.phone) || str(src.landlordPhone),
         email: str(lessor?.email) || str(src.landlordEmail),
         taxNumber: str(lessor?.unifiedNumber),
+        nationalityLookupId: await resolveLookupId(this.db, "nationality", lessor?.nationality),
         status: "active",
         notes: "مستورد من إيجار",
         ejarSource: "ejar",
@@ -919,6 +923,10 @@ export class EjarController {
       if (!found.email && (party?.email || src.tenantEmail)) fill.email = str(party?.email) || str(src.tenantEmail);
       if (!found.nationalId && nationalId) fill.nationalId = nationalId;
       if (!found.taxNumber && party?.unifiedNumber) fill.taxNumber = str(party.unifiedNumber);
+      if (!found.nationality && party?.nationality) {
+        fill.nationality = party.nationality;
+        fill.nationalityLookupId = await resolveLookupId(this.db, "nationality", party.nationality);
+      }
       if (party?.raw) { fill.ejarRaw = party.raw; fill.ejarSource = "ejar"; }
       if (Object.keys(fill).length) await this.db.update(tenantsTable).set(onlyPresent(fill)).where(eq(tenantsTable.id, found.id));
       linked.push("tenant");
@@ -934,6 +942,8 @@ export class EjarController {
         phone: str(party?.phone) || str(src.tenantPhone),
         email: str(party?.email) || str(src.tenantEmail),
         taxNumber: str(party?.unifiedNumber) || str(src.companyUnified),
+        nationality: str(party?.nationality),
+        nationalityLookupId: await resolveLookupId(this.db, "nationality", party?.nationality),
         status: "active",
         isDemo: "false",
         notes: "مستورد من إيجار",

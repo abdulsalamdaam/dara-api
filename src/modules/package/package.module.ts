@@ -28,6 +28,7 @@ class PackageController {
         subscriptionStartedAt: usersTable.subscriptionStartedAt, subscriptionEndsAt: usersTable.subscriptionEndsAt,
         subscriptionStatus: usersTable.subscriptionStatus, billingCycle: usersTable.billingCycle,
         setupCompletedAt: usersTable.setupCompletedAt, companyId: usersTable.companyId,
+        subscriptionIsTrial: usersTable.subscriptionIsTrial,
       })
       .from(usersTable)
       .where(eq(usersTable.id, ownerId));
@@ -101,6 +102,9 @@ class PackageController {
         billingCycle: cycle,
         amountDue,
         payable: isPayablePlan(owner?.packagePlan),
+        // A free window granted by an admin — the app labels it as a trial
+        // instead of implying the account has paid.
+        isTrial: !!owner?.subscriptionIsTrial,
       },
     };
   }

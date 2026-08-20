@@ -10,6 +10,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { assertNationalAddress } from "../../common/national-address";
 import { scopeId } from "../../common/scope";
+import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { listQuerySchema } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { EmailService } from "../email/email.service";
@@ -41,6 +42,15 @@ const FIELDS = [
   // Default landlord — newly-created properties auto-link to this one.
   "isDefault",
 ] as const;
+
+/**
+ * Nationality (الجنسية) is stored as an FK into the `nationality` lookup
+ * category, never as text — the column was dropped in 0024. It is therefore
+ * NOT in FIELDS: the client sends a human value (`nationality`), the
+ * controller resolves it to an id, and responses carry the label back under
+ * the same name so the API shape is unchanged.
+ */
+const NATIONALITY_SPEC = [{ idField: "nationalityLookupId", out: "nationality", mode: "labelAr" as const }];
 
 @ApiTags("owners")
 @ApiBearerAuth("user-jwt")
@@ -79,6 +89,7 @@ class OwnersController {
         ? this.db.select({ total: count() }).from(ownersTable).where(where)
         : Promise.resolve([{ total: 0 }]),
     ]);
+    await attachLookupLabels(this.db, rows as any[], NATIONALITY_SPEC);
     if (!usePaginated) return rows;
     return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
@@ -133,11 +144,13 @@ class OwnersController {
       nationalAddressCity: body.nationalAddressCity ?? null,
       nationalAddressDistrict: body.nationalAddressDistrict ?? null,
       nationalAddressStreet: body.nationalAddressStreet ?? null,
+      nationalityLookupId: await resolveLookupId(this.db, "nationality", body.nationality),
       isDraft: Boolean(body.isDraft ?? false),
       isDefault: wantsDefault,
       isAccountHolder: claimsAccountHolder,
       isDemo: "false",
     }).returning();
+    await attachLookupLabels(this.db, [owner] as any[], NATIONALITY_SPEC);
     return owner;
   }
 
@@ -164,6 +177,12 @@ class OwnersController {
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // Nationality arrives as a human value and is stored as a lookup FK. An
+    // explicit empty string clears it, which is why this checks `undefined`
+    // rather than truthiness.
+    if (body.nationality !== undefined) {
+      updateData.nationalityLookupId = await resolveLookupId(this.db, "nationality", body.nationality);
+    }
     // Anything not on FIELDS is dropped — including `isAccountHolder`, which is
     // server-owned. A body made up entirely of such keys leaves nothing to set,
     // and `set({})` is a driver-level crash; refuse it as the bad request it is
@@ -187,6 +206,7 @@ class OwnersController {
       await this.db.update(contractsTable).set({ landlordName: owner.name })
         .where(and(eq(contractsTable.landlordName, prior.name), eq(contractsTable.userId, scopeId(user))));
     }
+    await attachLookupLabels(this.db, [owner] as any[], NATIONALITY_SPEC);
     return owner;
   }
 

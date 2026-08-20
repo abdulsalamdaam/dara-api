@@ -75,6 +75,14 @@ export const usersTable = pgTable("users", {
   subscriptionStatus: text("subscription_status").notNull().default("pending_payment"),
   /** Billing cycle the user is subscribed on — "monthly" | "yearly". */
   billingCycle: text("billing_cycle").notNull().default("monthly"),
+  /**
+   * The current window is a free trial granted by an admin, not a paid one.
+   * Purely descriptive — trials use the same `active` status and the same
+   * window columns, so nothing has to special-case them — but without it a
+   * 30-day trial and a paid year look identical everywhere they are shown.
+   * Cleared when a real payment activates the account.
+   */
+  subscriptionIsTrial: boolean("subscription_is_trial").notNull().default(false),
   /** The plan the user picked on the landing page, shown to the admin before approval. */
   desiredPackagePlan: text("desired_package_plan"),
   /** The billing cycle the user picked on the landing page. */

@@ -45,6 +45,8 @@ async function activateFromPaidRow(db: Drizzle, row: SubscriptionPaymentRow, moy
     subscriptionStatus: "active",
     subscriptionStartedAt: now,
     subscriptionEndsAt: nextEndDate(cycle, now),
+    // Paid — whatever free/trial window it replaces, this one is not a trial.
+    subscriptionIsTrial: false,
   }).where(eq(usersTable.id, row.userId));
 }
 
@@ -78,6 +80,7 @@ class SubscriptionController {
         ? { id: open.id, plan: open.plan, billingCycle: open.billingCycle, amount: Number(open.amount), url: open.paymentUrl, createdAt: open.createdAt }
         : null,
       status: sub.status,
+      isTrial: !!owner?.subscriptionIsTrial,
       needsPayment: sub.needsPayment,
       locked: sub.locked,
       graceUntil: sub.graceUntil,

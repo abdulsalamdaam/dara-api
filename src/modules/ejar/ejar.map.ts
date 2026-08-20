@@ -218,12 +218,28 @@ export interface EjarPartyInfo {
   registrationNumber: string | null;
   organizationType: string | null;
   vat: string | null;
+  /**
+   * Nationality (الجنسية). Ejar does not publish it as its own field on every
+   * contract, so this is the explicit value when present and otherwise the one
+   * safe inference: a Saudi national ID means a Saudi national. An iqama or a
+   * passport says the holder is NOT Saudi but not which nationality they are,
+   * so those stay null rather than guessing.
+   */
+  nationality: string | null;
   /** The verbatim Ejar party object — persisted to tenants/owners.ejar_raw. */
   raw: Record<string, unknown>;
 }
 
+/** Nationality from an explicit Ejar field, else inferred from the ID type. */
+function partyNationality(p: Attrs, idType: string | null): string | null {
+  const explicit = pick(p, "nationality", "nationality_name", "nationality_ar", "party_nationality");
+  if (explicit) return explicit;
+  return (idType || "").toLowerCase() === "national_id" ? "سعودي" : null;
+}
+
 function mapParty(p: Attrs, group: EjarPartyInfo["group"]): EjarPartyInfo {
   const role = pick(p, "role");
+  const idType = pick(p, "id_type", "owner_id_type");
   return {
     raw: p as Record<string, unknown>,
     group,
@@ -231,7 +247,8 @@ function mapParty(p: Attrs, group: EjarPartyInfo["group"]): EjarPartyInfo {
     isRepresentative: (role || "").toLowerCase().includes("representative"),
     name: pick(p, "name", "full_name", "party_name", "owner_name"),
     partyType: pick(p, "type", "party_type", "owner_type"),
-    idType: pick(p, "id_type", "owner_id_type"),
+    idType,
+    nationality: partyNationality(p, idType),
     idNumber: pick(p, "id_number", "national_id", "identity_number", "owner_id"),
     phone: pick(p, "phone_number", "phone", "mobile"),
     email: pick(p, "email"),
@@ -265,6 +282,7 @@ export function mapEjarParties(detail: EjarContractDetail): EjarParties {
       name: brokerName,
       partyType: null,
       idType: brokerId ? "national_id" : null,
+      nationality: brokerId ? "سعودي" : null,
       idNumber: brokerId,
       phone: null,
       email: null,

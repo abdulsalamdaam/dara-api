@@ -2,11 +2,7 @@ import { Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundExcept
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsOptional, IsString } from "class-validator";
 import { and, eq, isNull, inArray, desc, sql } from "drizzle-orm";
-import {
-  usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable,
-  paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable,
-  simpleInvoicesTable, companiesTable,
-} from "@dara/database";
+import { usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable, simpleInvoicesTable, companiesTable, lookupsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -90,6 +86,14 @@ class LandlordMobileController {
   private async sign(key: string | null | undefined): Promise<string | null> {
     if (!key) return null;
     try { return await this.uploads.presignGet(key, 3600); } catch { return null; }
+  }
+
+  /** Arabic label for a lookup row id (nationality etc.), or null. */
+  private async lookupLabel(id: number | null | undefined): Promise<string | null> {
+    if (id == null) return null;
+    const [row] = await this.db.select({ labelAr: lookupsTable.labelAr })
+      .from(lookupsTable).where(eq(lookupsTable.id, id)).limit(1);
+    return row?.labelAr ?? null;
   }
 
   /** Logged-in landlord profile + how many landlords/properties they hold. */
@@ -470,6 +474,7 @@ class LandlordMobileController {
       (o.name && c.landlordName === o.name));
     return {
       ...o,
+      nationality: await this.lookupLabel((o as any).nationalityLookupId),
       representativeDocUrl: await this.sign((o as any).representativeDocUrl),
       properties: properties.map((p) => ({ ...p, unitsCount: unitsByProp.get(p.id) ?? 0 })),
       contracts: mine.map((c) => ({ id: c.id, contractNumber: c.contractNumber, status: c.status, tenantName: c.tenantName, monthlyRent: this.num(c.monthlyRent), startDate: c.startDate, endDate: c.endDate })),
@@ -968,10 +973,14 @@ class LandlordMobileController {
       : [];
     const linkOf = new Map<number, { unitNumber: string | null; propertyName: string | null }>();
     for (const r of cu) if (!linkOf.has(r.contractId)) linkOf.set(r.contractId, { unitNumber: r.unitNumber, propertyName: r.propertyName });
-    // These tenant fields are intentionally not surfaced anywhere.
-    const { nationality: _n, employer: _e, monthlyIncome: _m, ...tRest } = t as any;
+    // Employer + income stay internal (collections context, not the app's).
+    // Nationality IS surfaced — the landlord app shows it on the tenant card —
+    // so it is resolved from the lookup FK, falling back to the legacy text.
+    const { employer: _e, monthlyIncome: _m, ...tRest } = t as any;
+    const nationality = (await this.lookupLabel((t as any).nationalityLookupId)) ?? ((t as any).nationality ?? null);
     return {
       ...tRest,
+      nationality,
       representativeDocUrl: await this.sign((t as any).representativeDocUrl),
       contracts: contracts.map((c) => ({
         id: c.id, contractNumber: c.contractNumber, status: c.status, monthlyRent: this.num(c.monthlyRent),

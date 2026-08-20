@@ -39,6 +39,22 @@ const EMAIL_OTP_MAX_ATTEMPTS = 5;
 /** Minimum gap before another login OTP can be requested (per IP / email). */
 const OTP_RESEND_COOLDOWN_MIN = 2;
 
+/**
+ * Phone-OTP test bypass. QA/staging sets TWILIO_DEV_BYPASS=true so the phone
+ * flows accept a fixed code and burn no SMS credit; production leaves it unset
+ * (or false) and every code is a real Twilio Verify challenge.
+ *
+ * Read per call, not captured at module load, so flipping the variable takes
+ * effect on the next container start rather than depending on import order —
+ * and so a test can toggle it. NEVER default this to true: an accidental
+ * bypass in production is an authentication bypass, since the phone flows are
+ * a full login path for tenants and landlords on the mobile app.
+ */
+const DEV_BYPASS_CODE = "1234";
+function smsBypassEnabled(): boolean {
+  return process.env.TWILIO_DEV_BYPASS === "true";
+}
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -725,11 +741,11 @@ export class AuthService {
 
   /* ── Tenant: phone OTP login ──
    *
-   * SMS sending is HARDCODED OFF while the team is testing builds. The
-   * verify endpoint accepts the fixed code "1234" for any active tenant.
-   * To re-enable Twilio later: uncomment the `twilio.start` line below
-   * and replace the `code === "1234"` check with the original
-   * `await this.twilio.check(...)` call.
+   * Real Twilio Verify SMS. The only way to skip it is the environment flag
+   * TWILIO_DEV_BYPASS=true (staging/QA), which accepts DEV_BYPASS_CODE for any
+   * active tenant and sends nothing. It is deliberately env-driven rather than
+   * hardcoded: a code-level bypass ships to production the moment someone
+   * forgets to flip it back, which is exactly what happened before.
    */
 
   async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }) {
@@ -742,9 +758,11 @@ export class AuthService {
       return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
     }
 
-    // SMS paused — DO NOT delete this block; flip back on when Twilio is needed.
-    // await this.twilio.start(phone, input.channel || "sms");
-    new Logger("AuthService").log(`[bypass] tenant OTP request for ${phone} — SMS skipped, accept code 1234`);
+    if (smsBypassEnabled()) {
+      new Logger("AuthService").warn(`[TWILIO_DEV_BYPASS] tenant OTP for ${phone} — no SMS sent, accept code ${DEV_BYPASS_CODE}`);
+      return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
+    }
+    await this.twilio.start(phone, input.channel || "sms");
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 
@@ -760,9 +778,9 @@ export class AuthService {
       throw new UnauthorizedException("بيانات غير صحيحة");
     }
 
-    // SMS paused — accept the hardcoded test code. To re-enable real OTP,
-    // restore: const ok = await this.twilio.check(phone, code, input.channel || "sms");
-    const ok = code === "1234";
+    const ok = smsBypassEnabled()
+      ? code === DEV_BYPASS_CODE
+      : await this.twilio.check(phone, code, input.channel || "sms");
     if (!ok) {
       await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("رمز التحقق غير صحيح");
@@ -791,7 +809,7 @@ export class AuthService {
   /* ── Landlord (USER) phone-OTP login for the mobile app ──
    * Mirrors the tenant phone flow but resolves a USER by phone and returns a
    * USER JWT (kind "user"), so landlords use the same phone+OTP experience.
-   * SMS is paused like the tenant flow — the bypass code is "1234". */
+   * Uses the same real-SMS path as the tenant flow (TWILIO_DEV_BYPASS aside). */
   /**
    * Find an active owner (landlord, added via the web) whose EFFECTIVE login
    * phone matches the given raw number. The effective login phone is:
@@ -813,6 +831,12 @@ export class AuthService {
     return owner;
   }
 
+  /** Verify a phone OTP: the dev bypass code when enabled, else Twilio Verify. */
+  private async checkPhoneCode(phone: string, code: string): Promise<boolean> {
+    if (smsBypassEnabled()) return code === DEV_BYPASS_CODE;
+    return this.twilio.check(phone, code, "sms");
+  }
+
   async userPhoneRequestOtp(input: { phone: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
@@ -821,7 +845,12 @@ export class AuthService {
     const matched = (user && user.isActive) ? true : !!(await this.findOwnerByLoginPhone(raw));
     // Generic response — don't disclose whether the number is registered.
     if (!matched) return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
-    new Logger("AuthService").log(`[bypass] landlord OTP request for ${this.twilio.normalizePhone(raw)} — SMS skipped, accept code 1234`);
+    const phone = this.twilio.normalizePhone(raw);
+    if (smsBypassEnabled()) {
+      new Logger("AuthService").warn(`[TWILIO_DEV_BYPASS] landlord OTP for ${phone} — no SMS sent, accept code ${DEV_BYPASS_CODE}`);
+      return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
+    }
+    await this.twilio.start(phone, "sms");
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 
@@ -844,7 +873,7 @@ export class AuthService {
       // No matching user — fall back to an owner (landlord) login by phone.
       const owner = await this.findOwnerByLoginPhone(raw);
       if (owner) {
-        if (code !== "1234") {
+        if (!(await this.checkPhoneCode(phone, code))) {
           await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
           throw new UnauthorizedException("رمز التحقق غير صحيح");
         }
@@ -857,8 +886,7 @@ export class AuthService {
       await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("بيانات غير صحيحة");
     }
-    // SMS paused — accept the hardcoded test code (same as the tenant flow).
-    if (code !== "1234") {
+    if (!(await this.checkPhoneCode(phone, code))) {
       await this.recordLogin(user.id, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("رمز التحقق غير صحيح");
     }

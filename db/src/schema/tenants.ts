@@ -1,4 +1,5 @@
 import { pgTable, text, serial, timestamp, pgEnum, integer, boolean, numeric, jsonb } from "drizzle-orm/pg-core";
+import { lookupsTable } from "./lookups";
 
 export const tenantTypeEnum = pgEnum("tenant_type", ["individual", "company"]);
 export const tenantStatusEnum = pgEnum("tenant_status", ["active", "inactive"]);
@@ -29,7 +30,14 @@ export const tenantsTable = pgTable("tenants", {
   postalCode: text("postal_code"),
   additionalNumber: text("additional_number"),
   buildingNumber: text("building_number"),
+  /**
+   * Free-text nationality kept for legacy rows and for a value the lookup
+   * doesn't carry; `nationalityLookupId` is the authoritative one and the API
+   * keeps both in step (see the tenants controller).
+   */
   nationality: text("nationality"),
+  /** FK → lookups(category = "nationality"). Mirrors owners.nationalityLookupId. */
+  nationalityLookupId: integer("nationality_lookup_id").references(() => lookupsTable.id, { onDelete: "set null" }),
   // Representative (وكيل) flow — same pattern as owners.ts. When set, the
   // row describes the agent and original-tenant fields hold the actual
   // tenant identity.

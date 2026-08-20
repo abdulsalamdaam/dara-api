@@ -407,6 +407,13 @@
       "when": 1779141360000,
       "tag": "0057_account_holder_party",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1779141420000,
+      "tag": "0058_trial_and_party_nationality",
+      "breakpoints": true
     }
   ]
 }

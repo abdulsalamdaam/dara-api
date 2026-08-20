@@ -11,22 +11,61 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { seedDemoData } from "./demo-seed";
 import { ALL_PERMISSIONS, ROLE_PRESETS, isCustomerAccount } from "../../common/permissions";
 import { EmailService } from "../email/email.service";
-import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
+import { isPackagePlan, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 
-/** Subscription window: starts now; ends at the given date or +1 year. */
-function subscriptionWindow(endsAtIso?: string): { startedAt: Date; endsAt: Date } {
+/**
+ * Subscription window: starts now; ends after `trialDays`, or at the given
+ * date, or +1 year. `trialDays` wins over an explicit date so the admin UI can
+ * offer "30 days" without also having to compute and send the date.
+ */
+function subscriptionWindow(opts?: { endsAtIso?: string; trialDays?: number }): { startedAt: Date; endsAt: Date } {
   const startedAt = new Date();
+  const days = normalizeTrialDays(opts?.trialDays);
+  if (days != null) {
+    return { startedAt, endsAt: new Date(startedAt.getTime() + days * 86_400_000) };
+  }
   let endsAt: Date;
-  if (endsAtIso) {
-    const d = new Date(endsAtIso);
+  if (opts?.endsAtIso) {
+    const d = new Date(opts.endsAtIso);
     endsAt = isNaN(d.getTime()) ? new Date(new Date().setFullYear(startedAt.getFullYear() + 1)) : d;
   } else {
     endsAt = new Date(new Date().setFullYear(startedAt.getFullYear() + 1));
   }
   return { startedAt, endsAt };
+}
+
+/** Trial length in whole days, or null when none was asked for. */
+function normalizeTrialDays(raw: unknown): number | null {
+  if (raw == null || raw === "") return null;
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // A year of "trial" is a free subscription; anything past that is a typo.
+  if (n > 365) throw new BadRequestException("مدة التجربة يجب أن تكون بين 1 و 365 يوماً");
+  return n;
+}
+
+/**
+ * The plan an admin action should apply, or a 400.
+ *
+ * Precedence: an explicit choice → the plan the user picked when registering →
+ * `basic`. An explicit choice that is not a real plan key is REJECTED rather
+ * than quietly replaced: the admin's dropdown used to be able to send a legacy
+ * value ("broker"), which failed `isPackagePlan`, fell through to the default,
+ * and granted a package nobody had selected — with a success toast.
+ */
+function resolveAdminPlan(requested: unknown, desired: string | null | undefined): PackagePlan {
+  if (requested != null && requested !== "") {
+    const asked = String(requested);
+    if (!isPackagePlan(asked)) {
+      throw new BadRequestException(`باقة غير معروفة: ${asked}`);
+    }
+    return asked;
+  }
+  if (isPackagePlan(desired)) return desired;
+  return "basic";
 }
 
 @ApiTags("admin")
@@ -417,6 +456,9 @@ class AdminController {
         desiredPackagePlan: usersTable.desiredPackagePlan,
         desiredBillingCycle: usersTable.desiredBillingCycle,
         subscriptionStatus: usersTable.subscriptionStatus,
+        subscriptionEndsAt: usersTable.subscriptionEndsAt,
+        subscriptionIsTrial: usersTable.subscriptionIsTrial,
+        userType: usersTable.userType,
         emailVerified: usersTable.emailVerified,
         emailVerifiedAt: usersTable.emailVerifiedAt,
         roleKey: rolesTable.key,
@@ -442,6 +484,9 @@ class AdminController {
       desiredPackagePlan: u.desiredPackagePlan,
       desiredBillingCycle: u.desiredBillingCycle,
       subscriptionStatus: u.subscriptionStatus,
+      subscriptionEndsAt: u.subscriptionEndsAt,
+      isTrial: u.subscriptionIsTrial,
+      userType: u.userType,
       emailVerified: u.emailVerified,
       emailVerifiedAt: u.emailVerifiedAt,
       createdAt: u.createdAt,
@@ -478,61 +523,95 @@ class AdminController {
     });
   }
 
+  /**
+   * Approve a registration, on a package the admin picks.
+   *
+   * Two outcomes:
+   *  - default → account is active but the subscription is `pending_payment`;
+   *    the user lands on the pay screen and the package they PAY for wins.
+   *  - `trialDays` / `grantWithoutPayment` / `subscriptionEndsAt` → the admin
+   *    grants the window outright: the chosen package is live immediately, no
+   *    payment required, and the pay screen is skipped.
+   *
+   * When the window is granted, the user's own landing-page selection is
+   * cleared. Leaving it set meant the pay screen (and any later "continue
+   * payment" nudge) still advertised the plan they asked for rather than the
+   * one the admin actually gave them.
+   */
   @Patch("registrations/:id/approve")
-  async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean } | undefined) {
+  async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean; trialDays?: number } | undefined) {
     const uid = parseInt(id, 10);
     const [existing] = await this.db.select({ desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle, userType: usersTable.userType })
       .from(usersTable).where(eq(usersTable.id, uid));
-    // Plan precedence: admin override → the plan the user picked on the
-    // landing → basic.
-    const plan = isPackagePlan(body?.packagePlan) ? body!.packagePlan
-      : isPackagePlan(existing?.desiredPlan) ? existing!.desiredPlan!
-      : "basic";
+    if (!existing) throw new NotFoundException("User not found");
+    const plan = resolveAdminPlan(body?.packagePlan, existing.desiredPlan);
     // Company-only plans stay company-only even when an admin assigns them —
     // approval is the other door into `users.package_plan`.
-    if (!planAllowedForUserType(plan, existing?.userType)) {
+    if (!planAllowedForUserType(plan, existing.userType)) {
       throw new BadRequestException(planUserTypeError(plan));
     }
-    const cycle = existing?.desiredCycle === "yearly" ? "yearly" : "monthly";
+    const cycle = existing.desiredCycle === "yearly" ? "yearly" : "monthly";
 
-    // Default flow: approve the account but require payment to activate the
-    // subscription (status = pending_payment, no active window yet). The admin
-    // can grant a free window by passing subscriptionEndsAt / grantWithoutPayment.
-    const manualGrant = !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
-    const win = manualGrant ? subscriptionWindow(body?.subscriptionEndsAt) : null;
+    const trialDays = normalizeTrialDays(body?.trialDays);
+    const manualGrant = trialDays != null || !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
+    const win = manualGrant ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined }) : null;
     const [user] = await this.db.update(usersTable)
       .set({
         accountStatus: "active", isActive: true, packagePlan: plan, billingCycle: cycle,
         subscriptionStatus: manualGrant ? "active" : "pending_payment",
         subscriptionStartedAt: manualGrant ? win!.startedAt : null,
         subscriptionEndsAt: manualGrant ? win!.endsAt : null,
+        subscriptionIsTrial: manualGrant && trialDays != null,
+        // A granted window is the decision — don't leave a stale "wanted plan"
+        // behind to reappear on the billing screen.
+        desiredPackagePlan: manualGrant ? null : existing.desiredPlan,
+        desiredBillingCycle: manualGrant ? null : existing.desiredCycle,
       })
       .where(eq(usersTable.id, uid))
       .returning();
     if (!user) throw new NotFoundException("User not found");
     // Fire-and-forget the approval notice — must not block the API response.
     void this.email.sendRegistrationApproved(user.email, user.name);
-    return { success: true, id: user.id, accountStatus: user.accountStatus, packagePlan: plan, subscriptionStatus: user.subscriptionStatus };
+    return {
+      success: true, id: user.id, accountStatus: user.accountStatus, packagePlan: plan,
+      subscriptionStatus: user.subscriptionStatus, subscriptionEndsAt: user.subscriptionEndsAt,
+      trialDays: trialDays ?? null, granted: manualGrant,
+    };
   }
 
-  /** Change a user's subscription package (and renew the window) at any time. */
+  /**
+   * Change a user's subscription package (and renew the window) at any time.
+   * Accepts the same `trialDays` shorthand as approval, and activates the
+   * subscription — an admin granting a package by hand is granting access, so
+   * leaving the account on `pending_payment` would hand it the paywall
+   * instead of the package.
+   */
   @Patch("users/:userId/package")
-  async changePackage(@Param("userId") userId: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string }) {
+  async changePackage(@Param("userId") userId: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; trialDays?: number }) {
     const id = parseInt(userId, 10);
-    const plan = isPackagePlan(body?.packagePlan) ? body!.packagePlan : "basic";
-    const [target] = await this.db.select({ userType: usersTable.userType })
+    const [target] = await this.db.select({ userType: usersTable.userType, desiredPlan: usersTable.desiredPackagePlan })
       .from(usersTable).where(eq(usersTable.id, id));
     if (!target) throw new NotFoundException("User not found");
+    const plan = resolveAdminPlan(body?.packagePlan, target.desiredPlan);
     if (!planAllowedForUserType(plan, target.userType)) {
       throw new BadRequestException(planUserTypeError(plan));
     }
-    const win = subscriptionWindow(body?.subscriptionEndsAt);
+    const trialDays = normalizeTrialDays(body?.trialDays);
+    const win = subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined });
     const [user] = await this.db.update(usersTable)
-      .set({ packagePlan: plan, subscriptionStartedAt: win.startedAt, subscriptionEndsAt: win.endsAt })
+      .set({
+        packagePlan: plan,
+        subscriptionStatus: "active",
+        subscriptionStartedAt: win.startedAt,
+        subscriptionEndsAt: win.endsAt,
+        subscriptionIsTrial: trialDays != null,
+        desiredPackagePlan: null,
+        desiredBillingCycle: null,
+      })
       .where(eq(usersTable.id, id))
       .returning();
     if (!user) throw new NotFoundException("User not found");
-    return { success: true, id: user.id, packagePlan: plan, subscriptionEndsAt: win.endsAt };
+    return { success: true, id: user.id, packagePlan: plan, subscriptionEndsAt: win.endsAt, trialDays: trialDays ?? null };
   }
 
   /** Re-send the email-verification link to a pending registrant. */
