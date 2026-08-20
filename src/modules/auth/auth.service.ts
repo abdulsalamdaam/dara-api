@@ -746,9 +746,25 @@ export class AuthService {
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const phone = this.phoneOtp.normalizePhone(raw);
     const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
-    if (!tenant || tenant.status !== "active") {
-      // Don't disclose whether the tenant exists; respond generic.
-      return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
+    // Answer honestly instead of the old generic "if the number is registered
+    // we sent a code". That reply hid the truth from the only people it
+    // mattered to: the app pushed every caller to the code screen, no SMS ever
+    // arrived, and there was nothing on screen to explain why. It does reveal
+    // whether a number is registered — an accepted trade for a login the user
+    // can actually get through.
+    if (!tenant) {
+      throw new NotFoundException({
+        code: "PHONE_NOT_REGISTERED",
+        error: "هذا الرقم غير مسجّل لدينا. تأكد من الرقم أو تواصل مع المؤجر لتسجيلك.",
+        message: "هذا الرقم غير مسجّل لدينا. تأكد من الرقم أو تواصل مع المؤجر لتسجيلك.",
+      });
+    }
+    if (tenant.status !== "active") {
+      throw new ForbiddenException({
+        code: "ACCOUNT_INACTIVE",
+        error: "الحساب غير نشط حالياً. تواصل مع المؤجر لتفعيله.",
+        message: "الحساب غير نشط حالياً. تواصل مع المؤجر لتفعيله.",
+      });
     }
 
     await this.phoneOtp.start(phone, "tenant", ctx?.ip);
@@ -828,9 +844,23 @@ export class AuthService {
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const [user] = await this.db.select({ id: usersTable.id, isActive: usersTable.isActive })
       .from(usersTable).where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)));
-    const matched = (user && user.isActive) ? true : !!(await this.findOwnerByLoginPhone(raw));
-    // Generic response — don't disclose whether the number is registered.
-    if (!matched) return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
+    const owner = user && user.isActive ? null : await this.findOwnerByLoginPhone(raw);
+    if (!user && !owner) {
+      throw new NotFoundException({
+        code: "PHONE_NOT_REGISTERED",
+        error: "هذا الرقم غير مسجّل لدينا. تأكد من الرقم أو تواصل مع الدعم.",
+        message: "هذا الرقم غير مسجّل لدينا. تأكد من الرقم أو تواصل مع الدعم.",
+      });
+    }
+    // A row exists but is switched off — say so rather than sending a code that
+    // could never complete a login.
+    if (user && !user.isActive && !owner) {
+      throw new ForbiddenException({
+        code: "ACCOUNT_INACTIVE",
+        error: "الحساب غير نشط حالياً. تواصل مع الدعم لتفعيله.",
+        message: "الحساب غير نشط حالياً. تواصل مع الدعم لتفعيله.",
+      });
+    }
     await this.phoneOtp.start(raw, "user", ctx?.ip);
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }

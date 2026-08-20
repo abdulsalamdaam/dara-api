@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, Post, Query, UseGuards, BadRequestException,
+  BadRequestException, Body, Controller, Get, Param, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -144,10 +144,19 @@ export class ZatcaOnboardingController {
   @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
   async issueComplianceCsid(
     @CurrentUser() user: AuthUser,
+    @Param("env") envParam: string,
     @Body() body: { otp?: string; env?: ZatcaEnv; ownerId?: number },
-    // env can also come from the path
   ) {
-    const env: ZatcaEnv = (body.env ?? "sandbox") as ZatcaEnv;
+    // The environment is in the PATH — this used to read `body.env` and
+    // default to "sandbox", ignoring the path entirely. The portal only ever
+    // put it in the URL, so picking Simulation (or Production) still onboarded
+    // sandbox, and the screen kept reporting "sandbox" with no clue why.
+    // Body still wins if a caller sends it, for backwards compatibility.
+    const raw = body.env ?? envParam;
+    if (raw !== "sandbox" && raw !== "simulation" && raw !== "production") {
+      throw new BadRequestException(`Unknown ZATCA environment "${raw}" — expected sandbox | simulation | production`);
+    }
+    const env: ZatcaEnv = raw;
     return this.onboarding.issueComplianceCsid(scopeId(user), env, body.otp, this.oid(body.ownerId));
   }
 
