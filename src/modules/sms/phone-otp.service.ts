@@ -52,9 +52,9 @@ export class PhoneOtpService {
   }
 
   private message(code: string): string {
-    // Kept to one short line: Arabic body + the code on its own, so it reads
-    // well in a notification preview and stays inside a single SMS segment.
-    return `رمز الدخول إلى دارا: ${code}\nصالح لمدة ${PHONE_OTP_TTL_MIN} دقائق. لا تشاركه مع أحد.`;
+    // Short on purpose: Arabic is UCS-2, so ~70 characters is one SMS segment
+    // and anything past that doubles the cost of every login.
+    return `رمز الدخول إلى دارا: ${code}\nلا تشاركه مع أحد.`;
   }
 
   /**
