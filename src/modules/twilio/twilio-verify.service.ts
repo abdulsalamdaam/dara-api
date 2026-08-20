@@ -77,6 +77,14 @@ export class TwilioVerifyService {
     const json: any = await res.json().catch(() => null);
     if (!res.ok) {
       this.log.error(`Twilio check failed: ${res.status} ${JSON.stringify(json)}`);
+      // Twilio 404s a VerificationCheck once the verification is consumed,
+      // expired (10 min) or never started. That is the ordinary "your code is
+      // stale" case, not an outage — surfacing Twilio's raw English
+      // "The requested resource /v2/Services/VA…/VerificationCheck was not
+      // found" told an Arabic-speaking user nothing they could act on.
+      if (res.status === 404) {
+        throw new BadRequestException("انتهت صلاحية رمز التحقق أو تم استخدامه. اطلب رمزاً جديداً.");
+      }
       throw new BadRequestException(json?.message || "تعذّر التحقق من الرمز");
     }
     return json?.status === "approved" && json?.valid === true;

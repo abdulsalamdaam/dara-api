@@ -144,10 +144,55 @@ usually what you want, but check before assuming a rule is universal.
 
 ---
 
+## 2b. ZATCA (Fatoora) — which environment we are actually in
+
+**Everything is sandbox. Production has never submitted a real e-invoice.**
+Every row in `zatca_credentials` — production database included — has
+`active_environment = 'sandbox'` and a NULL `prod_onboarded_at`, so every
+submission goes to the developer-portal gateway with a test CSID. Verified
+20 Aug 2026 against both databases.
+
+The three environments differ by URL prefix *and* by CSR certificate template
+(`zatca-api.service.ts` + `csr.service.ts`), and both must match or onboarding
+fails in ways that look like a credential problem:
+
+| env | path prefix | CSR template | OTP |
+|---|---|---|---|
+| sandbox | `/e-invoicing/developer-portal` | `TSTZATCA-Code-Signing` | fixed `123456` |
+| simulation | `/e-invoicing/simulation` | `PREZATCA-Code-Signing` | from Fatoora simulation portal |
+| production | `/e-invoicing/core` | `ZATCA-Code-Signing` | issued per taxpayer, out of band |
+
+Going live is **not** a config flip. Per ZATCA's own guidance each seller has
+to: onboard against simulation, pass the compliance cycle (3+ invoices of each
+type: standard, simplified, credit, debit) on that compliance CSID, then
+request a production CSID with an OTP the taxpayer generates in the Fatoora
+portal. That OTP cannot be automated — it belongs to the taxpayer, per VAT
+number. Only then does `activeEnvironment` move to `production`.
+
+Also: e-invoicing only applies to VAT-registered sellers, and the billing
+module deliberately skips documents whose lines are all exempt/out-of-scope
+(residential rent) — a skipped submission there is correct behaviour, not a
+broken integration. In production 12 of 19 VAT-registered landlords have no
+credentials row at all, so their invoices skip with `not_linked`.
+
 ## 3. Packages, roles and account classification
 
 - Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,
   `enterprise`. Two modes: `tenant` (self-tracker) and `landlord` (full portal).
+- **A package is a quota, not a different product.** The tenant plan used to get
+  a whitelist of tabs (`TENANT_TABS`) and a two-step getting-started list; both
+  are gone — every plan opens the same portal, and only the limits differ
+  (tenant is 50 units / 3 seats). `mode` still shapes *content* (the dashboard
+  widget, who the contract wizard treats as the account holder), not access.
+- **Admin approval grants the package it displays.** `PATCH
+  /admin/registrations/:id/approve` 400s on an unknown plan key rather than
+  falling back to `basic` — it used to accept the legacy `broker` a fresh row
+  carries, fail `isPackagePlan`, and silently grant something else. Approval
+  without a grant leaves `pending_payment`, and then **the plan the user PAYS
+  for wins**; `trialDays` / `grantWithoutPayment` / `subscriptionEndsAt` grant
+  the chosen plan outright and clear the user's `desired*` selection.
+  `users.subscription_is_trial` marks a granted window as a trial and is
+  cleared by any real payment.
 - **`tenant` is company-only** (`PackageDef.requiresUserType`). Enforced on all
   three paths that write `users.package_plan`: self-registration, admin
   approval, admin package change. Fails closed on a missing account type.
@@ -334,8 +379,25 @@ Two entry points share all of this: the modal's download button and
   fallback. Fix in Coolify (both API apps), then redeploy. See §1.
 - The Moyasar webhook resolves `metadata.subscriptionPaymentId` by primary key
   with no user scoping, and staging shares the production Moyasar account.
-- `TWILIO_DEV_BYPASS=true` in production — the repo's own `coolify.md` says keep
-  it `false`. Phone OTP verification is bypassed.
+- ~~`TWILIO_DEV_BYPASS=true` in production~~ — **resolved 20 Aug 2026.** The
+  hardcoded "SMS paused / accept 1234" block in `auth.service.ts` is gone and
+  phone OTP is a real Twilio Verify challenge again. The env flag is now the
+  only bypass: `false` on `dara-api`, `true` on `dara-api-staging` (QA, code
+  `1234`). Never set it true in production — tenant and landlord phone login is
+  a full login path, so a bypass there is an authentication bypass. Twilio
+  balance was $18.68 on switch-on, i.e. a few hundred Saudi verifications;
+  watch it, because an empty balance fails these logins outright.
+- **Import from Ejar is switched off in the product** and presented as
+  paid-packages-only, behind `dara-web/src/lib/ejar-import-lock.ts`. The API's
+  `/ejar/*` routes are untouched — the lock is presentational, so don't treat
+  it as authorization.
+- **Nationality (الجنسية) is lookup-backed on both parties.** `owners
+  .nationality_lookup_id` (the text column was dropped in 0024) and, since
+  0058, `tenants.nationality_lookup_id` alongside the legacy text. Clients send
+  a human value under `nationality`; the controller resolves it, responses
+  return the Arabic label. Ejar imports fill it from the payload, or infer
+  "سعودي" from `id_type = national_id` — an iqama/passport says the holder is
+  not Saudi but not what they are, so those stay null.
 - The SSH private key and the Postgres password were both exposed in a chat
   transcript. **Rotate both.**
 - `dara-api` is a **public** GitHub repo — confirm that is deliberate.
@@ -344,6 +406,11 @@ Two entry points share all of this: the modal's download button and
   accounts. Closed for tenant-package accounts only.
 - VAT was applied to new contracts only; existing rows keep their stored
   `vatEnabled` because some have been reported to ZATCA.
+- `APP_ENV=staging` is set on the **production** API and web apps too. Nothing
+  in the code reads it (there is no `APP_ENV`/`NODE_ENV` branch anywhere in
+  `dara-api`), so it is misleading rather than harmful — but it makes a
+  container's env useless for telling prod from staging. Use `COOLIFY_FQDN` or
+  `DATABASE_URL` instead.
 - Coolify → Settings → Instance Domain is `https://coolify.dara-sa.net`; the
   legacy `*.oqudk.com` routers live in
   `/data/coolify/proxy/dynamic/dara-rebrand.yaml`, which Coolify does not manage.
