@@ -421,6 +421,13 @@
       "when": 1779141480000,
       "tag": "0059_phone_otp_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1779141540000,
+      "tag": "0060_zatca_prod_slot_env",
+      "breakpoints": true
     }
   ]
 }

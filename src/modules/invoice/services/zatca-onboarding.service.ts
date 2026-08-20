@@ -141,7 +141,10 @@ export class ZatcaOnboardingService {
         configured: !!c,
         activeEnvironment: c?.activeEnvironment ?? null,
         sandboxOnboarded: !!c?.sandboxCertPem,
-        productionOnboarded: !!c?.prodCertPem,
+        // "production" means a real production CSID — a simulation rehearsal
+        // fills the same columns and must not be reported as live.
+        productionOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "production",
+        simulationOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "simulation",
         onboardedAt: c?.sandboxOnboardedAt ?? c?.prodOnboardedAt ?? null,
       };
     });
@@ -260,7 +263,9 @@ export class ZatcaOnboardingService {
       updates.sandboxComplianceRequestId = j.requestID ?? null;
       updates.sandboxOnboardedAt = new Date();
     } else if (environment === "simulation") {
-      // Simulation also lives on the production columns — same lifecycle, same gateway prefix swap.
+      // Simulation also lives on the production columns — same lifecycle, same
+      // gateway prefix swap — so the slot records which of the two it holds.
+      updates.prodSlotEnv = "simulation";
       updates.prodPrivateKeyEnc = encryptString(csr.privateKey);
       updates.prodPublicKeyPem = csr.publicKey;
       updates.prodCsrPem = csr.csr;
@@ -270,6 +275,7 @@ export class ZatcaOnboardingService {
       updates.prodComplianceRequestId = j.requestID ?? null;
       updates.prodOnboardedAt = new Date();
     } else {
+      updates.prodSlotEnv = "production";
       updates.prodPrivateKeyEnc = encryptString(csr.privateKey);
       updates.prodPublicKeyPem = csr.publicKey;
       updates.prodCsrPem = csr.csr;
@@ -332,6 +338,9 @@ export class ZatcaOnboardingService {
         prodSecretEnc: encryptString(resp.json.secret),
         prodCertPem: certPem,
         prodOnboardedAt: new Date(),
+        // A real production CSID now occupies the slot, whichever compliance
+        // certificate it was promoted from.
+        prodSlotEnv: environment === "production" ? "production" : "simulation",
       })
       .where(eq(zatcaCredentialsTable.id, creds.id));
 
@@ -353,6 +362,15 @@ export class ZatcaOnboardingService {
       if (!creds.prodCertPem || !creds.prodSecretEnc) {
         throw new ConflictException(
           "Production credentials not provisioned. Run compliance + production CSID issuance first.",
+        );
+      }
+      // Simulation fills these same columns. Without this check a seller that
+      // had only rehearsed could be switched "live" holding a simulation
+      // certificate — every real invoice would then be signed with a
+      // certificate the /core gateway does not accept.
+      if (creds.prodSlotEnv === "simulation") {
+        throw new ConflictException(
+          "هذه الشهادة خاصة ببيئة المحاكاة (Simulation). أعد الربط باختيار بيئة الإنتاج للحصول على شهادة إنتاج حقيقية.",
         );
       }
       // Optional belt-and-braces: ensure the seller has run the test cycle.

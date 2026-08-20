@@ -92,6 +92,14 @@ export const zatcaCredentialsTable = pgTable("zatca_credentials", {
   prodIcv: integer("prod_icv").notNull().default(0),
   prodPih: text("prod_pih").notNull().default(ZATCA_INITIAL_PIH),
   prodOnboardedAt: timestamp("prod_onboarded_at", { withTimezone: true }),
+  /**
+   * Which environment the prod* columns above actually hold — "simulation" or
+   * "production". The two share these columns (identical lifecycle, different
+   * gateway prefix and CSR template), so without this a seller that had only
+   * rehearsed on simulation reported itself as live. NULL = pre-dates this
+   * column; treated as unknown, never as production.
+   */
+  prodSlotEnv: text("prod_slot_env"),
 
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
