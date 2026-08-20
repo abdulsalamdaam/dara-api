@@ -741,7 +741,7 @@ export class AuthService {
    * forgets to flip it back, which is exactly what happened before.
    */
 
-  async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }) {
+  async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const phone = this.phoneOtp.normalizePhone(raw);
@@ -751,7 +751,7 @@ export class AuthService {
       return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
     }
 
-    await this.phoneOtp.start(phone, "tenant");
+    await this.phoneOtp.start(phone, "tenant", ctx?.ip);
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 
@@ -823,7 +823,7 @@ export class AuthService {
     return this.phoneOtp.check(phone, code, "user");
   }
 
-  async userPhoneRequestOtp(input: { phone: string }) {
+  async userPhoneRequestOtp(input: { phone: string }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const [user] = await this.db.select({ id: usersTable.id, isActive: usersTable.isActive })
@@ -831,7 +831,7 @@ export class AuthService {
     const matched = (user && user.isActive) ? true : !!(await this.findOwnerByLoginPhone(raw));
     // Generic response — don't disclose whether the number is registered.
     if (!matched) return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
-    await this.phoneOtp.start(raw, "user");
+    await this.phoneOtp.start(raw, "user", ctx?.ip);
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 

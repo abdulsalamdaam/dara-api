@@ -169,12 +169,13 @@ export class AuthController {
     long:  { limit: 15, ttl: 3600_000 },
   })
   @UseGuards(OtpThrottlerGuard)
-  tenantRequestOtp(@Body() body: TenantOtpStartDto) {
-    return this.auth.tenantRequestOtp(body);
+  tenantRequestOtp(@Body() body: TenantOtpStartDto, @Req() req: Request) {
+    return this.auth.tenantRequestOtp(body, clientCtx(req));
   }
 
-  // OTP-check — 15 attempts per 5 min per (IP + phone). Brute-force is still
-  // bounded upstream by Twilio Verify (max-check-attempts) and the code TTL.
+  // OTP-check — 15 attempts per 5 min per (IP + phone). Brute-force is also
+  // bounded by the code itself: 5 wrong tries burns the row (PhoneOtpService),
+  // and it expires in 10 minutes either way.
   @Post("tenant/verify-otp")
   @HttpCode(200)
   @Throttle({ default: { limit: 15, ttl: 300_000 } })
@@ -189,8 +190,8 @@ export class AuthController {
   @HttpCode(200)
   @Throttle({ short: { limit: 3, ttl: 60_000 }, long: { limit: 15, ttl: 3600_000 } })
   @UseGuards(OtpThrottlerGuard)
-  userPhoneRequestOtp(@Body() body: { phone?: string }) {
-    return this.auth.userPhoneRequestOtp({ phone: body?.phone ?? "" });
+  userPhoneRequestOtp(@Body() body: { phone?: string }, @Req() req: Request) {
+    return this.auth.userPhoneRequestOtp({ phone: body?.phone ?? "" }, clientCtx(req));
   }
 
   @Post("user/phone-otp/verify")

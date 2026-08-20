@@ -252,6 +252,39 @@ account. Scope that lookup before relying on staging for payment testing.
 
 ---
 
+## 4b. SMS — Taqnyat, and why the OTP lifecycle is ours
+
+**The SMS provider is Taqnyat (taqnyat.sa), not Twilio.** Twilio Verify was a
+verification *service* (it generated, expired and checked codes for us);
+Taqnyat is a plain gateway that sends text. So the code lifecycle now lives in
+`PhoneOtpService` + the `phone_otp_tokens` table: 4 digits, bcrypt hash only,
+10-minute expiry, 5 attempts then the row is burned, single use, 60-second
+resend cooldown enforced in the DB, and the code is bound to
+(phone, purpose) so a tenant's code cannot be replayed against the landlord
+login. Same hardening as the email OTP, deliberately — these are the product's
+only two login paths.
+
+Env on the API: `TAQNYAT_API_KEY` + `TAQNYAT_SENDER`. It **fails closed** —
+without both, phone login 503s rather than falling back to anything, so set
+the env BEFORE deploying a container that expects it.
+
+Gotchas that cost real time:
+
+- Recipients must be `9665XXXXXXXX` — **no `+`, no `00`**, the opposite of what
+  Twilio wanted. A wrong shape is a 400 or a silent `rejected: [...]` inside a
+  2xx, so `TaqnyatService.send` treats a non-empty `rejected` as a failure.
+- `sender` must be a name already approved on the account and is
+  **case-sensitive**. We use `DaamTech`, NOT `DaamTech-AD` — the `-AD` suffix
+  marks an advertising sender under CITC rules and OTP is transactional.
+- An expired account, an empty balance and an unapproved sender name all look
+  identical from the app ("the code never arrived"). `GET /api/admin/sms/status`
+  answers all three without sending anything.
+- Their `/verify.php` API would have been a smaller change but answers
+  "number already verified" (19) / "already activated" (13) — states designed
+  for one-time activation, not a login people repeat daily. Don't reach for it.
+- Arabic is UCS-2, so ~70 chars per segment. The OTP body is one segment
+  (0.092 SAR); lengthen it and every login costs double.
+
 ## 5. Fonts and Arabic typography
 
 Readex Pro carries Arabic and Latin. `dara-web/scripts/patch_font_metrics.py`
@@ -381,12 +414,10 @@ Two entry points share all of this: the modal's download button and
   with no user scoping, and staging shares the production Moyasar account.
 - ~~`TWILIO_DEV_BYPASS=true` in production~~ — **resolved 20 Aug 2026.** The
   hardcoded "SMS paused / accept 1234" block in `auth.service.ts` is gone and
-  phone OTP is a real Twilio Verify challenge again. The env flag is now the
-  only bypass: `false` on `dara-api`, `true` on `dara-api-staging` (QA, code
-  `1234`). Never set it true in production — tenant and landlord phone login is
-  a full login path, so a bypass there is an authentication bypass. Twilio
-  balance was $18.68 on switch-on, i.e. a few hundred Saudi verifications;
-  watch it, because an empty balance fails these logins outright.
+  phone OTP is live. The env flag is the only bypass: `false` on `dara-api`,
+  `true` on `dara-api-staging` (QA, code `1234`). Never set it true in
+  production — tenant and landlord phone login is a full login path, so a
+  bypass there is an authentication bypass.
 - **Import from Ejar is switched off in the product** and presented as
   paid-packages-only, behind `dara-web/src/lib/ejar-import-lock.ts`. The API's
   `/ejar/*` routes are untouched — the lock is presentational, so don't treat
