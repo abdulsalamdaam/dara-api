@@ -2,6 +2,7 @@ export * from "./users";
 export * from "./companies";
 export * from "./roles";
 export * from "./emailOtpTokens";
+export * from "./phoneOtpTokens";
 export * from "./loginLogs";
 export * from "./deeds";
 export * from "./properties";

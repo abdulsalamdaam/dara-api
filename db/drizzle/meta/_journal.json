@@ -414,6 +414,13 @@
       "when": 1779141420000,
       "tag": "0058_trial_and_party_nationality",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1779141480000,
+      "tag": "0059_phone_otp_tokens",
+      "breakpoints": true
     }
   ]
 }

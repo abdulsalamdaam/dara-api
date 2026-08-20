@@ -5,10 +5,12 @@ import { AuthService } from "./auth.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { TenantAuthGuard } from "../../common/guards/tenant-auth.guard";
 import { TwilioModule } from "../twilio/twilio.module";
+import { SmsModule } from "../sms/sms.module";
 
 @Module({
   imports: [
     TwilioModule,
+    SmsModule,
     JwtModule.registerAsync({
       useFactory: () => ({
         secret: process.env.JWT_SECRET ?? "milkia-dev-secret",

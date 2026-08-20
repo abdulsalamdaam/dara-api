@@ -8,6 +8,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import type { TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { TwilioVerifyService } from "../twilio/twilio-verify.service";
+import { PhoneOtpService, smsBypassEnabled, DEV_BYPASS_CODE } from "../sms/phone-otp.service";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
 import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
@@ -39,21 +40,6 @@ const EMAIL_OTP_MAX_ATTEMPTS = 5;
 /** Minimum gap before another login OTP can be requested (per IP / email). */
 const OTP_RESEND_COOLDOWN_MIN = 2;
 
-/**
- * Phone-OTP test bypass. QA/staging sets TWILIO_DEV_BYPASS=true so the phone
- * flows accept a fixed code and burn no SMS credit; production leaves it unset
- * (or false) and every code is a real Twilio Verify challenge.
- *
- * Read per call, not captured at module load, so flipping the variable takes
- * effect on the next container start rather than depending on import order —
- * and so a test can toggle it. NEVER default this to true: an accidental
- * bypass in production is an authentication bypass, since the phone flows are
- * a full login path for tenants and landlords on the mobile app.
- */
-const DEV_BYPASS_CODE = "1234";
-function smsBypassEnabled(): boolean {
-  return process.env.TWILIO_DEV_BYPASS === "true";
-}
 
 @Injectable()
 export class AuthService {
@@ -61,6 +47,7 @@ export class AuthService {
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly jwt: JwtService,
     private readonly twilio: TwilioVerifyService,
+    private readonly phoneOtp: PhoneOtpService,
     private readonly email: EmailService,
   ) {}
 
@@ -706,7 +693,11 @@ export class AuthService {
     }
 
     const target = isEmail ? user.email : (user.phone || id);
-    await this.twilio.start(target, channel);
+    // SMS goes through Taqnyat like every other text we send; the email
+    // channel is left on Twilio Verify because that is where it already was
+    // and password login is disabled anyway (see `login` above).
+    if (channel === "sms") await this.phoneOtp.start(target, "user");
+    else await this.twilio.start(target, channel);
     return { success: true, message: "تم إرسال رمز التحقق. أدخله لإكمال إعادة تعيين كلمة المرور." };
   }
 
@@ -724,7 +715,9 @@ export class AuthService {
     if (!user) throw new BadRequestException("بيانات غير صحيحة");
 
     const target = isEmail ? user.email : (user.phone || identifier);
-    const ok = await this.twilio.check(target, code, channel);
+    const ok = channel === "sms"
+      ? await this.phoneOtp.check(target, code, "user")
+      : await this.twilio.check(target, code, channel);
     if (!ok) throw new BadRequestException("رمز التحقق غير صحيح أو منتهي الصلاحية");
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
@@ -751,18 +744,14 @@ export class AuthService {
   async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
-    const phone = this.twilio.normalizePhone(raw);
+    const phone = this.phoneOtp.normalizePhone(raw);
     const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
     if (!tenant || tenant.status !== "active") {
       // Don't disclose whether the tenant exists; respond generic.
       return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
     }
 
-    if (smsBypassEnabled()) {
-      new Logger("AuthService").warn(`[TWILIO_DEV_BYPASS] tenant OTP for ${phone} — no SMS sent, accept code ${DEV_BYPASS_CODE}`);
-      return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
-    }
-    await this.twilio.start(phone, input.channel || "sms");
+    await this.phoneOtp.start(phone, "tenant");
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 
@@ -770,7 +759,7 @@ export class AuthService {
     const raw = (input.phone || "").trim();
     const code = (input.code || "").trim();
     if (!raw || !code) throw new BadRequestException("رقم الجوال والرمز مطلوبان");
-    const phone = this.twilio.normalizePhone(raw);
+    const phone = this.phoneOtp.normalizePhone(raw);
 
     const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
     if (!tenant || tenant.status !== "active") {
@@ -778,9 +767,7 @@ export class AuthService {
       throw new UnauthorizedException("بيانات غير صحيحة");
     }
 
-    const ok = smsBypassEnabled()
-      ? code === DEV_BYPASS_CODE
-      : await this.twilio.check(phone, code, input.channel || "sms");
+    const ok = await this.phoneOtp.check(phone, code, "tenant");
     if (!ok) {
       await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("رمز التحقق غير صحيح");
@@ -831,10 +818,9 @@ export class AuthService {
     return owner;
   }
 
-  /** Verify a phone OTP: the dev bypass code when enabled, else Twilio Verify. */
+  /** Verify a landlord phone OTP (Taqnyat-backed, dev bypass aware). */
   private async checkPhoneCode(phone: string, code: string): Promise<boolean> {
-    if (smsBypassEnabled()) return code === DEV_BYPASS_CODE;
-    return this.twilio.check(phone, code, "sms");
+    return this.phoneOtp.check(phone, code, "user");
   }
 
   async userPhoneRequestOtp(input: { phone: string }) {
@@ -845,12 +831,7 @@ export class AuthService {
     const matched = (user && user.isActive) ? true : !!(await this.findOwnerByLoginPhone(raw));
     // Generic response — don't disclose whether the number is registered.
     if (!matched) return { success: true, message: "إذا كان الرقم مسجّلاً، فقد أرسلنا رمز التحقق." };
-    const phone = this.twilio.normalizePhone(raw);
-    if (smsBypassEnabled()) {
-      new Logger("AuthService").warn(`[TWILIO_DEV_BYPASS] landlord OTP for ${phone} — no SMS sent, accept code ${DEV_BYPASS_CODE}`);
-      return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
-    }
-    await this.twilio.start(phone, "sms");
+    await this.phoneOtp.start(raw, "user");
     return { success: true, message: "تم إرسال رمز التحقق إلى جوالك." };
   }
 
@@ -858,7 +839,7 @@ export class AuthService {
     const raw = (input.phone || "").trim();
     const code = (input.code || "").trim();
     if (!raw || !code) throw new BadRequestException("رقم الجوال والرمز مطلوبان");
-    const phone = this.twilio.normalizePhone(raw);
+    const phone = this.phoneOtp.normalizePhone(raw);
 
     const [user] = await this.db
       .select({

@@ -6,6 +6,7 @@ import { OtpThrottlerGuard } from "./common/throttler";
 
 import { DatabaseModule } from "./database/database.module";
 import { TwilioModule } from "./modules/twilio/twilio.module";
+import { SmsModule } from "./modules/sms/sms.module";
 import { EmailModule } from "./modules/email/email.module";
 import { UploadsModule } from "./modules/uploads/uploads.module";
 import { HealthModule } from "./modules/health/health.module";
@@ -56,6 +57,7 @@ import { ReportsModule } from "./modules/reports/reports.module";
     ]),
     DatabaseModule,
     TwilioModule,
+    SmsModule,
     EmailModule,
     UploadsModule,
     HealthModule,

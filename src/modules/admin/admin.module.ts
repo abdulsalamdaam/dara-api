@@ -15,6 +15,7 @@ import { isPackagePlan, planAllowedForUserType, planUserTypeError, type PackageP
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
+import { TaqnyatService } from "../sms/taqnyat.service";
 
 /**
  * Subscription window: starts now; ends after `trialDays`, or at the given
@@ -77,6 +78,7 @@ class AdminController {
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly email: EmailService,
     private readonly ejarPolicy: EjarPolicyService,
+    private readonly sms: TaqnyatService,
   ) {}
 
   /**
@@ -105,6 +107,29 @@ class AdminController {
   async recheckEjar() {
     await this.ejarPolicy.refreshHealth();
     return this.ejarPolicy.getPolicy();
+  }
+
+  /**
+   * SMS gateway health: account status, remaining credit and the sender names
+   * approved on the account. Costs nothing (no message is sent) and is the
+   * fastest answer to "why did the OTP not arrive" — an expired account, an
+   * empty balance and an unapproved sender all look identical from the app.
+   */
+  @Get("sms/status")
+  async smsStatus() {
+    const [balance, senders] = await Promise.all([this.sms.balance(), this.sms.senders()]);
+    const configuredSender = process.env.TAQNYAT_SENDER || null;
+    return {
+      provider: "taqnyat",
+      configured: this.sms.isConfigured(),
+      sender: configuredSender,
+      senderApproved: configuredSender
+        ? senders.senders.some((x) => x.senderName === configuredSender && String(x.status ?? "").toLowerCase() !== "inactive")
+        : false,
+      devBypass: process.env.SMS_DEV_BYPASS === "true" || process.env.TWILIO_DEV_BYPASS === "true",
+      balance,
+      senders: senders.senders,
+    };
   }
 
   @Get("stats")
