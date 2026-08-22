@@ -254,6 +254,122 @@ class SimpleInvoicesController {
     return { data, page: q.page, pageSize: q.pageSize, total, stats };
   }
 
+  /**
+   * Everyone this account has billed, derived from the invoices themselves —
+   * there is no customers table, and there deliberately isn't one: an invoice
+   * already carries the party it was raised against, so a separate list could
+   * only drift from it. Raising an invoice for someone new is what adds them.
+   *
+   * Grouped by the strongest identifier present (VAT number, then phone, then
+   * email, then the normalised name), so the same person entered twice with a
+   * typo'd name still lands on one card if they share a VAT number or phone.
+   */
+  @Get("customers")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  async customers(@CurrentUser() user: AuthUser) {
+    const rows = await this.db
+      .select({
+        id: simpleInvoicesTable.id,
+        number: simpleInvoicesTable.number,
+        type: simpleInvoicesTable.type,
+        status: simpleInvoicesTable.status,
+        kind: simpleInvoicesTable.kind,
+        tenantId: simpleInvoicesTable.tenantId,
+        tenantName: simpleInvoicesTable.tenantName,
+        client: simpleInvoicesTable.client,
+        total: simpleInvoicesTable.total,
+        issueDate: simpleInvoicesTable.issueDate,
+      })
+      .from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)))
+      .orderBy(desc(simpleInvoicesTable.issueDate), desc(simpleInvoicesTable.id));
+
+    type Customer = {
+      key: string; name: string; kind: string;
+      phone: string | null; email: string | null; address: string | null; vatNumber: string | null;
+      tenantId: number | null;
+      invoiceCount: number; totalAmount: number; lastIssueDate: string | null;
+      invoices: Array<{ id: number; number: string; type: string; status: string; total: number; issueDate: string | null }>;
+    };
+    const byKey = new Map<string, Customer>();
+
+    for (const r of rows) {
+      const c = (r.client ?? {}) as Record<string, any>;
+      const name = String(r.tenantName ?? c.name ?? "").trim();
+      const vat = String(c.vatNumber ?? "").trim();
+      const phone = String(c.phone ?? "").trim();
+      const email = String(c.email ?? "").trim().toLowerCase();
+      // An invoice with nothing identifying the buyer can't be attributed.
+      if (!name && !vat && !phone && !email) continue;
+      const key = vat ? `v:${vat}` : phone ? `p:${phone}` : email ? `e:${email}` : `n:${name.toLowerCase()}`;
+
+      let cur = byKey.get(key);
+      if (!cur) {
+        cur = {
+          key,
+          name: name || vat || phone || email,
+          // `kind` is stamped on new documents; older rows only tell us whether
+          // a tenant was linked, so fall back to that rather than guessing.
+          kind: String(c.kind ?? (r.tenantId ? "tenant" : r.kind === "commission" ? "landlord" : "other")),
+          phone: phone || null, email: email || null,
+          address: (c.address ? String(c.address) : null), vatNumber: vat || null,
+          tenantId: r.tenantId ?? null,
+          invoiceCount: 0, totalAmount: 0, lastIssueDate: null, invoices: [],
+        };
+        byKey.set(key, cur);
+      }
+      // Rows arrive newest-first, so the first sighting holds the freshest
+      // contact details; only fill what is still missing.
+      cur.phone ??= phone || null;
+      cur.email ??= email || null;
+      cur.address ??= c.address ? String(c.address) : null;
+      cur.vatNumber ??= vat || null;
+      cur.tenantId ??= r.tenantId ?? null;
+      cur.invoiceCount += 1;
+      // Credit notes reduce what the customer was billed.
+      cur.totalAmount += (r.type === "credit" ? -1 : 1) * (Number(r.total) || 0);
+      if (!cur.lastIssueDate && r.issueDate) cur.lastIssueDate = r.issueDate;
+      cur.invoices.push({
+        id: r.id, number: r.number, type: r.type, status: r.status,
+        total: Number(r.total) || 0, issueDate: r.issueDate,
+      });
+    }
+
+    return [...byKey.values()]
+      .map((c) => ({ ...c, totalAmount: Math.round((c.totalAmount + Number.EPSILON) * 100) / 100 }))
+      .sort((a, b) => (b.lastIssueDate ?? "").localeCompare(a.lastIssueDate ?? "") || b.invoiceCount - a.invoiceCount);
+  }
+
+  /**
+   * NOTE: every STATIC path under this controller must be declared ABOVE
+   * `@Get(":id")` — Nest matches routes in declaration order, so ":id" claims
+   * anything that reaches it first. `readiness` sat below it and every call
+   * 500'd (parseInt("readiness") → NaN), which silently disabled the invoice
+   * readiness gate in the UI.
+   */
+  @Get("readiness")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  async readiness(
+    @CurrentUser() user: AuthUser,
+    @Query("contractId") contractId?: string,
+    @Query("paymentId") paymentId?: string,
+  ) {
+    const uid = scopeId(user);
+    let id = contractId ? Number(contractId) : null;
+    // "Create invoice from installment" only knows the payment — resolve its
+    // contract here so the UI can pre-check from that entry point too, instead
+    // of discovering the problem when the user hits save.
+    if (!Number.isFinite(id as number) && paymentId) {
+      const [pay] = await this.db
+        .select({ contractId: paymentsTable.contractId })
+        .from(paymentsTable)
+        .where(and(eq(paymentsTable.id, Number(paymentId)), eq(paymentsTable.userId, uid)))
+        .limit(1);
+      id = pay?.contractId ?? null;
+    }
+    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
+  }
+
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
@@ -296,29 +412,6 @@ class SimpleInvoicesController {
    * Create Invoice screen opens so it can block the button and show exactly
    * what is missing, instead of letting the user fill a form and fail on save.
    */
-  @Get("readiness")
-  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async readiness(
-    @CurrentUser() user: AuthUser,
-    @Query("contractId") contractId?: string,
-    @Query("paymentId") paymentId?: string,
-  ) {
-    const uid = scopeId(user);
-    let id = contractId ? Number(contractId) : null;
-    // "Create invoice from installment" only knows the payment — resolve its
-    // contract here so the UI can pre-check from that entry point too, instead
-    // of discovering the problem when the user hits save.
-    if (!Number.isFinite(id as number) && paymentId) {
-      const [pay] = await this.db
-        .select({ contractId: paymentsTable.contractId })
-        .from(paymentsTable)
-        .where(and(eq(paymentsTable.id, Number(paymentId)), eq(paymentsTable.userId, uid)))
-        .limit(1);
-      id = pay?.contractId ?? null;
-    }
-    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
-  }
-
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
