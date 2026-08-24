@@ -287,11 +287,17 @@ class SimpleInvoicesController {
     type Customer = {
       key: string; name: string; kind: string;
       phone: string | null; email: string | null; address: string | null; vatNumber: string | null;
+      // Structured national address. Only an external (non-tenant, non-landlord)
+      // buyer carries it on the invoice — for everyone else it lives on their
+      // own record, and re-serving a stale copy from here would fight it.
+      region: string | null; city: string | null; district: string | null; street: string | null;
+      buildingNumber: string | null; additionalNumber: string | null; postalCode: string | null;
       tenantId: number | null;
       invoiceCount: number; totalAmount: number; lastIssueDate: string | null;
       invoices: Array<{ id: number; number: string; type: string; status: string; total: number; issueDate: string | null }>;
     };
     const byKey = new Map<string, Customer>();
+    const blankStr = (v: unknown) => { const x = (v ?? "").toString().trim(); return x || null; };
 
     for (const r of rows) {
       const c = (r.client ?? {}) as Record<string, any>;
@@ -313,6 +319,9 @@ class SimpleInvoicesController {
           kind: String(c.kind ?? (r.tenantId ? "tenant" : r.kind === "commission" ? "landlord" : "other")),
           phone: phone || null, email: email || null,
           address: (c.address ? String(c.address) : null), vatNumber: vat || null,
+          region: blankStr(c.region), city: blankStr(c.city), district: blankStr(c.district),
+          street: blankStr(c.street), buildingNumber: blankStr(c.buildingNumber),
+          additionalNumber: blankStr(c.additionalNumber), postalCode: blankStr(c.postalCode),
           tenantId: r.tenantId ?? null,
           invoiceCount: 0, totalAmount: 0, lastIssueDate: null, invoices: [],
         };
@@ -324,6 +333,13 @@ class SimpleInvoicesController {
       cur.email ??= email || null;
       cur.address ??= c.address ? String(c.address) : null;
       cur.vatNumber ??= vat || null;
+      cur.region ??= blankStr(c.region);
+      cur.city ??= blankStr(c.city);
+      cur.district ??= blankStr(c.district);
+      cur.street ??= blankStr(c.street);
+      cur.buildingNumber ??= blankStr(c.buildingNumber);
+      cur.additionalNumber ??= blankStr(c.additionalNumber);
+      cur.postalCode ??= blankStr(c.postalCode);
       cur.tenantId ??= r.tenantId ?? null;
       cur.invoiceCount += 1;
       // Credit notes reduce what the customer was billed.
@@ -992,15 +1008,21 @@ class SimpleInvoicesController {
       } else {
         const tenant = doc.tenantId ? (await this.db.select().from(tenantsTable)
           .where(and(eq(tenantsTable.id, Number(doc.tenantId)), eq(tenantsTable.userId, uid))))[0] ?? null : null;
+        // An invoice raised for an external buyer (neither tenant nor landlord)
+        // has no party record to read an address from — the document itself is
+        // the record, so the client block is the last fallback for every field.
+        // Without it a standard tax invoice to such a buyer would go out with a
+        // null city/district/street and fail BR-KSA-63.
+        const cl = (doc.client ?? {}) as Record<string, any>;
         buyer = this.buyerFromParty(doc, {
-          name: doc.tenantName || tenant?.name || contract?.tenantName,
+          name: doc.tenantName || tenant?.name || contract?.tenantName || cl.name,
           vat: doc.client?.vatNumber || tenant?.taxNumber || contract?.tenantTaxNumber,
-          street: tenant?.nationalAddressStreet || contract?.tenantAddress || tenant?.address,
-          buildingNo: tenant?.buildingNumber || contract?.tenantBuildingNumber,
-          district: tenant?.nationalAddressDistrict || null,
-          city: tenant?.nationalAddressCity || null,
-          postalZone: tenant?.postalCode || contract?.tenantPostalCode,
-          additionalNo: tenant?.additionalNumber || contract?.tenantAdditionalNumber,
+          street: tenant?.nationalAddressStreet || contract?.tenantAddress || tenant?.address || cl.street,
+          buildingNo: tenant?.buildingNumber || contract?.tenantBuildingNumber || cl.buildingNumber,
+          district: tenant?.nationalAddressDistrict || cl.district || null,
+          city: tenant?.nationalAddressCity || cl.city || null,
+          postalZone: tenant?.postalCode || contract?.tenantPostalCode || cl.postalCode,
+          additionalNo: tenant?.additionalNumber || contract?.tenantAdditionalNumber || cl.additionalNumber,
         });
       }
       // B2B (buyer has a VAT number) → standard/clearance; otherwise simplified/reporting.
