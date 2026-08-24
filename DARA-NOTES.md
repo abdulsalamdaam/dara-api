@@ -285,6 +285,27 @@ Gotchas that cost real time:
 - Arabic is UCS-2, so ~70 chars per segment. The OTP body is one segment
   (0.092 SAR); lengthen it and every login costs double.
 
+### The QA login bypasses, and the only honest staging signal
+
+`TWILIO_DEV_BYPASS` (legacy name; `SMS_DEV_BYPASS` is the current one) is
+**"true" on both staging apps and "false" on production**, which makes it the
+one env var that actually distinguishes the two. Nothing else does: `APP_ENV`
+is literally `staging` on the production containers and `NODE_ENV` is
+`production` on all four, so any code that tries to infer the environment
+infers it wrong. When something must be staging-only on the API, hang it off
+this flag and let it **fail closed**.
+
+Armed, it accepts fixed codes for a real login and sends nothing: `1234` for
+the phone OTP, `111111` for the email OTP. That is a full authentication
+bypass, which is why it is env-driven.
+
+It has burned us once already: the email-OTP path had `code === "111111"`
+hardcoded with no flag at all, under a `TODO: remove before production` that
+was never actioned — so for as long as it was deployed, **every account on the
+live API could be entered with a six-character constant**. Fixed by routing it
+through `src/common/qa-bypass.ts`. Do not reintroduce a code-level bypass; the
+flag exists precisely so nobody has to remember to flip one back.
+
 ## 5. Fonts and Arabic typography
 
 Readex Pro carries Arabic and Latin. `dara-web/scripts/patch_font_metrics.py`

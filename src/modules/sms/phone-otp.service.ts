@@ -5,6 +5,7 @@ import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { phoneOtpTokensTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { TaqnyatService } from "./taqnyat.service";
+import { qaBypassEnabled } from "../../common/qa-bypass";
 
 /**
  * Phone-OTP for the mobile app's two login paths (tenant and landlord).
@@ -32,8 +33,10 @@ const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_SEC = 60;
 export const DEV_BYPASS_CODE = "1234";
 
+/** Re-exported so callers here keep their name; the flag lives in one place
+ *  now that the email OTP is armed by it too. */
 export function smsBypassEnabled(): boolean {
-  return process.env.SMS_DEV_BYPASS === "true" || process.env.TWILIO_DEV_BYPASS === "true";
+  return qaBypassEnabled();
 }
 
 @Injectable()

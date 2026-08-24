@@ -9,6 +9,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import type { TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { TwilioVerifyService } from "../twilio/twilio-verify.service";
 import { PhoneOtpService, smsBypassEnabled, DEV_BYPASS_CODE } from "../sms/phone-otp.service";
+import { qaBypassEnabled, EMAIL_OTP_BYPASS_CODE } from "../../common/qa-bypass";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
 import { isPackagePlan, planAllowedForUserType, planUserTypeError } from "../../common/packages";
@@ -282,12 +283,22 @@ export class AuthService {
 
     const now = new Date();
 
-    // ── TEST BYPASS ──────────────────────────────────────────────────
-    // Accept the fixed code "111111" for any registered email so QA can log
-    // in without waiting for the real emailed OTP. Skips the token lookup,
-    // attempt-count, and bcrypt checks entirely.
-    // TODO: remove before production.
-    const isTestBypass = code === "111111";
+    // ── QA BYPASS (armed by env, off in production) ───────────────────
+    // Accepts the fixed code for any registered email so QA can log in without
+    // waiting for the real emailed OTP: it skips the token lookup, the attempt
+    // count and the bcrypt check entirely — a full authentication bypass.
+    //
+    // It used to be unconditional, with a `TODO: remove before production` that
+    // never happened, so every account on the live API could be entered with a
+    // six-character constant. It is now armed by the same flag the phone-OTP
+    // bypass has always used, and that flag is "false" on production.
+    //
+    // The code still works normally when the bypass is off: a real OTP that
+    // happens to be this value falls through to the checks below like any other.
+    const isTestBypass = code === EMAIL_OTP_BYPASS_CODE && qaBypassEnabled();
+    if (isTestBypass) {
+      new Logger("AuthService").warn(`[QA_BYPASS] email OTP accepted for ${email} without a token`);
+    }
 
     if (!isTestBypass) {
       const [token] = await this.db
