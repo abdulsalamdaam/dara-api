@@ -53,6 +53,30 @@ function normalizeItems(raw: any): LineItem[] {
     .filter((it) => it.description || it.amount);
 }
 
+/**
+ * Refuse a document whose figures are negative.
+ *
+ * A negative invoice is a credit note wearing an invoice's number: it would
+ * subtract from revenue, from the installment it collects against and from the
+ * ZATCA submission, all while being typed as an invoice. Credit and debit notes
+ * carry their own positive amounts and are netted by TYPE, so the rule is the
+ * same for all three. Enforced here as well as in the UI because the UI is only
+ * one caller.
+ */
+function assertNonNegative(items: LineItem[], total: number): void {
+  const bad = items.find((it) =>
+    !Number.isFinite(it.quantity) || !Number.isFinite(it.unitPrice) || !Number.isFinite(it.amount) ||
+    it.quantity < 0 || it.unitPrice < 0 || it.amount < 0);
+  if (bad) {
+    throw new BadRequestException(
+      `لا تُقبل القيم السالبة في بنود المستند${bad.description ? ` — «${bad.description}»` : ""}`,
+    );
+  }
+  if (!Number.isFinite(total) || total < 0) {
+    throw new BadRequestException("لا يمكن أن يكون إجمالي المستند سالباً");
+  }
+}
+
 @ApiTags("simple-invoices")
 @ApiBearerAuth("user-jwt")
 @Controller("simple-invoices")
@@ -435,6 +459,7 @@ class SimpleInvoicesController {
     const items = normalizeItems(body?.items);
     const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
     const total = body?.total != null ? round2(Number(body.total)) : subtotal;
+    assertNonNegative(items, total);
     // An explicit number wins; otherwise it's generated atomically below.
     const explicitNumber = (body?.number && String(body.number).trim()) || null;
 
@@ -813,11 +838,15 @@ class SimpleInvoicesController {
     const patch: any = {};
     if (body?.items != null) {
       const items = normalizeItems(body.items);
+      const total = body?.total != null ? round2(Number(body.total)) : round2(items.reduce((s, it) => s + it.amount, 0));
+      assertNonNegative(items, total);
       patch.items = items;
       patch.subtotal = round2(items.reduce((s, it) => s + it.amount, 0)).toFixed(2);
-      patch.total = (body?.total != null ? round2(Number(body.total)) : round2(items.reduce((s, it) => s + it.amount, 0))).toFixed(2);
+      patch.total = total.toFixed(2);
     } else if (body?.total != null) {
-      patch.total = round2(Number(body.total)).toFixed(2);
+      const total = round2(Number(body.total));
+      assertNonNegative([], total);
+      patch.total = total.toFixed(2);
     }
     for (const k of ["tenantName", "client", "issueDate", "dueDate", "notes", "billingReference", "contractId", "tenantId", "paymentId", "paymentIds"]) {
       if (body?.[k] !== undefined) patch[k] = body[k];
