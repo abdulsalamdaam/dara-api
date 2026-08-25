@@ -152,6 +152,28 @@ Every row in `zatca_credentials` — production database included — has
 submission goes to the developer-portal gateway with a test CSID. Verified
 20 Aug 2026 against both databases.
 
+**`active_environment` must always name a slot that HAS credentials.** It is
+the only thing `isOnboarded()` (`common/invoice-readiness.ts`) and
+`submitZatca()` read to pick which certificate columns to use, and neither
+falls back. On 25 Aug 2026 the first real production onboarding (owner 264)
+produced a row with a complete production CSID, `prod_slot_env = 'production'`
+— and `active_environment` still `'sandbox'`, whose columns were empty:
+`isOnboarded()` returned false, the readiness gate refused **every** invoice
+that landlord tried to issue, and a valid production certificate sat unused in
+the next column. `saveProfile` hardcodes `'sandbox'` on insert; issuing the
+production CSID now moves the pointer, because the only other writer —
+`switchEnvironment()` — is absent from the production UI *and* refuses to flip
+to production until a test cycle the blocked seller cannot run. A dead end with
+no way out of it from the app.
+
+Simulation deliberately does **not** move the pointer: it fills the same
+`prod_*` columns, and a record marked live while holding a simulation
+certificate signs every real invoice with something `/core` rejects.
+
+`seller_id_scheme` is per-INVOICE (`PartyIdentification/@schemeID`), not baked
+into the CSR — so it can be corrected on a live seller without re-onboarding.
+An individual landlord is `NAT` (national ID) or `IQA` (iqama), never `CRN`.
+
 The three environments differ by URL prefix *and* by CSR certificate template
 (`zatca-api.service.ts` + `csr.service.ts`), and both must match or onboarding
 fails in ways that look like a credential problem:

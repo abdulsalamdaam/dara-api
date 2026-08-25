@@ -341,6 +341,28 @@ export class ZatcaOnboardingService {
         // A real production CSID now occupies the slot, whichever compliance
         // certificate it was promoted from.
         prodSlotEnv: environment === "production" ? "production" : "simulation",
+        // ...and the record has to POINT at that slot.
+        //
+        // `saveProfile` creates every row with activeEnvironment "sandbox" and
+        // nothing here used to move it, so a seller who onboarded straight to
+        // production kept reading the EMPTY sandbox columns: isOnboarded() saw
+        // no certificate, the readiness gate refused every invoice they tried
+        // to issue, and submitZatca skipped as "not_onboarded" — all while a
+        // valid production certificate sat unused in the next column.
+        //
+        // It was a dead end, not a detour: switchEnvironment() is the only
+        // other writer, it is absent from the production UI entirely, and it
+        // refuses to flip to production until a test cycle that the blocked
+        // seller cannot run. Issuing a production CSID IS the go-live step, so
+        // it is what moves the pointer.
+        //
+        // Production only. Simulation fills these very same columns, and
+        // marking a record live while it holds a simulation certificate is the
+        // exact failure the prodSlotEnv guard in switchEnvironment() exists to
+        // prevent — every real invoice would be signed with a certificate the
+        // /core gateway rejects. A simulation seller can still switch by hand;
+        // that path is not gated.
+        ...(environment === "production" ? { activeEnvironment: "production" as const } : {}),
       })
       .where(eq(zatcaCredentialsTable.id, creds.id));
 
