@@ -106,8 +106,11 @@ export async function ensureSchema(): Promise<void> {
     try {
       await client.query(`alter table simple_invoices add column if not exists zatca_status text`);
       await client.query(`alter table simple_invoices add column if not exists zatca_error text`);
+      // The signed Phase-2 QR for this document. Additive and nullable: every
+      // existing row keeps printing the Phase-1 fallback untouched.
+      await client.query(`alter table simple_invoices add column if not exists zatca_qr text`);
     } catch (err: any) {
-      log.warn(`ensure simple_invoices.zatca_status/zatca_error failed: ${err?.message || err}`);
+      log.warn(`ensure simple_invoices.zatca_status/zatca_error/zatca_qr failed: ${err?.message || err}`);
     }
 
     // Unit-level usage override. NULL keeps the historical behaviour of

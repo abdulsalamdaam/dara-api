@@ -52,6 +52,16 @@ export const simpleInvoicesTable = pgTable("simple_invoices", {
   //   null      — not applicable / never attempted
   zatcaStatus: text("zatca_status"),
   zatcaError: text("zatca_error"),
+  // The QR ZATCA's signing produced for THIS document (base64 TLV, tags 1-9:
+  // the Phase-1 five plus the invoice hash, the ECDSA signature, the public key
+  // and — for a cleared standard invoice — ZATCA's stamp).
+  //
+  // Kept here rather than joined from `invoices` because nothing links the two
+  // tables, so the document had no way to reach its own QR and printed a
+  // locally-built Phase-1 one instead: five fields, no signature, nothing a
+  // verifier can check. Null until the document is actually submitted; the
+  // Phase-1 fallback still covers drafts and exempt supplies.
+  zatcaQr: text("zatca_qr"),
   // Receipt-voucher number, stamped when an invoice is confirmed.
   receiptNumber: text("receipt_number"),
   // For credit/debit notes — the original invoice number being adjusted.

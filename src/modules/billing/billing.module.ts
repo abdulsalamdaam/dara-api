@@ -36,7 +36,7 @@ type LineItem = { description: string; quantity: number; unitPrice: number; amou
 
 /** Result of the best-effort ZATCA mirror on approval — surfaced to the UI. */
 type ZatcaSubmitOutcome =
-  | { submitted: true; status: string; profile: string; environment: string; httpStatus: number; invoiceId: number; warnings: number }
+  | { submitted: true; status: string; profile: string; environment: string; httpStatus: number; invoiceId: number; qr: string | null; warnings: number }
   | { submitted: false; code: "not_linked" | "not_onboarded" | "no_items" | "skipped" | "not_required" | "error"; reason: string };
 
 function normalizeItems(raw: any): LineItem[] {
@@ -962,8 +962,10 @@ class SimpleInvoicesController {
       const o = outcome as any;
       let status: string;
       let error: string | null = null;
+      let qr: string | null = null;
       if (o.submitted) {
         status = o.profile === "standard" ? "cleared" : "reported";
+        qr = typeof o.qr === "string" && o.qr.trim() ? o.qr : null;
       } else {
         status = o.code === "error" ? "failed"
           : (o.code === "not_linked" || o.code === "not_onboarded") ? "pending"
@@ -971,7 +973,10 @@ class SimpleInvoicesController {
         error = o.reason ?? null;
       }
       await this.db.update(simpleInvoicesTable)
-        .set({ zatcaStatus: status, zatcaError: error } as any)
+        // Only ever WRITE the QR — never blank an existing one. A later
+        // re-submission that fails must not strip the signed QR off a document
+        // that was already cleared.
+        .set({ zatcaStatus: status, zatcaError: error, ...(qr ? { zatcaQr: qr } : {}) } as any)
         .where(and(eq(simpleInvoicesTable.id, Number(doc.id)), eq(simpleInvoicesTable.userId, uid)));
     } catch { /* status persistence is best-effort — never block approval */ }
     return outcome;
@@ -1074,7 +1079,10 @@ class SimpleInvoicesController {
       const result = await this.invoices.issue(uid, dto);
       this.logger.log(`ZATCA: ${doc.number} → ${result.invoice.status} (${result.invoice.submittedTo}, ${profile}) ownerId=${ownerId}`);
       const warnings = ((result.invoice.zatcaResponse as any)?.validationResults?.warningMessages ?? []).length;
-      return { submitted: true, status: result.invoice.status, profile, environment: env, httpStatus: result.invoice.httpStatus ?? 0, invoiceId: result.invoice.id, warnings };
+      // The QR the signer computed for this exact document — carried back so
+      // the printed invoice can show the signed one instead of a locally
+      // rebuilt Phase-1 stand-in.
+      return { submitted: true, status: result.invoice.status, profile, environment: env, httpStatus: result.invoice.httpStatus ?? 0, invoiceId: result.invoice.id, qr: result.invoice.qrBase64 ?? null, warnings };
     } catch (e: any) {
       this.logger.warn(`ZATCA submit failed for ${doc?.number}: ${e?.message ?? e}`);
       return { submitted: false, code: "error", reason: e?.message ? String(e.message).slice(0, 300) : "ZATCA submission failed" };
