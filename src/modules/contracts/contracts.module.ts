@@ -429,17 +429,51 @@ class ContractsController {
     if (prepaid > 0 && inserted.length > 0) {
       const method = body.prepaidMethod || "bank_transfer";
       const advanceVoucher = await this.nextReceiptNumber(ownerId);
-      const rentRows = inserted.filter((p) => !p.description && p.status !== "settled_external")
-        .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+
+      /* Which additional fees the advance is allowed to settle.
+       *
+       * The advance used to go to rent alone: `!p.description` matched rent
+       * installments and nothing else. A landlord who collected enough up front
+       * to cover the service fee as well had no way to say so — the fee sat
+       * unpaid next to a rent installment that was already covered, and had to
+       * be collected again by hand.
+       *
+       * Matched by NAME, because that is what an installment carries:
+       * `appendFees()` writes `description = fee.name`. The fee `id` lives only
+       * on the contract's JSON and never reaches the payments table. Two fees
+       * sharing a name are therefore indistinguishable here — they are also
+       * indistinguishable on the schedule, so this adds no new ambiguity.
+       */
+      const pickedFeeIds = new Set(
+        (Array.isArray(body.prepaidFeeIds) ? body.prepaidFeeIds : []).map((v: unknown) => String(v)),
+      );
+      const pickedFeeNames = new Set(
+        (additionalFees ?? [])
+          .filter((f: any) => pickedFeeIds.has(String(f?.id)))
+          .map((f: any) => String(f?.name || "رسوم")),
+      );
+
+      const settleRows = inserted
+        .filter((p) => p.status !== "settled_external"
+          && (!p.description || pickedFeeNames.has(p.description)))
+        .sort((a, b) =>
+          String(a.dueDate).localeCompare(String(b.dueDate))
+          // Same due date: rent before fees. Rent is the primary obligation, so
+          // an advance too small to cover both should land on it.
+          || Number(!!a.description) - Number(!!b.description));
+
       let left = prepaid;
       let applied = 0;
-      for (const p of rentRows) {
+      for (const p of settleRows) {
         if (left <= 0.01) break;
         const full = round2(Number(p.amount));
         const amt = round2(Math.min(left, full));
         await this.db.insert(paymentCollectionsTable).values({
           paymentId: p.id, userId: ownerId, amount: amt.toFixed(2),
           collectedDate: startDay, method, receiptNumber: advanceVoucher,
+          // This exact string buckets the collection as "advance" when the
+          // contract is ended (see settlementBuckets) — a fee-covering
+          // collection is still part of the advance, so it must not diverge.
           notes: "إيجار مدفوع مقدماً", attachmentKey: body.prepaidAttachmentKey ?? null,
         } as any);
         const fully = amt >= full - 0.01;
