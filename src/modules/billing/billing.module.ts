@@ -1,6 +1,6 @@
 import {
-  Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query,
-  BadRequestException, UseGuards,
+  Body, Controller, Delete, Get, Header, Inject, Module, NotFoundException, Param, Patch, Post, Query,
+  BadRequestException, ConflictException, StreamableFile, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql } from "drizzle-orm";
@@ -11,6 +11,9 @@ import {
   type BuyerSnapshot,
 } from "@dara/database";
 import type { InvoiceLineInput } from "../invoice/services/invoice-builder.service";
+import { PdfA3Service } from "../invoice/services/pdfa3.service";
+import { UploadsService } from "../uploads/uploads.service";
+import { UploadsModule } from "../uploads/uploads.module";
 import { listQuerySchema } from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -118,7 +121,64 @@ class SimpleInvoicesController {
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly invoices: InvoiceService,
     private readonly zatcaOnboarding: ZatcaOnboardingService,
+    private readonly pdfa3: PdfA3Service,
+    private readonly uploads: UploadsService,
   ) {}
+
+  /**
+   * GET /simple-invoices/:id/pdfa3
+   *
+   * The buyer's copy of a cleared invoice as PDF/A-3: the rendered page with
+   * ZATCA's cleared XML embedded inside it. ZATCA accepts the e-invoice being
+   * shared as XML or as PDF/A-3 carrying that XML, and this is the second form.
+   *
+   * Deliberately refuses rather than improvising when either half is missing —
+   * a PDF/A-3 without the cleared XML would claim to be an e-invoice while
+   * carrying nothing verifiable.
+   */
+  @Get(":id/pdfa3")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  @Header("Content-Type", "application/pdf")
+  async pdfA3(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    const uid = scopeId(user);
+    const [doc] = await this.db.select().from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+    if (!doc) throw new NotFoundException("Document not found");
+
+    // The cleared XML: by the stored link, falling back to a match on the
+    // invoice number for documents submitted before that link existed.
+    const linkId = (doc as any).zatcaInvoiceId as number | null;
+    const [einv] = linkId
+      ? await this.db.select({ clearedXml: invoicesTable.clearedXml, signedXml: invoicesTable.signedXml })
+          .from(invoicesTable).where(and(eq(invoicesTable.id, linkId), eq(invoicesTable.userId, uid)))
+      : await this.db.select({ clearedXml: invoicesTable.clearedXml, signedXml: invoicesTable.signedXml })
+          .from(invoicesTable)
+          .where(and(eq(invoicesTable.userId, uid), eq(invoicesTable.invoiceNumber, doc.number), isNull(invoicesTable.deletedAt)));
+
+    const xml = einv?.clearedXml ?? null;
+    if (!xml) {
+      throw new ConflictException(
+        "لا توجد نسخة معتمدة من هيئة الزكاة لهذا المستند بعد — لا يمكن إنشاء نسخة PDF/A-3.",
+      );
+    }
+    const pdfKey = (doc as any).pdfKey as string | null;
+    if (!pdfKey) {
+      throw new ConflictException(
+        "لم يتم إنشاء ملف PDF لهذا المستند بعد. افتح المستند مرة واحدة ثم أعد المحاولة.",
+      );
+    }
+
+    const pdf = await this.uploads.getObject(pdfKey);
+    const out = await this.pdfa3.build({
+      pdf, xml: Buffer.from(xml, "utf8"),
+      number: doc.number,
+      issuedAt: doc.issueDate ? new Date(doc.issueDate) : null,
+    });
+    return new StreamableFile(out, {
+      type: "application/pdf",
+      disposition: `attachment; filename="${doc.number.replace(/[^A-Za-z0-9._-]/g, "_")}-pdfa3.pdf"`,
+    });
+  }
 
   /**
    * Next document number for a type, e.g. INV-000123 / CRN-000005 / DBN-000002.
@@ -994,9 +1054,13 @@ class SimpleInvoicesController {
       let status: string;
       let error: string | null = null;
       let qr: string | null = null;
+      let zatcaInvoiceId: number | null = null;
       if (o.submitted) {
         status = o.profile === "standard" ? "cleared" : "reported";
         qr = typeof o.qr === "string" && o.qr.trim() ? o.qr : null;
+        // Remember WHICH e-invoice this document became, so the PDF/A-3 copy
+        // can find the cleared XML later.
+        zatcaInvoiceId = Number.isFinite(o.invoiceId) ? Number(o.invoiceId) : null;
       } else {
         status = o.code === "error" ? "failed"
           : (o.code === "not_linked" || o.code === "not_onboarded") ? "pending"
@@ -1007,7 +1071,11 @@ class SimpleInvoicesController {
         // Only ever WRITE the QR — never blank an existing one. A later
         // re-submission that fails must not strip the signed QR off a document
         // that was already cleared.
-        .set({ zatcaStatus: status, zatcaError: error, ...(qr ? { zatcaQr: qr } : {}) } as any)
+        .set({
+          zatcaStatus: status, zatcaError: error,
+          ...(qr ? { zatcaQr: qr } : {}),
+          ...(zatcaInvoiceId ? { zatcaInvoiceId } : {}),
+        } as any)
         .where(and(eq(simpleInvoicesTable.id, Number(doc.id)), eq(simpleInvoicesTable.userId, uid)));
     } catch { /* status persistence is best-effort — never block approval */ }
     return outcome;
@@ -1286,5 +1354,5 @@ class SimpleInvoicesController {
   }
 }
 
-@Module({ imports: [InvoiceModule], controllers: [SimpleInvoicesController] })
+@Module({ imports: [InvoiceModule, UploadsModule], controllers: [SimpleInvoicesController] })
 export class BillingModule {}

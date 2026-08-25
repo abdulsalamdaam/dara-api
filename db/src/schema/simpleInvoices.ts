@@ -62,6 +62,11 @@ export const simpleInvoicesTable = pgTable("simple_invoices", {
   // verifier can check. Null until the document is actually submitted; the
   // Phase-1 fallback still covers drafts and exempt supplies.
   zatcaQr: text("zatca_qr"),
+  // The `invoices` row this document was submitted as. Needed to reach the
+  // cleared XML (which lives there) when building the PDF/A-3 copy — the two
+  // tables had no link at all, so a billing document could not find its own
+  // e-invoice.
+  zatcaInvoiceId: integer("zatca_invoice_id"),
   // Receipt-voucher number, stamped when an invoice is confirmed.
   receiptNumber: text("receipt_number"),
   // For credit/debit notes — the original invoice number being adjusted.

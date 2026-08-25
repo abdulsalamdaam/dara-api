@@ -109,6 +109,7 @@ export async function ensureSchema(): Promise<void> {
       // The signed Phase-2 QR for this document. Additive and nullable: every
       // existing row keeps printing the Phase-1 fallback untouched.
       await client.query(`alter table simple_invoices add column if not exists zatca_qr text`);
+      await client.query(`alter table simple_invoices add column if not exists zatca_invoice_id integer`);
     } catch (err: any) {
       log.warn(`ensure simple_invoices.zatca_status/zatca_error/zatca_qr failed: ${err?.message || err}`);
     }
