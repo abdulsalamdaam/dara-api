@@ -453,13 +453,26 @@ class ContractsController {
           .map((f: any) => String(f?.name || "رسوم")),
       );
 
+      /* Rent is a choice too, not a fixture. A landlord may have taken the
+       * advance specifically to clear the fees and be collecting rent monthly
+       * as normal — forcing rent to absorb it first made that impossible to
+       * express. Defaults to true, so a caller that says nothing gets exactly
+       * the historical behaviour.
+       *
+       * If the caller manages to select nothing at all, fall back to rent
+       * rather than settling nothing: the amount is already recorded on the
+       * contract, and quietly applying it to no installment would leave money
+       * banked against a schedule that still reads as fully unpaid. */
+      const wantsRent = body.prepaidCoversRent !== false;
+      const coversRent = (wantsRent || pickedFeeNames.size === 0);
+
       const settleRows = inserted
         .filter((p) => p.status !== "settled_external"
-          && (!p.description || pickedFeeNames.has(p.description)))
+          && (p.description ? pickedFeeNames.has(p.description) : coversRent))
         .sort((a, b) =>
           String(a.dueDate).localeCompare(String(b.dueDate))
-          // Same due date: rent before fees. Rent is the primary obligation, so
-          // an advance too small to cover both should land on it.
+          // Same due date, and both were chosen: rent first. Only a tie-break —
+          // whether rent is in the running at all is the caller's decision.
           || Number(!!a.description) - Number(!!b.description));
 
       let left = prepaid;
