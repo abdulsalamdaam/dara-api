@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { PDFDocument, PDFName, PDFString, PDFNumber, AFRelationship, PDFDict } from "pdf-lib";
+import { createHash } from "node:crypto";
+import { PDFDocument, PDFName, PDFString, PDFHexString, PDFNumber, AFRelationship } from "pdf-lib";
 import { SRGB_ICC_BASE64 } from "../assets/srgb-icc";
 
 /**
@@ -41,21 +42,15 @@ export class PdfA3Service {
       afRelationship: AFRelationship.Alternative,
     });
 
-    // ── 2. Drop font declarations nothing draws with ───────────────────────
-    // The page is a single rasterised image and paints no text, but jsPDF
-    // still emits the 14 standard fonts into every page's /Resources with no
-    // /FontFile. PDF/A forbids a font that is not embedded, so those unused
-    // dictionaries alone would fail validation. Removing them is safe here
-    // precisely because no content stream references them.
-    let dropped = 0;
-    for (const page of doc.getPages()) {
-      const res = page.node.Resources();
-      const fonts = res?.lookup(PDFName.of("Font"));
-      if (fonts instanceof PDFDict) {
-        for (const key of fonts.keys()) { fonts.delete(key); dropped += 1; }
-        if (fonts.keys().length === 0) res!.delete(PDFName.of("Font"));
-      }
-    }
+    // NOTE on fonts: jsPDF emits the 14 standard fonts into every page's
+    // /Resources with no /FontFile, even though the page is a single rasterised
+    // image that paints no text. An earlier version of this stripped them.
+    // It no longer does, for two measured reasons: veraPDF passes the file
+    // either way (the embedding rules bind fonts actually used for rendering,
+    // and nothing references these), and removing them CORRUPTS any PDF whose
+    // content stream does draw text — the conformance gate caught exactly that.
+    // If the renderer ever stops rasterising, real embedded fonts become a
+    // requirement and the gate will say so.
 
     // ── 3. OutputIntent ───────────────────────────────────────────────────
     // PDF/A needs colour to be unambiguous, which means carrying the profile
@@ -107,13 +102,26 @@ export class PdfA3Service {
       doc.context.register(doc.context.stream(xmp, { Type: "Metadata", Subtype: "XML" })),
     );
 
+    // ── 5. File identifier ────────────────────────────────────────────────
+    // PDF/A clause 6.1.3 requires an /ID in the trailer. jsPDF happens to write
+    // one, so the current renderer's output already had it — but pdf-lib adds
+    // none of its own, so any source lacking it would have produced a file that
+    // fails on this alone. Derived from the invoice number and timestamp rather
+    // than randomly, so rebuilding the same invoice yields the same identifier.
+    if (!doc.context.trailerInfo.ID) {
+      const hex = createHash("sha256")
+        .update(`${args.number}|${when.toISOString()}`)
+        .digest("hex").slice(0, 32).toUpperCase();
+      doc.context.trailerInfo.ID = doc.context.obj([PDFHexString.of(hex), PDFHexString.of(hex)]);
+    }
+
     doc.setTitle(args.number);
     doc.setProducer("Dara");
     doc.setCreator("Dara");
     doc.setCreationDate(when);
     doc.setModificationDate(when);
 
-    this.log.debug(`PDF/A-3 ${args.number}: ${args.xml.length}B xml embedded, ${dropped} unused font dict(s) dropped`);
+    this.log.debug(`PDF/A-3 ${args.number}: ${args.xml.length}B xml embedded`);
     return Buffer.from(await doc.save());
   }
 }
