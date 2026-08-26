@@ -466,14 +466,31 @@ class ContractsController {
       const wantsRent = body.prepaidCoversRent !== false;
       const coversRent = (wantsRent || pickedFeeNames.size === 0);
 
+      /* Which of the chosen items gets paid first.
+       *
+       * Ticking a fee is worthless without this. Rent installments dwarf fees —
+       * 100,000 rent against a 1,000 service fee is ordinary — so a
+       * rent-first advance is swallowed whole by the first rent row and the fee
+       * it was explicitly ticked for receives nothing. The tick looked like it
+       * did nothing because, in that shape, it did.
+       *
+       * "fees" clears the ticked fees first and puts the remainder on rent,
+       * which is what someone ticking a fee almost always means. Defaults to
+       * "rent" — the historical behaviour, and the safer one, since rent is the
+       * obligation that accrues late fees.
+       */
+      const feesFirst = String(body.prepaidPriority ?? "rent") === "fees";
+
       const settleRows = inserted
         .filter((p) => p.status !== "settled_external"
           && (p.description ? pickedFeeNames.has(p.description) : coversRent))
-        .sort((a, b) =>
-          String(a.dueDate).localeCompare(String(b.dueDate))
-          // Same due date, and both were chosen: rent first. Only a tie-break —
-          // whether rent is in the running at all is the caller's decision.
-          || Number(!!a.description) - Number(!!b.description));
+        .sort((a, b) => {
+          const aFee = !!a.description, bFee = !!b.description;
+          // Priority decides the class order; due date orders within a class,
+          // so the money still walks the schedule forwards.
+          if (aFee !== bFee) return feesFirst ? (aFee ? -1 : 1) : (aFee ? 1 : -1);
+          return String(a.dueDate).localeCompare(String(b.dueDate));
+        });
 
       let left = prepaid;
       let applied = 0;
