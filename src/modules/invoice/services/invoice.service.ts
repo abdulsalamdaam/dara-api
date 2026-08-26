@@ -264,6 +264,22 @@ export class InvoiceService {
   async complianceCheck(userId: number, ownerId: number | null): Promise<{
     ok: boolean; httpStatus: number; status: string; warnings: string[]; errors: string[];
   }> {
+    // A compliance check is a PRE-go-live gate. Issuing the production CSID
+    // overwrites the compliance CSID it was promoted from, so a live seller no
+    // longer holds compliance credentials at all — running this would submit the
+    // production CSID to ZATCA's /compliance endpoint, which answers "already
+    // completed" for standard and rejects the simplified docs on signature
+    // validation. That is not a defect in the seller or the signing; it is a
+    // check that no longer applies. Refuse it in plain language rather than
+    // surfacing ZATCA's confusing rejection.
+    {
+      const c = await this.onboarding.getCredentials(userId, ownerId);
+      if (c && (c as any).prodSlotEnv === "production" && (c as any).activeEnvironment === "production") {
+        throw new ConflictException(
+          "هذا المؤجر مُفعّل على بيئة الإنتاج بالفعل — فحص التوافق خطوة سابقة للتفعيل ولا تنطبق بعده. الفواتير الحقيقية تُرسَل مباشرة إلى هيئة الزكاة.",
+        );
+      }
+    }
     // getActiveCredentials throws clean HTTP errors (404/409) if not onboarded —
     // let those bubble. Everything else is wrapped so a tooling/signing failure
     // becomes a readable verdict, never a 500.
@@ -291,6 +307,22 @@ export class InvoiceService {
     ok: boolean; passed: number; total: number;
     results: { doc: string; ok: boolean; status: string; warnings: string[]; errors: string[] }[];
   }> {
+    // A compliance check is a PRE-go-live gate. Issuing the production CSID
+    // overwrites the compliance CSID it was promoted from, so a live seller no
+    // longer holds compliance credentials at all — running this would submit the
+    // production CSID to ZATCA's /compliance endpoint, which answers "already
+    // completed" for standard and rejects the simplified docs on signature
+    // validation. That is not a defect in the seller or the signing; it is a
+    // check that no longer applies. Refuse it in plain language rather than
+    // surfacing ZATCA's confusing rejection.
+    {
+      const c = await this.onboarding.getCredentials(userId, ownerId);
+      if (c && (c as any).prodSlotEnv === "production" && (c as any).activeEnvironment === "production") {
+        throw new ConflictException(
+          "هذا المؤجر مُفعّل على بيئة الإنتاج بالفعل — فحص التوافق خطوة سابقة للتفعيل ولا تنطبق بعده. الفواتير الحقيقية تُرسَل مباشرة إلى هيئة الزكاة.",
+        );
+      }
+    }
     const { creds, decrypted } = await this.onboarding.getActiveCredentials(userId, ownerId);
     const seller = this.sellerSnapshotFrom(creds);
     const it = creds.invoiceType || "1100";
