@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Logger } from "@nestjs/common";
 import { eq, and, isNull, desc, ilike, count } from "drizzle-orm";
 import {
   invoicesTable,
@@ -46,6 +46,8 @@ export interface IssueResult {
 
 @Injectable()
 export class InvoiceService {
+  private readonly logger = new Logger(InvoiceService.name);
+
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly builder: InvoiceBuilderService,
@@ -268,14 +270,28 @@ export class InvoiceService {
     // let those bubble. Everything else is wrapped so a tooling/signing failure
     // becomes a readable verdict, never a 500.
     const { creds, decrypted } = await this.onboarding.getActiveCredentials(userId, ownerId);
+    /* Say what happened.
+     *
+     * This check deliberately persists nothing, which also meant it left no
+     * trace anywhere: no row, no log line above debug, and the proxy keeps no
+     * access log. Someone pressing "فحص" on production and asking afterwards
+     * what ZATCA said could not be answered from the server at all — the
+     * verdict existed only in the browser that received it. A support tool you
+     * cannot support from is not much of one.
+     */
+    const who = `owner=${ownerId ?? "self"} user=${userId} env=${decrypted.environment}`;
     try {
       const r = await this.submitComplianceDoc(
         decrypted, this.sellerSnapshotFrom(creds),
         { profile: "standard", docType: "invoice" }, decrypted.icv + 1, decrypted.pih,
       );
+      const detail = `${who} http=${r.httpStatus} status=${r.status}`;
+      if (r.ok) this.logger.log(`compliance-check PASS ${detail} warnings=${r.warnings.length}`);
+      else this.logger.warn(`compliance-check FAIL ${detail} errors=${JSON.stringify(r.errors).slice(0, 400)}`);
       return { ok: r.ok, httpStatus: r.httpStatus, status: r.status, warnings: r.warnings, errors: r.errors };
     } catch (e) {
       const msg = (e as Error)?.message || String(e);
+      this.logger.warn(`compliance-check ERROR ${who} ${msg.slice(0, 400)}`);
       return { ok: false, httpStatus: 0, status: "ERROR", warnings: [], errors: [msg.slice(0, 500)] };
     }
   }
