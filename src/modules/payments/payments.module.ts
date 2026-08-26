@@ -50,6 +50,20 @@ class PaymentsController {
     const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null || status != null || statusIn != null || contractIds != null);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const baseWhere = and(eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt));
+    /**
+     * The DATASET the summary cards describe, as opposed to how it is being
+     * presented. Search text, the status tab and paging are presentation — the
+     * cards deliberately ignore those so they do not jump around while the user
+     * pages or types. A contract filter is not presentation: it selects which
+     * contract's money is on screen, and cards that ignore it describe a
+     * different contract's money than the table beneath them.
+     *
+     * That was the bug: opening the log for one contract showed its 10,000 of
+     * collections in the rows and the account's entire 82,000 in the card.
+     */
+    const scopeWhere = contractIds && contractIds.length > 0
+      ? and(baseWhere, inArray(paymentsTable.contractId, contractIds))
+      : baseWhere;
     const conds = [baseWhere];
     if (q.search) {
       conds.push(or(
@@ -118,10 +132,22 @@ class PaymentsController {
         status: liveStatusSql,
         cnt: count(),
         amount: sum(paymentsTable.amount),
-      }).from(paymentsTable).where(baseWhere).groupBy(sql`1`) : Promise.resolve([]),
-      // Actual money collected across all collections (covers partial ones).
+      }).from(paymentsTable).where(scopeWhere).groupBy(sql`1`) : Promise.resolve([]),
+      // Money actually collected for the same scope (covers partial payments).
+      // Joined through the installment so it can be scoped and so a collection
+      // whose installment was since deleted stops being counted. Collections
+      // with no installment at all (a collected commission invoice, for
+      // example) are kept in the unfiltered view — they are real money — but
+      // cannot belong to a single contract, so a contract filter excludes them.
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
-        .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.userId, scopeId(user)))
+        .from(paymentCollectionsTable)
+        .leftJoin(paymentsTable, eq(paymentsTable.id, paymentCollectionsTable.paymentId))
+        .where(and(
+          eq(paymentCollectionsTable.userId, scopeId(user)),
+          contractIds && contractIds.length > 0
+            ? inArray(paymentsTable.contractId, contractIds)
+            : or(isNull(paymentCollectionsTable.paymentId), isNull(paymentsTable.deletedAt)),
+        ))
         : Promise.resolve([{ amount: null }]),
     ]);
 
