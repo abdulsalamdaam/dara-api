@@ -25,6 +25,7 @@ import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
+import { clearedInvoiceQr } from "../../common/zatca-qr";
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -39,36 +40,6 @@ type ZatcaSubmitOutcome =
   | { submitted: true; status: string; profile: string; environment: string; httpStatus: number; invoiceId: number; qr: string | null; warnings: number }
   | { submitted: false; code: "not_linked" | "not_onboarded" | "no_items" | "skipped" | "not_required" | "error"; reason: string };
 
-/**
- * ZATCA's own QR out of a CLEARED standard invoice.
- *
- * Our signer only builds the 9-tag Phase-2 QR for SIMPLIFIED invoices; a
- * standard (B2B) one is signed with a 5-tag Phase-1 QR, because a standard
- * invoice is not self-certified — it goes through clearance and ZATCA returns
- * the cleared document carrying the QR it stamped. That returned QR is the one
- * the buyer's copy has to show, and it was being decoded, stored in
- * `invoices.cleared_xml` and then ignored.
- *
- * Tolerant of namespace prefixes and attribute order, and returns null on
- * anything unexpected — a missing QR must leave the document on its existing
- * fallback, never blank it.
- */
-function clearedInvoiceQr(clearedXml: string | null | undefined): string | null {
-  if (!clearedXml || typeof clearedXml !== "string") return null;
-  // Each AdditionalDocumentReference is a self-contained block; the QR one is
-  // identified by an <ID>QR</ID> child, so isolate blocks and pick that one
-  // rather than trusting the document order.
-  const blocks = clearedXml.split(/<[A-Za-z0-9]*:?AdditionalDocumentReference[\s>]/).slice(1);
-  for (const block of blocks) {
-    if (!/<[A-Za-z0-9]*:?ID>\s*QR\s*<\//.test(block)) continue;
-    const m = block.match(
-      /<[A-Za-z0-9]*:?EmbeddedDocumentBinaryObject[^>]*>([\s\S]*?)<\/[A-Za-z0-9]*:?EmbeddedDocumentBinaryObject>/,
-    );
-    const qr = m?.[1]?.trim();
-    if (qr) return qr;
-  }
-  return null;
-}
 
 function normalizeItems(raw: any): LineItem[] {
   if (!Array.isArray(raw)) return [];

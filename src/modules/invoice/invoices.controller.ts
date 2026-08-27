@@ -16,6 +16,7 @@ import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-re
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
+import { clearedInvoiceQr } from "../../common/zatca-qr";
 
 @ApiTags("invoices")
 @ApiBearerAuth("user-jwt")
@@ -155,7 +156,11 @@ export class InvoicesController {
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
       .where(and(eq(usersTable.id, scopeId(user)), isNull(usersTable.deletedAt)));
     return {
-      invoice,
+      // A cleared standard invoice must print the QR ZATCA stamped, not the
+      // 5-tag Phase-1 one we signed with — that one no verifier can check.
+      // Simplified invoices keep their own QR, which is already the real 9-tag
+      // Phase-2 one, and an uncleared document keeps its fallback.
+      invoice: { ...invoice, qrBase64: clearedInvoiceQr(invoice.clearedXml) ?? invoice.qrBase64 },
       lines,
       language: lang ?? invoice.language ?? "ar",
       brand: { logoUrl: row?.companyLogoKey ?? null },
