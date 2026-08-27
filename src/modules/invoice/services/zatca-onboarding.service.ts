@@ -253,6 +253,9 @@ export class ZatcaOnboardingService {
     const certPem = tokenToCertPem(j.binarySecurityToken);
 
     const updates: Partial<ZatcaCredentials> = {};
+    // Point the record at the slot this CSID lands in, so the compliance suite
+    // that must run next reads THESE credentials and not an empty slot.
+    updates.activeEnvironment = environment;
     if (environment === "sandbox") {
       updates.sandboxPrivateKeyEnc = encryptString(csr.privateKey);
       updates.sandboxPublicKeyPem = csr.publicKey;
