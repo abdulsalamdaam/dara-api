@@ -295,6 +295,37 @@ seller name on the document comes from the XML, not the certificate) and not
 worth a re-onboard, which would cost a fresh taxpayer OTP — but fix
 `ZATCA_CSR_TEMPLATE` before onboarding the remaining 21 sellers.
 
+### 2b-ii. Validating invoices offline with ZATCA's own SDK
+
+`.github/workflows/zatca-validate.yml` runs ZATCA's Fatoora SDK over one of
+every document shape Dara issues, on every push, and fails the build on
+anything it rejects. `scripts/zatca-sample-matrix.ts` builds and signs that
+matrix — standard/simplified × invoice/credit/debit, plus the exempt
+residential-rent, mixed exempt+taxable, zero-rated and multi-line cases.
+
+It checks what we could not check before: XSD, EN16931, the KSA business rules,
+the QR, the signature and the PIH. The job ends with a **negative control** — it
+corrupts a digest and requires the SDK to notice — because a validation harness
+that has quietly stopped validating reports green forever.
+
+Three things that harness taught us, all of them easy to get wrong again:
+
+- **Use JDK 11.** SunEC dropped `secp256k1` after JDK 15, and ZATCA mandates
+  that curve. On a newer JDK the SDK logs `Curve not supported` and the
+  signature check is meaningless rather than failing loudly.
+- **`Data/Certificates/cert.pem` is a bare base64 body, not a PEM.** Feeding it
+  a real PEM produces `Illegal base64 character 2d` — the `-` of `-----BEGIN`.
+  That error is about the SDK's configuration, not about the invoice.
+- **The signature check compares against that configured certificate**, so it
+  must be the one the documents were signed with, or every document "fails"
+  with `wrong X509SerialNumber`.
+
+To validate against a REAL seller's certificate rather than the SDK's test one,
+sign the matrix inside the API container (where the private key can be
+decrypted) and run the validator over the output. Owner 264's ten documents
+passed 6/6 checks that way on 28 Aug 2026 — with the production CSID, before
+anything was submitted.
+
 **How to test all 6 on production WITHOUT a new OTP or creating invoices.**
 The compliance suite persists nothing and simplified is re-runnable; standard,
 once passed, returns "already completed" (now counted as a pass). Owner 264
