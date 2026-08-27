@@ -319,6 +319,15 @@ export class InvoiceService {
    * Documents are PIH-chained in sequence. Nothing is persisted, so it is
    * safely re-runnable. Returns a per-document verdict plus an overall pass.
    */
+  async runOneComplianceDocForDebug(userId: number, ownerId: number | null): Promise<any> {
+    const { creds, decrypted } = await this.onboarding.getActiveCredentials(userId, ownerId);
+    const r: any = await this.submitComplianceDoc(
+      decrypted, this.sellerSnapshotFrom(creds),
+      { profile: "simplified", docType: "invoice" }, decrypted.icv + 1, decrypted.pih,
+    );
+    return { ok: r.ok, status: r.status, errors: r.errors, signedXml: r.signedXml };
+  }
+
   async complianceSuite(userId: number, ownerId: number | null, opts?: { skipLiveGuard?: boolean }): Promise<{
     ok: boolean; passed: number; total: number;
     results: { doc: string; ok: boolean; status: string; warnings: string[]; errors: string[] }[];
@@ -466,7 +475,7 @@ export class InvoiceService {
     const reportStatus = j.reportingStatus || j.clearanceStatus || vr.status
       || (alreadyDone ? "ALREADY_DONE" : (resp.status >= 200 && resp.status < 300 ? "PASS" : `HTTP ${resp.status}`));
     const ok = alreadyDone || (resp.status >= 200 && resp.status < 300 && errors.length === 0);
-    return { ok, httpStatus: resp.status, status: String(reportStatus), warnings, errors: alreadyDone ? [] : errors, hash: signed.invoiceHashBase64 };
+    return { ok, httpStatus: resp.status, status: String(reportStatus), warnings, errors: alreadyDone ? [] : errors, hash: signed.invoiceHashBase64, signedXml: signed.signedXml } as any;
   }
 
   /* ─── Read APIs ─────────────────────────────────────────────────────── */

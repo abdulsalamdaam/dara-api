@@ -39,6 +39,15 @@ export class ZatcaOnboardingController {
    * Run the FULL compliance test suite (every document type the CSR declared).
    * Passing all of them is ZATCA's prerequisite for issuing a production CSID.
    */
+  @Post("debug-sign")
+  @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
+  async debugSign(@CurrentUser() user: AuthUser, @Body() body: { ownerId?: number }) {
+    // TEMP diagnostic: run just the simplified invoice compliance doc and return
+    // the signed XML so the SignedProperties can be inspected. Remove after use.
+    const r: any = await (this.invoices as any).runOneComplianceDocForDebug(scopeId(user), this.oid(body?.ownerId));
+    return r;
+  }
+
   @Post("compliance-suite")
   @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
   async complianceSuite(@CurrentUser() user: AuthUser, @Body() body: { ownerId?: number }) {
