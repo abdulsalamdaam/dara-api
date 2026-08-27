@@ -64,3 +64,29 @@ Ejar API behaviour and its scoping rules, the package/role model and why
 account classification is by topology rather than role key, VAT and derived
 installment status, the Arabic font-metric fix, and per-repo gotchas including
 the tsc baseline and the ValidationPipe whitelist.
+
+# Rule: never change ZATCA signing without validating it
+
+The signer, the invoice builder and the QR are **not** things to change and
+eyeball. A wrong byte there is invisible: the ZATCA sandbox accepts it, standard
+invoices still clear (ZATCA re-stamps those and never checks ours), and only the
+production reporting endpoint objects — months later, with an error pointing at
+the wrong field. That is exactly how three wrong recipes shipped and sat there.
+
+**Before and after touching any of:** `invoice-signer.service.ts`,
+`invoice-builder.service.ts`, `qr.service.ts`, `zatca-assets.ts`, or the base
+image's `xmllint` / `xsltproc` / `openssl` — validate with ZATCA's own SDK:
+
+```
+# in dara-api
+pnpm exec tsx scripts/zatca-sample-matrix.ts --cert <cert.pem> --key <key.pem> --out /tmp/samples
+fatoora -validate -invoice /tmp/samples/<each>.xml     # ZATCA Fatoora SDK
+```
+
+Every document must report `GLOBAL VALIDATION RESULT = PASSED`. See
+`DARA-NOTES.md` §2b-ii for how to set the SDK up (JDK 11 — newer JDKs silently
+cannot do `secp256k1`), how to sign with a real seller's certificate, and the
+two configuration traps that make the validator lie instead of fail.
+
+Validate again when the invoice shape changes, not only when the signer does —
+a new discount, advance payment or VAT category produces XML nobody has checked.
