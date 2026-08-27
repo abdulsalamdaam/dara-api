@@ -303,19 +303,17 @@ export class InvoiceService {
    * Documents are PIH-chained in sequence. Nothing is persisted, so it is
    * safely re-runnable. Returns a per-document verdict plus an overall pass.
    */
-  async complianceSuite(userId: number, ownerId: number | null): Promise<{
+  async complianceSuite(userId: number, ownerId: number | null, opts?: { skipLiveGuard?: boolean }): Promise<{
     ok: boolean; passed: number; total: number;
     results: { doc: string; ok: boolean; status: string; warnings: string[]; errors: string[] }[];
   }> {
-    // A compliance check is a PRE-go-live gate. Issuing the production CSID
-    // overwrites the compliance CSID it was promoted from, so a live seller no
-    // longer holds compliance credentials at all — running this would submit the
-    // production CSID to ZATCA's /compliance endpoint, which answers "already
-    // completed" for standard and rejects the simplified docs on signature
-    // validation. That is not a defect in the seller or the signing; it is a
-    // check that no longer applies. Refuse it in plain language rather than
-    // surfacing ZATCA's confusing rejection.
-    {
+    // The go-live guard is skipped when onboarding calls this: mid-onboarding the
+    // record already reads prodSlotEnv/activeEnvironment=production (it holds the
+    // compliance CSID in the prod slot), and this suite is exactly the step ZATCA
+    // requires before it will issue the production CSID. Outside onboarding, a
+    // live seller pressing "فحص كامل" is refused in plain language rather than
+    // hitting ZATCA's /compliance endpoint with a production CSID.
+    if (!opts?.skipLiveGuard) {
       const c = await this.onboarding.getCredentials(userId, ownerId);
       if (c && (c as any).prodSlotEnv === "production" && (c as any).activeEnvironment === "production") {
         throw new ConflictException(

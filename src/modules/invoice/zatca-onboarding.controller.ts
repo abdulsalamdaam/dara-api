@@ -169,7 +169,25 @@ export class ZatcaOnboardingController {
   @Post("onboarding/production")
   @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
   async issueProductionCsid(@CurrentUser() user: AuthUser, @Body() body: { source?: "sandbox" | "production"; ownerId?: number }) {
-    return this.onboarding.issueProductionCsid(scopeId(user), body.source ?? "production", this.oid(body.ownerId));
+    const uid = scopeId(user);
+    const ownerId = this.oid(body.ownerId);
+    const source = body.source ?? "production";
+    // ZATCA issues a production CSID ONLY after the compliance CSID has passed
+    // the full test cycle — 6 documents (standard/simplified × invoice/credit/
+    // debit). Skipping it is why /production/csids was returning
+    // "Missing-ComplianceSteps": onboarding jumped straight from the compliance
+    // CSID to the production CSID. Run the suite here, in order, and refuse to
+    // promote unless every document passes.
+    const suite = await this.invoices.complianceSuite(uid, ownerId, { skipLiveGuard: true });
+    if (!suite.ok) {
+      const failed = suite.results.filter((r) => !r.ok).map((r) => r.doc).join("، ");
+      throw new BadRequestException({
+        error: "compliance_incomplete",
+        message: `لم يكتمل فحص التوافق (${suite.passed}/${suite.total}) — يجب اجتياز جميع المستندات قبل إصدار شهادة الإنتاج. المتعثّرة: ${failed}`,
+        suite,
+      });
+    }
+    return this.onboarding.issueProductionCsid(uid, source, ownerId);
   }
 
   /**
