@@ -168,7 +168,10 @@ export class ZatcaOnboardingController {
    */
   @Post("onboarding/production")
   @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
-  async issueProductionCsid(@CurrentUser() user: AuthUser, @Body() body: { source?: "sandbox" | "production"; ownerId?: number }) {
+  async issueProductionCsid(
+    @CurrentUser() user: AuthUser,
+    @Body() body: { source?: "sandbox" | "production"; ownerId?: number; dryRun?: boolean },
+  ) {
     const uid = scopeId(user);
     const ownerId = this.oid(body.ownerId);
     const source = body.source ?? "production";
@@ -179,6 +182,11 @@ export class ZatcaOnboardingController {
     // CSID to the production CSID. Run the suite here, in order, and refuse to
     // promote unless every document passes.
     const suite = await this.invoices.complianceSuite(uid, ownerId, { skipLiveGuard: true });
+    // `dryRun` reports the six verdicts and stops there. The suite persists
+    // nothing and simplified documents can be re-submitted, so this is the way
+    // to see where a seller stands without spending their compliance CSID on a
+    // promotion — and without touching a single real invoice.
+    if (body.dryRun) return { dryRun: true, promoted: false, suite };
     if (!suite.ok) {
       const failed = suite.results.filter((r) => !r.ok).map((r) => r.doc).join("، ");
       throw new BadRequestException({

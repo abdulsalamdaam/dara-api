@@ -111,8 +111,13 @@ export class InvoiceSignerService {
     const certPath = path.join(tmp, "cert.pem");
     try {
       await fs.writeFile(certPath, certPem, "utf8");
+      // RFC2253 order (most specific RDN first), but joined with ", " — the
+      // separator ZATCA's own signed sample uses in X509IssuerName. The issuer
+      // is one of the four values it rebuilds SignedProperties from, so the
+      // spacing is part of the digest, not cosmetic.
       const issuerR = await this.shell.mustRun("openssl", [
-        "x509", "-in", certPath, "-noout", "-issuer", "-nameopt", "RFC2253",
+        "x509", "-in", certPath, "-noout", "-issuer",
+        "-nameopt", "RFC2253,sep_comma_plus_space",
       ]);
       const issuer = (issuerR.stdout as string).replace(/^issuer=\s*/i, "").trim();
       const serialR = await this.shell.mustRun("openssl", ["x509", "-in", certPath, "-noout", "-serial"]);
@@ -177,32 +182,60 @@ export class InvoiceSignerService {
   /* -----------------------------------------------------------
    * XAdES SignedProperties / SignedInfo / UBLExtensions templates
    *
-   * The whitespace and namespace declarations below are deliberate —
-   * SignedProperties is hashed *as serialized here* (not re-canonicalized),
-   * so even indentation differences will break verification on ZATCA's side.
+   * The whitespace is load-bearing. ZATCA hashes SignedProperties as a string,
+   * indentation and all, so the template must sit at the depth its own samples
+   * use; an indent level either way changes the digest and the reporting
+   * endpoint answers "Invalid signed properties hashing".
    * --------------------------------------------------------- */
 
+  /**
+   * SignedProperties as it appears INSIDE the document. The xades: prefix is
+   * inherited from QualifyingProperties and ds: from ds:Signature, so neither
+   * is redeclared here — this is byte-for-byte the shape of ZATCA's own
+   * published signed samples, indentation included.
+   */
   buildSignedPropertiesXml(args: {
     signingTime: string; certHashBase64: string; certIssuer: string; certSerial: string;
   }): string {
-    // Attribute order is load-bearing: xmlns:xades MUST precede Id. ZATCA's
-    // reporting endpoint (simplified/B2C) recomputes the digest over the
-    // canonical form, which orders the namespace declaration first; hashing the
-    // Id-first form produced "Invalid signed properties hashing". Clearance
-    // (standard/B2B) was lenient, which is why only simplified failed. Matches
-    // the ZATCA reference SignedProperties template byte-for-byte.
-    return `<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="xadesSignedProperties">
+    return this.signedPropertiesTemplate(args, false);
+  }
+
+  /**
+   * The SAME element as ZATCA hashes it: with every namespace its own tag and
+   * its ds: children use declared on them — the exclusive-C14N rendering of
+   * the embedded form above.
+   *
+   * This is not a guess. ZATCA's published signed sample
+   * (Data/Samples/Simplified/Invoice/Simplified_Invoice.xml in the e-invoicing
+   * SDK) carries the digest of THIS form and of no other: the literal document
+   * bytes, and the same bytes shifted by an indent level either way, all
+   * produce a different value. See invoice-signer.service.spec.ts, which
+   * reproduces that sample's DigestValue from these two methods.
+   */
+  buildSignedPropertiesForHashing(args: {
+    signingTime: string; certHashBase64: string; certIssuer: string; certSerial: string;
+  }): string {
+    return this.signedPropertiesTemplate(args, true);
+  }
+
+  private signedPropertiesTemplate(
+    args: { signingTime: string; certHashBase64: string; certIssuer: string; certSerial: string },
+    declareNamespaces: boolean,
+  ): string {
+    const xades = declareNamespaces ? ' xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"' : "";
+    const ds = declareNamespaces ? ' xmlns:ds="http://www.w3.org/2000/09/xmldsig#"' : "";
+    return `<xades:SignedProperties${xades} Id="xadesSignedProperties">
                                     <xades:SignedSignatureProperties>
                                         <xades:SigningTime>${args.signingTime}</xades:SigningTime>
                                         <xades:SigningCertificate>
                                             <xades:Cert>
                                                 <xades:CertDigest>
-                                                    <ds:DigestMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
-                                                    <ds:DigestValue xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${args.certHashBase64}</ds:DigestValue>
+                                                    <ds:DigestMethod${ds} Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+                                                    <ds:DigestValue${ds}>${args.certHashBase64}</ds:DigestValue>
                                                 </xades:CertDigest>
                                                 <xades:IssuerSerial>
-                                                    <ds:X509IssuerName xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${escapeXml(args.certIssuer)}</ds:X509IssuerName>
-                                                    <ds:X509SerialNumber xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${args.certSerial}</ds:X509SerialNumber>
+                                                    <ds:X509IssuerName${ds}>${escapeXml(args.certIssuer)}</ds:X509IssuerName>
+                                                    <ds:X509SerialNumber${ds}>${args.certSerial}</ds:X509SerialNumber>
                                                 </xades:IssuerSerial>
                                             </xades:Cert>
                                         </xades:SigningCertificate>
@@ -286,35 +319,30 @@ export class InvoiceSignerService {
   </cac:AdditionalDocumentReference>`;
   }
 
-  /** SHA-256 of the SignedProperties string. ZATCA hashes it as serialized, so
-   *  the template's attribute order and indentation are what matter — see
-   *  buildSignedPropertiesXml (xmlns:xades before Id). */
+  /**
+   * ZATCA's digest recipe for SignedProperties is the same one it uses for the
+   * certificate: sha256 → hex text → base64 OF THAT TEXT. It yields 88
+   * characters, not the 44 of a plain base64 digest — which is how ZATCA's own
+   * sample gives it away, and what "Invalid signed properties hashing" on the
+   * reporting endpoint was actually complaining about.
+   *
+   * Pass the namespace-declared form (buildSignedPropertiesForHashing), not the
+   * one embedded in the document.
+   */
   hashSignedProperties(signedPropertiesXml: string): string {
-    return createHash("sha256").update(signedPropertiesXml, "utf8").digest("base64");
-  }
-
-  /** Wrap SignedInfo in a host doc and run xmllint --c14n11 to canonicalize. */
-  async hashSignedInfo(signedInfoXml: string): Promise<Buffer> {
-    const wrapped = `<root xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">${signedInfoXml}</root>`;
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "zatca-sinfo-"));
-    const f = path.join(tmp, "si.xml");
-    try {
-      await fs.writeFile(f, wrapped, "utf8");
-      const c14n = await this.shell.mustRun("xmllint", [
-        "--c14n11", "--xpath", "/*/*[local-name()=\"SignedInfo\"]", f,
-      ]);
-      return Buffer.from(c14n.stdout as string, "utf8");
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
+    const hex = createHash("sha256").update(signedPropertiesXml, "utf8").digest("hex");
+    return Buffer.from(hex, "utf8").toString("base64");
   }
 
   /**
    * End-to-end XAdES signing:
    *   1. hash unsigned invoice (via XSL strip + C14N + SHA-256)
    *   2. compute cert hash + cert details
-   *   3. assemble SignedProperties, hash it (literal-string SHA-256)
-   *   4. assemble SignedInfo, canonicalize, sign with the EC private key
+   *   3. assemble SignedProperties, hash it (base64-of-hex over the
+   *      namespace-declared form)
+   *   4. assemble SignedInfo and sign the INVOICE HASH with the EC private key
+   *      — ZATCA's cryptographic stamp is a signature over the invoice hash,
+   *      not over the canonicalized SignedInfo that XMLDSig would call for
    *   5. assemble UBLExtensions + Signature block + QR AdditionalDocumentReference
    *   6. inject all three into the invoice XML — careful: any whitespace we
    *      add survives the strip transform downstream and re-hashes don't match.
@@ -328,15 +356,19 @@ export class InvoiceSignerService {
     const { issuer: certIssuer, serial: certSerial, publicKeyDer, certSignatureDer } = await this.inspectCert(certPem);
     const certBodyBase64 = pemBody(certPem);
 
-    const signingTime = new Date().toISOString().replace(/\.\d{3}Z$/, "Z").replace("Z", "");
-    const signedPropertiesXml = this.buildSignedPropertiesXml({
-      signingTime, certHashBase64, certIssuer, certSerial,
-    });
-    const signedPropsHashBase64 = this.hashSignedProperties(signedPropertiesXml);
+    const signingTime = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const props = { signingTime, certHashBase64, certIssuer, certSerial };
+    const signedPropertiesXml = this.buildSignedPropertiesXml(props);
+    const signedPropsHashBase64 = this.hashSignedProperties(this.buildSignedPropertiesForHashing(props));
 
     const signedInfoXml = this.buildSignedInfoXml({ invoiceHashBase64, signedPropsHashBase64 });
-    const canonicalSignedInfo = await this.hashSignedInfo(signedInfoXml);
-    const signatureValueBase64 = await this.signWithEcKey(privateKeyPem, canonicalSignedInfo);
+    // The stamp signs the invoice hash bytes themselves. Verified against
+    // ZATCA's published signed sample: its SignatureValue verifies against the
+    // decoded invoice hash and NOT against the canonicalized SignedInfo.
+    const signatureValueBase64 = await this.signWithEcKey(
+      privateKeyPem,
+      Buffer.from(invoiceHashBase64, "base64"),
+    );
 
     const ublExtensionsXml = this.buildUblExtension({
       signedInfoXml, signatureValueBase64, certBodyBase64, signedPropertiesXml,

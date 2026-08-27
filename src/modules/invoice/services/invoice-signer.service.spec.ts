@@ -116,4 +116,142 @@ describe("InvoiceSignerService (integration)", { skip: !shouldRun && "openssl/xm
     assert.ok(r.invoiceHashBase64.length > 0, "invoiceHash empty");
     assert.ok(r.signatureValueBase64.length > 0, "signature empty");
   });
+
+  it("re-hashes the signed document to the hash it stamped", async () => {
+    // ZATCA recomputes the invoice hash from the document we send, stripping
+    // UBLExtensions/Signature/QR again. Injecting those three must therefore
+    // leave no whitespace behind, or its hash and ours diverge.
+    const seller: SellerSnapshot = {
+      name: "Test Co", vat: "399999999900003", crn: "1010000000",
+      street: "King Fahd", buildingNo: "1", district: "Olaya",
+      city: "Riyadh", postalZone: "12345", additionalNo: "0000",
+    };
+    const built = builder.build({
+      profile: "simplified", docType: "invoice", invoiceId: "T-4",
+      icv: 1, pih: "AAAA", seller,
+      lines: [{ name: "Burger", quantity: 1, unitPrice: 10, vatPercent: 15 }],
+    });
+    const r = await signer.signInvoice({
+      invoiceXml: built.xml, privateKeyPem, certPem, profile: "simplified",
+      qrFields: {
+        sellerName: seller.name, vatNumber: seller.vat,
+        timestamp: "2026-05-08T10:00:00", totalWithVat: "11.50", vatTotal: "1.50",
+      },
+    });
+    const rehash = await signer.computeInvoiceHash(r.signedXml);
+    assert.equal(rehash.hashBase64, r.invoiceHashBase64);
+  });
+
+  it("formats the issuer the way ZATCA's sample does", async () => {
+    const { issuer } = await signer.inspectCert(certPem);
+    // Most-specific RDN first, ", " between them — e.g. ZATCA's own
+    // "CN=TSZEINVOICE-SubCA-1, DC=extgazt, DC=gov, DC=local".
+    assert.match(issuer, /^CN=/);
+    if (issuer.includes(",")) assert.match(issuer, /, /);
+    assert.ok(!/,[^ ]/.test(issuer), `issuer RDNs must be separated by ", ": ${issuer}`);
+  });
+
+  it("stamps the invoice hash itself, not the canonicalized SignedInfo", async () => {
+    const seller: SellerSnapshot = {
+      name: "Test Co", vat: "399999999900003", crn: "1010000000",
+      street: "King Fahd", buildingNo: "1", district: "Olaya",
+      city: "Riyadh", postalZone: "12345", additionalNo: "0000",
+    };
+    const built = builder.build({
+      profile: "simplified", docType: "invoice", invoiceId: "T-3",
+      icv: 1, pih: "AAAA", seller,
+      lines: [{ name: "Burger", quantity: 1, unitPrice: 10, vatPercent: 15 }],
+    });
+    const r = await signer.signInvoice({
+      invoiceXml: built.xml, privateKeyPem, certPem, profile: "simplified",
+      qrFields: {
+        sellerName: seller.name, vatNumber: seller.vat,
+        timestamp: "2026-05-08T10:00:00", totalWithVat: "11.50", vatTotal: "1.50",
+      },
+    });
+    // ZATCA's cryptographic stamp is ECDSA-SHA256 over the decoded invoice
+    // hash. This is what its published sample verifies against, and signing
+    // the canonicalized SignedInfo instead — as plain XMLDSig would — is what
+    // the B2C reporting endpoint refused.
+    const { createVerify, X509Certificate } = await import("node:crypto");
+    const publicKey = new X509Certificate(certPem).publicKey;
+    const verify = createVerify("sha256");
+    verify.update(Buffer.from(r.invoiceHashBase64, "base64"));
+    assert.ok(
+      verify.verify(publicKey, Buffer.from(r.signatureValueBase64, "base64")),
+      "SignatureValue does not verify against the invoice hash",
+    );
+    // ...and the same value is what the QR carries as tag 7.
+    const embedded = r.signedXml.match(/<ds:SignatureValue>([^<]+)<\/ds:SignatureValue>/)?.[1];
+    assert.equal(embedded, r.signatureValueBase64);
+  });
+});
+
+/**
+ * Pinned to ZATCA's own published signed sample — the e-invoicing SDK's
+ * Data/Samples/Simplified/Invoice/Simplified_Invoice.xml. Those numbers are
+ * the only external oracle we have for the two recipes ZATCA does not spell
+ * out (how SignedProperties is serialized before hashing, and how the digest
+ * is encoded), so they are asserted here rather than trusted to a comment.
+ */
+describe("InvoiceSignerService — ZATCA sample vectors", () => {
+  const signer = new InvoiceSignerService(new ShellService(), new QrService());
+
+  const sample = {
+    signingTime: "2023-01-24T11:16:44Z",
+    certHashBase64: "YTJkM2JhYTcwZTBhZTAxOGYwODMyNzY3NTdkZDM3YzhjY2IxOTIyZDZhM2RlZGJiMGY0NDUzZWJhYWI4MDhmYg==",
+    certIssuer: "CN=TSZEINVOICE-SubCA-1, DC=extgazt, DC=gov, DC=local",
+    certSerial: "2475382886904809774818644480820936050208702411",
+  };
+  const sampleDigest =
+    "N2MxMGJkZWM4MDdlYWY0ODY1ZDk0YTk3NGZhYmE4NjI5ZDM2ODYxMjg3ZDAwZDQzMmRjOTNjZTkxYjU0OWJmNw==";
+
+  it("reproduces the sample's SignedProperties digest", () => {
+    const forHashing = signer.buildSignedPropertiesForHashing(sample);
+    assert.equal(signer.hashSignedProperties(forHashing), sampleDigest);
+  });
+
+  it("emits the digest as base64 of the hex, not of the raw bytes", () => {
+    // 88 characters, not 44 — a plain base64 digest is what ZATCA's reporting
+    // endpoint rejected as "Invalid signed properties hashing".
+    assert.equal(sampleDigest.length, 88);
+    assert.equal(
+      Buffer.from(signer.hashSignedProperties(signer.buildSignedPropertiesForHashing(sample)), "base64").length,
+      64,
+    );
+  });
+
+  it("embeds SignedProperties exactly as the sample document carries it", () => {
+    // Copied out of the sample invoice: no xmlns declarations (both prefixes
+    // are already in scope) and this indentation.
+    const expected = [
+      '<xades:SignedProperties Id="xadesSignedProperties">',
+      "                                    <xades:SignedSignatureProperties>",
+      "                                        <xades:SigningTime>2023-01-24T11:16:44Z</xades:SigningTime>",
+      "                                        <xades:SigningCertificate>",
+      "                                            <xades:Cert>",
+      "                                                <xades:CertDigest>",
+      '                                                    <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>',
+      `                                                    <ds:DigestValue>${sample.certHashBase64}</ds:DigestValue>`,
+      "                                                </xades:CertDigest>",
+      "                                                <xades:IssuerSerial>",
+      `                                                    <ds:X509IssuerName>${sample.certIssuer}</ds:X509IssuerName>`,
+      `                                                    <ds:X509SerialNumber>${sample.certSerial}</ds:X509SerialNumber>`,
+      "                                                </xades:IssuerSerial>",
+      "                                            </xades:Cert>",
+      "                                        </xades:SigningCertificate>",
+      "                                    </xades:SignedSignatureProperties>",
+      "                                </xades:SignedProperties>",
+    ].join("\n");
+    assert.equal(signer.buildSignedPropertiesXml(sample), expected);
+  });
+
+  it("declares the namespaces only in the form it hashes", () => {
+    const embedded = signer.buildSignedPropertiesXml(sample);
+    const forHashing = signer.buildSignedPropertiesForHashing(sample);
+    assert.ok(!embedded.includes("xmlns:"), "embedded form must not redeclare namespaces");
+    assert.ok(forHashing.includes('<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id='));
+    // Every ds: child carries its own declaration — the exclusive-C14N form.
+    assert.equal((forHashing.match(/xmlns:ds=/g) ?? []).length, 4);
+  });
 });
