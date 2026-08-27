@@ -280,9 +280,29 @@ export class InvoiceSignerService {
   </cac:AdditionalDocumentReference>`;
   }
 
-  /** Hash signed-properties block per ZATCA spec — literal-string SHA-256 of the serialized XML. */
-  hashSignedProperties(signedPropertiesXml: string): string {
-    return createHash("sha256").update(signedPropertiesXml, "utf8").digest("base64");
+  /**
+   * Hash the SignedProperties per the XAdES reference — over its CANONICAL
+   * (C14N) form, not the literal string.
+   *
+   * The Reference URI="#xadesSignedProperties" in SignedInfo carries no explicit
+   * transform, so the digest is taken over the canonicalized element. C14N
+   * reorders `xmlns:xades` ahead of `Id`, so a literal-string SHA-256 produces a
+   * digest that does not match what a compliant validator recomputes. ZATCA's
+   * clearance endpoint (standard / B2B) was lenient and accepted the literal
+   * digest — which is why standard invoices passed — but the reporting endpoint
+   * (simplified / B2C) recomputes strictly and rejected it with "Invalid signed
+   * properties hashing". Canonicalizing first makes both agree.
+   */
+  async hashSignedProperties(signedPropertiesXml: string): Promise<string> {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "zatca-sprops-"));
+    const f = path.join(tmp, "sp.xml");
+    try {
+      await fs.writeFile(f, signedPropertiesXml, "utf8");
+      const c14n = await this.shell.mustRun("xmllint", ["--c14n", f]);
+      return createHash("sha256").update(c14n.stdout as string, "utf8").digest("base64");
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
   }
 
   /** Wrap SignedInfo in a host doc and run xmllint --c14n11 to canonicalize. */
@@ -324,7 +344,7 @@ export class InvoiceSignerService {
     const signedPropertiesXml = this.buildSignedPropertiesXml({
       signingTime, certHashBase64, certIssuer, certSerial,
     });
-    const signedPropsHashBase64 = this.hashSignedProperties(signedPropertiesXml);
+    const signedPropsHashBase64 = await this.hashSignedProperties(signedPropertiesXml);
 
     const signedInfoXml = this.buildSignedInfoXml({ invoiceHashBase64, signedPropsHashBase64 });
     const canonicalSignedInfo = await this.hashSignedInfo(signedInfoXml);
