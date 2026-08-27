@@ -185,7 +185,13 @@ export class InvoiceSignerService {
   buildSignedPropertiesXml(args: {
     signingTime: string; certHashBase64: string; certIssuer: string; certSerial: string;
   }): string {
-    return `<xades:SignedProperties Id="xadesSignedProperties" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">
+    // Attribute order is load-bearing: xmlns:xades MUST precede Id. ZATCA's
+    // reporting endpoint (simplified/B2C) recomputes the digest over the
+    // canonical form, which orders the namespace declaration first; hashing the
+    // Id-first form produced "Invalid signed properties hashing". Clearance
+    // (standard/B2B) was lenient, which is why only simplified failed. Matches
+    // the ZATCA reference SignedProperties template byte-for-byte.
+    return `<xades:SignedProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="xadesSignedProperties">
                                     <xades:SignedSignatureProperties>
                                         <xades:SigningTime>${args.signingTime}</xades:SigningTime>
                                         <xades:SigningCertificate>
@@ -280,29 +286,11 @@ export class InvoiceSignerService {
   </cac:AdditionalDocumentReference>`;
   }
 
-  /**
-   * Hash the SignedProperties per the XAdES reference — over its CANONICAL
-   * (C14N) form, not the literal string.
-   *
-   * The Reference URI="#xadesSignedProperties" in SignedInfo carries no explicit
-   * transform, so the digest is taken over the canonicalized element. C14N
-   * reorders `xmlns:xades` ahead of `Id`, so a literal-string SHA-256 produces a
-   * digest that does not match what a compliant validator recomputes. ZATCA's
-   * clearance endpoint (standard / B2B) was lenient and accepted the literal
-   * digest — which is why standard invoices passed — but the reporting endpoint
-   * (simplified / B2C) recomputes strictly and rejected it with "Invalid signed
-   * properties hashing". Canonicalizing first makes both agree.
-   */
-  async hashSignedProperties(signedPropertiesXml: string): Promise<string> {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "zatca-sprops-"));
-    const f = path.join(tmp, "sp.xml");
-    try {
-      await fs.writeFile(f, signedPropertiesXml, "utf8");
-      const c14n = await this.shell.mustRun("xmllint", ["--c14n", f]);
-      return createHash("sha256").update(c14n.stdout as string, "utf8").digest("base64");
-    } finally {
-      await fs.rm(tmp, { recursive: true, force: true });
-    }
+  /** SHA-256 of the SignedProperties string. ZATCA hashes it as serialized, so
+   *  the template's attribute order and indentation are what matter — see
+   *  buildSignedPropertiesXml (xmlns:xades before Id). */
+  hashSignedProperties(signedPropertiesXml: string): string {
+    return createHash("sha256").update(signedPropertiesXml, "utf8").digest("base64");
   }
 
   /** Wrap SignedInfo in a host doc and run xmllint --c14n11 to canonicalize. */
@@ -344,7 +332,7 @@ export class InvoiceSignerService {
     const signedPropertiesXml = this.buildSignedPropertiesXml({
       signingTime, certHashBase64, certIssuer, certSerial,
     });
-    const signedPropsHashBase64 = await this.hashSignedProperties(signedPropertiesXml);
+    const signedPropsHashBase64 = this.hashSignedProperties(signedPropertiesXml);
 
     const signedInfoXml = this.buildSignedInfoXml({ invoiceHashBase64, signedPropsHashBase64 });
     const canonicalSignedInfo = await this.hashSignedInfo(signedInfoXml);

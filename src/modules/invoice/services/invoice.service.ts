@@ -439,9 +439,18 @@ export class InvoiceService {
       const raw = (resp as any).raw || (j && Object.keys(j).length ? JSON.stringify(j) : "");
       errors.push(raw ? `HTTP ${resp.status}: ${String(raw).slice(0, 500)}` : `HTTP ${resp.status}`);
     }
-    const reportStatus = j.reportingStatus || j.clearanceStatus || vr.status || (resp.status >= 200 && resp.status < 300 ? "PASS" : `HTTP ${resp.status}`);
-    const ok = resp.status >= 200 && resp.status < 300 && errors.length === 0;
-    return { ok, httpStatus: resp.status, status: String(reportStatus), warnings, errors, hash: signed.invoiceHashBase64 };
+    // "Compliance check already completed for X" means ZATCA has this document
+    // type on record as PASSED against this compliance CSID — re-running it is a
+    // no-op, not a failure. Once a seller has passed a type, it can never be
+    // resubmitted, so treating it as a failure would make onboarding impossible
+    // to finish after a partial run (exactly what stranded owner 264: standard
+    // passed, the run stopped on simplified, and every retry then reported
+    // standard as "already completed").
+    const alreadyDone = errors.length > 0 && errors.every((e) => /already completed/i.test(String(e)));
+    const reportStatus = j.reportingStatus || j.clearanceStatus || vr.status
+      || (alreadyDone ? "ALREADY_DONE" : (resp.status >= 200 && resp.status < 300 ? "PASS" : `HTTP ${resp.status}`));
+    const ok = alreadyDone || (resp.status >= 200 && resp.status < 300 && errors.length === 0);
+    return { ok, httpStatus: resp.status, status: String(reportStatus), warnings, errors: alreadyDone ? [] : errors, hash: signed.invoiceHashBase64 };
   }
 
   /* ─── Read APIs ─────────────────────────────────────────────────────── */
