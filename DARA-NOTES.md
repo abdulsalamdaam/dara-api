@@ -281,6 +281,20 @@ documents report REPORTED; the three standard ones return `NOT_CLEARED` with no
 errors, which is what the compliance endpoint says for a document it validated
 but was never asked to clear.
 
+**Owner 264 is now live.** The production CSID was issued straight after
+(`/core/production/csids`, HTTP 200) — which is the only proof that matters,
+because ZATCA answers `Missing-ComplianceSteps` unless it has all six on
+record. The stored certificate is issued by `CN=PRZEINVOICESCA1-CA` (the
+production CA; the test one is `TSZEINVOICE-SubCA-1`) and runs to 26 Aug 2031.
+`active_environment` and `prod_slot_env` are both `production`.
+
+**The certificate subject is double-encoded** — `ابراهيم العقيل` appears as
+`Ø§Ø¨Ø±Ø§Ù‡ÙŠÙ……`. The CSR config has no `utf8 = yes`, so openssl reads
+already-UTF-8 Arabic as Latin-1 and re-encodes it. Harmless for invoices (the
+seller name on the document comes from the XML, not the certificate) and not
+worth a re-onboard, which would cost a fresh taxpayer OTP — but fix
+`ZATCA_CSR_TEMPLATE` before onboarding the remaining 21 sellers.
+
 **How to test all 6 on production WITHOUT a new OTP or creating invoices.**
 The compliance suite persists nothing and simplified is re-runnable; standard,
 once passed, returns "already completed" (now counted as a pass). Owner 264
@@ -644,8 +658,8 @@ makes that claim true rather than aspirational.
   See §2b-i for what they were and the sample that proves each one. Every
   simplified invoice signed before that commit carries a wrong QR tag 7 and a
   wrong SignedProperties digest, so anything already sent to sandbox is not a
-  usable precedent. Owner 264 still holds a COMPLIANCE CSID, not a production
-  one — the promotion has not been run.
+  usable precedent. Owner 264 has since been promoted and holds a real
+  PRODUCTION CSID.
 
 ### ZATCA — what "compliant" still needs (25 Aug 2026)
 
@@ -656,10 +670,9 @@ established**. Do not tell anyone it is until at least the first item is done.
    `environment = 'production'`. One real clearance is the gate on everything
    else here: it proves the submission path, and it produces the first genuine
    cleared XML. `ابراهيم العقيل` (owner 264) is currently the only account that
-   can do it. As of 28 Aug 2026 that account passes ZATCA's compliance suite
-   6/6 (§2b-i) — which means the signing is right, not that anything has
-   cleared. Between the two sits the production CSID, which nobody has issued
-   yet.
+   can do it — and as of 28 Aug 2026 it now can: it passes the compliance suite
+   6/6 and holds a production CSID (§2b-i). What is left is a real invoice
+   through `/core`, which nothing has done yet.
 2. **Six landlords are live on the sandbox** (see §2b). Their invoices are not
    e-invoices. Each needs production onboarding with its own Fatoora OTP.
 3. **15 VAT-registered landlords have no credentials at all.**
