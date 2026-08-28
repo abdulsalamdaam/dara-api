@@ -18,10 +18,19 @@ import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERI
 const MAX_FAILED = 5;
 
 /**
- * Saudi mobile numbers are stored inconsistently (+966502907100, 966502907100,
- * 0502907100, 502907100). To match regardless of format, reduce any input to its
- * 9-digit core (5XXXXXXXX) and return every common stored variant for an IN()
- * lookup. Fixes "+966… vs 05…" not matching.
+ * The canonical stored form of a Saudi mobile is the bare 9-digit core,
+ * `5XXXXXXXX` — see `saudiPhone()` in `common/validation.ts`, which every
+ * controller write path funnels through, and the one-off backfill in
+ * `db/sql/2026_08_phone_bare_9_digits.sql`.
+ *
+ * Historical rows are NOT all in that form (+966502907100, 966502907100,
+ * 0502907100), and a caller can type any of them. To match regardless, reduce
+ * the input to its 9-digit core and return every stored variant for an IN()
+ * lookup. **`core` itself is in the set** — that is what makes a row stored in
+ * the new canonical form findable when the user types `0502907100` or
+ * `+966502907100`. Do not drop it: tenant OTP login (`tenantRequestOtp` /
+ * `tenantVerifyOtp`), landlord phone-OTP login (`userPhone*Otp`,
+ * `findOwnerByLoginPhone`) and password reset all depend on this one set.
  */
 function phoneCore(raw: string): string {
   let d = (raw || "").replace(/\D/g, "");
@@ -31,8 +40,21 @@ function phoneCore(raw: string): string {
 }
 function phoneVariants(raw: string): string[] {
   const core = phoneCore(raw);
-  const set = new Set<string>([`+966${core}`, `966${core}`, `0${core}`, core, (raw || "").trim()]);
+  // Canonical form first, then the three legacy ones, then the untouched input
+  // (which covers a number that is not a Saudi mobile at all).
+  const set = new Set<string>([core, `+966${core}`, `966${core}`, `0${core}`, (raw || "").trim()]);
   return [...set].filter(Boolean);
+}
+/**
+ * The canonical stored form of a phone, or the value untouched when it is not a
+ * Saudi mobile. Mirrors `saudiPhone()` in `common/validation.ts` but never
+ * throws — registration has always accepted whatever it was given.
+ */
+function canonicalPhone(raw: string | null | undefined): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  const core = phoneCore(trimmed);
+  return /^5\d{8}$/.test(core) ? core : trimmed;
 }
 /** Email-OTP code lifetime — drives the DB expiry, the email text, and the
  *  expiresInMinutes returned to the client (the login screen's timer). */
@@ -498,7 +520,11 @@ export class AuthService {
       name,
       isActive: false,
       accountStatus: "pending",
-      phone: phone ?? null,
+      // Store the canonical 9-digit form (`saudiPhone()` in common/validation.ts)
+      // so a registered landlord's number joins and matches like every other
+      // phone in the DB. Registration has never rejected a malformed number and
+      // still does not: anything that is not a Saudi mobile is kept verbatim.
+      phone: canonicalPhone(phone),
       roleId: fallbackRoleRow?.id ?? null,
       companyId,
       userType,
@@ -696,7 +722,12 @@ export class AuthService {
 
     const [user] = isEmail
       ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, id.toLowerCase()), isNull(usersTable.deletedAt)))
-      : await this.db.select().from(usersTable).where(and(eq(usersTable.phone, id), isNull(usersTable.deletedAt)));
+      // Phone lookup goes through the variant set, not an equality test: the
+      // stored form is now the bare 9 digits and the user types 05…/+966….
+      : await this.db.select().from(usersTable)
+          .where(and(inArray(usersTable.phone, phoneVariants(id)), isNull(usersTable.deletedAt)))
+          .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+          .limit(1);
 
     // Always respond the same way to avoid leaking which accounts exist.
     if (!user) {
@@ -722,7 +753,13 @@ export class AuthService {
 
     const [user] = isEmail
       ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, identifier.toLowerCase()), isNull(usersTable.deletedAt)))
-      : await this.db.select().from(usersTable).where(and(eq(usersTable.phone, identifier), isNull(usersTable.deletedAt)));
+      // Same variant lookup as forgotPassword, with the same deterministic
+      // ordering — duplicate phone numbers exist, so request and verify must
+      // agree on which identity they picked.
+      : await this.db.select().from(usersTable)
+          .where(and(inArray(usersTable.phone, phoneVariants(identifier)), isNull(usersTable.deletedAt)))
+          .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+          .limit(1);
     if (!user) throw new BadRequestException("بيانات غير صحيحة");
 
     const target = isEmail ? user.email : (user.phone || identifier);

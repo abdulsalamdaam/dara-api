@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, lt, gt, isNull, or, ilike, count, asc, desc, inArray, notInArray, notExists, sql } from "drizzle-orm";
-import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, lookupsTable } from "@dara/database";
+import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, invoicesTable, auditLogsTable, lookupsTable } from "@dara/database";
 import {
   BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyForeignKey, applyFourDigitCode,
   applyMoney, applyOneOf, applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText,
@@ -32,6 +32,40 @@ const ENDED_CONTRACT_STATUSES = ["terminated", "cancelled"] as const;
  * their own slot in the same two-int space so the two never contend.
  */
 const CONTRACT_NUMBER_LOCK = 11;
+
+/**
+ * A contract request that has passed every rule the create path enforces,
+ * carrying everything needed to write it and everything it will generate.
+ *
+ * Produced once by `prepareContract` and consumed by BOTH the create and the
+ * rebuild path — that shared object is what stops the two from drifting apart
+ * on validation, VAT derivation, the advance plan or the schedule itself.
+ */
+type PreparedContract = {
+  ownerId: number;
+  isDraft: boolean;
+  unitIds: number[];
+  /** The column values to write to `contracts` — no id, no contract number. */
+  values: Record<string, unknown>;
+  rentTerms: { year: number; amount: number }[];
+  additionalFees: FeeEntry[] | null;
+  customSchedule: { dueDate: string; amount: string }[] | null;
+  settledExternalUntil: string | null;
+  freq: string;
+  startDate: string;
+  endDate: string;
+  /** The DERIVED VAT verdict — never the raw request flag. */
+  rentVat: boolean;
+  prepaidRequested: number;
+  /** Fee installments (matched by name) the advance may settle. */
+  pickedFeeNames: Set<string>;
+  /** Whether the advance may settle rent installments. */
+  coversRent: boolean;
+  /** Whether the advance clears fees before rent. */
+  feesFirst: boolean;
+  prepaidAttachmentKey: string | null;
+  depositAttachmentKey: string | null;
+};
 
 /**
  * Shape, length and range checks for every contract field a request may set.
@@ -136,6 +170,11 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { buildInstallments, applyExternalSettlement, type FeeEntry } from "./installments";
+import {
+  ADVANCE_NOTE, DEPOSIT_KIND, RECEIPT_KIND, classifyContractDocs, collectionsTotal,
+  contractMoneyFacts, factsDiff, foreignCollections, rebuildAuditPath, rebuildBlockReason,
+  type ContractCollectionRow, type ContractDocRow,
+} from "./rebuild";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 
 const CONTRACT_FIELDS = [
@@ -476,9 +515,21 @@ class ContractsController {
     return verdict === null ? requested : verdict;
   }
 
-  @Post()
-  @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
-  async create(@CurrentUser() user: AuthUser, @Body() body: any) {
+  /**
+   * Everything a contract needs BEFORE it touches the database, validated.
+   *
+   * This is the whole of the create path's rule set — unit parsing and bounds,
+   * unit ownership, the required-fields gate, the VAT derivation, the field
+   * sanitiser, the period/rent sanity checks, the advance plan and the
+   * advance-rent ceiling — pulled out of `create` so the rebuild path can run
+   * the EXACT same rules rather than a second copy of them that drifts.
+   *
+   * Read-only: it never writes, so it is safe to call before opening the
+   * transaction. The two things it deliberately leaves to the caller are the
+   * contract number and the double-booking check, because both are only correct
+   * inside the advisory-locked transaction.
+   */
+  private async prepareContract(user: AuthUser, body: any): Promise<PreparedContract> {
     const isDraft = Boolean(body.isDraft ?? false);
     // A contract spans one or more units (`unitIds`). The legacy single
     // `unitId` is still accepted so older callers keep working.
@@ -501,17 +552,21 @@ class ContractsController {
     if (unitIds.length === 0 || (!isDraft && (!body.tenantName || !body.startDate || !body.endDate || !body.monthlyRent))) {
       throw new BadRequestException(isDraft ? "اختر وحدة واحدة على الأقل لحفظ المسودة" : "البيانات الأساسية مطلوبة");
     }
+    const ownerId = scopeId(user);
     // The units have to be the caller's. Nothing checked, so a contract could
     // be written against another account's unit: it linked, it showed that
     // account's property and unit in the list, and once active it flipped
     // their unit to "rented" — a cross-account write, not just a read.
+    //
+    // The rebuild runs this too, which is what stops an edit from moving a
+    // contract onto a unit belonging to somebody else.
     const ownedUnits = await this.db
       .select({ id: unitsTable.id })
       .from(unitsTable)
       .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
       .where(and(
         inArray(unitsTable.id, unitIds),
-        eq(propertiesTable.userId, scopeId(user)),
+        eq(propertiesTable.userId, ownerId),
         isNull(unitsTable.deletedAt),
         isNull(propertiesTable.deletedAt),
       ));
@@ -544,7 +599,6 @@ class ContractsController {
     }
 
     const freq = body.paymentFrequency || "monthly";
-    const ownerId = scopeId(user);
     // Existing/legacy contract: rent due before this date was settled outside
     // the portal. Normalised to YYYY-MM-DD or null.
     const settledExternalUntil: string | null = dateOnly(body.settledExternalUntil, "تاريخ السداد خارج المنصة");
@@ -671,35 +725,198 @@ class ContractsController {
      */
     const feesFirst = String(body.prepaidPriority ?? "rent") === "fees";
 
-    /** The schedule this contract will produce — needed before it exists. */
-    const previewSchedule = () => applyExternalSettlement(
-      buildInstallments(
-        0, ownerId, startDate, endDate, String(values.monthlyRent), freq, additionalFees,
-        rentVat, Number(values.escalationRate) || 0,
-        String(values.escalationType) === "amount" ? "amount" : "percent",
-        rentTerms, 0, customSchedule,
-      ),
-      settledExternalUntil,
-    );
+    const prepared: PreparedContract = {
+      ownerId, isDraft, unitIds, values, rentTerms, additionalFees,
+      customSchedule: customSchedule && customSchedule.length > 0 ? customSchedule : null,
+      settledExternalUntil, freq, startDate, endDate, rentVat,
+      prepaidRequested: round2(Number(values.prepaidRent) || 0),
+      pickedFeeNames, coversRent, feesFirst,
+      prepaidAttachmentKey: body.prepaidAttachmentKey ?? null,
+      depositAttachmentKey: body.depositAttachmentKey ?? null,
+    };
 
     // The advance can only ever be applied to installments the schedule
     // actually contains, and only to the ones the caller chose it to cover.
     // Anything above that was stored on the contract as received and then
     // silently dropped: `prepaidRent: 999999` against a 12,000 schedule
     // recorded 987,999 with no collection, no receipt voucher and no error.
-    const prepaidRequested = round2(Number(values.prepaidRent) || 0);
-    if (!isDraft && prepaidRequested > 0) {
-      const absorbable = round2(previewSchedule()
-        .filter((p) => p.status !== "settled_external"
-          && (p.description ? pickedFeeNames.has(p.description) : coversRent))
+    if (!isDraft && prepared.prepaidRequested > 0) {
+      // Contract id 0 — the preview only needs the shape and the amounts.
+      const absorbable = round2(this.buildScheduleRows(0, prepared)
+        .filter((p) => this.advanceCovers(prepared, p.status, p.description))
         .reduce((sum, p) => sum + Number(p.amount), 0));
-      if (prepaidRequested > absorbable + 0.01) {
+      if (prepared.prepaidRequested > absorbable + 0.01) {
         throw new BadRequestException(
-          `الإيجار المدفوع مقدماً (${prepaidRequested.toFixed(2)}) يتجاوز ما يمكن سداده من جدول الدفعات — ` +
+          `الإيجار المدفوع مقدماً (${prepared.prepaidRequested.toFixed(2)}) يتجاوز ما يمكن سداده من جدول الدفعات — ` +
           `الحد الأقصى ${absorbable.toFixed(2)} ر.س · Advance rent exceeds what the schedule can settle`,
         );
       }
     }
+
+    return prepared;
+  }
+
+  /**
+   * The installment schedule a prepared contract produces. One definition, used
+   * by the ceiling preview, the create path and the rebuild path alike — the
+   * preview used to be a separate closure, which is how a preview and the rows
+   * actually written could disagree.
+   */
+  private buildScheduleRows(contractId: number, p: PreparedContract) {
+    return applyExternalSettlement(
+      buildInstallments(
+        contractId, p.ownerId, p.startDate, p.endDate, String(p.values.monthlyRent), p.freq,
+        p.additionalFees, p.rentVat, Number(p.values.escalationRate) || 0,
+        String(p.values.escalationType) === "amount" ? "amount" : "percent",
+        p.rentTerms,
+        0, // prepaid is tracked as a collection, not a deduction
+        p.customSchedule,
+      ),
+      p.settledExternalUntil,
+    );
+  }
+
+  /**
+   * Is this installment one the advance is allowed to settle? The ceiling check
+   * and the settlement loop MUST answer this identically — deciding it twice is
+   * how a contract ends up accepting an advance it then cannot apply.
+   */
+  private advanceCovers(p: PreparedContract, status: string, description: string | null): boolean {
+    if (status === "settled_external") return false;
+    return description ? p.pickedFeeNames.has(description) : p.coversRent;
+  }
+
+  /**
+   * Generate everything a contract row implies: its per-year rent overrides,
+   * its unit statuses, its installment schedule, the advance collections and
+   * receipt voucher, and the deposit voucher.
+   *
+   * Takes the db handle so the create path can run it on `this.db` (unchanged
+   * behaviour — after its own transaction commits) while the rebuild path runs
+   * it inside the transaction that destroyed the previous generation, so a
+   * failure anywhere leaves the contract exactly as it was.
+   */
+  private async materializeContract(db: any, contract: any, p: PreparedContract): Promise<number> {
+    const ownerId = p.ownerId;
+    // Per-year rent overrides (saved for drafts too, so they prefill on edit).
+    if (p.rentTerms.length > 0) {
+      await db.insert(contractRentTermsTable).values(
+        p.rentTerms.map((t) => ({ contractId: contract.id, year: t.year, amount: String(t.amount) })),
+      );
+    }
+
+    // A draft contract doesn't occupy its units and generates no
+    // installments until it is finalised.
+    if (p.isDraft) return 0;
+
+    await db.update(unitsTable).set({ status: "rented" }).where(inArray(unitsTable.id, p.unitIds));
+
+    // Build installments at their FULL amount (prepaid is NOT deducted — it's
+    // recorded as a collection below so each installment shows its full value
+    // with the remaining).
+    const rows = this.buildScheduleRows(contract.id, p);
+    const inserted = rows.length > 0 ? await db.insert(paymentsTable).values(rows).returning() : [];
+
+    const nowStr = new Date().toISOString().slice(0, 10);
+    const startDay = p.startDate || nowStr;
+
+    // Advance/prepaid rent → record as a collection on the earliest rent
+    // installments (keeps full amount; flips them to paid / partially_paid).
+    // The advance carries its OWN receipt-voucher number so it shows in the
+    // Collections tab as a distinct سند القبض — the later collection of the
+    // remaining balance produces a second voucher. (Hence: with advance rent
+    // there are two receipt vouchers for the rent — advance + remainder.)
+    const prepaid = p.prepaidRequested;
+    if (prepaid > 0 && inserted.length > 0) {
+      const method = (p.values.prepaidMethod as string | null) || "bank_transfer";
+      const advanceVoucher = await this.nextReceiptNumber(db, ownerId);
+
+      // `pickedFeeNames`, `coversRent` and `feesFirst` were decided during
+      // `prepareContract` — the ceiling check needs the same answers this loop
+      // uses, and deciding them twice is how the two could drift apart.
+      const settleRows = inserted
+        .filter((row: any) => this.advanceCovers(p, row.status, row.description))
+        .sort((a: any, b: any) => {
+          const aFee = !!a.description, bFee = !!b.description;
+          // Priority decides the class order; due date orders within a class,
+          // so the money still walks the schedule forwards.
+          if (aFee !== bFee) return p.feesFirst ? (aFee ? -1 : 1) : (aFee ? 1 : -1);
+          return String(a.dueDate).localeCompare(String(b.dueDate));
+        });
+
+      let left = prepaid;
+      let applied = 0;
+      for (const row of settleRows) {
+        if (left <= 0.01) break;
+        const full = round2(Number(row.amount));
+        const amt = round2(Math.min(left, full));
+        await db.insert(paymentCollectionsTable).values({
+          paymentId: row.id, userId: ownerId, amount: amt.toFixed(2),
+          collectedDate: startDay, method, receiptNumber: advanceVoucher,
+          // This exact string buckets the collection as "advance" when the
+          // contract is ended (see settlementBuckets) — a fee-covering
+          // collection is still part of the advance, so it must not diverge.
+          // It is also what the rebuild path recognises as its own artefact.
+          notes: ADVANCE_NOTE, attachmentKey: p.prepaidAttachmentKey,
+        } as any);
+        const fully = amt >= full - 0.01;
+        await db.update(paymentsTable)
+          .set({ status: fully ? "paid" : "partially_paid", paidDate: fully ? startDay : null })
+          .where(eq(paymentsTable.id, row.id));
+        left = round2(left - amt);
+        applied = round2(applied + amt);
+      }
+      // Advance receipt-voucher DOCUMENT (kind="receipt") so the advance shows in
+      // the Receipt Vouchers page too — it shares the RV number stamped on the
+      // collection(s) above. Not linked to an installment (the collection is),
+      // so it doesn't double-count in collections.
+      if (applied > 0.01) {
+        await db.insert(simpleInvoicesTable).values({
+          userId: ownerId, number: advanceVoucher, type: "invoice", kind: RECEIPT_KIND, status: "confirmed",
+          contractId: contract.id, tenantId: contract.tenantId ?? null, tenantName: contract.tenantName ?? null,
+          items: [{ description: ADVANCE_NOTE, quantity: 1, unitPrice: applied, amount: applied, vat: false }],
+          subtotal: applied.toFixed(2), total: applied.toFixed(2),
+          issueDate: startDay, paidDate: startDay, confirmedAt: new Date(),
+          receiptNumber: advanceVoucher, paymentMethod: method, notes: ADVANCE_NOTE,
+          attachmentKey: p.prepaidAttachmentKey,
+        } as any);
+      }
+    }
+
+    // Collected deposit → issue a receipt voucher (سند قبض) only. A deposit is
+    // held trust money (amanat), NOT rent revenue — it is no longer an
+    // installment/payment row, so it never appears in the financial schedule.
+    // The voucher is viewable from the contract once the deposit is collected.
+    //
+    // Guarded by an existence check because the rebuild reaches here too: a
+    // deposit voucher is deliberately NOT destroyed by a rebuild (it is proof
+    // that trust money was received), so it must not be minted a second time.
+    const depositAmt = round2(Number(p.values.depositAmount) || 0);
+    if (depositAmt > 0 && p.values.depositStatus === "collected") {
+      const [existing] = await db.select({ id: simpleInvoicesTable.id }).from(simpleInvoicesTable)
+        .where(and(
+          eq(simpleInvoicesTable.userId, ownerId), eq(simpleInvoicesTable.contractId, contract.id),
+          eq(simpleInvoicesTable.kind, DEPOSIT_KIND), ne(simpleInvoicesTable.status, "cancelled"),
+          isNull(simpleInvoicesTable.deletedAt),
+        )).limit(1);
+      if (!existing) {
+        await this.createDepositVoucher(
+          db, ownerId, contract, depositAmt,
+          (p.values.depositDueDate as string | null) || startDay,
+          (p.values.depositMethod as string | null) || "bank_transfer",
+          p.depositAttachmentKey,
+        );
+      }
+    }
+
+    return inserted.length;
+  }
+
+  @Post()
+  @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
+  async create(@CurrentUser() user: AuthUser, @Body() body: any) {
+    const p = await this.prepareContract(user, body);
+    const ownerId = p.ownerId;
 
     // Numbering + insert + unit linking happen inside ONE transaction guarded
     // by a per-account advisory lock — the same technique billing uses for
@@ -710,130 +927,26 @@ class ContractsController {
     // when the transaction commits.
     const contract = await this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(${ownerId}, ${CONTRACT_NUMBER_LOCK})`);
-      if (!isDraft) await this.assertNoOverlappingContract(tx, unitIds, startDate, endDate, null);
-      values.contractNumber = await this.nextContractNumber(tx, ownerId);
-      const [row] = await tx.insert(contractsTable).values(values as any).returning();
+      if (!p.isDraft) await this.assertNoOverlappingContract(tx, p.unitIds, p.startDate, p.endDate, null);
+      p.values.contractNumber = await this.nextContractNumber(tx, ownerId);
+      const [row] = await tx.insert(contractsTable).values(p.values as any).returning();
       // Link every unit to the new contract.
       await tx.insert(contractUnitsTable).values(
-        unitIds.map((unitId) => ({ contractId: row!.id, unitId })),
+        p.unitIds.map((unitId) => ({ contractId: row!.id, unitId })),
       );
       return row;
     });
 
-    // Per-year rent overrides (saved for drafts too, so they prefill on edit).
-    if (rentTerms.length > 0) {
-      await this.db.insert(contractRentTermsTable).values(
-        rentTerms.map((t) => ({ contractId: contract!.id, year: t.year, amount: String(t.amount) })),
-      );
-    }
-
-    // A draft contract doesn't occupy its units and generates no
-    // installments until it is finalised.
-    if (isDraft) {
-      return { ...contract, unitIds, installmentsCreated: 0 };
-    }
-
-    await this.db.update(unitsTable).set({ status: "rented" }).where(inArray(unitsTable.id, unitIds));
-
-    // Build installments at their FULL amount (prepaid is NOT deducted — it's
-    // recorded as a collection below so each installment shows its full value
-    // with the remaining).
-    const rows = applyExternalSettlement(
-      buildInstallments(
-        contract!.id, ownerId, startDate, endDate, String(values.monthlyRent), freq, additionalFees,
-        rentVat, Number(values.escalationRate) || 0,
-        String(values.escalationType) === "amount" ? "amount" : "percent",
-        rentTerms, 0, customSchedule,
-      ),
-      settledExternalUntil,
-    );
-    const inserted = rows.length > 0 ? await this.db.insert(paymentsTable).values(rows).returning() : [];
-
-    const nowStr = new Date().toISOString().slice(0, 10);
-    const startDay = startDate || nowStr;
-
-    // Advance/prepaid rent → record as a collection on the earliest rent
-    // installments (keeps full amount; flips them to paid / partially_paid).
-    // The advance carries its OWN receipt-voucher number so it shows in the
-    // Collections tab as a distinct سند القبض — the later collection of the
-    // remaining balance produces a second voucher. (Hence: with advance rent
-    // there are two receipt vouchers for the rent — advance + remainder.)
-    const prepaid = prepaidRequested;
-    if (prepaid > 0 && inserted.length > 0) {
-      const method = (values.prepaidMethod as string | null) || "bank_transfer";
-      const advanceVoucher = await this.nextReceiptNumber(ownerId);
-
-      // `pickedFeeNames`, `coversRent` and `feesFirst` were decided before the
-      // insert — the ceiling check needs the same answers this loop uses, and
-      // deciding them twice is how the two could drift apart.
-      const settleRows = inserted
-        .filter((p) => p.status !== "settled_external"
-          && (p.description ? pickedFeeNames.has(p.description) : coversRent))
-        .sort((a, b) => {
-          const aFee = !!a.description, bFee = !!b.description;
-          // Priority decides the class order; due date orders within a class,
-          // so the money still walks the schedule forwards.
-          if (aFee !== bFee) return feesFirst ? (aFee ? -1 : 1) : (aFee ? 1 : -1);
-          return String(a.dueDate).localeCompare(String(b.dueDate));
-        });
-
-      let left = prepaid;
-      let applied = 0;
-      for (const p of settleRows) {
-        if (left <= 0.01) break;
-        const full = round2(Number(p.amount));
-        const amt = round2(Math.min(left, full));
-        await this.db.insert(paymentCollectionsTable).values({
-          paymentId: p.id, userId: ownerId, amount: amt.toFixed(2),
-          collectedDate: startDay, method, receiptNumber: advanceVoucher,
-          // This exact string buckets the collection as "advance" when the
-          // contract is ended (see settlementBuckets) — a fee-covering
-          // collection is still part of the advance, so it must not diverge.
-          notes: "إيجار مدفوع مقدماً", attachmentKey: body.prepaidAttachmentKey ?? null,
-        } as any);
-        const fully = amt >= full - 0.01;
-        await this.db.update(paymentsTable)
-          .set({ status: fully ? "paid" : "partially_paid", paidDate: fully ? startDay : null })
-          .where(eq(paymentsTable.id, p.id));
-        left = round2(left - amt);
-        applied = round2(applied + amt);
-      }
-      // Advance receipt-voucher DOCUMENT (kind="receipt") so the advance shows in
-      // the Receipt Vouchers page too — it shares the RV number stamped on the
-      // collection(s) above. Not linked to an installment (the collection is),
-      // so it doesn't double-count in collections.
-      if (applied > 0.01) {
-        const c = contract!;
-        await this.db.insert(simpleInvoicesTable).values({
-          userId: ownerId, number: advanceVoucher, type: "invoice", kind: "receipt", status: "confirmed",
-          contractId: c.id, tenantId: c.tenantId ?? null, tenantName: c.tenantName ?? null,
-          items: [{ description: "إيجار مدفوع مقدماً", quantity: 1, unitPrice: applied, amount: applied, vat: false }],
-          subtotal: applied.toFixed(2), total: applied.toFixed(2),
-          issueDate: startDay, paidDate: startDay, confirmedAt: new Date(),
-          receiptNumber: advanceVoucher, paymentMethod: method, notes: "إيجار مدفوع مقدماً",
-          attachmentKey: body.prepaidAttachmentKey ?? null,
-        } as any);
-      }
-    }
-
-    // Collected deposit → issue a receipt voucher (سند قبض) only. A deposit is
-    // held trust money (amanat), NOT rent revenue — it is no longer an
-    // installment/payment row, so it never appears in the financial schedule.
-    // The voucher is viewable from the contract once the deposit is collected.
-    const depositAmt = round2(Number(values.depositAmount) || 0);
-    if (depositAmt > 0 && values.depositStatus === "collected") {
-      await this.createDepositVoucher(
-        ownerId, contract!, depositAmt, (values.depositDueDate as string | null) || startDay, (values.depositMethod as string | null) || "bank_transfer",
-        body.depositAttachmentKey ?? null,
-      );
-    }
-
-    return { ...contract, unitIds, installmentsCreated: inserted.length };
+    const installmentsCreated = await this.materializeContract(this.db, contract!, p);
+    return { ...contract, unitIds: p.unitIds, installmentsCreated };
   }
 
-  /** Next per-account receipt-voucher (سند قبض) number: RV-000001, … */
-  private async nextReceiptNumber(ownerId: number): Promise<string> {
-    return nextReceiptVoucherNumber(this.db, ownerId);
+  /** Next per-account receipt-voucher (سند قبض) number: RV-000001, …
+   *  Takes the db handle so it can be generated inside a transaction — the
+   *  rebuild mints its advance voucher within the transaction that destroyed
+   *  the previous one, so the number must be read under the same lock. */
+  private async nextReceiptNumber(db: any, ownerId: number): Promise<string> {
+    return nextReceiptVoucherNumber(db, ownerId);
   }
 
   /**
@@ -842,15 +955,14 @@ class ContractsController {
    * no VAT, stamped with an RV number. This is the ONLY artefact a collected
    * deposit produces — there is no installment/payment row for it.
    */
-  private async createDepositVoucher(ownerId: number, contract: any, amount: number, date: string, method: string, attachmentKey?: string | null) {
-    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+  private async createDepositVoucher(db: any, ownerId: number, contract: any, amount: number, date: string, method: string, attachmentKey?: string | null) {
     const amt = round2(amount);
-    const voucher = await this.nextReceiptNumber(ownerId);
+    const voucher = await this.nextReceiptNumber(db, ownerId);
     // A deposit voucher is a سند قبض, not a tax invoice — its number IS the RV
     // number; it never consumes an INV-#### sequence.
     const number = voucher;
-    const [doc] = await this.db.insert(simpleInvoicesTable).values({
-      userId: ownerId, number, type: "invoice", kind: "deposit", status: "confirmed",
+    const [doc] = await db.insert(simpleInvoicesTable).values({
+      userId: ownerId, number, type: "invoice", kind: DEPOSIT_KIND, status: "confirmed",
       contractId: contract.id, tenantId: contract.tenantId ?? null, tenantName: contract.tenantName ?? null,
       items: [{ description: DEPOSIT_DESC, quantity: 1, unitPrice: amt, amount: amt, vat: false }],
       subtotal: amt.toFixed(2), total: amt.toFixed(2),
@@ -927,7 +1039,7 @@ class ContractsController {
 
     const date = body?.paidDate || new Date().toISOString().slice(0, 10);
     const method = body?.method || contract.depositMethod || "bank_transfer";
-    const voucher = await this.createDepositVoucher(ownerId, contract, amt, date, method);
+    const voucher = await this.createDepositVoucher(this.db, ownerId, contract, amt, date, method);
     await this.db.update(contractsTable)
       .set({ depositStatus: "collected", depositMethod: method, depositDueDate: contract.depositDueDate || date } as any)
       .where(eq(contractsTable.id, id));
@@ -985,11 +1097,296 @@ class ContractsController {
     return { success: true, installmentsCreated: rows.length };
   }
 
+  /**
+   * Rebuild a contract in place — the edit path.
+   *
+   * A landlord who has just written a contract and got the rent, the dates, the
+   * fees, the units or the tenant wrong cannot patch their way out of it: the
+   * installment schedule, the unit links and the advance artefacts were all
+   * DERIVED from the values that were wrong. So an edit does not adjust them —
+   * it destroys everything the creation path produced and generates it again
+   * from the corrected values.
+   *
+   * ── The contract keeps its identity ──
+   * Same row, same `id`, same `contract_number`. No number is allocated and no
+   * second contract row is written; every document, link and report that
+   * already points at this contract still points at the same contract.
+   *
+   * ── What is destroyed and remade ──
+   *   payments              → deleted outright, rebuilt from the new terms
+   *   payment_collections   → deleted with them (only the create-path advance
+   *                           can be present; see the gate)
+   *   the advance voucher   → cancelled + tombstoned, re-minted by materialize
+   *   contract_units        → deleted and re-linked
+   *   contract_rent_terms   → deleted and re-inserted
+   *
+   * Deleted, not soft-deleted, because a rebuild is not a business event that
+   * deserves a paper trail of tombstoned installments — every edit would leave
+   * another full schedule behind. What happened is recorded once, in
+   * `audit_logs`, with the counts. The gate below has already guaranteed that
+   * nothing outside the contract references any of those rows.
+   *
+   * The deposit voucher is the one artefact deliberately left alone: it is
+   * proof that trust money was actually received, so voiding and re-minting it
+   * would destroy the tenant's receipt and burn an RV number. The gate refuses
+   * instead if the rebuild would move the amount it attests to.
+   *
+   * ── Same rules as create, not a second copy of them ──
+   * `prepareContract` runs the whole create rule set (unit bounds, unit
+   * ownership, required fields, the derived VAT verdict, the field sanitiser,
+   * the period and rent checks, the advance plan, the advance ceiling), and
+   * `materializeContract` writes exactly what create writes. The only things
+   * this path adds are the eligibility gate, the destruction, and the audit.
+   *
+   * Everything runs inside one transaction, under the same per-account advisory
+   * lock the create path takes: a failure anywhere leaves the contract exactly
+   * as it was, and a concurrent create cannot interleave with the moment the
+   * units are unlinked.
+   */
+  private async rebuildContract(user: AuthUser, id: number, body: any) {
+    const ownerId = scopeId(user);
+
+    // Cheap refusals first, so a draft or an ended contract gets its own reason
+    // instead of a validation error from a rule set that does not apply to it.
+    const [head] = await this.db
+      .select({ id: contractsTable.id, isDraft: contractsTable.isDraft, status: contractsTable.status })
+      .from(contractsTable)
+      .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
+    if (!head) throw new NotFoundException("Contract not found");
+    // `"false"` is a truthy string — read the flag the way the dispatch does.
+    const wantsDraft = body?.isDraft === true || body?.isDraft === "true";
+    const early = rebuildBlockReason({
+      isDraft: Boolean(head.isDraft), status: head.status,
+      zatcaInvoiceCount: 0, docs: classifyContractDocs([]), foreignCollections: [],
+      depositVoucherTotal: 0, nextDepositAmount: 0,
+      wantsDraft: wantsDraft,
+    });
+    if (early) throw new BadRequestException(early.message);
+
+    // The create path's ENTIRE rule set, over the new payload. A rebuild is
+    // never a draft — a draft is exempt from the identity formats, the period
+    // check and the rent check, none of which a live contract may skip.
+    const p = await this.prepareContract(user, { ...body, isDraft: false });
+
+    return this.db.transaction(async (tx) => {
+      // The SAME lock the create path takes, in the same key space. Without it
+      // a create could run its double-booking check in the window where this
+      // rebuild has unlinked the old units and not yet linked the new ones, and
+      // both would find the unit free. It also serialises two concurrent
+      // rebuilds: the second waits, then re-reads the row and re-runs the gate
+      // against whatever the first one left behind.
+      await tx.execute(sql`select pg_advisory_xact_lock(${ownerId}, ${CONTRACT_NUMBER_LOCK})`);
+
+      // Re-read under a row lock. The eligibility facts are only meaningful for
+      // the row as it is INSIDE this transaction — an invoice issued between
+      // the early check and here must still block the rebuild.
+      const [current] = await tx.select().from(contractsTable)
+        .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)))
+        .for("update");
+      if (!current) throw new NotFoundException("Contract not found");
+
+      /* ── Eligibility ───────────────────────────────────────────────────
+       * Three reads establish everything `rebuildBlockReason` needs; the rule
+       * itself, and the reasoning behind it, lives in ./rebuild.ts.
+       */
+
+      // (a) The ZATCA e-invoice table, joined by contract. Any non-deleted row
+      //     bars the rebuild whatever its status — even a `draft` invoice has
+      //     already taken an ICV and a PIH in the landlord's hash chain.
+      const [zatcaCount] = await tx.select({ n: count() }).from(invoicesTable)
+        .where(and(eq(invoicesTable.contractId, id), isNull(invoicesTable.deletedAt)));
+
+      // (b) Every live billing document on the contract, classified into the
+      //     ones that reached ZATCA, the create path's own artefacts, and
+      //     anything else that would be left pointing at deleted installments.
+      const docRows: ContractDocRow[] = await tx.select({
+        id: simpleInvoicesTable.id,
+        kind: simpleInvoicesTable.kind,
+        status: simpleInvoicesTable.status,
+        notes: simpleInvoicesTable.notes,
+        zatcaStatus: simpleInvoicesTable.zatcaStatus,
+        zatcaQr: simpleInvoicesTable.zatcaQr,
+        zatcaInvoiceId: simpleInvoicesTable.zatcaInvoiceId,
+        total: simpleInvoicesTable.total,
+      }).from(simpleInvoicesTable).where(and(
+        eq(simpleInvoicesTable.contractId, id),
+        eq(simpleInvoicesTable.userId, ownerId),
+        isNull(simpleInvoicesTable.deletedAt),
+      ));
+      const docs = classifyContractDocs(docRows);
+      const depositVoucherTotal = round2(
+        docs.depositVouchers.reduce((s, d) => s + (Number(d.total) || 0), 0),
+      );
+
+      // (c) Money already collected. Tombstoned installments are included on
+      //     purpose — a soft-deleted row can still carry a collection, and the
+      //     rebuild is about to remove it for good either way.
+      const payIds = (await tx.select({ id: paymentsTable.id }).from(paymentsTable)
+        .where(and(eq(paymentsTable.contractId, id), eq(paymentsTable.userId, ownerId))))
+        .map((r) => r.id);
+      const colRows: ContractCollectionRow[] = payIds.length > 0
+        ? await tx.select({
+            id: paymentCollectionsTable.id,
+            notes: paymentCollectionsTable.notes,
+            amount: paymentCollectionsTable.amount,
+          }).from(paymentCollectionsTable).where(inArray(paymentCollectionsTable.paymentId, payIds))
+        : [];
+
+      const refusal = rebuildBlockReason({
+        isDraft: Boolean(current.isDraft),
+        status: current.status,
+        zatcaInvoiceCount: Number(zatcaCount?.n ?? 0),
+        docs,
+        foreignCollections: foreignCollections(colRows),
+        depositVoucherTotal,
+        nextDepositAmount: round2(Number(p.values.depositAmount) || 0),
+        wantsDraft: wantsDraft,
+      });
+      if (refusal) {
+        // A draft / to-draft request is a malformed request; everything else is
+        // a state conflict — the contract exists but is past the point of being
+        // rebuildable.
+        if (refusal.code === "draft" || refusal.code === "to_draft") throw new BadRequestException(refusal.message);
+        throw new ConflictException(refusal.message);
+      }
+
+      // The contract as it stands, for the audit diff — read before anything is
+      // destroyed, and inside the lock so it is the state actually replaced.
+      const priorUnitIds = (await tx.select({ unitId: contractUnitsTable.unitId })
+        .from(contractUnitsTable).where(eq(contractUnitsTable.contractId, id))).map((r) => r.unitId);
+      const priorFacts = contractMoneyFacts(current, priorUnitIds,
+        (await tx.select().from(contractRentTermsTable).where(eq(contractRentTermsTable.contractId, id)))
+          .map((t: any) => ({ year: t.year, amount: Number(t.amount) })));
+
+      // The same double-booking rule the create path enforces, with this
+      // contract excluded from the comparison — its own links must not read as
+      // a clash with its own new period. Inside the lock, so a concurrent
+      // create cannot slip a second contract onto the unit meanwhile.
+      await this.assertNoOverlappingContract(tx, p.unitIds, p.startDate, p.endDate, id);
+
+      /* ── Destroy everything the previous generation produced ────────── */
+      const installmentsRemoved = payIds.length;
+      if (payIds.length > 0) {
+        await tx.delete(paymentCollectionsTable).where(inArray(paymentCollectionsTable.paymentId, payIds));
+        await tx.delete(paymentsTable)
+          .where(and(eq(paymentsTable.contractId, id), eq(paymentsTable.userId, ownerId)));
+      }
+      // The advance receipt voucher is a document, not a row nobody has seen —
+      // tombstone it as cancelled rather than deleting it, so an RV number that
+      // may already have been printed resolves to a voided document instead of
+      // to nothing.
+      const advanceVoucherIds = docs.advanceVouchers.map((d) => d.id);
+      if (advanceVoucherIds.length > 0) {
+        await tx.update(simpleInvoicesTable)
+          .set({ status: "cancelled", deletedAt: new Date() } as any)
+          .where(inArray(simpleInvoicesTable.id, advanceVoucherIds));
+      }
+      await tx.delete(contractRentTermsTable).where(eq(contractRentTermsTable.contractId, id));
+      await tx.delete(contractUnitsTable).where(eq(contractUnitsTable.contractId, id));
+
+      /* ── Rewrite the contract row (same id, same number) ─────────────── */
+      const setValues: Record<string, unknown> = { ...p.values };
+      // Identity and account facts are not contract terms: the number is never
+      // reallocated, the owner never moves, and `isDemo` belongs to how the row
+      // was seeded, not to what the landlord just typed.
+      delete setValues.userId;
+      delete setValues.isDemo;
+      delete setValues.contractNumber;
+      // `prepareContract` returns "active", because that is what a NEW live
+      // contract is. A rebuild must not silently reactivate an expired contract
+      // or change its lifecycle at all — the stored status stands. Changing it
+      // is what the ordinary PATCH (and `terminate`) are for.
+      setValues.status = current.status;
+      const [updated] = await tx.update(contractsTable).set(setValues as any)
+        .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)))
+        .returning();
+      if (!updated) throw new NotFoundException("Contract not found");
+
+      /* ── Regenerate ─────────────────────────────────────────────────── */
+      await tx.insert(contractUnitsTable).values(
+        p.unitIds.map((unitId) => ({ contractId: id, unitId })),
+      );
+      const installmentsCreated = await this.materializeContract(tx, updated, p);
+
+      // A unit dropped from the contract goes back to "available" — but only if
+      // nothing else still holds it. The contract's own links are already gone
+      // at this point, so it cannot count as its own occupant.
+      const released = priorUnitIds.filter((u) => !p.unitIds.includes(u));
+      let freed: number[] = [];
+      if (released.length > 0) {
+        const stillHeld = await tx.select({ unitId: contractUnitsTable.unitId })
+          .from(contractUnitsTable)
+          .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+          .where(and(
+            inArray(contractUnitsTable.unitId, released),
+            isNull(contractsTable.deletedAt),
+            eq(contractsTable.isDraft, false),
+            notInArray(contractsTable.status, ENDED_CONTRACT_STATUSES as any),
+          ));
+        const held = new Set(stillHeld.map((r) => r.unitId));
+        freed = released.filter((u) => !held.has(u));
+        if (freed.length > 0) {
+          await tx.update(unitsTable).set({ status: "available" }).where(inArray(unitsTable.id, freed));
+        }
+      }
+
+      /* ── Audit ──────────────────────────────────────────────────────── */
+      // Written INSIDE the transaction, unlike the global interceptor's
+      // fire-and-forget row: a rebuild that rolls back must not leave a log
+      // entry claiming it happened. See `rebuildAuditPath` for the shape and
+      // why the payload rides on `path`.
+      const diff = factsDiff(priorFacts, contractMoneyFacts(updated, p.unitIds, p.rentTerms));
+      await tx.insert(auditLogsTable).values({
+        ownerUserId: ownerId,
+        actorUserId: user.id,
+        action: "rebuild",
+        entity: "contracts",
+        entityId: String(id),
+        method: "PATCH",
+        path: rebuildAuditPath(id, updated.contractNumber, diff, { installmentsRemoved, installmentsCreated }),
+      });
+
+      return {
+        ...updated,
+        unitIds: p.unitIds,
+        rebuilt: true,
+        installmentsRemoved,
+        installmentsCreated,
+        collectionsRemoved: colRows.length,
+        collectionsRemovedTotal: collectionsTotal(colRows),
+        vouchersVoided: advanceVoucherIds.length,
+        unitsReleased: freed,
+        changed: Object.keys(diff),
+        message:
+          `تم تحديث العقد ${updated.contractNumber} وإعادة بناء جدول الدفعات ` +
+          `(${installmentsRemoved} دفعة سابقة ← ${installmentsCreated} دفعة جديدة)`,
+      };
+    });
+  }
+
+  /**
+   * PATCH /contracts/:contractId
+   *
+   * Two behaviours behind one route, chosen by the body:
+   *
+   *   - the ordinary field patch (default) — merges the sent fields into the
+   *     stored row and leaves the generated schedule alone;
+   *   - `rebuild: true` — REBUILDS the contract in place from a full wizard
+   *     payload (see `rebuildContract`).
+   *
+   * Deliberately not a second endpoint: the portal's edit flow is the same
+   * wizard as its create flow, so the edit call is the create body plus one
+   * flag. A parallel route would have made "edit" a new concept for the client
+   * and split the contract surface in two.
+   */
   @Patch(":contractId")
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
     const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
+    if (body?.rebuild === true || body?.rebuild === "true") {
+      return this.rebuildContract(user, id, body);
+    }
     // The prior row is needed to reason about the contract AS IT WILL BE: a
     // PATCH that moves only the end date, or only flips `isDraft`, still has to
     // satisfy the same period / rent / double-booking rules the create path

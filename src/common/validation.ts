@@ -173,29 +173,35 @@ export function oneOf<T extends string>(v: unknown, allowed: readonly T[], label
 /* ─────────────────────── Saudi identity fields ─────────────────────── */
 
 /**
- * Normalise a Saudi mobile number to its canonical stored form `05XXXXXXXX`.
+ * Normalise a Saudi mobile number to its canonical stored form: the bare nine
+ * significant digits, `5XXXXXXXX` — no country code, no leading zero.
  *
  * Accepted inputs: `+9665XXXXXXXX`, `9665XXXXXXXX`, `05XXXXXXXX`, `5XXXXXXXX`
  * (spaces, dashes and parentheses are stripped first). Anything else is
- * refused — always exactly 9 significant digits starting with 5.
+ * refused — always exactly 9 significant digits starting with 5. The UI shows
+ * a fixed `+966` prefix and collects those 9 digits; the prefix is presentation
+ * only and is never stored.
  *
- * `05XXXXXXXX` is one of the variants `phoneVariants()` in
+ * The bare form is one of the variants `phoneVariants()` in
  * `modules/auth/auth.service.ts` expands to when it looks a number up, so a
- * number stored in this form is still found by tenant/landlord OTP login
- * whatever form the caller types. Storing one canonical form also makes the
- * exact-match joins (e.g. maintenance matching `contracts.tenant_phone` to
- * `tenants.phone`) actually match.
+ * number stored this way is still found by tenant/landlord OTP login whatever
+ * form the caller types. `sms/taqnyat.service.ts#normalizeRecipient` likewise
+ * re-adds the `966` before a message is sent, so delivery is unaffected.
+ * Storing one canonical form also makes the exact-match joins (the tenant
+ * portal and maintenance matching `contracts.tenant_phone` to `tenants.phone`)
+ * actually match — both sides must be in THIS form, which is what the
+ * `db/sql/2026_08_phone_bare_9_digits.sql` migration exists to guarantee.
  */
 export function saudiPhone(v: unknown, label = "رقم الجوال"): string | null {
   if (isBlank(v)) return null;
   const raw = scalar(v, label).replace(/[\s\-()]/g, "");
   if (!RE.saudiMobile.test(raw)) {
-    bad(`${label} غير صالح — يجب أن يبدأ بـ 05 ويتكوّن من 10 أرقام (أو +9665…) · Invalid Saudi mobile number`);
+    bad(`${label} غير صالح — يجب أن يتكوّن من 9 أرقام تبدأ بـ 5 بعد مفتاح +966 · Invalid Saudi mobile number`);
   }
   let digits = raw.replace(/\D/g, "");
   if (digits.startsWith("966")) digits = digits.slice(3);
   if (digits.startsWith("0")) digits = digits.slice(1);
-  return `0${digits}`;
+  return digits;
 }
 
 /** National ID (starts with 1) or Iqama (starts with 2) — exactly 10 digits. */
