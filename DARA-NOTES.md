@@ -144,6 +144,13 @@ usually what you want, but check before assuming a rule is universal.
 
 ---
 
+**Deploy timings, why they are slow, and the duplicate-container bug** are
+measured in **`DEPLOY-PERFORMANCE.md`** (same copy in `dara-api`). Short
+version: a deploy is 90% docker build; two containers per app for ~25–65s is
+normal rolling-update overlap, but Coolify silently swallows a failed cleanup
+and can leave the old build serving traffic for minutes — so confirm a deploy
+by behaviour, never by the green tick.
+
 ## 2b. ZATCA (Fatoora) — which environment we are actually in
 
 **Production has never submitted a real e-invoice.** Audited against the
