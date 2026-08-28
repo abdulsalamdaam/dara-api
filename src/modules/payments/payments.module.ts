@@ -104,7 +104,28 @@ class PaymentsController {
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow, statsRows, collectedRow] = await Promise.all([
+    // Money collected on a free invoice — a fee collected against an invoice
+    // with no installment behind it. It never produces a payment_collections
+    // row, so the sum above cannot see it, and the Payments card used to leave
+    // it out entirely: the row appeared in the table and the total did not move.
+    // Same conditions the Collections tab uses for these, kept in SQL so the
+    // figure covers every invoice rather than the first page of them.
+    const freeCollectedWhere = and(
+      eq(simpleInvoicesTable.userId, scopeId(user)),
+      eq(simpleInvoicesTable.status, "confirmed"),
+      eq(simpleInvoicesTable.type, "invoice"),
+      isNull(simpleInvoicesTable.paymentId),
+      isNull(simpleInvoicesTable.deletedAt),
+      isNotNull(simpleInvoicesTable.paidDate),
+      // Vouchers are evidence of money already counted elsewhere, not collections.
+      or(isNull(simpleInvoicesTable.kind), and(ne(simpleInvoicesTable.kind, "deposit"), ne(simpleInvoicesTable.kind, "receipt"))),
+      notExists(
+        this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+          .where(eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id)),
+      ),
+    );
+
+    const [rows, totalRow, statsRows, collectedRow, freeCollectedRow] = await Promise.all([
       rowsQ,
       usePaginated ? this.db.select({ total: count() }).from(paymentsTable)
         .leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
@@ -123,6 +144,9 @@ class PaymentsController {
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
         .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.userId, scopeId(user)))
         : Promise.resolve([{ amount: null }]),
+      usePaginated ? this.db.select({ amount: sum(simpleInvoicesTable.total), cnt: count() })
+        .from(simpleInvoicesTable).where(freeCollectedWhere)
+        : Promise.resolve([{ amount: null, cnt: 0 }]),
     ]);
 
     // Per-payment collected amount for the rows on this page.
@@ -158,8 +182,12 @@ class PaymentsController {
     });
     if (!usePaginated) return data;
 
+    const freeCollected = round2(Number((freeCollectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0));
+    const freeCollectedCount = Number((freeCollectedRow as Array<{ cnt: number }>)[0]?.cnt ?? 0);
     const stats = { paid: 0, pending: 0, overdue: 0, cancelled: 0, partiallyPaid: 0,
-      collected: round2(Number((collectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0)),
+      // `collected` is all the money in, whichever way it came in.
+      collected: round2(Number((collectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0) + freeCollected),
+      freeCollected, freeCollectedCount,
       paidCount: 0, pendingCount: 0, overdueCount: 0, cancelledCount: 0, partiallyPaidCount: 0 };
     for (const s of statsRows as Array<{ status: string; cnt: number; amount: string | null }>) {
       const amt = Number(s.amount ?? 0);
