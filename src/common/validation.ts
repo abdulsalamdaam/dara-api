@@ -42,8 +42,22 @@ export const RE = {
   nationalId: /^[12]\d{9}$/,
   /** Commercial registration (السجل التجاري): 10 digits. */
   commercialReg: /^\d{10}$/,
-  /** Saudi mobile in any of the four accepted forms. */
-  saudiMobile: /^(?:0?5\d{8}|9665\d{8}|\+9665\d{8})$/,
+  /**
+   * Saudi mobile in any accepted form: `5XXXXXXXX`, `05XXXXXXXX`,
+   * `9665XXXXXXXX`, `+9665XXXXXXXX`, `009665XXXXXXXX`.
+   *
+   * Test it against the output of `latinDigits()` with spaces, dashes and
+   * parentheses already stripped — Arabic-Indic and Persian digits are not
+   * `\d` in JavaScript, so the folding has to happen first (`saudiPhone()`
+   * does both). `00966` is the international prefix as it is dialled from a
+   * Saudi handset and is what `dara-mobile` and pasted contact cards produce.
+   *
+   * Leading zeros are `0*` rather than `0?` on purpose: `normalizeSaudiMobile`
+   * in `dara-web/src/lib/phone.ts` strips them all, so anything the client
+   * says it accepts is accepted here too. A leading zero is never significant
+   * — it is the national trunk prefix — so this widens nothing that matters.
+   */
+  saudiMobile: /^(?:0*5\d{8}|\+?0*9665\d{8})$/,
   /** ZATCA VAT number: 15 digits, first and last both 3. */
   vatNumber: /^3\d{13}3$/,
   /** Saudi IBAN: SA + 22 digits (24 chars total). */
@@ -173,14 +187,49 @@ export function oneOf<T extends string>(v: unknown, allowed: readonly T[], label
 /* ─────────────────────── Saudi identity fields ─────────────────────── */
 
 /**
+ * Arabic-Indic (٠-٩) and Persian/Urdu (۰-۹) digits → ASCII `0-9`.
+ *
+ * An Arabic keyboard on iOS produces `٠٥٠٢٩٠٧١٠٠`, and JavaScript's `\d`
+ * matches ASCII only, so every digit-shaped rule has to fold first or it sees
+ * a string with no digits in it at all. Mirrors `toLatinDigits()` in
+ * `dara-web/src/lib/phone.ts`, which folds before it sends.
+ */
+function latinDigits(s: string): string {
+  return s
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
+}
+
+/** Everything a human puts between the digits of a phone number. */
+function stripPhonePunctuation(s: string): string {
+  return s.replace(/[\s\-()]/g, "");
+}
+
+/**
+ * Reduce an already-validated phone string to the bare nine digits: drop the
+ * national trunk `0`, then the `966` country code, then any zero the country
+ * code was hiding. Leading zeros go first so `00966…` loses its international
+ * prefix before the `966` test runs.
+ */
+function phoneCore(digitsOnly: string): string {
+  let d = digitsOnly.replace(/^0+/, "");
+  if (d.startsWith("966")) d = d.slice(3).replace(/^0+/, "");
+  return d;
+}
+
+/**
  * Normalise a Saudi mobile number to its canonical stored form: the bare nine
  * significant digits, `5XXXXXXXX` — no country code, no leading zero.
  *
- * Accepted inputs: `+9665XXXXXXXX`, `9665XXXXXXXX`, `05XXXXXXXX`, `5XXXXXXXX`
- * (spaces, dashes and parentheses are stripped first). Anything else is
- * refused — always exactly 9 significant digits starting with 5. The UI shows
- * a fixed `+966` prefix and collects those 9 digits; the prefix is presentation
- * only and is never stored.
+ * Accepted inputs: `+9665XXXXXXXX`, `9665XXXXXXXX`, `009665XXXXXXXX`,
+ * `05XXXXXXXX`, `5XXXXXXXX`, in ASCII or Arabic-Indic/Persian digits (spaces,
+ * dashes and parentheses are stripped first). That is exactly the set
+ * `normalizeSaudiMobile()` in `dara-web/src/lib/phone.ts` documents as
+ * accepted and normalises before sending, so the API never refuses an input
+ * the client promised to take. Anything else is refused — always exactly 9
+ * significant digits starting with 5. The UI shows a fixed `+966` prefix and
+ * collects those 9 digits; the prefix is presentation only and is never
+ * stored.
  *
  * The bare form is one of the variants `phoneVariants()` in
  * `modules/auth/auth.service.ts` expands to when it looks a number up, so a
@@ -194,14 +243,43 @@ export function oneOf<T extends string>(v: unknown, allowed: readonly T[], label
  */
 export function saudiPhone(v: unknown, label = "رقم الجوال"): string | null {
   if (isBlank(v)) return null;
-  const raw = scalar(v, label).replace(/[\s\-()]/g, "");
+  const raw = stripPhonePunctuation(latinDigits(scalar(v, label)));
   if (!RE.saudiMobile.test(raw)) {
     bad(`${label} غير صالح — يجب أن يتكوّن من 9 أرقام تبدأ بـ 5 بعد مفتاح +966 · Invalid Saudi mobile number`);
   }
-  let digits = raw.replace(/\D/g, "");
-  if (digits.startsWith("966")) digits = digits.slice(3);
-  if (digits.startsWith("0")) digits = digits.slice(1);
-  return digits;
+  return phoneCore(raw.replace(/\D/g, ""));
+}
+
+/**
+ * `saudiPhone()` for a DRAFT: normalises, never refuses.
+ *
+ * The difference from `saudiPhone()` is only what happens to a value that is
+ * NOT a complete Saudi mobile. `saudiPhone()` raises — correct for a real
+ * record. A draft is deliberately allowed to hold incomplete data ("حفظ
+ * كمسودة" exists so a half-typed contract can be put down and picked up
+ * later), so refusing `05512` would break the feature. This helper therefore:
+ *
+ *   - stores a recognisable number in the SAME canonical form as
+ *     `saudiPhone()` — `+966 50 290 7100`, `0502907100` and `٠٥٠٢٩٠٧١٠٠` all
+ *     become `502907100`;
+ *   - leaves anything it cannot recognise as the caller typed it, subject
+ *     only to the length cap that free text gets.
+ *
+ * Why it matters that a draft is canonical too: `contracts.tenant_phone` is
+ * joined to `tenants.phone` by exact string equality (the tenant portal and
+ * maintenance routing both do this), and a draft is visible in the portal for
+ * the whole of its life. Routing a draft's phone through `text()` made drafts
+ * the only rows in the table holding a non-canonical number, so those joins
+ * silently missed. Use this for a draft's phone; use `saudiPhone()` everywhere
+ * else — a finalised contract must still be refused a malformed number.
+ */
+export function draftPhone(v: unknown, label = "رقم الجوال", max: number = LIMITS.identifier): string | null {
+  if (isBlank(v)) return null;
+  const s = text(v, label, max);
+  if (s === null) return null;
+  const cleaned = stripPhonePunctuation(latinDigits(s));
+  if (!RE.saudiMobile.test(cleaned)) return s; // half-typed / not a Saudi mobile — keep it
+  return phoneCore(cleaned.replace(/\D/g, ""));
 }
 
 /** National ID (starts with 1) or Iqama (starts with 2) — exactly 10 digits. */
@@ -514,6 +592,16 @@ export function applyPercent(o: Record<string, unknown>, key: string, label: str
 
 export function applyPhone(o: Record<string, unknown>, key: string, label = "رقم الجوال"): void {
   applyWith(o, key, (v) => saudiPhone(v, label));
+}
+
+/**
+ * The draft counterpart of `applyPhone` — see `draftPhone()`. Normalises a
+ * recognisable number to the canonical 9 digits and lets an incomplete one
+ * through untouched, so "save as draft" keeps working while the stored value
+ * still joins to `tenants.phone`. Never use it on a non-draft write path.
+ */
+export function applyDraftPhone(o: Record<string, unknown>, key: string, label = "رقم الجوال", max: number = LIMITS.identifier): void {
+  applyWith(o, key, (v) => draftPhone(v, label, max));
 }
 
 export function applyEmail(o: Record<string, unknown>, key: string, label = "البريد الإلكتروني"): void {

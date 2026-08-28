@@ -60,6 +60,8 @@ export type ContractDocRow = {
   zatcaQr: string | null;
   zatcaInvoiceId: number | null;
   total: string | null;
+  /** Proof of payment uploaded with the voucher, carried across a rebuild. */
+  attachmentKey?: string | null;
 };
 
 /** The `payment_collections` columns the gate needs. */
@@ -67,6 +69,18 @@ export type ContractCollectionRow = {
   id: number;
   notes: string | null;
   amount: string | null;
+  /**
+   * The billing document this collection was recorded against, if any.
+   *
+   * This is the discriminator that actually holds. The creation path never
+   * sets it — its advance collection belongs to an installment, not to a
+   * document — while `createReceiptVoucher` always does. The note text does
+   * NOT hold: that endpoint copies the caller's note onto both the voucher and
+   * every collection it writes, so a hand-made voucher carrying the same
+   * Arabic string used to be mistaken for the create path's own artefact,
+   * silently voided, and its collection deleted.
+   */
+  invoiceId: number | null;
 };
 
 /**
@@ -122,21 +136,36 @@ export type ContractDocs = {
  * bar to rebuilding — so a hand-made look-alike is caught by the collection
  * check rather than being silently destroyed here.
  */
-export function classifyContractDocs(docs: ContractDocRow[]): ContractDocs {
+export function classifyContractDocs(
+  docs: ContractDocRow[],
+  /** Ids of documents that a collection was recorded against — never the
+   *  creation path's advance voucher, which no collection references. */
+  referencedByCollection: ReadonlySet<number> = new Set(),
+): ContractDocs {
   const out: ContractDocs = { zatcaSubmitted: [], advanceVouchers: [], depositVouchers: [], other: [] };
   for (const d of docs) {
     if (isSubmittedToZatca(d)) { out.zatcaSubmitted.push(d); continue; }
     if (d.status === "cancelled") continue;
-    if (isAdvanceVoucher(d)) { out.advanceVouchers.push(d); continue; }
+    if (isAdvanceVoucher(d) && !referencedByCollection.has(d.id)) {
+      out.advanceVouchers.push(d); continue;
+    }
     if (isDepositVoucher(d)) { out.depositVouchers.push(d); continue; }
     out.other.push(d);
   }
   return out;
 }
 
-/** Collections on the contract that are NOT the advance the creation path made. */
+/**
+ * Collections on the contract that are NOT the advance the creation path made,
+ * and which therefore bar a rebuild — the rebuild deletes the installments
+ * they hang off.
+ *
+ * Both halves are required: the note marks it as an advance, and the absent
+ * `invoiceId` proves the creation path wrote it rather than a hand-made
+ * receipt voucher that happens to carry the same note.
+ */
 export function foreignCollections(cols: ContractCollectionRow[]): ContractCollectionRow[] {
-  return cols.filter((c) => c.notes !== ADVANCE_NOTE);
+  return cols.filter((c) => !(c.notes === ADVANCE_NOTE && c.invoiceId == null));
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -162,6 +191,8 @@ export type RebuildFacts = {
   depositVoucherTotal: number;
   /** The deposit amount the rebuild would store. */
   nextDepositAmount: number;
+  /** The deposit status the rebuild would store, e.g. "collected"/"pending". */
+  nextDepositStatus: string | null;
   /** Whether the incoming payload asks for a draft. */
   wantsDraft: boolean;
 };
@@ -274,6 +305,20 @@ export function rebuildBlockReason(f: RebuildFacts): RebuildRefusal | null {
   // rebuild deliberately does NOT void and re-mint it, because that would
   // destroy the receipt the tenant holds and burn an RV number. So the deposit
   // figure it attests to must not move underneath it.
+  // A receipted deposit cannot be un-receipted either. Saying the deposit is no
+  // longer collected while its confirmed voucher stands leaves the contract and
+  // the tenant's receipt telling different stories, and the audit diff did not
+  // even record it because the status was not one of the money facts.
+  if (f.depositVoucherTotal > 0.01 && f.nextDepositStatus != null && f.nextDepositStatus !== "collected") {
+    return {
+      code: "deposit_uncollected",
+      message:
+        `لا يمكن وضع التأمين كغير محصَّل بعد إصدار سند قبض التأمين (${f.depositVoucherTotal.toFixed(2)} ر.س). ` +
+        "استرد التأمين من شاشة إنهاء العقد ثم أعد التعديل · " +
+        "The deposit cannot be marked uncollected once its receipt voucher has been issued",
+    };
+  }
+
   if (f.depositVoucherTotal > 0.01 && Math.abs(f.depositVoucherTotal - f.nextDepositAmount) > 0.01) {
     return {
       code: "deposit_voucher",
@@ -306,6 +351,7 @@ export type ContractMoneyFacts = {
   escalationType: string;
   escalationRate: string;
   deposit: string;
+  depositStatus: string;
   prepaid: string;
   agencyFee: string;
   fees: { name: string; amount: string; recurrence: string }[];
@@ -330,6 +376,7 @@ export function contractMoneyFacts(
     escalationType: str(row.escalationType, "percent"),
     escalationRate: str(row.escalationRate),
     deposit: str(row.depositAmount),
+    depositStatus: str(row.depositStatus, ""),
     prepaid: str(row.prepaidRent),
     agencyFee: str(row.agencyFee),
     fees: fees.map((f: any) => ({

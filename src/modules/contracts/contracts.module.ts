@@ -6,7 +6,7 @@ import {
   BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyForeignKey, applyFourDigitCode,
   applyMoney, applyOneOf, applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText,
   applyText, applyVatNumber, applyWith, applyWithNonNull, assertDateOrder, dateOnly, money,
-  partyIdentityNumber, percent, requiredForeignKeyId,
+  partyIdentityNumber, percent, requiredForeignKeyId, applyDraftPhone,
 } from "../../common/validation";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
@@ -138,15 +138,22 @@ function sanitizeContractFields(v: Record<string, unknown>, isDraft: boolean, es
   } else {
     for (const [key, label] of [
       ["tenantIdNumber", "رقم هوية المستأجر"], ["repIdNumber", "رقم هوية الممثل"],
-      ["landlordIdNumber", "رقم هوية المؤجر"], ["tenantPhone", "جوال المستأجر"],
-      ["landlordPhone", "جوال المؤجر"], ["tenantTaxNumber", "الرقم الضريبي للمستأجر"],
+      ["landlordIdNumber", "رقم هوية المؤجر"],
+      ["tenantTaxNumber", "الرقم الضريبي للمستأجر"],
       ["landlordTaxNumber", "الرقم الضريبي للمؤجر"], ["tenantPostalCode", "الرمز البريدي للمستأجر"],
       ["landlordPostalCode", "الرمز البريدي للمؤجر"], ["tenantAdditionalNumber", "الرقم الإضافي للمستأجر"],
       ["tenantBuildingNumber", "رقم مبنى المستأجر"], ["landlordAdditionalNumber", "الرقم الإضافي للمؤجر"],
       ["landlordBuildingNumber", "رقم مبنى المؤجر"],
     ] as const) {
       applyText(v, key, label, LIMITS.identifier);
-    }
+      // A draft's phone is NORMALISED but never refused: half-typed values are
+    // the whole point of a draft. Storing the canonical form as soon as the
+    // number is recognisable matters because `contracts.tenant_phone` joins to
+    // `tenants.phone` by exact string equality, and a draft is visible in the
+    // portal for its whole life.
+    applyDraftPhone(v, "tenantPhone", "جوال المستأجر");
+    applyDraftPhone(v, "landlordPhone", "جوال المؤجر");
+  }
     applyText(v, "tenantEmail", "بريد المستأجر الإلكتروني");
     applyText(v, "landlordEmail", "بريد المؤجر الإلكتروني");
   }
@@ -1158,6 +1165,7 @@ class ContractsController {
     const early = rebuildBlockReason({
       isDraft: Boolean(head.isDraft), status: head.status,
       zatcaInvoiceCount: 0, docs: classifyContractDocs([]), foreignCollections: [],
+      nextDepositStatus: null,
       depositVoucherTotal: 0, nextDepositAmount: 0,
       wantsDraft: wantsDraft,
     });
@@ -1207,16 +1215,14 @@ class ContractsController {
         zatcaStatus: simpleInvoicesTable.zatcaStatus,
         zatcaQr: simpleInvoicesTable.zatcaQr,
         zatcaInvoiceId: simpleInvoicesTable.zatcaInvoiceId,
+        attachmentKey: simpleInvoicesTable.attachmentKey,
         total: simpleInvoicesTable.total,
       }).from(simpleInvoicesTable).where(and(
         eq(simpleInvoicesTable.contractId, id),
         eq(simpleInvoicesTable.userId, ownerId),
         isNull(simpleInvoicesTable.deletedAt),
       ));
-      const docs = classifyContractDocs(docRows);
-      const depositVoucherTotal = round2(
-        docs.depositVouchers.reduce((s, d) => s + (Number(d.total) || 0), 0),
-      );
+      // docs are classified below, once the collections are known
 
       // (c) Money already collected. Tombstoned installments are included on
       //     purpose — a soft-deleted row can still carry a collection, and the
@@ -1229,8 +1235,19 @@ class ContractsController {
             id: paymentCollectionsTable.id,
             notes: paymentCollectionsTable.notes,
             amount: paymentCollectionsTable.amount,
+            invoiceId: paymentCollectionsTable.invoiceId,
           }).from(paymentCollectionsTable).where(inArray(paymentCollectionsTable.paymentId, payIds))
         : [];
+      // A receipt voucher some collection points at was written by the billing
+      // module, not by contract creation, so it is not ours to void.
+      const docsReferencedByCollection = new Set(
+        colRows.map((c) => c.invoiceId).filter((x): x is number => x != null),
+      );
+
+      const docs = classifyContractDocs(docRows, docsReferencedByCollection);
+      const depositVoucherTotal = round2(
+        docs.depositVouchers.reduce((s, d) => s + (Number(d.total) || 0), 0),
+      );
 
       const refusal = rebuildBlockReason({
         isDraft: Boolean(current.isDraft),
@@ -1240,6 +1257,7 @@ class ContractsController {
         foreignCollections: foreignCollections(colRows),
         depositVoucherTotal,
         nextDepositAmount: round2(Number(p.values.depositAmount) || 0),
+        nextDepositStatus: (p.values.depositStatus as string | null) ?? null,
         wantsDraft: wantsDraft,
       });
       if (refusal) {
@@ -1280,6 +1298,15 @@ class ContractsController {
         await tx.update(simpleInvoicesTable)
           .set({ status: "cancelled", deletedAt: new Date() } as any)
           .where(inArray(simpleInvoicesTable.id, advanceVoucherIds));
+      }
+      // The proof of payment the landlord uploaded for the advance is not a
+      // contract column, so the wizard cannot send it back and every rebuild
+      // would reissue the voucher with no attachment — quietly losing the
+      // evidence that the money arrived. Carry it from the voucher being
+      // voided unless the caller supplied a new one.
+      if (!p.prepaidAttachmentKey) {
+        const carried = docs.advanceVouchers.find((d) => d.attachmentKey);
+        if (carried?.attachmentKey) p.prepaidAttachmentKey = carried.attachmentKey;
       }
       await tx.delete(contractRentTermsTable).where(eq(contractRentTermsTable.contractId, id));
       await tx.delete(contractUnitsTable).where(eq(contractUnitsTable.contractId, id));

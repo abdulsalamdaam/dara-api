@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  rebuildBlockReason, isSubmittedToZatca, classifyContractDocs, factsDiff,
+  rebuildBlockReason, foreignCollections, isSubmittedToZatca, classifyContractDocs, factsDiff,
   ADVANCE_NOTE, RECEIPT_KIND, DEPOSIT_KIND,
   type ContractDocRow, type RebuildFacts, type ContractMoneyFacts,
 } from "./rebuild";
@@ -21,7 +21,8 @@ const doc = (over: Partial<ContractDocRow> = {}): ContractDocRow => ({
 const facts = (over: Partial<RebuildFacts> = {}): RebuildFacts => ({
   isDraft: false, status: "active", zatcaInvoiceCount: 0,
   docs: classifyContractDocs([]), foreignCollections: [],
-  depositVoucherTotal: 0, nextDepositAmount: 0, wantsDraft: false, ...over,
+  depositVoucherTotal: 0, nextDepositAmount: 0, nextDepositStatus: null,
+  wantsDraft: false, ...over,
 });
 
 describe("rebuild eligibility", () => {
@@ -83,7 +84,7 @@ describe("rebuild eligibility", () => {
 
   it("refuses a collection that is not the advance", () => {
     const f = facts({
-      foreignCollections: [{ id: 9, amount: "500", notes: "دفعة" }],
+      foreignCollections: [{ id: 9, amount: "500", notes: "دفعة", invoiceId: null }],
     });
     assert.ok(rebuildBlockReason(f));
   });
@@ -96,6 +97,28 @@ describe("rebuild eligibility", () => {
     assert.equal(rebuildBlockReason(same), null, "an unchanged deposit is fine");
   });
 
+  it("refuses un-receipting a deposit that has a voucher", () => {
+    const docs = classifyContractDocs([doc({ kind: DEPOSIT_KIND, total: "5000" })]);
+    const f = facts({
+      docs, depositVoucherTotal: 5000, nextDepositAmount: 5000, nextDepositStatus: "pending",
+    });
+    assert.equal(rebuildBlockReason(f)?.code, "deposit_uncollected");
+  });
+
+  it("refuses a hand-made voucher that borrowed the advance note", () => {
+    // createReceiptVoucher copies the caller's note onto the voucher AND its
+    // collections, so the note alone cannot tell the two apart. The absent
+    // invoiceId is what proves the creation path wrote it.
+    const borrowed = foreignCollections([
+      { id: 1, amount: "10000", notes: ADVANCE_NOTE, invoiceId: 77 },
+    ]);
+    assert.equal(borrowed.length, 1, "a voucher-linked collection must not pass as ours");
+    const ours = foreignCollections([
+      { id: 2, amount: "10000", notes: ADVANCE_NOTE, invoiceId: null },
+    ]);
+    assert.equal(ours.length, 0, "the creation path's own advance must pass");
+  });
+
   it("refuses turning a live contract back into a draft", () => {
     assert.ok(rebuildBlockReason(facts({ wantsDraft: true })));
   });
@@ -104,7 +127,7 @@ describe("rebuild eligibility", () => {
 describe("rebuild audit diff", () => {
   const base: ContractMoneyFacts = {
     rent: "5000", start: "2026-01-01", end: "2026-12-31", frequency: "monthly",
-    vat: false, escalationType: "percent", escalationRate: "0", deposit: "0",
+    vat: false, escalationType: "percent", escalationRate: "0", deposit: "0", depositStatus: "",
     prepaid: "0", agencyFee: "0", fees: [], units: [1, 2], rentTerms: [],
   };
 

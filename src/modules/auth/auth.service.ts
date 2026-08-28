@@ -789,11 +789,36 @@ export class AuthService {
    * forgets to flip it back, which is exactly what happened before.
    */
 
+  /**
+   * Resolve the ONE tenant a phone number logs in as.
+   *
+   * A phone number is not unique across tenants — nothing in the schema stops
+   * two rows carrying the same number, and canonicalising every stored number
+   * to the bare 9 digits made collisions strictly MORE likely: numbers that
+   * used to differ only by format (`0551234567` vs `+966551234567`) are now
+   * byte-identical. Without an ORDER BY, `[tenant]` was whatever Postgres
+   * happened to return first, so six consecutive verify calls on one number
+   * alternated between two different tenants — and request/verify could
+   * disagree about who was logging in.
+   *
+   * Same tie-break as the `usersTable` lookups below: an active row wins, ties
+   * break on the oldest id. Soft-deleted rows are excluded outright — a
+   * deleted tenant must not be able to log in, and `usersTable` has always
+   * filtered `deleted_at` here.
+   */
+  private async findTenantByLoginPhone(raw: string) {
+    const [tenant] = await this.db.select().from(tenantsTable)
+      .where(and(inArray(tenantsTable.phone, phoneVariants(raw)), isNull(tenantsTable.deletedAt)))
+      .orderBy(desc(sql`${tenantsTable.status} = 'active'`), asc(tenantsTable.id))
+      .limit(1);
+    return tenant;
+  }
+
   async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const phone = this.phoneOtp.normalizePhone(raw);
-    const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
+    const tenant = await this.findTenantByLoginPhone(raw);
     // Answer honestly instead of the old generic "if the number is registered
     // we sent a code". That reply hid the truth from the only people it
     // mattered to: the app pushed every caller to the code screen, no SMS ever
@@ -825,7 +850,7 @@ export class AuthService {
     if (!raw || !code) throw new BadRequestException("رقم الجوال والرمز مطلوبان");
     const phone = this.phoneOtp.normalizePhone(raw);
 
-    const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
+    const tenant = await this.findTenantByLoginPhone(raw);
     if (!tenant || tenant.status !== "active") {
       await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("بيانات غير صحيحة");
@@ -867,7 +892,7 @@ export class AuthService {
    *   isRepresentative === false → owners.phone
    *   isRepresentative === true  → owners.originalOwnerPhone (the actual owner;
    *                                the main phone then belongs to the agent/وكيل)
-   * Returns the first match or undefined.
+   * Returns the single deterministically-chosen match, or undefined.
    */
   private async findOwnerByLoginPhone(raw: string) {
     const variants = phoneVariants(raw);
@@ -878,7 +903,15 @@ export class AuthService {
       ),
       eq(ownersTable.status, "active"),
       isNull(ownersTable.deletedAt),
-    ));
+    ))
+      // Duplicate landlord phone numbers exist too (an agent/وكيل row and the
+      // owner row can carry the same number), so "the first match" has to be
+      // defined rather than left to the planner: the oldest id wins. Status is
+      // already pinned to active by the WHERE, so id alone settles it. Without
+      // this, `userPhoneRequestOtp` and `userPhoneVerifyOtp` could resolve the
+      // same number to two different owners — different scopes, different data.
+      .orderBy(asc(ownersTable.id))
+      .limit(1);
     return owner;
   }
 
