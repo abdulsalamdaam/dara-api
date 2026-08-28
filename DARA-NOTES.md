@@ -630,6 +630,40 @@ makes that claim true rather than aspirational.
   standard already passed on ZATCA, awaiting the 3 simplified or a `1000`
   re-onboard with a fresh OTP).
 
+### The subscription webhook activated on an anonymous request (28 Aug 2026)
+
+`POST /api/subscription/webhook` is unauthenticated by design — Moyasar calls
+it — and it was meant to verify rather than trust. It only did so when the
+payload happened to carry an `invoice_id`. Without one, `paid` was read
+straight from the request body, so an anonymous
+
+```json
+{"data":{"status":"paid","metadata":{"subscriptionPaymentId":N}}}
+```
+
+activated that subscription. The shared-secret guard did not close it: a WRONG
+`secret_token` was rejected, but an OMITTED one only logged a warning and
+carried on. `parseInt` on the row id meant `"3.7"` resolved to row 3, and a
+13-digit value passed `Number.isSafeInteger` and then overflowed int4 — a 500
+on a public route.
+
+Found on 28 Aug 2026 while verifying an unrelated fix, and proven by activating
+a real staging row (reverted). Fixed on **master/staging** (`9ca04ae`): a
+configured secret is now required rather than merely checked when present; the
+payload's own status is trusted only when that secret proves the sender;
+otherwise the row must be confirmed with Moyasar or the request is refused. A
+transient Moyasar failure refuses rather than activates — Moyasar retries.
+
+**This fix is not on `main`.** Production still runs the version that activates
+on an anonymous request.
+
+Two neighbours found at the same time, also master-only: an employee created
+without a `preset` silently inherited the account-owner role (40 permissions,
+including deletes and `subscription.manage`) because the resolver defaulted to
+`"user"`; and `/me/subscription/pay` was the one path to `users.package_plan`
+that skipped `planAllowedForUserType`, so an individual could buy the
+company-only tenant plan.
+
 ### ZATCA — what "compliant" still needs (25 Aug 2026)
 
 The mechanics are fixed and tested. Compliance is a separate claim and is **not
