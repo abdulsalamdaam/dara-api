@@ -1299,8 +1299,17 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async collect(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const uid = scopeId(user);
-    const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+    const docId = parseInt(id, 10);
+    if (!Number.isInteger(docId)) throw new BadRequestException("رقم المستند غير صالح");
+    // Everything below reads what has been collected so far and then writes.
+    // With no lock, parallel requests all read "nothing yet", all pass the cap,
+    // and the same money lands several times — a 1,000 invoice was measured
+    // recording 4,000 across four rows, sharing one receipt-voucher number.
+    // The installment path was given this lock; its invoice-level twin was not.
+    return this.db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${uid}, ${docId})`);
+    const [doc] = await tx.select().from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.id, docId), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.type !== "invoice") throw new BadRequestException("التحصيل يتم على الفواتير فقط");
     if (doc.status !== "confirmed") throw new BadRequestException("يجب اعتماد الفاتورة قبل التحصيل");
@@ -1312,7 +1321,7 @@ class SimpleInvoicesController {
     const paidDate = body?.paidDate || today();
     // Per-account sequential receipt-voucher number (RV-000001…), unique across
     // both invoice docs and collections (e.g. the advance-rent voucher).
-    const voucher = await nextReceiptVoucherNumber(this.db, uid);
+    const voucher = await nextReceiptVoucherNumber(tx as any, uid);
     const method = body?.method ?? "bank_transfer";
     const receipt = (body?.receiptNumber && String(body.receiptNumber).trim()) || voucher;
     const ids = (doc.paymentIds && doc.paymentIds.length) ? doc.paymentIds : (doc.paymentId ? [doc.paymentId] : []);
@@ -1321,7 +1330,7 @@ class SimpleInvoicesController {
     // balance due — not the gross one printed on the immutable document. A
     // credit note has to actually stop the money coming in, and a debit note
     // has to let the amount it added be collected.
-    const [priorAgg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
+    const [priorAgg] = await tx.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const alreadyCollected = round2(Number(priorAgg?.total ?? 0));
     const netTotal = round2(Number(doc.total) + (await this.notesAdjustmentFor(uid, doc)));
@@ -1337,17 +1346,17 @@ class SimpleInvoicesController {
 
     for (const pid of ids) {
       if (toCollect <= 0.01) break;
-      const [payment] = await this.db.select().from(paymentsTable)
+      const [payment] = await tx.select().from(paymentsTable)
         .where(and(eq(paymentsTable.id, pid), eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt)));
       if (!payment || payment.status === "cancelled") continue;
-      const prior = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
+      const prior = await tx.select({ total: sum(paymentCollectionsTable.amount) })
         .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.paymentId, pid));
       const collectedBefore = round2(Number(prior[0]?.total ?? 0));
       const totalDue = round2(Number(payment.amount));
       const remaining = round2(totalDue - collectedBefore);
       if (remaining <= 0.01) continue;
       const amt = round2(Math.min(remaining, toCollect));
-      await this.db.insert(paymentCollectionsTable).values({
+      await tx.insert(paymentCollectionsTable).values({
         paymentId: pid,
         userId: uid,
         amount: amt.toFixed(2),
@@ -1360,7 +1369,7 @@ class SimpleInvoicesController {
       });
       const collectedAfter = round2(collectedBefore + amt);
       const status = collectedAfter >= totalDue - 0.01 ? "paid" : "partially_paid";
-      await this.db.update(paymentsTable).set({
+      await tx.update(paymentsTable).set({
         status,
         paidDate: status === "paid" ? paidDate : payment.paidDate,
         receiptNumber: receipt,
@@ -1374,7 +1383,7 @@ class SimpleInvoicesController {
     // record a collection — against the invoice only — so their collected
     // amount is consistent with the "paid" stamp (no "paid but collected = 0").
     if (!ids.length && toCollect > 0.01) {
-      await this.db.insert(paymentCollectionsTable).values({
+      await tx.insert(paymentCollectionsTable).values({
         paymentId: null, userId: uid, amount: toCollect.toFixed(2), collectedDate: paidDate,
         method, receiptNumber: receipt, invoiceId: doc.id,
         notes: body?.notes ?? `فاتورة ${doc.number}`,
@@ -1392,12 +1401,13 @@ class SimpleInvoicesController {
     // Only mark the invoice fully collected when prior + this collection cover
     // the net total; a partial collection keeps it confirmed (collectible again).
     const fullyCollected = round2(alreadyCollected + applied) >= netTotal - 0.01;
-    const [updated] = await this.db.update(simpleInvoicesTable).set({
+    const [updated] = await tx.update(simpleInvoicesTable).set({
       ...(fullyCollected ? { paidDate, receiptNumber: voucher } : {}),
       paymentMethod: method,
       attachmentKey: body?.attachmentKey ?? doc.attachmentKey,
     }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
     return updated;
+    });
   }
 
   @Delete(":id")

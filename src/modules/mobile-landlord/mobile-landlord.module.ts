@@ -72,6 +72,33 @@ class LandlordMobileController {
   }
 
   /** Collected total per payment id. */
+  /**
+   * Money collected against an INVOICE with no installment behind it — a
+   * collected commission invoice, an advance receipted on its own. Those rows
+   * carry `payment_id = null`, so the installment-keyed log above cannot see
+   * them and every account total that used it was short by exactly their sum.
+   * Scoped through the invoice's own contract when the caller is owner-scoped.
+   */
+  private async invoiceOnlyCollections(uid: number, contractIds: number[] | null) {
+    const rows = await this.db.select({
+      amount: paymentCollectionsTable.amount,
+      collectedDate: paymentCollectionsTable.collectedDate,
+      contractId: simpleInvoicesTable.contractId,
+    })
+      .from(paymentCollectionsTable)
+      .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
+      .where(and(
+        eq(paymentCollectionsTable.userId, uid),
+        isNull(paymentCollectionsTable.paymentId),
+        ...(contractIds ? [inArray(simpleInvoicesTable.contractId, contractIds)] : []),
+      ));
+    return rows.map((r) => ({
+      amount: this.num(r.amount),
+      collectedDate: r.collectedDate ?? null,
+      contractId: r.contractId ?? null,
+    }));
+  }
+
   private collectedByPayment(cols: { paymentId: number; amount: number }[]) {
     const map = new Map<number, number>();
     for (const c of cols) map.set(c.paymentId, this.round2((map.get(c.paymentId) ?? 0) + c.amount));
@@ -323,10 +350,12 @@ class LandlordMobileController {
     const cols = await this.collectionsOf(payments.map((p) => p.id));
     const money = this.buckets(payments.map((p) => ({ ...p, status: p.status as string })), this.collectedByPayment(cols));
     const monthKey = riyadhToday().slice(0, 7);
-    const collectedTotal = money.collected;
-    const monthlyRevenue = this.round2(cols
-      .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
-      .reduce((s, c) => s + c.amount, 0));
+    const invoiceOnly = await this.invoiceOnlyCollections(uid, scope.contractIds ?? null);
+    const collectedTotal = this.round2(money.collected + invoiceOnly.reduce((s, c) => s + c.amount, 0));
+    const monthlyRevenue = this.round2(
+      [...cols, ...invoiceOnly]
+        .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
+        .reduce((s, c) => s + c.amount, 0));
     const pendingDue = this.round2(money.pending + money.overdue);
     const overduePaymentsCount = money.overdueCount;
 
@@ -979,12 +1008,17 @@ class LandlordMobileController {
     }).sort((a, b) => b.collected - a.collected).slice(0, 8);
 
     const money = this.buckets(payments.map((p) => ({ ...p, status: p.status as string })), collectedMap);
-    const collectedTotal = money.collected;
+    // Same correction as the summary: money receipted against an invoice with
+    // no installment behind it is still money in, and the installment-keyed
+    // log cannot see it.
+    const invoiceOnly = await this.invoiceOnlyCollections(uid, scope.contractIds ?? null);
+    const collectedTotal = this.round2(money.collected + invoiceOnly.reduce((s, c) => s + c.amount, 0));
     const expectedTotal = money.expected;
     const monthKey = riyadhToday().slice(0, 7);
-    const monthlyRevenue = this.round2(cols
-      .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
-      .reduce((s, c) => s + c.amount, 0));
+    const monthlyRevenue = this.round2(
+      [...cols, ...invoiceOnly]
+        .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
+        .reduce((s, c) => s + c.amount, 0));
 
     return {
       occupancyRate: this.occupancyRate(rented, totalDenom),

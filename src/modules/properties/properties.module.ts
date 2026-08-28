@@ -390,6 +390,7 @@ class PropertiesController {
       }
       updateData["deedId"] = nextDeedId;
     }
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [prop] = await this.db.update(propertiesTable)
       .set(updateData as any)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)))

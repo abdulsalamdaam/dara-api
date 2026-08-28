@@ -483,7 +483,10 @@ class ContractsController {
       ? body.unitIds
       : (body.unitId != null ? [body.unitId] : []))
       .map((n: any) => Number(n))
-      .filter((n: number) => Number.isFinite(n) && n > 0);
+      // Bounded to what the int4 column can hold. An id past 2^31 reached the
+      // driver and came back a 500 instead of a clean refusal; the same bound
+      // was already being applied to tenantId.
+      .filter((n: number) => Number.isInteger(n) && n >= BOUNDS.foreignKey.min && n <= BOUNDS.foreignKey.max);
     if (unitIds.length === 0 || (!isDraft && (!body.tenantName || !body.startDate || !body.endDate || !body.monthlyRent))) {
       throw new BadRequestException(isDraft ? "اختر وحدة واحدة على الأقل لحفظ المسودة" : "البيانات الأساسية مطلوبة");
     }
