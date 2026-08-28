@@ -550,3 +550,8 @@ export function applyBool(o: Record<string, unknown>, key: string, label: string
 export function applyDate(o: Record<string, unknown>, key: string, label: string): void {
   applyWith(o, key, (v) => dateOnly(v, label));
 }
+
+/** Largest value an int4 primary key can hold. Anything past it must be
+ *  refused before it reaches the driver, which answers a 500 rather than a
+ *  400 when a bind parameter overflows the column type. */
+export const INT4_MAX = 2147483647;

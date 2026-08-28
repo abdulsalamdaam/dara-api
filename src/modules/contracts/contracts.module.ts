@@ -489,7 +489,15 @@ class ContractsController {
       // Bounded to what the int4 column can hold. An id past 2^31 reached the
       // driver and came back a 500 instead of a clean refusal; the same bound
       // was already being applied to tenantId.
-      .filter((n: number) => Number.isInteger(n) && n >= BOUNDS.foreignKey.min && n <= BOUNDS.foreignKey.max);
+      .filter((n: number) => Number.isFinite(n));
+    // Refuse an out-of-range unit id rather than dropping it: silently
+    // narrowing the list meant a contract was created against fewer units than
+    // the caller asked for, and answered 201 as if it had honoured them all.
+    for (const n of unitIds) {
+      if (!Number.isInteger(n) || n < BOUNDS.foreignKey.min || n > BOUNDS.foreignKey.max) {
+        throw new BadRequestException("معرف الوحدة غير صالح · Invalid unit id");
+      }
+    }
     if (unitIds.length === 0 || (!isDraft && (!body.tenantName || !body.startDate || !body.endDate || !body.monthlyRent))) {
       throw new BadRequestException(isDraft ? "اختر وحدة واحدة على الأقل لحفظ المسودة" : "البيانات الأساسية مطلوبة");
     }

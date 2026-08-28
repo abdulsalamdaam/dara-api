@@ -33,7 +33,7 @@ const deedCreateSchema = z.object({
   // payloads. We don't enforce .url() here because object keys aren't URLs.
   documentUrl: z.string().trim().min(1).optional().nullable(),
   documentName: z.string().trim().optional().nullable(),
-  ownerId: z.coerce.number().int().positive().optional().nullable(),
+  ownerId: z.coerce.number().int().positive().max(2147483647).optional().nullable(),
   ownerNationalId: z.string().trim().optional().nullable(),
   // Co-owners named on the deed document. Optional; a row with no name is
   // dropped so an empty form line never persists as a blank owner.
@@ -130,7 +130,11 @@ class DeedsController {
   @RequirePermissions(PERMISSIONS.DEEDS_VIEW)
   async getOne(@CurrentUser() user: AuthUser, @Param("deedId") deedId: string) {
     const id = parseInt(deedId, 10);
-    if (!Number.isInteger(id)) throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    // Bounded to int4: an id past 2^31 passed the integer test and then
+    // overflowed in the driver, turning a bad request into a 500.
+    if (!Number.isInteger(id) || id < 1 || id > 2147483647) {
+      throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    }
 
     const [deed] = await this.db.select().from(deedsTable)
       .where(and(eq(deedsTable.id, id), eq(deedsTable.userId, scopeId(user)), isNull(deedsTable.deletedAt)));
@@ -186,7 +190,11 @@ class DeedsController {
   @RequirePermissions(PERMISSIONS.DEEDS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("deedId") deedId: string, @Body() rawBody: any) {
     const id = parseInt(deedId, 10);
-    if (!Number.isInteger(id)) throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    // Bounded to int4: an id past 2^31 passed the integer test and then
+    // overflowed in the driver, turning a bad request into a 500.
+    if (!Number.isInteger(id) || id < 1 || id > 2147483647) {
+      throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    }
     const body = this.parseOrThrow(deedUpdateSchema, rawBody);
     const owner = scopeId(user);
 
@@ -222,7 +230,11 @@ class DeedsController {
   @RequirePermissions(PERMISSIONS.DEEDS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("deedId") deedId: string) {
     const id = parseInt(deedId, 10);
-    if (!Number.isInteger(id)) throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    // Bounded to int4: an id past 2^31 passed the integer test and then
+    // overflowed in the driver, turning a bad request into a 500.
+    if (!Number.isInteger(id) || id < 1 || id > 2147483647) {
+      throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
+    }
 
     const owner = scopeId(user);
 

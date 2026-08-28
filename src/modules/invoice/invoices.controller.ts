@@ -2,6 +2,7 @@ import {
   BadRequestException, Body, Controller, Delete, Get, Header, Inject,
   NotFoundException, Param, ParseIntPipe, Post, Query, Res, UseGuards,
 } from "@nestjs/common";
+import { ParseInt4Pipe } from "../../common/int4.pipe";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import type { Response } from "express";
 import { eq, and, isNull } from "drizzle-orm";
@@ -55,7 +56,7 @@ export class InvoicesController {
   /** GET /invoices/:id */
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async get(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async get(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.getOneWithLines(scopeId(user), id);
   }
 
@@ -93,14 +94,14 @@ export class InvoicesController {
    */
   @Post(":id/resubmit")
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
-  async resubmit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async resubmit(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.resubmit(scopeId(user), id);
   }
 
   /** DELETE /invoices/:id  (soft-delete) */
   @Delete(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_DELETE)
-  async remove(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async remove(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.softDelete(scopeId(user), id);
   }
 
@@ -108,7 +109,7 @@ export class InvoicesController {
   @Get(":id/xml")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   @Header("Content-Type", "application/xml; charset=utf-8")
-  async getXml(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async getXml(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     const { invoice } = await this.invoices.getOneWithLines(scopeId(user), id);
     return invoice.signedXml ?? invoice.unsignedXml;
   }
@@ -119,7 +120,7 @@ export class InvoicesController {
   @Header("Content-Type", "text/html; charset=utf-8")
   async getHtml(
     @CurrentUser() user: AuthUser,
-    @Param("id", ParseIntPipe) id: number,
+    @Param("id", ParseInt4Pipe) id: number,
     @Query("lang") lang?: "ar" | "en",
   ) {
     const ctx = await this.buildRenderContext(user, id, lang);
@@ -131,7 +132,7 @@ export class InvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async getPdf(
     @CurrentUser() user: AuthUser,
-    @Param("id", ParseIntPipe) id: number,
+    @Param("id", ParseInt4Pipe) id: number,
     @Query("lang") lang: "ar" | "en" | undefined,
     @Res() res: Response,
   ) {

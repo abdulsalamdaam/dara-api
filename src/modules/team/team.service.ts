@@ -67,8 +67,16 @@ export class TeamService {
     }
   }
 
-  private async resolveRoleId(presetKey: string | undefined | null, fallbackKey = "user"): Promise<number | null> {
+  /**
+   * An employee's role must be stated, never inferred. The fallback used to be
+   * "user" — the account-owner role, 40 permissions including deletes and
+   * subscription management — so an omitted or misspelled `preset` field was
+   * silently whitelisted away and handed the new employee owner-level rights.
+   * Callers that legitimately have no preset now get null and refuse.
+   */
+  private async resolveRoleId(presetKey: string | undefined | null, fallbackKey?: string): Promise<number | null> {
     const key = presetKey?.trim() || fallbackKey;
+    if (!key) return null;
     const [r] = await this.db
       .select({ id: rolesTable.id })
       .from(rolesTable)

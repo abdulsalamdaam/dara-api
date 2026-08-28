@@ -218,7 +218,10 @@ class SubscriptionWebhookController {
       return { ok: false, error: "secret_token_mismatch" };
     }
     if (expected && !body?.secret_token) {
-      console.warn("[moyasar] webhook has no secret_token but one is configured");
+      // Warning-only meant the guard could be walked straight past by simply
+      // omitting the field — on a route that activates a paid subscription.
+      console.error("[moyasar] webhook REJECTED: secret_token missing but one is configured");
+      return { ok: false, error: "secret_token_missing" };
     }
 
     // Extract the invoice id from the various event shapes Moyasar may send.
@@ -234,15 +237,36 @@ class SubscriptionWebhookController {
     const eventPaymentId: string | undefined = data?.id;
     const metaPaymentId = data?.metadata?.subscriptionPaymentId;
 
-    let paid = String(data?.status || "").toLowerCase() === "paid";
+    let paid = false;
+    let verified = false;
     let paymentId: string | undefined = eventPaymentId;
 
-    // Verify against Moyasar when configured (don't trust the payload alone).
+    // "Don't trust the payload alone" was the intent; the code only managed it
+    // when an invoice id happened to be present. Without one, `paid` came
+    // straight out of an anonymous request body — so a POST carrying
+    // {"data":{"status":"paid","metadata":{"subscriptionPaymentId":N}}}
+    // activated that subscription. Nothing else on this route authenticates.
     if (invoiceId && isMoyasarConfigured()) {
       try {
         const inv = await fetchMoyasarInvoice(invoiceId);
         paid = String(inv.status).toLowerCase() === "paid";
-      } catch { /* fall back to payload status */ }
+        verified = true;
+      } catch {
+        // A transient Moyasar failure must not become an unverified
+        // activation. Moyasar retries; answering "not verified" is the safe
+        // half of that trade.
+      }
+    }
+    if (!verified) {
+      // The shared secret is the only other thing that can prove the sender.
+      if (expected && body?.secret_token === expected) {
+        paid = String(data?.status || "").toLowerCase() === "paid";
+      } else {
+        console.error("[moyasar] webhook REFUSED: payload could not be verified", {
+          hasInvoiceId: !!invoiceId, moyasarConfigured: isMoyasarConfigured(),
+        });
+        return { ok: false, error: "unverified" };
+      }
     }
     if (!paid) return { ok: true, ignored: true };
 
@@ -258,8 +282,12 @@ class SubscriptionWebhookController {
       // a non-numeric value used to become NaN and blow up in the driver (500).
       // Anything that isn't a real row id now falls through to the same clean
       // `unmatched` answer a valid-but-unknown id already gets.
-      const metaRowId = Number.parseInt(String(metaPaymentId), 10);
-      if (Number.isSafeInteger(metaRowId) && metaRowId > 0) {
+      // Exact digits only, and inside int4 — "3.7" used to resolve to row 3,
+      // and a 13-digit value passed the safe-integer test and then overflowed
+      // in the driver, 500ing an unauthenticated route.
+      const raw = String(metaPaymentId).trim();
+      const metaRowId = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+      if (Number.isInteger(metaRowId) && metaRowId > 0 && metaRowId <= 2147483647) {
         [row] = await this.db.select().from(subscriptionPaymentsTable)
           .where(eq(subscriptionPaymentsTable.id, metaRowId));
       }
