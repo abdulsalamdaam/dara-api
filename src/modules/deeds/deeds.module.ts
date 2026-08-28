@@ -224,19 +224,29 @@ class DeedsController {
     const id = parseInt(deedId, 10);
     if (!Number.isInteger(id)) throw new BadRequestException("معرف الصك غير صالح · Invalid deed id");
 
+    const owner = scopeId(user);
+
     // Block delete while a property still links to this deed. Better to ask
     // the user to unlink first than to silently leave a property's deed_id
     // pointing at a tombstone (the FK is `ON DELETE SET NULL` for safety,
     // but we want the loud version at the API layer).
+    //
+    // Scoped to the caller: unscoped, deleting SOMEONE ELSE'S linked deed
+    // answered 409 instead of 404, which confirmed that deed id exists on
+    // another account. Out-of-scope ids now fall through to the 404 below.
     const [linkedProperty] = await this.db.select({ id: propertiesTable.id })
       .from(propertiesTable)
-      .where(and(eq(propertiesTable.deedId, id), isNull(propertiesTable.deletedAt)));
+      .where(and(
+        eq(propertiesTable.deedId, id),
+        eq(propertiesTable.userId, owner),
+        isNull(propertiesTable.deletedAt),
+      ));
     if (linkedProperty) {
       throw new ConflictException("لا يمكن حذف الصك لأنه مرتبط بعقار · Cannot delete: deed is linked to a property");
     }
 
     const [deleted] = await this.db.update(deedsTable).set({ deletedAt: new Date() } as any)
-      .where(and(eq(deedsTable.id, id), eq(deedsTable.userId, scopeId(user)), isNull(deedsTable.deletedAt)))
+      .where(and(eq(deedsTable.id, id), eq(deedsTable.userId, owner), isNull(deedsTable.deletedAt)))
       .returning({ id: deedsTable.id });
     if (!deleted) throw new NotFoundException("الصك غير موجود · Deed not found");
     return { success: true, message: "تم الحذف بنجاح · Deleted successfully" };

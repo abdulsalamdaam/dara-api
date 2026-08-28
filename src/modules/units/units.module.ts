@@ -4,8 +4,9 @@ import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql, notInArray 
 import { listQuerySchema } from "../../common/pagination";
 import { unitsTable, propertiesTable, contractsTable, contractUnitsTable , lookupsTable } from "@dara/database";
 import {
-  BOUNDS, LIMITS, applyBool, applyBoolNonNull, applyDecimal, applyInt, applyMoney,
-  applyOneOfNonNull, applyRequiredText, applyText, requiredText,
+  BOUNDS, LIMITS, applyBool, applyBoolNonNull, applyDecimal, applyForeignKey, applyInt,
+  applyMoney, applyOneOfNonNull, applyRequiredText, applyText, requiredForeignKeyId,
+  requiredText,
 } from "../../common/validation";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -94,8 +95,8 @@ function sanitizeUnitFields(v: Record<string, unknown>): void {
   applyText(v, "imageKey", "صورة الوحدة", LIMITS.address);
   applyText(v, "floorPlanKey", "المخطط", LIMITS.address);
   applyBoolNonNull(v, "isDraft", "مسودة");
-  applyInt(v, "typeLookupId", "نوع الوحدة", BOUNDS.foreignKey);
-  applyInt(v, "finishingLookupId", "التشطيب", BOUNDS.foreignKey);
+  applyForeignKey(v, "typeLookupId", "نوع الوحدة");
+  applyForeignKey(v, "finishingLookupId", "التشطيب");
 }
 
 /** True when a property's usage is `mixed` (سكني - تجاري). */
@@ -297,7 +298,7 @@ class UnitsController {
   @Get("properties/:propertyId/units")
   @RequirePermissions(PERMISSIONS.UNITS_VIEW)
   async listByProperty(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const [prop] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)));
     if (!prop) throw new NotFoundException("Property not found");
@@ -310,7 +311,7 @@ class UnitsController {
   @Post("properties/:propertyId/units")
   @RequirePermissions(PERMISSIONS.UNITS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string, @Body() body: any) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const [prop] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)));
     if (!prop) throw new NotFoundException("Property not found");
@@ -377,10 +378,16 @@ class UnitsController {
   @Patch("units/:unitId")
   @RequirePermissions(PERMISSIONS.UNITS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("unitId") unitId: string, @Body() body: any) {
-    const id = parseInt(unitId, 10);
+    const id = requiredForeignKeyId(unitId, "رقم الوحدة");
     // Verify the unit belongs to a property owned by this user/owner before allowing edits.
     const [unit0] = await this.db
-      .select({ id: unitsTable.id, propertyId: unitsTable.propertyId })
+      .select({
+        id: unitsTable.id, propertyId: unitsTable.propertyId,
+        // Needed to spot the draft → live transition, and to know what the
+        // unit's usage already is when the request does not send one.
+        isDraft: unitsTable.isDraft, usageLookupId: unitsTable.usageLookupId,
+        propertyUsageLookupId: propertiesTable.usageLookupId,
+      })
       .from(unitsTable)
       .innerJoin(propertiesTable, and(eq(unitsTable.propertyId, propertiesTable.id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)))
       .where(and(eq(unitsTable.id, id), isNull(unitsTable.deletedAt)));
@@ -415,6 +422,20 @@ class UnitsController {
       }
       if (resolved !== undefined) updateData.usageLookupId = resolved;
     }
+    // Finalising a draft applies the rule the create path applies to a live
+    // unit: on a mixed-use property nothing can be inherited, so the unit's own
+    // usage decides whether its rent carries VAT and cannot be missing. The
+    // draft exemption ended the moment `isDraft` was cleared, but nothing
+    // re-checked it — a draft with no usage went live and billed on a guess.
+    const willBeDraft = updateData.isDraft !== undefined ? Boolean(updateData.isDraft) : Boolean(unit0.isDraft);
+    if (unit0.isDraft && !willBeDraft) {
+      const nextUsage = updateData.usageLookupId !== undefined
+        ? (updateData.usageLookupId as number | null)
+        : unit0.usageLookupId;
+      if (nextUsage == null && (await isMixedProperty(this.db, unit0.propertyUsageLookupId ?? null))) {
+        throw new BadRequestException(USAGE_REQUIRED_MSG);
+      }
+    }
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [unit] = await this.db.update(unitsTable).set(updateData).where(eq(unitsTable.id, id)).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
@@ -423,7 +444,7 @@ class UnitsController {
   @Delete("units/:unitId")
   @RequirePermissions(PERMISSIONS.UNITS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("unitId") unitId: string) {
-    const id = parseInt(unitId, 10);
+    const id = requiredForeignKeyId(unitId, "رقم الوحدة");
     const [unit0] = await this.db
       .select({ id: unitsTable.id })
       .from(unitsTable)

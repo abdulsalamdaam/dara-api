@@ -335,6 +335,27 @@ export function integerIn(v: unknown, label: string, b: Bounds = BOUNDS.count): 
 }
 
 /**
+ * An id that is about to be used as a foreign key (or a route parameter that
+ * addresses a row).
+ *
+ * Every such column is a `serial` → int4, so anything past 2^31 is a driver
+ * error, not a lookup that misses: `parseInt("abc")` reached the query as
+ * `NaN` and `9999999999` as an overflow, and both surfaced as 500s. The bound
+ * was already being applied to `tenantId` and to the contract's `unitIds`;
+ * this is the same rule, named once so every incoming id can use it.
+ */
+export function foreignKeyId(v: unknown, label: string): number | null {
+  return integerIn(v, label, BOUNDS.foreignKey);
+}
+
+/** A foreign-key id that must be present — a route parameter, typically. */
+export function requiredForeignKeyId(v: unknown, label: string): number {
+  const n = foreignKeyId(v, label);
+  if (n === null) bad(`${label} مطلوب · ${label} is required`);
+  return n;
+}
+
+/**
  * A decimal within bounds, returned as a string — that is what Drizzle's
  * `numeric()` columns take, and it avoids float round-tripping on money.
  */
@@ -466,6 +487,11 @@ export function applyBoolNonNull(o: Record<string, unknown>, key: string, label:
 
 export function applyInt(o: Record<string, unknown>, key: string, label: string, b: Bounds = BOUNDS.count): void {
   applyWith(o, key, (v) => integerIn(v, label, b));
+}
+
+/** An id column pointing at another row — always `BOUNDS.foreignKey`. */
+export function applyForeignKey(o: Record<string, unknown>, key: string, label: string): void {
+  applyWith(o, key, (v) => foreignKeyId(v, label));
 }
 
 export function applyDecimal(o: Record<string, unknown>, key: string, label: string, b: Bounds = BOUNDS.money): void {

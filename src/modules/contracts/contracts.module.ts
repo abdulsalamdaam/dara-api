@@ -3,13 +3,16 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, lt, gt, isNull, or, ilike, count, asc, desc, inArray, notInArray, notExists, sql } from "drizzle-orm";
 import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, lookupsTable } from "@dara/database";
 import {
-  BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyFourDigitCode, applyInt,
+  BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyForeignKey, applyFourDigitCode,
   applyMoney, applyOneOf, applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText,
   applyText, applyVatNumber, applyWith, applyWithNonNull, assertDateOrder, dateOnly, money,
-  partyIdentityNumber, percent,
+  partyIdentityNumber, percent, requiredForeignKeyId,
 } from "../../common/validation";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
+
+/** Round to 2 decimals without binary-float drift. Money is halalas. */
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 const CONTRACT_STATUSES = ["active", "expired", "terminated", "cancelled", "pending"] as const;
 const PAYMENT_FREQUENCIES = ["monthly", "quarterly", "semi_annual", "annual", "custom"] as const;
@@ -43,7 +46,7 @@ const CONTRACT_NUMBER_LOCK = 11;
  * a flat money amount.
  */
 function sanitizeContractFields(v: Record<string, unknown>, isDraft: boolean, escalationType: string): void {
-  applyInt(v, "tenantId", "المستأجر", BOUNDS.foreignKey);
+  applyForeignKey(v, "tenantId", "المستأجر");
   applyRequiredText(v, "tenantName", "اسم المستأجر", LIMITS.name);
   applyText(v, "tenantType", "نوع المستأجر");
   applyText(v, "tenantAddress", "عنوان المستأجر", LIMITS.address);
@@ -604,6 +607,92 @@ class ContractsController {
     if (values.prepaidRent == null) values.prepaidRent = "0";         // NOT NULL
     if (values.escalationRate == null) values.escalationRate = "0";   // NOT NULL
 
+    // Per-year rent overrides. Parsed before the insert because the schedule
+    // preview below is built from them (they are stored after it, once the
+    // contract has an id).
+    const rentTerms = parseRentTerms(body.rentTerms);
+
+    /* Which additional fees the advance is allowed to settle.
+     *
+     * The advance used to go to rent alone: `!p.description` matched rent
+     * installments and nothing else. A landlord who collected enough up front
+     * to cover the service fee as well had no way to say so — the fee sat
+     * unpaid next to a rent installment that was already covered, and had to
+     * be collected again by hand.
+     *
+     * Matched by NAME, because that is what an installment carries:
+     * `appendFees()` writes `description = fee.name`. The fee `id` lives only
+     * on the contract's JSON and never reaches the payments table. Two fees
+     * sharing a name are therefore indistinguishable here — they are also
+     * indistinguishable on the schedule, so this adds no new ambiguity.
+     */
+    const pickedFeeIds = new Set(
+      (Array.isArray(body.prepaidFeeIds) ? body.prepaidFeeIds : []).map((v: unknown) => String(v)),
+    );
+    const pickedFeeNames = new Set(
+      (additionalFees ?? [])
+        .filter((f: any) => pickedFeeIds.has(String(f?.id)))
+        .map((f: any) => String(f?.name || "رسوم")),
+    );
+
+    /* Rent is a choice too, not a fixture. A landlord may have taken the
+     * advance specifically to clear the fees and be collecting rent monthly
+     * as normal — forcing rent to absorb it first made that impossible to
+     * express. Defaults to true, so a caller that says nothing gets exactly
+     * the historical behaviour.
+     *
+     * If the caller manages to select nothing at all, fall back to rent
+     * rather than settling nothing: the amount is already recorded on the
+     * contract, and quietly applying it to no installment would leave money
+     * banked against a schedule that still reads as fully unpaid. */
+    const wantsRent = body.prepaidCoversRent !== false;
+    const coversRent = (wantsRent || pickedFeeNames.size === 0);
+
+    /* Which of the chosen items gets paid first.
+     *
+     * Ticking a fee is worthless without this. Rent installments dwarf fees —
+     * 100,000 rent against a 1,000 service fee is ordinary — so a
+     * rent-first advance is swallowed whole by the first rent row and the fee
+     * it was explicitly ticked for receives nothing. The tick looked like it
+     * did nothing because, in that shape, it did.
+     *
+     * "fees" clears the ticked fees first and puts the remainder on rent,
+     * which is what someone ticking a fee almost always means. Defaults to
+     * "rent" — the historical behaviour, and the safer one, since rent is the
+     * obligation that accrues late fees.
+     */
+    const feesFirst = String(body.prepaidPriority ?? "rent") === "fees";
+
+    /** The schedule this contract will produce — needed before it exists. */
+    const previewSchedule = () => applyExternalSettlement(
+      buildInstallments(
+        0, ownerId, startDate, endDate, String(values.monthlyRent), freq, additionalFees,
+        rentVat, Number(values.escalationRate) || 0,
+        String(values.escalationType) === "amount" ? "amount" : "percent",
+        rentTerms, 0, customSchedule,
+      ),
+      settledExternalUntil,
+    );
+
+    // The advance can only ever be applied to installments the schedule
+    // actually contains, and only to the ones the caller chose it to cover.
+    // Anything above that was stored on the contract as received and then
+    // silently dropped: `prepaidRent: 999999` against a 12,000 schedule
+    // recorded 987,999 with no collection, no receipt voucher and no error.
+    const prepaidRequested = round2(Number(values.prepaidRent) || 0);
+    if (!isDraft && prepaidRequested > 0) {
+      const absorbable = round2(previewSchedule()
+        .filter((p) => p.status !== "settled_external"
+          && (p.description ? pickedFeeNames.has(p.description) : coversRent))
+        .reduce((sum, p) => sum + Number(p.amount), 0));
+      if (prepaidRequested > absorbable + 0.01) {
+        throw new BadRequestException(
+          `الإيجار المدفوع مقدماً (${prepaidRequested.toFixed(2)}) يتجاوز ما يمكن سداده من جدول الدفعات — ` +
+          `الحد الأقصى ${absorbable.toFixed(2)} ر.س · Advance rent exceeds what the schedule can settle`,
+        );
+      }
+    }
+
     // Numbering + insert + unit linking happen inside ONE transaction guarded
     // by a per-account advisory lock — the same technique billing uses for
     // document numbers. Without it, concurrent POSTs read the same sequence and
@@ -624,7 +713,6 @@ class ContractsController {
     });
 
     // Per-year rent overrides (saved for drafts too, so they prefill on edit).
-    const rentTerms = parseRentTerms(body.rentTerms);
     if (rentTerms.length > 0) {
       await this.db.insert(contractRentTermsTable).values(
         rentTerms.map((t) => ({ contractId: contract!.id, year: t.year, amount: String(t.amount) })),
@@ -653,7 +741,6 @@ class ContractsController {
     );
     const inserted = rows.length > 0 ? await this.db.insert(paymentsTable).values(rows).returning() : [];
 
-    const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const nowStr = new Date().toISOString().slice(0, 10);
     const startDay = startDate || nowStr;
 
@@ -663,62 +750,14 @@ class ContractsController {
     // Collections tab as a distinct سند القبض — the later collection of the
     // remaining balance produces a second voucher. (Hence: with advance rent
     // there are two receipt vouchers for the rent — advance + remainder.)
-    const prepaid = round2(Number(values.prepaidRent) || 0);
+    const prepaid = prepaidRequested;
     if (prepaid > 0 && inserted.length > 0) {
       const method = (values.prepaidMethod as string | null) || "bank_transfer";
       const advanceVoucher = await this.nextReceiptNumber(ownerId);
 
-      /* Which additional fees the advance is allowed to settle.
-       *
-       * The advance used to go to rent alone: `!p.description` matched rent
-       * installments and nothing else. A landlord who collected enough up front
-       * to cover the service fee as well had no way to say so — the fee sat
-       * unpaid next to a rent installment that was already covered, and had to
-       * be collected again by hand.
-       *
-       * Matched by NAME, because that is what an installment carries:
-       * `appendFees()` writes `description = fee.name`. The fee `id` lives only
-       * on the contract's JSON and never reaches the payments table. Two fees
-       * sharing a name are therefore indistinguishable here — they are also
-       * indistinguishable on the schedule, so this adds no new ambiguity.
-       */
-      const pickedFeeIds = new Set(
-        (Array.isArray(body.prepaidFeeIds) ? body.prepaidFeeIds : []).map((v: unknown) => String(v)),
-      );
-      const pickedFeeNames = new Set(
-        (additionalFees ?? [])
-          .filter((f: any) => pickedFeeIds.has(String(f?.id)))
-          .map((f: any) => String(f?.name || "رسوم")),
-      );
-
-      /* Rent is a choice too, not a fixture. A landlord may have taken the
-       * advance specifically to clear the fees and be collecting rent monthly
-       * as normal — forcing rent to absorb it first made that impossible to
-       * express. Defaults to true, so a caller that says nothing gets exactly
-       * the historical behaviour.
-       *
-       * If the caller manages to select nothing at all, fall back to rent
-       * rather than settling nothing: the amount is already recorded on the
-       * contract, and quietly applying it to no installment would leave money
-       * banked against a schedule that still reads as fully unpaid. */
-      const wantsRent = body.prepaidCoversRent !== false;
-      const coversRent = (wantsRent || pickedFeeNames.size === 0);
-
-      /* Which of the chosen items gets paid first.
-       *
-       * Ticking a fee is worthless without this. Rent installments dwarf fees —
-       * 100,000 rent against a 1,000 service fee is ordinary — so a
-       * rent-first advance is swallowed whole by the first rent row and the fee
-       * it was explicitly ticked for receives nothing. The tick looked like it
-       * did nothing because, in that shape, it did.
-       *
-       * "fees" clears the ticked fees first and puts the remainder on rent,
-       * which is what someone ticking a fee almost always means. Defaults to
-       * "rent" — the historical behaviour, and the safer one, since rent is the
-       * obligation that accrues late fees.
-       */
-      const feesFirst = String(body.prepaidPriority ?? "rent") === "fees";
-
+      // `pickedFeeNames`, `coversRent` and `feesFirst` were decided before the
+      // insert — the ceiling check needs the same answers this loop uses, and
+      // deciding them twice is how the two could drift apart.
       const settleRows = inserted
         .filter((p) => p.status !== "settled_external"
           && (p.description ? pickedFeeNames.has(p.description) : coversRent))
@@ -821,7 +860,7 @@ class ContractsController {
   @Get(":contractId/deposit")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async getDeposit(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const ownerId = scopeId(user);
     const [contract] = await this.db.select({
@@ -858,7 +897,7 @@ class ContractsController {
   @Post(":contractId/collect-deposit")
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async collectDeposit(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const ownerId = scopeId(user);
     const [contract] = await this.db.select().from(contractsTable)
@@ -890,7 +929,7 @@ class ContractsController {
   @Post(":contractId/generate-installments")
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async generateInstallments(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
     const [contract] = await this.db.select().from(contractsTable)
       .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
@@ -941,7 +980,7 @@ class ContractsController {
   @Patch(":contractId")
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
     // The prior row is needed to reason about the contract AS IT WILL BE: a
     // PATCH that moves only the end date, or only flips `isDraft`, still has to
@@ -958,6 +997,37 @@ class ContractsController {
     // `tenantId` is an integer FK; the sanitiser coerces and range-checks it
     // (and `null` still clears it) — `Number("abc")` used to reach the driver.
     sanitizeContractFields(updateData, willBeDraft, escalationType);
+
+    /* ── Finalising a draft re-validates the WHOLE contract ──
+     *
+     * Drafts are exempt from the exact identity formats, which is right while
+     * they are drafts. But nothing re-checked them when the draft went live, so
+     * whatever was typed during the draft simply became a live contract: one
+     * was found in production carrying `tenant_phone = +966500000001` and
+     * `tenant_id_number = 99`. The tenant portal matches contracts to a tenant
+     * by phone STRING, so the real tenant saw no contracts at all while theirs
+     * was live.
+     *
+     * The same rules the non-draft create path runs, applied to the row as it
+     * WILL BE — the stored draft merged with this request — so a value that
+     * arrived while it was a draft cannot slip through by simply not being
+     * re-sent. The normalised forms are written back too (a phone becomes
+     * `05XXXXXXXX`), because that is what the portal's exact match needs.
+     *
+     * The journey is unchanged: the same button, now able to say why.
+     */
+    if (prior.isDraft && !willBeDraft) {
+      const merged: Record<string, unknown> = {};
+      for (const f of CONTRACT_FIELDS) {
+        merged[f] = f in updateData ? updateData[f] : (prior as Record<string, any>)[f];
+      }
+      sanitizeContractFields(merged, false, escalationType);
+      for (const f of CONTRACT_FIELDS) {
+        if (f in updateData) continue;                       // the caller's own value, already checked
+        if (!(f in merged)) continue;                        // blank on a NOT NULL column — leave it alone
+        if (merged[f] !== (prior as Record<string, any>)[f]) updateData[f] = merged[f];
+      }
+    }
 
     const nextStart = (updateData.startDate as string | undefined) ?? prior.startDate;
     const nextEnd = (updateData.endDate as string | undefined) ?? prior.endDate;
@@ -1038,7 +1108,7 @@ class ContractsController {
   @Delete(":contractId")
   @RequirePermissions(PERMISSIONS.CONTRACTS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Query("mode") mode?: string) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const now = new Date();
     // Cancelling the unpaid installments cancels the contract; otherwise it's a
     // normal termination.
@@ -1150,7 +1220,7 @@ class ContractsController {
   @Get(":contractId/settlement")
   @RequirePermissions(PERMISSIONS.CONTRACTS_DELETE)
   async settlement(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const [contract] = await this.db.select({ id: contractsTable.id }).from(contractsTable)
       .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, scopeId(user)), isNull(contractsTable.deletedAt)));
@@ -1175,7 +1245,7 @@ class ContractsController {
   @Post(":contractId/terminate")
   @RequirePermissions(PERMISSIONS.CONTRACTS_DELETE)
   async terminate(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
-    const id = parseInt(contractId, 10);
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const today = new Date().toISOString().slice(0, 10);

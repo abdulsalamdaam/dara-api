@@ -17,7 +17,7 @@ import { EmailService } from "../email/email.service";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyMoney,
   applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText, applyText,
-  applyVatNumber, applyWith, partyIdentityNumber,
+  applyVatNumber, applyWith, partyIdentityNumber, requiredForeignKeyId,
 } from "../../common/validation";
 
 const FIELDS = [
@@ -223,7 +223,7 @@ class TenantsController {
   @Post(":id/app-reminder")
   @RequirePermissions(PERMISSIONS.TENANTS_WRITE)
   async appReminder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    const tid = parseInt(id, 10);
+    const tid = requiredForeignKeyId(id, "رقم المستأجر");
     const [tenant] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
     if (!tenant) throw new NotFoundException("غير موجود");
@@ -235,7 +235,7 @@ class TenantsController {
   @Patch(":id")
   @RequirePermissions(PERMISSIONS.TENANTS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
-    const tid = parseInt(id, 10);
+    const tid = requiredForeignKeyId(id, "رقم المستأجر");
     // Read the prior row so we can detect the draft → finalized transition
     // and only send the welcome email once, when the tenant is actually
     // being promoted from draft to finalized.
@@ -257,13 +257,35 @@ class TenantsController {
 
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    const willBeDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior.isDraft);
     // The edit path enforces exactly what create does — it used to write every
     // value through untouched.
-    sanitizeTenantFields(
-      updateData,
-      body.type ?? prior.type ?? null,
-      body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior.isDraft),
-    );
+    sanitizeTenantFields(updateData, body.type ?? prior.type ?? null, willBeDraft);
+
+    /* Finalising a draft re-validates the WHOLE tenant.
+     *
+     * The draft exemption from the exact identity formats ended when `isDraft`
+     * was cleared, but nothing re-applied them to what the draft was already
+     * carrying — so a phone that is not a phone, or a 2-digit national ID,
+     * became live data just by not being re-sent. That is not cosmetic here:
+     * the tenant portal matches a tenant to their contracts by phone STRING,
+     * so a malformed number is a tenant who can see nothing. Validated against
+     * the merged row, and the normalised values are written back so the stored
+     * column is the one the match will hit.
+     */
+    if (prior.isDraft && !willBeDraft) {
+      const merged: Record<string, unknown> = {};
+      for (const f of FIELDS) merged[f] = f in updateData ? updateData[f] : (prior as Record<string, any>)[f];
+      const mergedType = body.type ?? prior.type ?? null;
+      sanitizeTenantFields(merged, mergedType, false);
+      assertCompanyCommercialReg({ type: mergedType, nationalId: merged.nationalId as string | null, isDraft: false });
+      assertNationalAddress({ ...merged, isDraft: false });
+      for (const f of FIELDS) {
+        if (f in updateData) continue;
+        if (!(f in merged)) continue;
+        if (merged[f] !== (prior as Record<string, any>)[f]) updateData[f] = merged[f];
+      }
+    }
     // Nationality is derived, not copied: one incoming value, two columns. An
     // explicit "" clears both, hence the `undefined` check.
     if (body.nationality !== undefined) {
@@ -298,7 +320,7 @@ class TenantsController {
   @Delete(":id")
   @RequirePermissions(PERMISSIONS.TENANTS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    const tid = parseInt(id, 10);
+    const tid = requiredForeignKeyId(id, "رقم المستأجر");
     // A tenant-package account's own tenant row is its identity — the settings
     // profile binds to it. Same protection as the account holder's landlord.
     const [target] = await this.db.select({ isAccountHolder: tenantsTable.isAccountHolder })

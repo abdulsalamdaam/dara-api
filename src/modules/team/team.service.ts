@@ -15,10 +15,27 @@ import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage, UNLIMITED } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
 
-type Public = Omit<User, "passwordHash">;
+/**
+ * What a team endpoint may hand back about a user row. Beyond the password
+ * hash, the row also carries the email-verification token hash + its expiry
+ * (whoever holds the hash's plaintext can activate the account) and
+ * `tokenVersion` (the session-invalidation counter). None of those are the
+ * caller's business, and they were being returned verbatim by createEmployee
+ * and the update endpoints.
+ */
+type Public = Omit<
+  User,
+  "passwordHash" | "emailVerifyTokenHash" | "emailVerifyExpiresAt" | "tokenVersion"
+>;
 
 function strip(u: User): Public {
-  const { passwordHash: _ph, ...rest } = u;
+  const {
+    passwordHash: _ph,
+    emailVerifyTokenHash: _evth,
+    emailVerifyExpiresAt: _eve,
+    tokenVersion: _tv,
+    ...rest
+  } = u;
   return rest;
 }
 
@@ -178,8 +195,9 @@ export class TeamService {
     const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
-    if (!emp || emp.ownerUserId !== actorId || emp.deletedAt) throw new NotFoundException("Employee not found");
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
+    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
     if (emp.emailVerified) return { success: true, alreadyVerified: true };
     const verify = newEmailVerifyToken();
     await this.db.update(usersTable)
@@ -198,7 +216,10 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    // Soft-deleted rows are gone as far as the API is concerned — matching
+    // deleteEmployee, which already 404s on them instead of touching them.
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const updates: Partial<typeof usersTable.$inferInsert> = {};
@@ -231,7 +252,8 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const clean = Array.from(new Set((permissions || []).filter((p) => typeof p === "string" && p.trim())));
@@ -271,7 +293,8 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const passwordHash = await bcrypt.hash(newPassword, 10);

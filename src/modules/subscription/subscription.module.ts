@@ -7,7 +7,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, type BillingCycle } from "../../common/packages";
+import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription } from "../../common/subscription";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
 
@@ -108,6 +108,15 @@ class SubscriptionController {
     let cycle = (owner.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
     if (body?.plan && isPackagePlan(body.plan)) plan = body.plan;
     if (body?.cycle === "monthly" || body?.cycle === "yearly") cycle = body.cycle;
+
+    // Some plans are sold to one account type only (e.g. the Tenants plan is
+    // for companies). This is the 4th path that ends up writing
+    // `users.package_plan` (via the webhook) — enforce the same restriction the
+    // registration / admin-approval / admin-change paths do, or an individual
+    // account could buy a company-only plan straight from the billing screen.
+    if (!planAllowedForUserType(plan, owner.userType)) {
+      throw new BadRequestException(planUserTypeError(plan));
+    }
 
     if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
     const amount = planPrice(plan, cycle);
@@ -244,9 +253,16 @@ class SubscriptionWebhookController {
       [row] = await this.db.select().from(subscriptionPaymentsTable)
         .where(eq(subscriptionPaymentsTable.moyasarInvoiceId, invoiceId));
     }
-    if (!row && metaPaymentId) {
-      [row] = await this.db.select().from(subscriptionPaymentsTable)
-        .where(eq(subscriptionPaymentsTable.id, parseInt(metaPaymentId, 10)));
+    if (!row && metaPaymentId != null) {
+      // The metadata is attacker-controllable on this unauthenticated route:
+      // a non-numeric value used to become NaN and blow up in the driver (500).
+      // Anything that isn't a real row id now falls through to the same clean
+      // `unmatched` answer a valid-but-unknown id already gets.
+      const metaRowId = Number.parseInt(String(metaPaymentId), 10);
+      if (Number.isSafeInteger(metaRowId) && metaRowId > 0) {
+        [row] = await this.db.select().from(subscriptionPaymentsTable)
+          .where(eq(subscriptionPaymentsTable.id, metaRowId));
+      }
     }
     if (!row && eventPaymentId) {
       // A payment event whose invoice_id we never saw: the payment id may

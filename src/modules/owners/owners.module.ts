@@ -20,7 +20,7 @@ import { Type } from "class-transformer";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyOneOfNonNull,
   applyPercent, applyPhone, applyPostalCode, applyRequiredText, applyText, applyVatNumber,
-  applyWith, partyIdentityNumber,
+  applyWith, partyIdentityNumber, requiredForeignKeyId,
 } from "../../common/validation";
 
 /** An owner's effective contact applies the representative (وكيل) precedence:
@@ -229,7 +229,7 @@ class OwnersController {
   @Post(":id/app-reminder")
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async appReminder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    const oid = parseInt(id, 10);
+    const oid = requiredForeignKeyId(id, "رقم المؤجر");
     const [owner] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, oid), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     if (!owner) throw new NotFoundException("غير موجود");
@@ -242,19 +242,39 @@ class OwnersController {
   @Patch(":ownerId")
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("ownerId") ownerId: string, @Body() body: any) {
-    const id = parseInt(ownerId, 10);
-    const [prior] = await this.db.select({ name: ownersTable.name, type: ownersTable.type, isDraft: ownersTable.isDraft }).from(ownersTable)
+    const id = requiredForeignKeyId(ownerId, "رقم المؤجر");
+    // The WHOLE prior row — finalising a draft re-checks the stored values too.
+    const [prior] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    const willBeDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior?.isDraft);
     // The edit path now enforces exactly what create does. It used to copy the
     // body into the numeric columns verbatim — hence the 500s on "abc" and on
     // 999999999999, and the silently-stored -50 management fee.
-    sanitizeOwnerFields(
-      updateData,
-      body.type ?? prior?.type ?? null,
-      body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior?.isDraft),
-    );
+    sanitizeOwnerFields(updateData, body.type ?? prior?.type ?? null, willBeDraft);
+
+    /* Finalising a draft re-validates the WHOLE landlord.
+     *
+     * Drafts are exempt from the exact identity formats — ID/CR, phone, IBAN,
+     * VAT number, national address — which is right while they are drafts. But
+     * nothing re-applied them when `isDraft` was cleared, so anything typed
+     * during the draft went live untouched simply by not being re-sent, and a
+     * landlord whose phone is not a phone is a landlord the OTP login and every
+     * exact-match join cannot find. Checked against the merged row, with the
+     * normalised values (phone → `05XXXXXXXX`, IBAN upper-cased) written back.
+     */
+    if (prior && prior.isDraft && !willBeDraft) {
+      const merged: Record<string, unknown> = {};
+      for (const f of FIELDS) merged[f] = f in updateData ? updateData[f] : (prior as Record<string, any>)[f];
+      sanitizeOwnerFields(merged, body.type ?? prior.type ?? null, false);
+      assertNationalAddress({ ...merged, isDraft: false });
+      for (const f of FIELDS) {
+        if (f in updateData) continue;
+        if (!(f in merged)) continue;
+        if (merged[f] !== (prior as Record<string, any>)[f]) updateData[f] = merged[f];
+      }
+    }
     // Nationality arrives as a human value and is stored as a lookup FK. An
     // explicit empty string clears it, which is why this checks `undefined`
     // rather than truthiness.
@@ -291,7 +311,7 @@ class OwnersController {
   @Delete(":ownerId")
   @RequirePermissions(PERMISSIONS.OWNERS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("ownerId") ownerId: string) {
-    const id = parseInt(ownerId, 10);
+    const id = requiredForeignKeyId(ownerId, "رقم المؤجر");
     const [target] = await this.db
       .select({ isDefault: ownersTable.isDefault, isAccountHolder: ownersTable.isAccountHolder })
       .from(ownersTable)
@@ -373,7 +393,9 @@ class OwnerNotificationsController {
   @Post()
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async send(@CurrentUser() user: AuthUser, @Body() body: SendOwnerNotificationDto) {
-    const ownerId = Number(body?.ownerId);
+    // `@IsInt()` lets any 32-bit-overflowing integer through — the column is a
+    // serial, so that reached the driver as an error rather than a miss.
+    const ownerId = requiredForeignKeyId(body?.ownerId, "المؤجر");
     const title = body?.title?.toString().trim();
     const text = body?.body?.toString().trim();
     if (!ownerId || !title || !text) {

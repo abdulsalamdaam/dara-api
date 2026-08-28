@@ -6,8 +6,9 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, notInArray, inArray, sql, or, ilike, count, asc, desc } from "drizzle-orm";
 import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable, contractsTable, contractUnitsTable } from "@dara/database";
 import {
-  BOUNDS, LIMITS, applyBoolNonNull, applyFourDigitCode, applyInt, applyIntNonNull,
-  applyOneOfNonNull, applyPercent, applyPostalCode, applyRequiredText, applyText,
+  BOUNDS, LIMITS, applyBoolNonNull, applyForeignKey, applyFourDigitCode, applyInt,
+  applyIntNonNull, applyOneOfNonNull, applyPercent, applyPostalCode, applyRequiredText,
+  applyText, foreignKeyId, requiredForeignKeyId,
 } from "../../common/validation";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -84,11 +85,23 @@ function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): v
   applyText(v, "notes", "الملاحظات", LIMITS.notes);
   applyText(v, "imageKey", "صورة العقار", LIMITS.address);
   applyBoolNonNull(v, "isDraft", "مسودة");
-  applyInt(v, "typeLookupId", "نوع العقار", BOUNDS.foreignKey);
-  applyInt(v, "usageLookupId", "استخدام العقار", BOUNDS.foreignKey);
-  applyInt(v, "regionLookupId", "المنطقة", BOUNDS.foreignKey);
-  applyInt(v, "cityLookupId", "المدينة", BOUNDS.foreignKey);
+  applyForeignKey(v, "typeLookupId", "نوع العقار");
+  applyForeignKey(v, "usageLookupId", "استخدام العقار");
+  applyForeignKey(v, "regionLookupId", "المنطقة");
+  applyForeignKey(v, "cityLookupId", "المدينة");
 }
+
+/**
+ * The property columns a request may set. Shared by the PATCH allowlist and by
+ * the draft-finalise re-check, so the two can never disagree about which
+ * fields make up a property.
+ */
+const PROPERTY_FIELDS = [
+  "name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators",
+  "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber",
+  "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft",
+  "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId",
+] as const;
 
 @ApiTags("properties")
 @ApiBearerAuth("user-jwt")
@@ -96,6 +109,24 @@ function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): v
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 class PropertiesController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+
+  /**
+   * The landlord a property is filed under must belong to the caller.
+   *
+   * Nothing checked it: `ownerId` was taken off the body and written straight
+   * to the column, so a property could be created (or moved) pointing at
+   * another account's landlord. Reads are scoped by `user_id`, so it is not a
+   * disclosure — it is worse in a quieter way: the property belongs to an
+   * `owner_id` this account cannot resolve, so it vanishes from every
+   * landlord-facing view while still counting against the quota. Same shape as
+   * the deed check below.
+   */
+  private async assertOwnerInScope(ownerId: number, userId: number): Promise<void> {
+    const [owner] = await this.db.select({ id: ownersTable.id })
+      .from(ownersTable)
+      .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)));
+    if (!owner) throw new BadRequestException("المؤجر المختار غير موجود · Selected landlord not found");
+  }
 
   @Get()
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
@@ -226,7 +257,7 @@ class PropertiesController {
     const owner = scopeId(user);
     // Enforce the subscription package's property quota.
     await assertWithinQuota(this.db, owner, "properties");
-    const deedId = body.deedId == null ? null : (typeof body.deedId === "number" ? body.deedId : parseInt(String(body.deedId), 10));
+    const deedId = foreignKeyId(body.deedId, "الصك");
 
     // Validate the deed belongs to this scope and isn't already linked to
     // another property (1:1 enforcement at the API layer for nice errors;
@@ -246,7 +277,8 @@ class PropertiesController {
     // Resolve the landlord when the form sends none:
     //   1. Use the account's flagged default landlord, if any.
     //   2. Otherwise, individual-owner accounts auto-link their sole landlord.
-    let ownerId: number | null = body.ownerId != null ? Number(body.ownerId) : null;
+    let ownerId: number | null = foreignKeyId(body.ownerId, "المؤجر");
+    if (ownerId != null) await this.assertOwnerInScope(ownerId, owner);
     if (ownerId == null) {
       const [def] = await this.db.select({ id: ownersTable.id })
         .from(ownersTable)
@@ -318,7 +350,7 @@ class PropertiesController {
   @Get(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
   async getOne(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const [prop] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)));
     if (!prop) throw new NotFoundException("Property not found");
@@ -342,22 +374,44 @@ class PropertiesController {
   @Patch(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string, @Body() body: any) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const owner = scopeId(user);
     // Needed to know whether this record is still a draft — drafts are exempt
     // from the exact national-address formats, exactly as on create.
-    const [priorProp] = await this.db.select({ isDraft: propertiesTable.isDraft })
+    // The WHOLE prior row, not just the draft flag: finalising re-checks the
+    // stored values as well as the incoming ones (below).
+    const [priorProp] = await this.db.select()
       .from(propertiesTable)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)));
     if (!priorProp) throw new NotFoundException("Property not found");
     const isDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(priorProp.isDraft);
     const updateData: Record<string, unknown> = {};
-    const fields = ["name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators", "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber", "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft", "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId"];
-    for (const field of fields) if (body[field] !== undefined) updateData[field] = body[field];
+    for (const field of PROPERTY_FIELDS) if (body[field] !== undefined) updateData[field] = body[field];
     if (body.managementFeePercent !== undefined) updateData.managementFeePercent = body.managementFeePercent;
     // The edit path enforces exactly what the create path does — it used to
     // copy the body straight into `set()`.
     sanitizePropertyFields(updateData, isDraft);
+
+    // Finalising a draft re-checks the row AS IT WILL BE — the stored values
+    // merged with this request. A draft is exempt from the exact
+    // national-address formats while it is a draft; nothing re-applied them
+    // when it stopped being one, so a half-typed postal code went live simply
+    // by not being re-sent. Normalised values are carried back so the fix
+    // reaches the column, not just the response.
+    if (priorProp.isDraft && !isDraft) {
+      const merged: Record<string, unknown> = {};
+      for (const f of PROPERTY_FIELDS) {
+        merged[f] = f in updateData ? updateData[f] : (priorProp as Record<string, any>)[f];
+      }
+      if ("managementFeePercent" in updateData) merged.managementFeePercent = updateData.managementFeePercent;
+      else merged.managementFeePercent = (priorProp as Record<string, any>).managementFeePercent;
+      sanitizePropertyFields(merged, false);
+      for (const f of [...PROPERTY_FIELDS, "managementFeePercent"] as const) {
+        if (f in updateData) continue;
+        if (!(f in merged)) continue;
+        if (merged[f] !== (priorProp as Record<string, any>)[f]) updateData[f] = merged[f];
+      }
+    }
     // Keep the lookup FKs in sync when the matching text field changes.
     if (body.type !== undefined) {
       const typeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "property_type", body.type);
@@ -369,11 +423,13 @@ class PropertiesController {
     if (body.region !== undefined) updateData.regionLookupId = body.regionLookupId ?? await resolveLookupId(this.db, "region", body.region);
     if (body.city !== undefined) updateData.cityLookupId = body.cityLookupId ?? await resolveLookupId(this.db, "city", body.city);
     if (body.ownerId !== undefined) {
-      updateData["ownerId"] = body.ownerId === null ? null : (typeof body.ownerId === "number" ? body.ownerId : parseInt(String(body.ownerId), 10));
+      const nextOwnerId = foreignKeyId(body.ownerId, "المؤجر");
+      if (nextOwnerId != null) await this.assertOwnerInScope(nextOwnerId, owner);
+      updateData["ownerId"] = nextOwnerId;
     }
     // Handle deedId change: re-validate ownership + 1:1 freshness.
     if (body.deedId !== undefined) {
-      const nextDeedId = body.deedId === null ? null : (typeof body.deedId === "number" ? body.deedId : parseInt(String(body.deedId), 10));
+      const nextDeedId = foreignKeyId(body.deedId, "الصك");
       if (nextDeedId != null) {
         const [deed] = await this.db.select({ id: deedsTable.id })
           .from(deedsTable)
@@ -402,7 +458,7 @@ class PropertiesController {
   @Delete(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     // Deleting a property cascades to its units — and used to leave every
     // contract on those units `active`, still billing pending installments
     // against a unit and a property that no longer exist. Refuse while any

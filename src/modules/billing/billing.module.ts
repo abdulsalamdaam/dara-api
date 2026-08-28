@@ -24,6 +24,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
+import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
@@ -111,6 +112,45 @@ function assertNonNegative(items: LineItem[], total: number): void {
   }
 }
 
+/** The VAT rate a taxable line carries. Mirrors the wizard's `VAT_RATE`. */
+const VAT_RATE = 0.15;
+/** One halala — money is compared at the precision it is stored in. */
+const HALALA = 0.01;
+
+/**
+ * Refuse a document whose total does not follow from its own line items.
+ *
+ * `subtotal` is derived (Σ of the line amounts) but `total` was taken from the
+ * request verbatim, and VAT is implied everywhere downstream as
+ * `total − subtotal` — so `{"items":[{…,"amount":100}],"total":999999}` stored
+ * `subtotal 100.00, total 999999.00` and minted 999,899 of VAT out of nothing,
+ * on a document that goes to ZATCA.
+ *
+ * The expected total is the subtotal plus 15% on the lines that are flagged
+ * VAT-able, which covers every shape the wizard produces: a mixed document
+ * (some lines taxed, some not), zero-rated/exempt lines (`vat: false`) and a
+ * VAT-disabled document (every line `vat: false`, so total === subtotal).
+ * Two roundings are accepted — the whole VAT rounded once, which is what the
+ * web computes, and each line's VAT rounded on its own — because both are a
+ * correct reading of the same figures and they can differ by a halala.
+ */
+function assertTotalMatchesItems(items: LineItem[], total: number): void {
+  const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
+  const taxable = items.reduce((s, it) => s + (it.vat ? it.amount : 0), 0);
+  // Σ VAT rounded once (the wizard's arithmetic) …
+  const roundedOnce = round2(subtotal + round2(taxable * VAT_RATE));
+  // … and VAT rounded per line (what a line-by-line reading gives).
+  const roundedPerLine = round2(items.reduce((s, it) => s + it.amount + (it.vat ? round2(it.amount * VAT_RATE) : 0), 0));
+  if (Math.abs(total - roundedOnce) <= HALALA || Math.abs(total - roundedPerLine) <= HALALA) return;
+  if (items.length === 0) {
+    throw new BadRequestException("لا يمكن إصدار مستند بإجمالي بدون بنود · A document total needs line items behind it");
+  }
+  throw new BadRequestException(
+    `إجمالي المستند (${total.toFixed(2)}) لا يطابق بنوده — المجموع ${subtotal.toFixed(2)} ` +
+    `والإجمالي المتوقع ${roundedOnce.toFixed(2)} · Document total does not match its line items and their VAT flags`,
+  );
+}
+
 @ApiTags("simple-invoices")
 @ApiBearerAuth("user-jwt")
 @Controller("simple-invoices")
@@ -142,7 +182,7 @@ class SimpleInvoicesController {
   async pdfA3(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const uid = scopeId(user);
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
 
     // The cleared XML: by the stored link, falling back to a match on the
@@ -486,15 +526,16 @@ class SimpleInvoicesController {
     @Query("paymentId") paymentId?: string,
   ) {
     const uid = scopeId(user);
-    let id = contractId ? Number(contractId) : null;
+    let id = foreignKeyId(contractId, "رقم العقد");
     // "Create invoice from installment" only knows the payment — resolve its
     // contract here so the UI can pre-check from that entry point too, instead
     // of discovering the problem when the user hits save.
-    if (!Number.isFinite(id as number) && paymentId) {
+    const payId = foreignKeyId(paymentId, "رقم القسط");
+    if (id == null && payId != null) {
       const [pay] = await this.db
         .select({ contractId: paymentsTable.contractId })
         .from(paymentsTable)
-        .where(and(eq(paymentsTable.id, Number(paymentId)), eq(paymentsTable.userId, uid)))
+        .where(and(eq(paymentsTable.id, payId), eq(paymentsTable.userId, uid)))
         .limit(1);
       id = pay?.contractId ?? null;
     }
@@ -524,7 +565,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     const uid = scopeId(user);
     const [agg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
@@ -561,18 +602,22 @@ class SimpleInvoicesController {
     const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
     const total = body?.total != null ? round2(Number(body.total)) : subtotal;
     assertNonNegative(items, total);
+    assertTotalMatchesItems(items, total);
     // An explicit number wins; otherwise it's generated atomically below.
     const explicitNumber = (body?.number && String(body.number).trim()) || null;
 
-    // If linked to an installment, snapshot tenant/contract from it.
-    let contractId = body?.contractId ?? null;
-    let tenantId = body?.tenantId ?? null;
+    // If linked to an installment, snapshot tenant/contract from it. Every id
+    // off the body is range-checked before it is used as a key — these columns
+    // are int4, so an oversized id was a driver error rather than a miss.
+    let contractId = foreignKeyId(body?.contractId, "رقم العقد");
+    let tenantId = foreignKeyId(body?.tenantId, "رقم المستأجر");
     let tenantName = body?.tenantName ?? null;
     let client = body?.client ?? null;
-    if (body?.paymentId) {
+    const bodyPaymentId = foreignKeyId(body?.paymentId, "رقم القسط");
+    if (bodyPaymentId != null) {
       const [pay] = await this.db.select({ contractId: paymentsTable.contractId, tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
         .from(paymentsTable).leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
-        .where(and(eq(paymentsTable.id, Number(body.paymentId)), eq(paymentsTable.userId, scopeId(user))));
+        .where(and(eq(paymentsTable.id, bodyPaymentId), eq(paymentsTable.userId, scopeId(user))));
       if (pay) { contractId = contractId ?? pay.contractId; tenantId = tenantId ?? pay.tenantId; tenantName = tenantName ?? pay.tenantName; }
     }
     // Credit/debit note: snapshot client + contract from the referenced invoice
@@ -616,8 +661,8 @@ class SimpleInvoicesController {
     }
 
     const paymentIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
-      : (body?.paymentId ? [Number(body.paymentId)] : []);
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      : (bodyPaymentId != null ? [bodyPaymentId] : []);
 
     // A security deposit (الوديعة/الضمان) is held trust money (amanat), never
     // revenue — collecting it must produce a receipt voucher (سند قبض), not a
@@ -680,7 +725,7 @@ class SimpleInvoicesController {
         type,
         status: "draft",
         contractId: contractId ?? null,
-        paymentId: body?.paymentId ?? (paymentIds[0] ?? null),
+        paymentId: bodyPaymentId ?? (paymentIds[0] ?? null),
         paymentIds: paymentIds.length ? paymentIds : null,
         tenantId: tenantId ?? null,
         tenantName: tenantName ?? null,
@@ -838,15 +883,16 @@ class SimpleInvoicesController {
     // Optional installment link(s) — the voucher also records a collection
     // against each, so a deposit/fee/rent collected this way reflects its real
     // collected/remaining figures (no orphaned "paid but collected = 0").
+    const singlePayId = foreignKeyId(body?.paymentId, "رقم القسط");
     const payIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
-      : (body?.paymentId ? [Number(body.paymentId)] : []);
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      : (singlePayId != null ? [singlePayId] : []);
 
     // Optional contract link — snapshot its number/tenant. Fall back to the
     // contract of the first linked installment when not given explicitly.
-    let contractId: number | null = body?.contractId ?? null;
+    let contractId: number | null = foreignKeyId(body?.contractId, "رقم العقد");
     let tenantName: string | null = body?.tenantName ?? null;
-    let tenantId: number | null = body?.tenantId ?? null;
+    let tenantId: number | null = foreignKeyId(body?.tenantId, "رقم المستأجر");
     if (contractId) {
       const [c] = await this.db.select({ id: contractsTable.id, tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
         .from(contractsTable).where(and(eq(contractsTable.id, contractId), eq(contractsTable.userId, uid)));
@@ -966,7 +1012,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("لا يمكن تعديل مستند مؤكَّد");
     const patch: any = {};
@@ -974,16 +1020,32 @@ class SimpleInvoicesController {
       const items = normalizeItems(body.items);
       const total = body?.total != null ? round2(Number(body.total)) : round2(items.reduce((s, it) => s + it.amount, 0));
       assertNonNegative(items, total);
+      assertTotalMatchesItems(items, total);
       patch.items = items;
       patch.subtotal = round2(items.reduce((s, it) => s + it.amount, 0)).toFixed(2);
       patch.total = total.toFixed(2);
     } else if (body?.total != null) {
       const total = round2(Number(body.total));
       assertNonNegative([], total);
+      // A total sent on its own is still a total for THESE line items — the
+      // stored ones. Without the merge this branch was the shortest route to a
+      // document whose VAT is whatever the caller asked for.
+      assertTotalMatchesItems(normalizeItems(doc.items), total);
       patch.total = total.toFixed(2);
     }
-    for (const k of ["tenantName", "client", "issueDate", "dueDate", "notes", "billingReference", "contractId", "tenantId", "paymentId", "paymentIds"]) {
+    for (const k of ["tenantName", "client", "issueDate", "dueDate", "notes", "billingReference"]) {
       if (body?.[k] !== undefined) patch[k] = body[k];
+    }
+    // The id fields on the same allowlist were copied through untouched — the
+    // one place a PATCH could still put an out-of-range value into an int4
+    // column. `null` still clears the link.
+    for (const [k, label] of [["contractId", "رقم العقد"], ["tenantId", "رقم المستأجر"], ["paymentId", "رقم القسط"]] as const) {
+      if (body?.[k] !== undefined) patch[k] = foreignKeyId(body[k], label);
+    }
+    if (body?.paymentIds !== undefined) {
+      patch.paymentIds = Array.isArray(body.paymentIds)
+        ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+        : null;
     }
     const [updated] = await this.db.update(simpleInvoicesTable).set(patch)
       .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scopeId(user)))).returning();
@@ -1007,7 +1069,7 @@ class SimpleInvoicesController {
     const key = typeof body?.key === "string" ? body.key.trim() : "";
     if (!key) throw new BadRequestException("key is required");
     const [updated] = await this.db.update(simpleInvoicesTable).set({ pdfKey: key } as any)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)))
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)))
       .returning({ id: simpleInvoicesTable.id });
     if (!updated) throw new NotFoundException("Document not found");
     return { ok: true };
@@ -1019,9 +1081,27 @@ class SimpleInvoicesController {
     void body;
     const uid = scopeId(user);
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
+
+    // Approval is where a draft becomes a real, issued document — the copy the
+    // buyer keeps and the one mirrored to ZATCA. Everything the create path
+    // refuses has to hold HERE too, against the row as it now stands: a draft
+    // can be edited after it is created (and PATCH used to accept a bare
+    // `total`), so a figure that create would never have taken could still walk
+    // in through the edit and go live at approval.
+    //
+    // Deliberately NOT re-run: the invoice-readiness gate. It is answered with
+    // an explicit `confirmations` acknowledgement the caller sends at create
+    // time, and approve carries no body — re-checking it here would fail
+    // approvals whose acknowledgement was already given.
+    {
+      const items = normalizeItems(doc.items);
+      const total = round2(Number(doc.total));
+      assertNonNegative(items, total);
+      assertTotalMatchesItems(items, total);
+    }
 
     const isNote = doc.type === "credit" || doc.type === "debit";
     if (isNote) {
@@ -1074,7 +1154,7 @@ class SimpleInvoicesController {
   async submitZatca(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const uid = scopeId(user);
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status !== "confirmed") throw new BadRequestException("اعتمد المستند قبل إرساله لهيئة الزكاة");
     // Already mirrored? Don't duplicate — report its current ZATCA status.
@@ -1299,7 +1379,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async collect(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const uid = scopeId(user);
-    const docId = parseInt(id, 10);
+    const docId = requiredForeignKeyId(id, "رقم المستند");
     if (!Number.isInteger(docId)) throw new BadRequestException("رقم المستند غير صالح");
     // Everything below reads what has been collected so far and then writes.
     // With no lock, parallel requests all read "nothing yet", all pass the cap,
@@ -1414,7 +1494,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     // An approved document has been issued — to the buyer, and to ZATCA. It is
     // corrected by a credit note, never withdrawn. And a soft delete only hides

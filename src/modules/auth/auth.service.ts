@@ -2,7 +2,7 @@ import { Injectable, Inject, BadRequestException, NotFoundException, Unauthorize
 import { JwtService } from "@nestjs/jwt";
 import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
-import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { companiesTable, emailOtpTokensTable, loginLogsTable, ownersTable, rolesTable, tenantsTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -853,8 +853,14 @@ export class AuthService {
   async userPhoneRequestOtp(input: { phone: string }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
+    // A phone number is NOT unique across users (registration allows a
+    // duplicate), so an unordered `[user]` picked an arbitrary identity — and
+    // request/verify could disagree about who is logging in. Prefer an active
+    // row, then the oldest id, so the choice is stable and matches verify.
     const [user] = await this.db.select({ id: usersTable.id, isActive: usersTable.isActive })
-      .from(usersTable).where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)));
+      .from(usersTable).where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)))
+      .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+      .limit(1);
     const owner = user && user.isActive ? null : await this.findOwnerByLoginPhone(raw);
     if (!user && !owner) {
       throw new NotFoundException({
@@ -890,7 +896,14 @@ export class AuthService {
         roleKey: rolesTable.key,
       })
       .from(usersTable).leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      .where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)));
+      .where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)))
+      // Duplicate phone numbers exist, so this lookup must be deterministic:
+      // an active row wins, ties break on the oldest id. Without the ORDER BY
+      // the DB could hand back an inactive duplicate, and the fall-through
+      // below would then log the caller in as a *different* identity (an
+      // owner/landlord with a different scope).
+      .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+      .limit(1);
     if (!user || !user.isActive) {
       // No matching user — fall back to an owner (landlord) login by phone.
       const owner = await this.findOwnerByLoginPhone(raw);
