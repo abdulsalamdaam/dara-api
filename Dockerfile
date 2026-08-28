@@ -23,9 +23,20 @@ ENV NODE_ENV=production
 
 # ZATCA e-invoicing shells out to these for CSR generation, the hash transform
 # (XSLT) and C14N canonicalization. node:22-slim doesn't ship them.
+#
+# chromium is here for the same reason: the invoice PDF is rendered by headless
+# Chrome (pdf.service). Without it every GET /invoices/:id/pdf threw "No
+# headless browser found" — the endpoint was dead in production and nobody had
+# noticed, because no tax invoice had been printed yet. The fonts are not
+# optional: without them Arabic renders as boxes, which on a tax invoice means
+# the seller name, the buyer name and every line item.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openssl xsltproc libxml2-utils \
+      chromium fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
+
+# pdf.service probes a fixed list of paths; Debian installs it here.
+ENV CHROME_PATH=/usr/bin/chromium
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
