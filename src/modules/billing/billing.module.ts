@@ -151,6 +151,19 @@ function assertTotalMatchesItems(items: LineItem[], total: number): void {
   );
 }
 
+/**
+ * Sub-kinds that are not tax invoices and so are exempt from the invoice
+ * readiness gate. Anything outside this set — including an unrecognised value —
+ * is treated as a tax invoice.
+ */
+const TAX_EXEMPT_KINDS = new Set(["receipt", "deposit", "commission"]);
+function isTaxExemptKind(kind: unknown): boolean {
+  return typeof kind === "string" && TAX_EXEMPT_KINDS.has(kind.trim());
+}
+
+/** Every sub-kind the product actually issues; anything else is refused. */
+const KNOWN_DOC_KINDS = new Set([...TAX_EXEMPT_KINDS, "invoice", "manual"]);
+
 @ApiTags("simple-invoices")
 @ApiBearerAuth("user-jwt")
 @Controller("simple-invoices")
@@ -664,12 +677,29 @@ class SimpleInvoicesController {
       ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
       : (bodyPaymentId != null ? [bodyPaymentId] : []);
 
-    // A security deposit (الوديعة/الضمان) is held trust money (amanat), never
+    // Only these sub-kinds are genuinely not tax invoices: a voucher is evidence
+  // of money received, and a commission bill is the managing account invoicing
+  // the landlord. Everything else — including a `kind` nobody recognises — is a
+  // tax invoice and must face the readiness gate.
+  //
+  // The gates below used to read `!body?.kind`, so ANY value at all skipped
+  // them. Staging holds 6 documents with kind "invoice" and 6 with "manual"
+  // that were issued without the check ever running.
+  // A security deposit (الوديعة/الضمان) is held trust money (amanat), never
     // revenue — collecting it must produce a receipt voucher (سند قبض), not a
     // tax invoice. If a linked installment is a deposit and the caller hasn't
     // explicitly opted to bill it (billDeposit), divert to a receipt voucher
     // (which also records the collection against the deposit installment).
-    if (type === "invoice" && !body?.kind && paymentIds.length && !body?.billDeposit) {
+    // An unrecognised `kind` used to be stored verbatim AND to skip the gates
+    // below, so an arbitrary string bought an exemption. Refuse it instead.
+    const docKind = body?.kind == null || String(body.kind).trim() === ""
+      ? null
+      : String(body.kind).trim();
+    if (docKind != null && !KNOWN_DOC_KINDS.has(docKind)) {
+      throw new BadRequestException(`نوع المستند غير معروف: ${docKind} · Unknown document kind`);
+    }
+
+    if (type === "invoice" && !isTaxExemptKind(docKind) && paymentIds.length && !body?.billDeposit) {
       const linked = await this.db.select({ description: paymentsTable.description })
         .from(paymentsTable)
         .where(and(inArray(paymentsTable.id, paymentIds), eq(paymentsTable.userId, scopeId(user))));
@@ -687,7 +717,7 @@ class SimpleInvoicesController {
     // (no VAT number, no email, landlord not onboarded with ZATCA…). Receipt
     // vouchers and commission docs are exempt — a voucher is not a tax invoice,
     // and the deposit diversion above has already returned by this point.
-    if (type === "invoice" && !body?.kind) {
+    if (type === "invoice" && !isTaxExemptKind(docKind)) {
       const readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
       // A tenant with no VAT number needs an explicit acknowledgement — the
       // client ticks a box rather than the invoice quietly going out without
@@ -733,7 +763,7 @@ class SimpleInvoicesController {
         items,
         subtotal: subtotal.toFixed(2),
         total: total.toFixed(2),
-        kind: body?.kind ?? null,
+        kind: docKind,
         issueDate: body?.issueDate || today(),
         dueDate: body?.dueDate || null,
         billingReference: body?.billingReference ?? null,

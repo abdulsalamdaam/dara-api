@@ -617,6 +617,13 @@ class ContractsController {
           .map((e: any) => ({ dueDate: String(e?.dueDate ?? "").slice(0, 10), amount: String(e?.amount ?? "") }))
           .filter((e: any) => e.dueDate && Number(e.amount) > 0)
       : null;
+    // A due date that isn't a real calendar date reached `new Date(...)
+    // .toISOString()` while the schedule was being built and threw a
+    // RangeError — a 500 on what is simply a malformed request. Check them
+    // here, before anything is written.
+    for (const [i, e] of (customSchedule ?? []).entries()) {
+      dateOnly(e.dueDate, `تاريخ الدفعة ${i + 1} في الجدول المخصص`);
+    }
 
     const values: Record<string, unknown> = {
       userId: ownerId,
@@ -941,11 +948,16 @@ class ContractsController {
       await tx.insert(contractUnitsTable).values(
         p.unitIds.map((unitId) => ({ contractId: row!.id, unitId })),
       );
-      return row;
+      // Inside the transaction, not after it. Materialising afterwards meant a
+      // failure here — an unparseable custom-schedule date, say — left the
+      // contract row and its unit links committed: a live contract holding a
+      // unit as "rented" with no schedule at all, and no way to notice. The
+      // rebuild path always did this correctly; create did not.
+      const created = await this.materializeContract(tx, row!, p);
+      return { row, created };
     });
 
-    const installmentsCreated = await this.materializeContract(this.db, contract!, p);
-    return { ...contract, unitIds: p.unitIds, installmentsCreated };
+    return { ...contract.row, unitIds: p.unitIds, installmentsCreated: contract.created };
   }
 
   /** Next per-account receipt-voucher (سند قبض) number: RV-000001, …
