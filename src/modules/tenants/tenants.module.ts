@@ -17,7 +17,7 @@ import { EmailService } from "../email/email.service";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyMoney,
   applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText, applyText,
-  applyVatNumber, applyWith, partyIdentityNumber, requiredForeignKeyId,
+  applyVatNumber, applyWith, partyIdentityNumber, requiredForeignKeyId, applyDraftPhone,
 } from "../../common/validation";
 
 const FIELDS = [
@@ -102,7 +102,10 @@ function sanitizeTenantFields(v: Record<string, unknown>, type: unknown, isDraft
     applyEmail(v, "originalTenantEmail", "بريد المستأجر الأصلي");
   } else {
     applyText(v, "nationalId", "رقم الهوية / السجل التجاري", LIMITS.identifier);
-    applyText(v, "phone", "رقم الجوال", LIMITS.identifier);
+    // Normalised but never refused — a half-typed number is the point of a
+    // draft, while a recognisable one must still be stored canonically so it
+    // joins to the other phone columns by exact string equality.
+    applyDraftPhone(v, "phone", "رقم الجوال");
     applyText(v, "email", "البريد الإلكتروني", LIMITS.line);
     applyText(v, "iban", "رقم الآيبان", LIMITS.identifier);
     applyText(v, "taxNumber", "الرقم الضريبي", LIMITS.identifier);
@@ -110,7 +113,7 @@ function sanitizeTenantFields(v: Record<string, unknown>, type: unknown, isDraft
     applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
     applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
     applyText(v, "originalTenantIdNumber", "رقم هوية المستأجر الأصلي", LIMITS.identifier);
-    applyText(v, "originalTenantPhone", "جوال المستأجر الأصلي", LIMITS.identifier);
+    applyDraftPhone(v, "originalTenantPhone", "جوال المستأجر الأصلي");
     applyText(v, "originalTenantEmail", "بريد المستأجر الأصلي", LIMITS.line);
   }
 }

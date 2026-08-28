@@ -20,7 +20,7 @@ import { Type } from "class-transformer";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyOneOfNonNull,
   applyPercent, applyPhone, applyPostalCode, applyRequiredText, applyText, applyVatNumber,
-  applyWith, partyIdentityNumber, requiredForeignKeyId,
+  applyWith, partyIdentityNumber, requiredForeignKeyId, applyDraftPhone,
 } from "../../common/validation";
 
 /** An owner's effective contact applies the representative (وكيل) precedence:
@@ -102,7 +102,10 @@ function sanitizeOwnerFields(v: Record<string, unknown>, type: unknown, isDraft:
     applyEmail(v, "originalOwnerEmail", "بريد المالك الأصلي");
   } else {
     applyText(v, "idNumber", "رقم الهوية / السجل التجاري", LIMITS.identifier);
-    applyText(v, "phone", "رقم الجوال", LIMITS.identifier);
+    // Normalised but never refused — a half-typed number is the point of a
+    // draft, while a recognisable one must still be stored canonically so it
+    // joins to the other phone columns by exact string equality.
+    applyDraftPhone(v, "phone", "رقم الجوال");
     applyText(v, "email", "البريد الإلكتروني", LIMITS.line);
     applyText(v, "iban", "رقم الآيبان", LIMITS.identifier);
     applyText(v, "taxNumber", "الرقم الضريبي", LIMITS.identifier);
@@ -110,7 +113,7 @@ function sanitizeOwnerFields(v: Record<string, unknown>, type: unknown, isDraft:
     applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
     applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
     applyText(v, "originalOwnerIdNumber", "رقم هوية المالك الأصلي", LIMITS.identifier);
-    applyText(v, "originalOwnerPhone", "جوال المالك الأصلي", LIMITS.identifier);
+    applyDraftPhone(v, "originalOwnerPhone", "جوال المالك الأصلي");
     applyText(v, "originalOwnerEmail", "بريد المالك الأصلي", LIMITS.line);
   }
   applyText(v, "nationalAddressCity", "المدينة");
