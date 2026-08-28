@@ -71,6 +71,16 @@ class PaymentsController {
     conds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
     const where = and(...conds);
 
+    // The cards deliberately ignore search and the status tab, so they stay put
+    // while the table pages — but they must NOT ignore the contract filter. The
+    // by-contract finance view asks for one contract's figures with pageSize 1
+    // and got the whole account's totals back, so every card there described
+    // somebody else's money.
+    const statsConds: any[] = [baseWhere];
+    if (contractIds && contractIds.length > 0) statsConds.push(inArray(paymentsTable.contractId, contractIds));
+    statsConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
+    const statsWhere = and(...statsConds);
+
     let rowsQ = this.db
       .select({
         id: paymentsTable.id,
@@ -123,6 +133,7 @@ class PaymentsController {
         this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
           .where(eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id)),
       ),
+      ...(contractIds && contractIds.length > 0 ? [inArray(simpleInvoicesTable.contractId, contractIds)] : []),
     );
 
     const [rows, totalRow, statsRows, collectedRow, freeCollectedRow] = await Promise.all([
@@ -139,10 +150,20 @@ class PaymentsController {
         status: liveStatusSql,
         cnt: count(),
         amount: sum(paymentsTable.amount),
-      }).from(paymentsTable).where(baseWhere).groupBy(sql`1`) : Promise.resolve([]),
+      }).from(paymentsTable).where(statsWhere).groupBy(sql`1`) : Promise.resolve([]),
       // Actual money collected across all collections (covers partial ones).
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
-        .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.userId, scopeId(user)))
+        .from(paymentCollectionsTable)
+        // An invoice-only collection carries no payment, so its contract comes
+        // from the invoice — match either, or a filtered card loses that money.
+        .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
+        .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
+        .where(and(
+          eq(paymentCollectionsTable.userId, scopeId(user)),
+          ...(contractIds && contractIds.length > 0
+            ? [or(inArray(paymentsTable.contractId, contractIds), inArray(simpleInvoicesTable.contractId, contractIds))]
+            : []),
+        ))
         : Promise.resolve([{ amount: null }]),
       usePaginated ? this.db.select({ amount: sum(simpleInvoicesTable.total), cnt: count() })
         .from(simpleInvoicesTable).where(freeCollectedWhere)

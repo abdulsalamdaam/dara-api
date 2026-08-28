@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
+import { and, eq, isNull, or, ilike, count, asc, desc, inArray, notExists } from "drizzle-orm";
 import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, lookupsTable } from "@dara/database";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
@@ -791,7 +791,19 @@ class ContractsController {
     } else if (mode === "cancelled") {
       await this.db.update(paymentsTable)
         .set({ status: "cancelled" } as any)
-        .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
+        .where(and(
+          eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt),
+          inArray(paymentsTable.status, unsettled),
+          // Never void an installment that already holds collected money. A
+          // partially-collected row is in `unsettled`, so cancelling a contract
+          // used to flip it to "cancelled" — and every total derived from
+          // payment status then stopped counting money the landlord really
+          // received. It stays as it is; only untouched rows are voided.
+          notExists(
+            this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+              .where(eq(paymentCollectionsTable.paymentId, paymentsTable.id)),
+          ),
+        ));
     }
     return {
       success: true,
@@ -916,7 +928,19 @@ class ContractsController {
         .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
     } else if (mode === "cancelled") {
       await this.db.update(paymentsTable).set({ status: "cancelled" } as any)
-        .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
+        .where(and(
+          eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt),
+          inArray(paymentsTable.status, unsettled),
+          // Never void an installment that already holds collected money. A
+          // partially-collected row is in `unsettled`, so cancelling a contract
+          // used to flip it to "cancelled" — and every total derived from
+          // payment status then stopped counting money the landlord really
+          // received. It stays as it is; only untouched rows are voided.
+          notExists(
+            this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+              .where(eq(paymentCollectionsTable.paymentId, paymentsTable.id)),
+          ),
+        ));
     }
 
     // ── Settle already-collected money ──
