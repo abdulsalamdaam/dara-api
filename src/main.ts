@@ -58,6 +58,23 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
+  // Close on SIGTERM instead of ignoring it. Docker sends SIGTERM, waits out
+  // its 30s grace period, then SIGKILLs — so every deploy spent ~34s in
+  // teardown, 14% of an API deploy, purely because nothing was listening for
+  // the signal. Nest's shutdown hooks also let providers close their own
+  // handles rather than having them severed.
+  app.enableShutdownHooks();
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => {
+      Logger.log(`${signal} received — closing`, "Bootstrap");
+      // In-flight requests finish; a hung close must not outlast the grace
+      // period, or we are back to being killed.
+      const forced = setTimeout(() => process.exit(0), 10_000);
+      forced.unref();
+      app.close().then(() => process.exit(0)).catch(() => process.exit(0));
+    });
+  }
+
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   await app.listen(port);
   Logger.log(`API listening on http://localhost:${port}`, "Bootstrap");

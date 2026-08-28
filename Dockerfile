@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # ─── Builder ────────────────────────────────────────────────────────
 FROM node:22-slim AS builder
 WORKDIR /app
@@ -5,9 +6,14 @@ WORKDIR /app
 # Install pnpm.
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 
-# Cache deps layer.
+# Cache deps layer. The store mount survives between builds, so a lockfile
+# change re-links from disk instead of re-downloading all 554 packages — the
+# layer cache cannot help, because the lockfile change is what invalidated it.
+ENV PNPM_HOME=/pnpm
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile --prod=false
+RUN --mount=type=cache,target=/pnpm/store,sharing=locked \
+    pnpm config set store-dir /pnpm/store && \
+    pnpm install --frozen-lockfile --prod=false
 
 # Build.
 COPY . .
