@@ -101,6 +101,17 @@ class ReportsController {
       if (inv && inv.kind === "deposit" && inv.contractId != null) {
         convertedDepositVoucherIds.add(inv.id);
         convertedDepositByContract.set(inv.contractId, round2((convertedDepositByContract.get(inv.contractId) ?? 0) + Number(col.amount)));
+        continue;
+      }
+      // Any other payment-less collection is money that really came in — an
+      // invoice with no installment behind it, or the remainder a schedule
+      // couldn't absorb. Without the invoice's own contract to fall back on it
+      // was dropped here while the Payments screen counted it, so the same
+      // tenant read as collected on one screen and owing on the other.
+      // Commission is left out: it is billed to the landlord, and the tenant
+      // statement doesn't invoice it either.
+      if (inv && inv.kind !== "commission" && inv.contractId != null) {
+        collectedByContract.set(inv.contractId, round2((collectedByContract.get(inv.contractId) ?? 0) + Number(col.amount)));
       }
     }
     // Only APPROVED (confirmed) commission invoices count — drafts never enter

@@ -17,6 +17,11 @@ import { EmailService } from "../email/email.service";
 import { sendExpoPush } from "../../common/push";
 import { IsInt, IsString, IsNotEmpty, IsOptional } from "class-validator";
 import { Type } from "class-transformer";
+import {
+  LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyOneOfNonNull,
+  applyPercent, applyPhone, applyPostalCode, applyRequiredText, applyText, applyVatNumber,
+  applyWith, partyIdentityNumber,
+} from "../../common/validation";
 
 /** An owner's effective contact applies the representative (وكيل) precedence:
  *  when isRepresentative is true the original-owner fields hold the real
@@ -51,6 +56,69 @@ const FIELDS = [
  * the same name so the API shape is unchanged.
  */
 const NATIONALITY_SPEC = [{ idField: "nationalityLookupId", out: "nationality", mode: "labelAr" as const }];
+
+const OWNER_TYPES = ["individual", "company"] as const;
+const OWNER_STATUSES = ["active", "inactive"] as const;
+
+/**
+ * Shape, length and range checks for every landlord field a request may set.
+ *
+ * The PATCH path copied the body straight into `set()`, so the numeric columns
+ * took whatever arrived: `"abc"` and `999999999999` were both 500s (a bad cast
+ * and a numeric(5,2) overflow), `-50` was stored as a management fee, a JSON
+ * object was accepted as a name, and a 1-digit postal code got through even
+ * though `assertNationalAddress` demands 5 on create. This runs on both paths.
+ *
+ * `type` decides how the identity number is read — a company carries a CR, an
+ * individual a national ID / Iqama, and both live in `id_number`. On a PATCH
+ * that does not send `type`, the caller passes the stored one.
+ */
+function sanitizeOwnerFields(v: Record<string, unknown>, type: unknown, isDraft: boolean): void {
+  applyRequiredText(v, "name", "اسم المؤجر", LIMITS.name);
+  applyText(v, "shortName", "الاسم المختصر", LIMITS.shortName);
+  applyOneOfNonNull(v, "type", OWNER_TYPES, "نوع المؤجر");
+  applyOneOfNonNull(v, "status", OWNER_STATUSES, "حالة المؤجر");
+  applyPercent(v, "managementFeePercent", "نسبة رسوم الإدارة");
+  applyText(v, "address", "العنوان", LIMITS.address);
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyBoolNonNull(v, "isRepresentative", "وكيل");
+  applyText(v, "representativeDocUrl", "وثيقة الوكالة", LIMITS.address);
+  applyText(v, "originalOwnerName", "اسم المالك الأصلي", LIMITS.name);
+  // Exact identity formats. A draft is explicitly incomplete — "حفظ كمسودة"
+  // saves whatever has been typed so far — so it is exempt, the same way
+  // `assertNationalAddress` and `assertCompanyCommercialReg` exempt it. The
+  // length caps and numeric bounds above still apply to drafts.
+  if (!isDraft) {
+    applyWith(v, "idNumber", (raw) => partyIdentityNumber(raw, type));
+    applyPhone(v, "phone");
+    applyEmail(v, "email");
+    applyIban(v, "iban");
+    applyVatNumber(v, "taxNumber");
+    applyPostalCode(v, "postalCode");
+    applyFourDigitCode(v, "additionalNumber", "الرقم الإضافي");
+    applyFourDigitCode(v, "buildingNumber", "رقم المبنى");
+    applyWith(v, "originalOwnerIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية المالك الأصلي"));
+    applyPhone(v, "originalOwnerPhone", "جوال المالك الأصلي");
+    applyEmail(v, "originalOwnerEmail", "بريد المالك الأصلي");
+  } else {
+    applyText(v, "idNumber", "رقم الهوية / السجل التجاري", LIMITS.identifier);
+    applyText(v, "phone", "رقم الجوال", LIMITS.identifier);
+    applyText(v, "email", "البريد الإلكتروني", LIMITS.line);
+    applyText(v, "iban", "رقم الآيبان", LIMITS.identifier);
+    applyText(v, "taxNumber", "الرقم الضريبي", LIMITS.identifier);
+    applyText(v, "postalCode", "الرمز البريدي", LIMITS.identifier);
+    applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
+    applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
+    applyText(v, "originalOwnerIdNumber", "رقم هوية المالك الأصلي", LIMITS.identifier);
+    applyText(v, "originalOwnerPhone", "جوال المالك الأصلي", LIMITS.identifier);
+    applyText(v, "originalOwnerEmail", "بريد المالك الأصلي", LIMITS.line);
+  }
+  applyText(v, "nationalAddressCity", "المدينة");
+  applyText(v, "nationalAddressDistrict", "الحي");
+  applyText(v, "nationalAddressStreet", "الشارع");
+  applyBoolNonNull(v, "isDraft", "مسودة");
+  applyBoolNonNull(v, "isDefault", "المؤجر الافتراضي");
+}
 
 @ApiTags("owners")
 @ApiBearerAuth("user-jwt")
@@ -117,7 +185,7 @@ class OwnersController {
       .where(and(eq(ownersTable.userId, scopeId(user)), eq(ownersTable.isAccountHolder, true), isNull(ownersTable.deletedAt)))
       .limit(1);
     const claimsAccountHolder = !heldBy && Boolean(body.isAccountHolder ?? false);
-    const [owner] = await this.db.insert(ownersTable).values({
+    const values: Record<string, unknown> = {
       userId: scopeId(user),
       name: body.name,
       shortName: body.shortName ?? null,
@@ -126,7 +194,7 @@ class OwnersController {
       phone: body.phone ?? null,
       email: body.email ?? null,
       iban: body.iban ?? null,
-      managementFeePercent: body.managementFeePercent ? String(body.managementFeePercent) : null,
+      managementFeePercent: body.managementFeePercent ?? null,
       taxNumber: body.taxNumber ?? null,
       address: body.address ?? null,
       postalCode: body.postalCode ?? null,
@@ -149,7 +217,9 @@ class OwnersController {
       isDefault: wantsDefault,
       isAccountHolder: claimsAccountHolder,
       isDemo: "false",
-    }).returning();
+    };
+    sanitizeOwnerFields(values, values.type, Boolean(values.isDraft));
+    const [owner] = await this.db.insert(ownersTable).values(values as any).returning();
     await attachLookupLabels(this.db, [owner] as any[], NATIONALITY_SPEC);
     return owner;
   }
@@ -173,10 +243,18 @@ class OwnersController {
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("ownerId") ownerId: string, @Body() body: any) {
     const id = parseInt(ownerId, 10);
-    const [prior] = await this.db.select({ name: ownersTable.name }).from(ownersTable)
+    const [prior] = await this.db.select({ name: ownersTable.name, type: ownersTable.type, isDraft: ownersTable.isDraft }).from(ownersTable)
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // The edit path now enforces exactly what create does. It used to copy the
+    // body into the numeric columns verbatim — hence the 500s on "abc" and on
+    // 999999999999, and the silently-stored -50 management fee.
+    sanitizeOwnerFields(
+      updateData,
+      body.type ?? prior?.type ?? null,
+      body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior?.isDraft),
+    );
     // Nationality arrives as a human value and is stored as a lookup FK. An
     // explicit empty string clears it, which is why this checks `undefined`
     // rather than truthiness.

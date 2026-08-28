@@ -1,8 +1,12 @@
-import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, or, ilike, count, asc, desc } from "drizzle-orm";
+import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql, notInArray } from "drizzle-orm";
 import { listQuerySchema } from "../../common/pagination";
 import { unitsTable, propertiesTable, contractsTable, contractUnitsTable , lookupsTable } from "@dara/database";
+import {
+  BOUNDS, LIMITS, applyBool, applyBoolNonNull, applyDecimal, applyInt, applyMoney,
+  applyOneOfNonNull, applyRequiredText, applyText, requiredText,
+} from "../../common/validation";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -44,6 +48,55 @@ const UNIT_FIELDS = [
   // Lookups-FK refactor — FK ids alongside the legacy text columns.
   "typeLookupId", "finishingLookupId",
 ] as const;
+
+const UNIT_STATUSES = ["available", "rented", "maintenance", "reserved"] as const;
+
+/**
+ * Statuses that mean "this contract is over". Anything else still binds the
+ * unit — so the unit cannot be deleted, and a second overlapping contract
+ * cannot be written against it.
+ */
+const ENDED_CONTRACT_STATUSES = ["terminated", "cancelled"] as const;
+
+/**
+ * Shape, length and range checks for every unit field a request may set.
+ *
+ * Applied to the create payload AND to the PATCH allowlist, because the two
+ * paths write the same columns: a 5,000-character `unitNumber`, `"abc"` in
+ * `area` or a negative `rentPrice` were all accepted on one path or the other.
+ * Absent keys stay absent, so a PATCH still touches only what it sent.
+ */
+function sanitizeUnitFields(v: Record<string, unknown>): void {
+  applyRequiredText(v, "unitNumber", "رقم الوحدة", LIMITS.code);
+  applyOneOfNonNull(v, "status", UNIT_STATUSES, "حالة الوحدة");
+  applyInt(v, "floor", "الدور", BOUNDS.floor);
+  applyDecimal(v, "area", "المساحة", BOUNDS.area);
+  applyInt(v, "bedrooms", "عدد غرف النوم");
+  applyInt(v, "bathrooms", "عدد دورات المياه");
+  applyInt(v, "livingRooms", "عدد غرف المعيشة");
+  applyInt(v, "halls", "عدد الصالات");
+  applyInt(v, "parkingSpaces", "عدد المواقف");
+  applyInt(v, "acUnits", "عدد المكيفات");
+  applyMoney(v, "rentPrice", "قيمة الإيجار");
+  applyText(v, "electricityMeter", "رقم عداد الكهرباء", LIMITS.code);
+  applyText(v, "waterMeter", "رقم عداد المياه", LIMITS.code);
+  applyText(v, "gasMeter", "رقم عداد الغاز", LIMITS.code);
+  applyText(v, "acType", "نوع التكييف");
+  applyText(v, "parkingType", "نوع الموقف");
+  applyText(v, "amenities", "المرافق", LIMITS.blob);
+  applyText(v, "amenitiesData", "تفاصيل المرافق", LIMITS.blob);
+  applyDecimal(v, "facadeLength", "طول الواجهة", BOUNDS.length);
+  applyDecimal(v, "unitLength", "طول الوحدة", BOUNDS.length);
+  applyDecimal(v, "unitWidth", "عرض الوحدة", BOUNDS.length);
+  applyDecimal(v, "unitHeight", "ارتفاع الوحدة", BOUNDS.length);
+  applyBool(v, "hasMezzanine", "وجود ميزانين");
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "imageKey", "صورة الوحدة", LIMITS.address);
+  applyText(v, "floorPlanKey", "المخطط", LIMITS.address);
+  applyBoolNonNull(v, "isDraft", "مسودة");
+  applyInt(v, "typeLookupId", "نوع الوحدة", BOUNDS.foreignKey);
+  applyInt(v, "finishingLookupId", "التشطيب", BOUNDS.foreignKey);
+}
 
 /** True when a property's usage is `mixed` (سكني - تجاري). */
 async function isMixedProperty(db: any, propertyUsageLookupId: number | null): Promise<boolean> {
@@ -97,6 +150,54 @@ async function resolveUnitUsage(
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 class UnitsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+
+  /**
+   * A unit number identifies the unit inside its property — "R-1" twice in one
+   * building is two records nobody can tell apart on a contract, an invoice or
+   * a report. Compared case-insensitively; `excludeId` lets an edit keep its
+   * own number.
+   */
+  private async assertUnitNumberFree(propertyId: number, unitNumber: string, excludeId: number | null) {
+    const conds = [
+      eq(unitsTable.propertyId, propertyId),
+      isNull(unitsTable.deletedAt),
+      sql`lower(${unitsTable.unitNumber}) = lower(${unitNumber})`,
+    ];
+    if (excludeId != null) conds.push(sql`${unitsTable.id} <> ${excludeId}`);
+    const [clash] = await this.db.select({ id: unitsTable.id }).from(unitsTable).where(and(...conds)).limit(1);
+    if (clash) {
+      throw new ConflictException(
+        `رقم الوحدة "${unitNumber}" مستخدم بالفعل في هذا العقار · Unit number already exists in this property`,
+      );
+    }
+  }
+
+  /**
+   * Refuse to delete a unit that a live contract still points at.
+   *
+   * Deleting it left the contract `active` with pending installments against a
+   * unit that no longer exists — the contract kept billing, the schedule kept
+   * running, and nothing in the UI could explain where the unit went. Same
+   * precedent as the deed → property guard in `deeds.module.ts`: ask the user
+   * to end the contract first rather than silently orphan it.
+   *
+   * Draft contracts do not count: a draft occupies no unit and generates no
+   * installments until it is finalised.
+   */
+  private async liveContractsForUnits(unitIds: number[]) {
+    if (unitIds.length === 0) return [];
+    return this.db
+      .select({ contractNumber: contractsTable.contractNumber })
+      .from(contractUnitsTable)
+      .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+      .where(and(
+        inArray(contractUnitsTable.unitId, unitIds),
+        isNull(contractsTable.deletedAt),
+        eq(contractsTable.isDraft, false),
+        notInArray(contractsTable.status, ENDED_CONTRACT_STATUSES as any),
+      ))
+      .limit(5);
+  }
 
   @Get("units")
   @RequirePermissions(PERMISSIONS.UNITS_VIEW)
@@ -240,10 +341,13 @@ class UnitsController {
     if (!body.unitNumber || (!isDraft && !body.type)) {
       throw new BadRequestException("رقم الوحدة والنوع مطلوبان");
     }
+    const unitNumber = requiredText(body.unitNumber, "رقم الوحدة", LIMITS.code);
+    await this.assertUnitNumberFree(id, unitNumber, null);
 
     const values: Record<string, unknown> = { propertyId: id, isDemo: false };
     for (const f of UNIT_FIELDS) values[f] = body[f] ?? null;
-    values.unitNumber = body.unitNumber;
+    values.unitNumber = unitNumber;
+    sanitizeUnitFields(values);
     // status is NOT NULL — fall back to the schema default if the loop above
     // set it to null because body.status was undefined.
     if (values.status == null) values.status = "available";
@@ -276,13 +380,20 @@ class UnitsController {
     const id = parseInt(unitId, 10);
     // Verify the unit belongs to a property owned by this user/owner before allowing edits.
     const [unit0] = await this.db
-      .select({ id: unitsTable.id })
+      .select({ id: unitsTable.id, propertyId: unitsTable.propertyId })
       .from(unitsTable)
       .innerJoin(propertiesTable, and(eq(unitsTable.propertyId, propertiesTable.id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)))
       .where(and(eq(unitsTable.id, id), isNull(unitsTable.deletedAt)));
     if (!unit0) throw new NotFoundException("Unit not found");
     const updateData: Record<string, unknown> = {};
     for (const f of UNIT_FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // Same rules the create path enforces — the edit path used to write every
+    // value straight through, so a unit that could not be created malformed
+    // could still be edited into that state.
+    sanitizeUnitFields(updateData);
+    if (typeof updateData.unitNumber === "string") {
+      await this.assertUnitNumberFree(unit0.propertyId, updateData.unitNumber, id);
+    }
     if (body.type !== undefined) {
       const unitTypeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "unit_type", body.type);
       updateData.typeLookupId = unitTypeLookupId;
@@ -318,6 +429,16 @@ class UnitsController {
       .innerJoin(propertiesTable, and(eq(unitsTable.propertyId, propertiesTable.id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)))
       .where(and(eq(unitsTable.id, id), isNull(unitsTable.deletedAt)));
     if (!unit0) throw new NotFoundException("Unit not found");
+    // Deleting a unit out from under a live contract left the contract active
+    // with pending installments and no unit — refuse, and name the contract so
+    // the user knows what to end first.
+    const live = await this.liveContractsForUnits([id]);
+    if (live.length > 0) {
+      const numbers = live.map((c) => c.contractNumber).join("، ");
+      throw new ConflictException(
+        `لا يمكن حذف الوحدة لارتباطها بعقد ساري (${numbers}). أنهِ العقد أولاً ثم احذف الوحدة · Cannot delete: unit is linked to an active contract`,
+      );
+    }
     await this.db.update(unitsTable).set({ deletedAt: new Date() } as any).where(eq(unitsTable.id, id));
     return { success: true, message: "تم الحذف بنجاح" };
   }

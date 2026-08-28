@@ -14,6 +14,11 @@ import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { listQuerySchema } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
+import {
+  LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyMoney,
+  applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText, applyText,
+  applyVatNumber, applyWith, partyIdentityNumber,
+} from "../../common/validation";
 
 const FIELDS = [
   "name", "shortName", "type", "status", "nationalId", "phone", "email", "taxNumber",
@@ -47,6 +52,67 @@ async function attachTenantNationality(db: Drizzle, rows: any[]): Promise<void> 
   const legacy = rows.map((r) => r?.nationality ?? null);
   await attachLookupLabels(db, rows, NATIONALITY_SPEC);
   rows.forEach((r, i) => { if (r && r.nationality == null) r.nationality = legacy[i]; });
+}
+
+const TENANT_TYPES = ["individual", "company"] as const;
+const TENANT_STATUSES = ["active", "inactive"] as const;
+
+/**
+ * Shape, length and range checks for every tenant field a request may set.
+ *
+ * Run on create AND on PATCH — the update path copied its allowlist straight
+ * into `set()`, so it accepted things the create path would have rejected
+ * (a malformed phone, an out-of-range `monthlyIncome`, a 5,000-character name).
+ *
+ * `nationalId` holds a CR for a company and a national ID / Iqama for an
+ * individual, which is why the party `type` is passed in;
+ * `assertCompanyCommercialReg` already covers the company half on the required
+ * side, this adds the individual half and applies to both paths.
+ *
+ * Drafts are exempt from the exact identity formats (a draft is explicitly
+ * incomplete), never from the length caps or numeric bounds.
+ */
+function sanitizeTenantFields(v: Record<string, unknown>, type: unknown, isDraft: boolean): void {
+  applyRequiredText(v, "name", "اسم المستأجر", LIMITS.name);
+  applyText(v, "shortName", "الاسم المختصر", LIMITS.shortName);
+  applyOneOfNonNull(v, "type", TENANT_TYPES, "نوع المستأجر");
+  applyOneOfNonNull(v, "status", TENANT_STATUSES, "حالة المستأجر");
+  applyText(v, "address", "العنوان", LIMITS.address);
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "employer", "جهة العمل", LIMITS.name);
+  applyMoney(v, "monthlyIncome", "الدخل الشهري");
+  applyBoolNonNull(v, "isRepresentative", "وكيل");
+  applyText(v, "representativeDocUrl", "وثيقة الوكالة", LIMITS.address);
+  applyText(v, "originalTenantName", "اسم المستأجر الأصلي", LIMITS.name);
+  applyText(v, "nationalAddressCity", "المدينة");
+  applyText(v, "nationalAddressDistrict", "الحي");
+  applyText(v, "nationalAddressStreet", "الشارع");
+  applyBoolNonNull(v, "isDraft", "مسودة");
+  if (!isDraft) {
+    applyWith(v, "nationalId", (raw) => partyIdentityNumber(raw, type));
+    applyPhone(v, "phone");
+    applyEmail(v, "email");
+    applyIban(v, "iban");
+    applyVatNumber(v, "taxNumber");
+    applyPostalCode(v, "postalCode");
+    applyFourDigitCode(v, "additionalNumber", "الرقم الإضافي");
+    applyFourDigitCode(v, "buildingNumber", "رقم المبنى");
+    applyWith(v, "originalTenantIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية المستأجر الأصلي"));
+    applyPhone(v, "originalTenantPhone", "جوال المستأجر الأصلي");
+    applyEmail(v, "originalTenantEmail", "بريد المستأجر الأصلي");
+  } else {
+    applyText(v, "nationalId", "رقم الهوية / السجل التجاري", LIMITS.identifier);
+    applyText(v, "phone", "رقم الجوال", LIMITS.identifier);
+    applyText(v, "email", "البريد الإلكتروني", LIMITS.line);
+    applyText(v, "iban", "رقم الآيبان", LIMITS.identifier);
+    applyText(v, "taxNumber", "الرقم الضريبي", LIMITS.identifier);
+    applyText(v, "postalCode", "الرمز البريدي", LIMITS.identifier);
+    applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
+    applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
+    applyText(v, "originalTenantIdNumber", "رقم هوية المستأجر الأصلي", LIMITS.identifier);
+    applyText(v, "originalTenantPhone", "جوال المستأجر الأصلي", LIMITS.identifier);
+    applyText(v, "originalTenantEmail", "بريد المستأجر الأصلي", LIMITS.line);
+  }
 }
 
 /** Resolve a human nationality value to { text, lookupId } for persistence. */
@@ -110,7 +176,7 @@ class TenantsController {
       .where(and(eq(tenantsTable.userId, scopeId(user)), eq(tenantsTable.isAccountHolder, true), isNull(tenantsTable.deletedAt)))
       .limit(1);
     const claimsAccountHolder = !heldBy && Boolean(body.isAccountHolder ?? false);
-    const [tenant] = await this.db.insert(tenantsTable).values({
+    const values: Record<string, unknown> = {
       userId: scopeId(user),
       name: body.name,
       shortName: body.shortName ?? null,
@@ -136,12 +202,14 @@ class TenantsController {
       originalTenantPhone: body.originalTenantPhone ?? null,
       originalTenantEmail: body.originalTenantEmail ?? null,
       employer: body.employer ?? null,
-      monthlyIncome: body.monthlyIncome != null && body.monthlyIncome !== "" ? String(body.monthlyIncome) : null,
+      monthlyIncome: body.monthlyIncome ?? null,
       ...(await nationalityValues(this.db, body.nationality)),
       isDraft: Boolean(body.isDraft ?? false),
       isAccountHolder: claimsAccountHolder,
       isDemo: "false",
-    }).returning();
+    };
+    sanitizeTenantFields(values, values.type, Boolean(values.isDraft));
+    const [tenant] = await this.db.insert(tenantsTable).values(values as any).returning();
     // Optional welcome email (opt-in via the add-tenant checkbox). Best-effort
     // and fire-and-forget so it never blocks or fails tenant creation.
     if (body.sendWelcomeEmail && tenant?.email) {
@@ -189,6 +257,13 @@ class TenantsController {
 
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    // The edit path enforces exactly what create does — it used to write every
+    // value through untouched.
+    sanitizeTenantFields(
+      updateData,
+      body.type ?? prior.type ?? null,
+      body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior.isDraft),
+    );
     // Nationality is derived, not copied: one incoming value, two columns. An
     // explicit "" clears both, hence the `undefined` check.
     if (body.nationality !== undefined) {

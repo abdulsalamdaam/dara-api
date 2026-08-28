@@ -1,9 +1,119 @@
-import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
+import { and, eq, ne, lt, gt, isNull, or, ilike, count, asc, desc, inArray, notInArray, notExists, sql } from "drizzle-orm";
 import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, lookupsTable } from "@dara/database";
+import {
+  BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyFourDigitCode, applyInt,
+  applyMoney, applyOneOf, applyOneOfNonNull, applyPhone, applyPostalCode, applyRequiredText,
+  applyText, applyVatNumber, applyWith, applyWithNonNull, assertDateOrder, dateOnly, money,
+  partyIdentityNumber, percent,
+} from "../../common/validation";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
+
+const CONTRACT_STATUSES = ["active", "expired", "terminated", "cancelled", "pending"] as const;
+const PAYMENT_FREQUENCIES = ["monthly", "quarterly", "semi_annual", "annual", "custom"] as const;
+const DEPOSIT_STATUSES = ["pending", "collected", "returned", "forfeited"] as const;
+const ESCALATION_TYPES = ["percent", "amount"] as const;
+
+/**
+ * Statuses that mean the contract is over. Anything else still binds its
+ * units — no second contract may overlap it, and neither the unit nor its
+ * property can be deleted (see units/properties modules).
+ */
+const ENDED_CONTRACT_STATUSES = ["terminated", "cancelled"] as const;
+
+/**
+ * The advisory-lock key space for contract numbering. `billing.module.ts` locks
+ * `(account, 1|2|3)` for its invoice/credit/debit sequences; contracts take
+ * their own slot in the same two-int space so the two never contend.
+ */
+const CONTRACT_NUMBER_LOCK = 11;
+
+/**
+ * Shape, length and range checks for every contract field a request may set.
+ *
+ * Run on create and on PATCH alike. The party blocks are denormalised
+ * snapshots of the tenant/landlord at signing time, so they get the same
+ * identity rules those records get. Drafts are exempt from the exact identity
+ * formats (a draft is explicitly incomplete) but never from the length caps,
+ * the numeric bounds or the enums.
+ *
+ * `escalationType` decides how `escalationRate` reads: a percentage (0–100) or
+ * a flat money amount.
+ */
+function sanitizeContractFields(v: Record<string, unknown>, isDraft: boolean, escalationType: string): void {
+  applyInt(v, "tenantId", "المستأجر", BOUNDS.foreignKey);
+  applyRequiredText(v, "tenantName", "اسم المستأجر", LIMITS.name);
+  applyText(v, "tenantType", "نوع المستأجر");
+  applyText(v, "tenantAddress", "عنوان المستأجر", LIMITS.address);
+  applyText(v, "repName", "اسم الممثل", LIMITS.name);
+  applyText(v, "companyUnified", "الرقم الموحد", LIMITS.identifier);
+  applyText(v, "companyOrgType", "نوع المنشأة");
+  applyText(v, "signingPlace", "مكان التوقيع");
+  applyText(v, "ejarContractNumber", "رقم عقد إيجار", LIMITS.code);
+  applyText(v, "landlordName", "اسم المؤجر", LIMITS.name);
+  applyText(v, "landlordAddress", "عنوان المؤجر", LIMITS.address);
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "attachmentKey", "المرفق", LIMITS.address);
+  applyText(v, "depositMethod", "طريقة سداد التأمين");
+  applyText(v, "prepaidMethod", "طريقة سداد الإيجار المقدَّم");
+
+  // `start_date` / `end_date` / `monthly_rent` are NOT NULL — a blank leaves
+  // the stored value alone rather than crashing the driver.
+  applyWithNonNull(v, "startDate", (raw) => dateOnly(raw, "تاريخ بداية العقد"));
+  applyWithNonNull(v, "endDate", (raw) => dateOnly(raw, "تاريخ نهاية العقد"));
+  applyDate(v, "signingDate", "تاريخ التوقيع");
+  applyDate(v, "depositDueDate", "تاريخ استحقاق التأمين");
+  applyDate(v, "settledExternalUntil", "تاريخ السداد خارج المنصة");
+
+  applyWithNonNull(v, "monthlyRent", (raw) => money(raw, "قيمة الإيجار"));
+  applyWithNonNull(v, "prepaidRent", (raw) => money(raw, "الإيجار المدفوع مقدماً"));
+  applyMoney(v, "depositAmount", "مبلغ التأمين");
+  applyMoney(v, "agencyFee", "أتعاب الوساطة");
+  applyMoney(v, "firstPaymentAmount", "قيمة الدفعة الأولى");
+  applyWithNonNull(v, "escalationRate", (raw) =>
+    escalationType === "amount" ? money(raw, "قيمة الزيادة السنوية") : percent(raw, "نسبة الزيادة السنوية"));
+
+  applyOneOfNonNull(v, "paymentFrequency", PAYMENT_FREQUENCIES, "دورية السداد");
+  applyOneOfNonNull(v, "escalationType", ESCALATION_TYPES, "نوع الزيادة السنوية");
+  applyOneOfNonNull(v, "status", CONTRACT_STATUSES, "حالة العقد");
+  applyOneOf(v, "depositStatus", DEPOSIT_STATUSES, "حالة التأمين");
+  applyBoolNonNull(v, "vatEnabled", "احتساب ضريبة القيمة المضافة");
+  applyBoolNonNull(v, "isDraft", "مسودة");
+
+  if (!isDraft) {
+    applyWith(v, "tenantIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية المستأجر"));
+    applyWith(v, "repIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية الممثل"));
+    applyWith(v, "landlordIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية المؤجر"));
+    applyPhone(v, "tenantPhone", "جوال المستأجر");
+    applyPhone(v, "landlordPhone", "جوال المؤجر");
+    applyEmail(v, "tenantEmail", "بريد المستأجر الإلكتروني");
+    applyEmail(v, "landlordEmail", "بريد المؤجر الإلكتروني");
+    applyVatNumber(v, "tenantTaxNumber", "الرقم الضريبي للمستأجر");
+    applyVatNumber(v, "landlordTaxNumber", "الرقم الضريبي للمؤجر");
+    applyPostalCode(v, "tenantPostalCode", "الرمز البريدي للمستأجر");
+    applyPostalCode(v, "landlordPostalCode", "الرمز البريدي للمؤجر");
+    applyFourDigitCode(v, "tenantAdditionalNumber", "الرقم الإضافي للمستأجر");
+    applyFourDigitCode(v, "tenantBuildingNumber", "رقم مبنى المستأجر");
+    applyFourDigitCode(v, "landlordAdditionalNumber", "الرقم الإضافي للمؤجر");
+    applyFourDigitCode(v, "landlordBuildingNumber", "رقم مبنى المؤجر");
+  } else {
+    for (const [key, label] of [
+      ["tenantIdNumber", "رقم هوية المستأجر"], ["repIdNumber", "رقم هوية الممثل"],
+      ["landlordIdNumber", "رقم هوية المؤجر"], ["tenantPhone", "جوال المستأجر"],
+      ["landlordPhone", "جوال المؤجر"], ["tenantTaxNumber", "الرقم الضريبي للمستأجر"],
+      ["landlordTaxNumber", "الرقم الضريبي للمؤجر"], ["tenantPostalCode", "الرمز البريدي للمستأجر"],
+      ["landlordPostalCode", "الرمز البريدي للمؤجر"], ["tenantAdditionalNumber", "الرقم الإضافي للمستأجر"],
+      ["tenantBuildingNumber", "رقم مبنى المستأجر"], ["landlordAdditionalNumber", "الرقم الإضافي للمؤجر"],
+      ["landlordBuildingNumber", "رقم مبنى المؤجر"],
+    ] as const) {
+      applyText(v, key, label, LIMITS.identifier);
+    }
+    applyText(v, "tenantEmail", "بريد المستأجر الإلكتروني");
+    applyText(v, "landlordEmail", "بريد المؤجر الإلكتروني");
+  }
+}
 
 /** Parse + sanitise the per-year rent overrides sent by the client. */
 function parseRentTerms(raw: any): { year: number; amount: number }[] {
@@ -48,6 +158,82 @@ class ContractsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
   /**
+   * Next per-account contract number: EQ-000001, EQ-000002 …
+   *
+   * MUST be called inside the advisory-locked transaction in `create`. It used
+   * to be `COUNT(*) + 1` read outside any transaction, which is not atomic
+   * against the partial unique index `contracts_user_contract_number_uq
+   * (user_id, contract_number) WHERE deleted_at IS NULL` — six parallel POSTs
+   * produced four 500s because they all read the same count.
+   *
+   * Derived from MAX(sequence)+1 rather than COUNT, for the same reasons
+   * `billing.module.ts` does: it stays unique after a contract in the middle is
+   * deleted, and the `EQ-%` filter isolates the sequence from the Ejar-imported
+   * contracts, which carry the Ejar contract number verbatim.
+   */
+  private async nextContractNumber(tx: any, ownerId: number): Promise<string> {
+    const res: any = await tx.execute(sql`
+      select coalesce(max(cast(substring(${contractsTable.contractNumber} from '[0-9]+$') as integer)), 0) as m
+      from ${contractsTable}
+      where ${contractsTable.userId} = ${ownerId} and ${contractsTable.contractNumber} like 'EQ-%'
+    `);
+    const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+    return `EQ-${String(Number(rows?.[0]?.m ?? 0) + 1).padStart(6, "0")}`;
+  }
+
+  /**
+   * Refuse to put a unit under two live contracts at once.
+   *
+   * Nothing stopped it before: one unit could carry two active contracts whose
+   * dates overlapped, each generating a full rent schedule, so the same unit
+   * was billed twice for the same months.
+   *
+   * Periods are compared as half-open at the boundary — a renewal that starts
+   * on the day the previous contract ends is the normal way to write a
+   * back-to-back contract and is NOT a clash; any genuine overlap is.
+   *
+   * Drafts are unrestricted, on both sides: a draft occupies no unit and
+   * generates no installments until it is finalised.
+   */
+  private async assertNoOverlappingContract(
+    db: any,
+    unitIds: number[],
+    startDate: string,
+    endDate: string,
+    excludeContractId: number | null,
+  ): Promise<void> {
+    if (unitIds.length === 0) return;
+    const conds = [
+      inArray(contractUnitsTable.unitId, unitIds),
+      isNull(contractsTable.deletedAt),
+      eq(contractsTable.isDraft, false),
+      notInArray(contractsTable.status, ENDED_CONTRACT_STATUSES as any),
+      lt(contractsTable.startDate, endDate),
+      gt(contractsTable.endDate, startDate),
+    ];
+    if (excludeContractId != null) conds.push(ne(contractsTable.id, excludeContractId));
+    const [clash] = await db
+      .select({
+        contractNumber: contractsTable.contractNumber,
+        unitNumber: unitsTable.unitNumber,
+        startDate: contractsTable.startDate,
+        endDate: contractsTable.endDate,
+      })
+      .from(contractUnitsTable)
+      .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+      .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+      .where(and(...conds))
+      .limit(1);
+    if (clash) {
+      throw new ConflictException(
+        `لا يمكن حجز الوحدة "${clash.unitNumber}": يوجد عقد ساري (${clash.contractNumber}) عليها ` +
+        `من ${clash.startDate} إلى ${clash.endDate} يتداخل مع فترة هذا العقد · ` +
+        `Unit already has an active contract overlapping these dates`,
+      );
+    }
+  }
+
+  /**
    * Load the units of a set of contracts via the `contract_units` join
    * table, grouped by contract id. Each entry carries the unit row plus
    * its property's display fields — done as a separate query so a
@@ -88,7 +274,11 @@ class ContractsController {
       })
       .from(contractUnitsTable)
       .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
-      .leftJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
+      // A deleted property must not keep supplying its name to a contract that
+      // still points at it — the join had no `deleted_at` guard, so an orphan
+      // left over from before the delete was blocked still reads as if the
+      // property were there.
+      .leftJoin(propertiesTable, and(eq(propertiesTable.id, unitsTable.propertyId), isNull(propertiesTable.deletedAt)))
       .where(and(inArray(contractUnitsTable.contractId, contractIds), isNull(unitsTable.deletedAt)))
       .orderBy(asc(contractUnitsTable.id));
     for (const r of rows) {
@@ -322,22 +512,28 @@ class ContractsController {
     // Draft contracts may be incomplete — fall back so NOT NULL columns hold.
     const today = new Date().toISOString().slice(0, 10);
     const tenantName = body.tenantName || (isDraft ? "—" : body.tenantName);
-    const startDate = body.startDate || (isDraft ? today : body.startDate);
-    const endDate = body.endDate || (isDraft ? today : body.endDate);
-    const monthlyRent = body.monthlyRent || (isDraft ? "0" : body.monthlyRent);
+    const startDate = dateOnly(body.startDate, "تاريخ بداية العقد") ?? today;
+    const endDate = dateOnly(body.endDate, "تاريخ نهاية العقد") ?? today;
+    const monthlyRent = money(body.monthlyRent, "قيمة الإيجار") ?? "0";
+
+    // A live contract has to describe a real rental period and a real rent.
+    // Neither was checked: an end date on or before the start produced a live
+    // contract with an empty schedule that still flipped its unit to "rented",
+    // and a zero/negative rent produced a full schedule of negative
+    // installments. The web wizard blocks both; the mobile app and the Ejar
+    // import call this endpoint directly. Drafts stay unrestricted.
+    if (!isDraft) {
+      assertDateOrder(startDate, endDate);
+      if (!(Number(monthlyRent) > 0)) {
+        throw new BadRequestException("قيمة الإيجار يجب أن تكون أكبر من صفر · Monthly rent must be greater than zero");
+      }
+    }
 
     const freq = body.paymentFrequency || "monthly";
     const ownerId = scopeId(user);
     // Existing/legacy contract: rent due before this date was settled outside
     // the portal. Normalised to YYYY-MM-DD or null.
-    const settledExternalUntil: string | null = body.settledExternalUntil
-      ? String(body.settledExternalUntil).slice(0, 10)
-      : null;
-    // Per-account sequential contract number (EQ-000001, EQ-000002 …). Each
-    // account has its own counter (unique is composite on user_id + number).
-    const [cCount] = await this.db.select({ c: count() }).from(contractsTable)
-      .where(eq(contractsTable.userId, ownerId));
-    const contractNumber = `EQ-${String(Number(cCount?.c ?? 0) + 1).padStart(6, "0")}`;
+    const settledExternalUntil: string | null = dateOnly(body.settledExternalUntil, "تاريخ السداد خارج المنصة");
 
     const additionalFees: FeeEntry[] | null = body.additionalFees && Array.isArray(body.additionalFees) && body.additionalFees.length > 0 ? body.additionalFees : null;
     // Custom payment schedule — only kept when the cycle is "custom".
@@ -347,10 +543,9 @@ class ContractsController {
           .filter((e: any) => e.dueDate && Number(e.amount) > 0)
       : null;
 
-    const [contract] = await this.db.insert(contractsTable).values({
+    const values: Record<string, unknown> = {
       userId: ownerId,
-      contractNumber,
-      tenantId: body.tenantId != null ? Number(body.tenantId) : null,
+      tenantId: body.tenantId ?? null,
       tenantType: body.tenantType ?? null,
       tenantName,
       tenantIdNumber: body.tenantIdNumber ?? null,
@@ -370,19 +565,19 @@ class ContractsController {
       ejarContractNumber: body.ejarContractNumber ?? null,
       startDate,
       endDate,
-      monthlyRent: String(monthlyRent),
+      monthlyRent,
       paymentFrequency: freq,
-      depositAmount: body.depositAmount ? String(body.depositAmount) : null,
+      depositAmount: body.depositAmount ?? null,
       depositStatus: body.depositStatus ?? null,
       depositDueDate: body.depositDueDate ?? null,
       depositMethod: body.depositMethod ?? null,
-      prepaidRent: body.prepaidRent != null ? String(body.prepaidRent) : "0",
+      prepaidRent: body.prepaidRent ?? "0",
       prepaidMethod: body.prepaidMethod ?? null,
       vatEnabled: rentVat,
       escalationType: body.escalationType === "amount" ? "amount" : "percent",
-      escalationRate: body.escalationRate != null ? String(body.escalationRate) : "0",
-      agencyFee: body.agencyFee ? String(body.agencyFee) : null,
-      firstPaymentAmount: body.firstPaymentAmount ? String(body.firstPaymentAmount) : null,
+      escalationRate: body.escalationRate ?? "0",
+      agencyFee: body.agencyFee ?? null,
+      firstPaymentAmount: body.firstPaymentAmount ?? null,
       additionalFees,
       customSchedule: customSchedule && customSchedule.length > 0 ? customSchedule : null,
       landlordName: body.landlordName ?? null,
@@ -398,14 +593,32 @@ class ContractsController {
       attachmentKey: body.attachmentKey ?? null,
       settledExternalUntil: settledExternalUntil,
       notes: body.notes ?? null,
-      isDraft: Boolean(body.isDraft ?? false),
+      isDraft,
       isDemo: false,
-    }).returning();
+    };
+    sanitizeContractFields(values, isDraft, String(values.escalationType));
+    if (values.monthlyRent == null) values.monthlyRent = monthlyRent; // NOT NULL
+    if (values.prepaidRent == null) values.prepaidRent = "0";         // NOT NULL
+    if (values.escalationRate == null) values.escalationRate = "0";   // NOT NULL
 
-    // Link every unit to the new contract.
-    await this.db.insert(contractUnitsTable).values(
-      unitIds.map((unitId) => ({ contractId: contract!.id, unitId })),
-    );
+    // Numbering + insert + unit linking happen inside ONE transaction guarded
+    // by a per-account advisory lock — the same technique billing uses for
+    // document numbers. Without it, concurrent POSTs read the same sequence and
+    // collided on `contracts_user_contract_number_uq` (six parallel creates →
+    // four 500s). The double-booking check lives inside the lock too, so two
+    // simultaneous contracts cannot both find the unit free. The lock releases
+    // when the transaction commits.
+    const contract = await this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(${ownerId}, ${CONTRACT_NUMBER_LOCK})`);
+      if (!isDraft) await this.assertNoOverlappingContract(tx, unitIds, startDate, endDate, null);
+      values.contractNumber = await this.nextContractNumber(tx, ownerId);
+      const [row] = await tx.insert(contractsTable).values(values as any).returning();
+      // Link every unit to the new contract.
+      await tx.insert(contractUnitsTable).values(
+        unitIds.map((unitId) => ({ contractId: row!.id, unitId })),
+      );
+      return row;
+    });
 
     // Per-year rent overrides (saved for drafts too, so they prefill on edit).
     const rentTerms = parseRentTerms(body.rentTerms);
@@ -428,9 +641,9 @@ class ContractsController {
     // with the remaining).
     const rows = applyExternalSettlement(
       buildInstallments(
-        contract!.id, ownerId, startDate, endDate, String(monthlyRent), freq, additionalFees,
-        rentVat, Number(body.escalationRate) || 0,
-        body.escalationType === "amount" ? "amount" : "percent",
+        contract!.id, ownerId, startDate, endDate, String(values.monthlyRent), freq, additionalFees,
+        rentVat, Number(values.escalationRate) || 0,
+        String(values.escalationType) === "amount" ? "amount" : "percent",
         rentTerms, 0, customSchedule,
       ),
       settledExternalUntil,
@@ -439,7 +652,7 @@ class ContractsController {
 
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const nowStr = new Date().toISOString().slice(0, 10);
-    const startDay = body.startDate || nowStr;
+    const startDay = startDate || nowStr;
 
     // Advance/prepaid rent → record as a collection on the earliest rent
     // installments (keeps full amount; flips them to paid / partially_paid).
@@ -447,9 +660,9 @@ class ContractsController {
     // Collections tab as a distinct سند القبض — the later collection of the
     // remaining balance produces a second voucher. (Hence: with advance rent
     // there are two receipt vouchers for the rent — advance + remainder.)
-    const prepaid = round2(Number(body.prepaidRent) || 0);
+    const prepaid = round2(Number(values.prepaidRent) || 0);
     if (prepaid > 0 && inserted.length > 0) {
-      const method = body.prepaidMethod || "bank_transfer";
+      const method = (values.prepaidMethod as string | null) || "bank_transfer";
       const advanceVoucher = await this.nextReceiptNumber(ownerId);
 
       /* Which additional fees the advance is allowed to settle.
@@ -557,10 +770,10 @@ class ContractsController {
     // held trust money (amanat), NOT rent revenue — it is no longer an
     // installment/payment row, so it never appears in the financial schedule.
     // The voucher is viewable from the contract once the deposit is collected.
-    const depositAmt = round2(Number(body.depositAmount) || 0);
-    if (depositAmt > 0 && body.depositStatus === "collected") {
+    const depositAmt = round2(Number(values.depositAmount) || 0);
+    if (depositAmt > 0 && values.depositStatus === "collected") {
       await this.createDepositVoucher(
-        ownerId, contract!, depositAmt, body.depositDueDate || startDay, body.depositMethod || "bank_transfer",
+        ownerId, contract!, depositAmt, (values.depositDueDate as string | null) || startDay, (values.depositMethod as string | null) || "bank_transfer",
         body.depositAttachmentKey ?? null,
       );
     }
@@ -726,16 +939,55 @@ class ContractsController {
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
     const id = parseInt(contractId, 10);
+    const ownerId = scopeId(user);
+    // The prior row is needed to reason about the contract AS IT WILL BE: a
+    // PATCH that moves only the end date, or only flips `isDraft`, still has to
+    // satisfy the same period / rent / double-booking rules the create path
+    // enforces. Without it the update path silently skipped all of them.
+    const [prior] = await this.db.select().from(contractsTable)
+      .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
+    if (!prior) throw new NotFoundException("Contract not found");
+
     const updateData: Record<string, unknown> = {};
     for (const f of CONTRACT_FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
-    // tenant_id is an integer FK — coerce the incoming value (or clear it).
-    if (body.tenantId !== undefined) updateData.tenantId = body.tenantId != null ? Number(body.tenantId) : null;
+    const willBeDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior.isDraft);
+    const escalationType = String(body.escalationType ?? (prior as any).escalationType ?? "percent");
+    // `tenantId` is an integer FK; the sanitiser coerces and range-checks it
+    // (and `null` still clears it) — `Number("abc")` used to reach the driver.
+    sanitizeContractFields(updateData, willBeDraft, escalationType);
 
-    const [contract] = await this.db.update(contractsTable)
-      .set(updateData)
-      .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, scopeId(user)), isNull(contractsTable.deletedAt)))
-      .returning();
-    if (!contract) throw new NotFoundException("Contract not found");
+    const nextStart = (updateData.startDate as string | undefined) ?? prior.startDate;
+    const nextEnd = (updateData.endDate as string | undefined) ?? prior.endDate;
+    const nextRent = (updateData.monthlyRent as string | undefined) ?? prior.monthlyRent;
+    const nextStatus = (updateData.status as string | undefined) ?? prior.status;
+    if (!willBeDraft) {
+      assertDateOrder(nextStart, nextEnd);
+      if (!(Number(nextRent) > 0)) {
+        throw new BadRequestException("قيمة الإيجار يجب أن تكون أكبر من صفر · Monthly rent must be greater than zero");
+      }
+      // A contract that is (or is becoming) live must not share a unit with
+      // another live contract over the same period — including when a draft is
+      // finalised, which is how a second contract used to slip onto an already
+      // occupied unit.
+      if (!(ENDED_CONTRACT_STATUSES as readonly string[]).includes(nextStatus)) {
+        const ownUnitIds = (await this.db.select({ unitId: contractUnitsTable.unitId })
+          .from(contractUnitsTable).where(eq(contractUnitsTable.contractId, id))).map((r) => r.unitId);
+        await this.assertNoOverlappingContract(this.db, ownUnitIds, nextStart, nextEnd, id);
+      }
+    }
+
+    // A body whose keys all fall outside CONTRACT_FIELDS (e.g. `rentTerms`
+    // alone) would reach `set({})`, which crashes the driver. Skip the update
+    // and let the side-effects below still run.
+    let contract = prior;
+    if (Object.keys(updateData).length > 0) {
+      const [updated] = await this.db.update(contractsTable)
+        .set(updateData)
+        .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)))
+        .returning();
+      if (!updated) throw new NotFoundException("Contract not found");
+      contract = updated;
+    }
 
     // Replace the per-year rent overrides when the client sends them.
     if (body.rentTerms !== undefined) {
@@ -813,7 +1065,19 @@ class ContractsController {
     } else if (mode === "cancelled") {
       await this.db.update(paymentsTable)
         .set({ status: "cancelled" } as any)
-        .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
+        .where(and(
+          eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt),
+          inArray(paymentsTable.status, unsettled),
+          // Never void an installment that already holds collected money. A
+          // partially-collected row is in `unsettled`, so cancelling a contract
+          // used to flip it to "cancelled" — and every total derived from
+          // payment status then stopped counting money the landlord really
+          // received. It stays as it is; only untouched rows are voided.
+          notExists(
+            this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+              .where(eq(paymentCollectionsTable.paymentId, paymentsTable.id)),
+          ),
+        ));
     }
     return {
       success: true,
@@ -938,7 +1202,19 @@ class ContractsController {
         .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
     } else if (mode === "cancelled") {
       await this.db.update(paymentsTable).set({ status: "cancelled" } as any)
-        .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
+        .where(and(
+          eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt),
+          inArray(paymentsTable.status, unsettled),
+          // Never void an installment that already holds collected money. A
+          // partially-collected row is in `unsettled`, so cancelling a contract
+          // used to flip it to "cancelled" — and every total derived from
+          // payment status then stopped counting money the landlord really
+          // received. It stays as it is; only untouched rows are voided.
+          notExists(
+            this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+              .where(eq(paymentCollectionsTable.paymentId, paymentsTable.id)),
+          ),
+        ));
     }
 
     // ── Settle already-collected money ──

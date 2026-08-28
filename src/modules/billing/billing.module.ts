@@ -501,6 +501,25 @@ class SimpleInvoicesController {
     return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
   }
 
+  /**
+   * Net effect of the confirmed credit/debit notes that reference an invoice:
+   * −Σ credit +Σ debit. The original document is immutable (ZATCA), so what is
+   * actually owed on it is `total` plus this figure — and every path that
+   * reasons about that obligation (the read handlers, the collection cap) has
+   * to agree on one number, which is why it lives here rather than being
+   * rebuilt per handler.
+   */
+  private async notesAdjustmentFor(uid: number, doc: { type: string; number: string }): Promise<number> {
+    if (doc.type !== "invoice") return 0;
+    const [c] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "credit"),
+        eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
+    const [d] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "debit"),
+        eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
+    return round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
+  }
+
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
@@ -512,16 +531,7 @@ class SimpleInvoicesController {
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const collected = round2(Number(agg?.total ?? 0));
     // Net of confirmed credit/debit notes referencing this invoice (immutable).
-    let notesAdjustment = 0;
-    if (doc.type === "invoice") {
-      const [c] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
-        .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "credit"),
-          eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
-      const [d] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
-        .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "debit"),
-          eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
-      notesAdjustment = round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
-    }
+    const notesAdjustment = await this.notesAdjustmentFor(uid, doc);
     const netTotal = round2(Number(doc.total) + notesAdjustment);
     const balanceDue = Math.max(0, round2(netTotal - collected));
     // Numbers of the confirmed credit/debit notes referencing this invoice — a
@@ -567,19 +577,41 @@ class SimpleInvoicesController {
     }
     // Credit/debit note: snapshot client + contract from the referenced invoice
     // (the note's parties come from the invoice, not entered manually).
-    if ((type === "credit" || type === "debit") && body?.billingReference) {
+    //
+    // The reference is what gives the note its meaning, so it is required and
+    // must resolve. A note that references nothing — or a number that doesn't
+    // exist, or a draft that was never issued — is a standalone amount the
+    // reports still net into revenue: it subtracts from money that was never
+    // billed and, having no buyer to snapshot, files itself under a nameless
+    // customer. A credit note is likewise bounded by the invoice it corrects:
+    // you cannot refund more than was charged.
+    if (type === "credit" || type === "debit") {
+      const ref = body?.billingReference != null ? String(body.billingReference).trim() : "";
+      if (!ref) throw new BadRequestException("يجب ربط الإشعار برقم الفاتورة الأصلية");
       const [refInv] = await this.db.select({
         contractId: simpleInvoicesTable.contractId, tenantId: simpleInvoicesTable.tenantId,
         tenantName: simpleInvoicesTable.tenantName, client: simpleInvoicesTable.client,
+        total: simpleInvoicesTable.total, status: simpleInvoicesTable.status,
       }).from(simpleInvoicesTable).where(and(
         eq(simpleInvoicesTable.userId, scopeId(user)), eq(simpleInvoicesTable.type, "invoice"),
-        eq(simpleInvoicesTable.number, String(body.billingReference)), isNull(simpleInvoicesTable.deletedAt),
+        eq(simpleInvoicesTable.number, ref), isNull(simpleInvoicesTable.deletedAt),
       ));
-      if (refInv) {
-        contractId = contractId ?? refInv.contractId;
-        tenantId = tenantId ?? refInv.tenantId;
-        tenantName = refInv.tenantName ?? tenantName;
-        client = refInv.client ?? client;
+      if (!refInv) throw new BadRequestException(`لا توجد فاتورة بالرقم ${ref}`);
+      if (refInv.status !== "confirmed") throw new BadRequestException(`الفاتورة ${ref} غير معتمدة — لا يمكن إصدار إشعار عليها`);
+      contractId = contractId ?? refInv.contractId;
+      tenantId = tenantId ?? refInv.tenantId;
+      tenantName = refInv.tenantName ?? tenantName;
+      client = refInv.client ?? client;
+      if (type === "credit") {
+        const [prior] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+          .where(and(eq(simpleInvoicesTable.userId, scopeId(user)), eq(simpleInvoicesTable.type, "credit"),
+            eq(simpleInvoicesTable.billingReference, ref), eq(simpleInvoicesTable.status, "confirmed"),
+            isNull(simpleInvoicesTable.deletedAt)));
+        const creditable = round2(round2(Number(refInv.total)) - round2(Number(prior?.total ?? 0)));
+        if (creditable <= 0.01) throw new BadRequestException(`تم إصدار إشعارات دائنة بكامل قيمة الفاتورة ${ref}`);
+        if (total > creditable + 0.01) {
+          throw new BadRequestException(`قيمة الإشعار الدائن تتجاوز المتبقي من الفاتورة ${ref} (${creditable.toFixed(2)})`);
+        }
       }
     }
 
@@ -683,11 +715,22 @@ class SimpleInvoicesController {
     return doc;
   }
 
-  /** Next commission-invoice number for an account: COM-000001, … */
+  /**
+   * Next commission-invoice number for an account: COM-000001, …
+   *
+   * MAX(sequence)+1 over the COM- prefix, for the same reason as `nextNumber`:
+   * counting the rows that are still there hands the next document a number a
+   * deleted one already spent, so two commissions end up sharing it.
+   */
   private async nextCommissionNumber(userId: number): Promise<string> {
-    const [row] = await this.db.select({ c: count() }).from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.userId, userId), eq(simpleInvoicesTable.kind, "commission")));
-    return `COM-${String(Number(row?.c ?? 0) + 1).padStart(6, "0")}`;
+    const res: any = await this.db.execute(sql`
+      select coalesce(max(cast(substring(${simpleInvoicesTable.number} from '[0-9]+$') as integer)), 0) as m
+      from ${simpleInvoicesTable}
+      where ${simpleInvoicesTable.userId} = ${userId} and ${simpleInvoicesTable.number} like ${"COM-%"}
+    `);
+    const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+    const max = Number(rows?.[0]?.m ?? 0);
+    return `COM-${String(max + 1).padStart(6, "0")}`;
   }
 
   /**
@@ -1274,13 +1317,23 @@ class SimpleInvoicesController {
     const receipt = (body?.receiptNumber && String(body.receiptNumber).trim()) || voucher;
     const ids = (doc.paymentIds && doc.paymentIds.length) ? doc.paymentIds : (doc.paymentId ? [doc.paymentId] : []);
     // Cap at what's still uncollected on this invoice (supports partial).
+    // Against the NET total — the same figure every read path reports as the
+    // balance due — not the gross one printed on the immutable document. A
+    // credit note has to actually stop the money coming in, and a debit note
+    // has to let the amount it added be collected.
     const [priorAgg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const alreadyCollected = round2(Number(priorAgg?.total ?? 0));
-    const invoiceRemaining = round2(round2(Number(doc.total)) - alreadyCollected);
+    const netTotal = round2(Number(doc.total) + (await this.notesAdjustmentFor(uid, doc)));
+    const invoiceRemaining = round2(netTotal - alreadyCollected);
     if (invoiceRemaining <= 0.01) throw new BadRequestException("تم تحصيل هذه الفاتورة بالكامل");
     let toCollect = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
     if (toCollect > invoiceRemaining + 0.01) throw new BadRequestException(`مبلغ التحصيل يتجاوز المتبقي (${invoiceRemaining.toFixed(2)})`);
+
+    // What the loop below could actually write. The requested amount is only an
+    // intention: an installment that is cancelled, deleted or already settled
+    // absorbs none of it.
+    let applied = 0;
 
     for (const pid of ids) {
       if (toCollect <= 0.01) break;
@@ -1313,27 +1366,32 @@ class SimpleInvoicesController {
         receiptNumber: receipt,
         attachmentKey: body?.attachmentKey ?? payment.attachmentKey,
       }).where(eq(paymentsTable.id, pid));
+      applied = round2(applied + amt);
       toCollect = round2(toCollect - amt);
     }
 
     // Invoices not backed by an installment (commission / free invoices) still
     // record a collection — against the invoice only — so their collected
     // amount is consistent with the "paid" stamp (no "paid but collected = 0").
-    if (!ids.length) {
-      const collectAmt = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
-      if (collectAmt > 0.01) {
-        await this.db.insert(paymentCollectionsTable).values({
-          paymentId: null, userId: uid, amount: collectAmt.toFixed(2), collectedDate: paidDate,
-          method, receiptNumber: receipt, invoiceId: doc.id,
-          notes: body?.notes ?? `فاتورة ${doc.number}`,
-        } as any);
-      }
+    if (!ids.length && toCollect > 0.01) {
+      await this.db.insert(paymentCollectionsTable).values({
+        paymentId: null, userId: uid, amount: toCollect.toFixed(2), collectedDate: paidDate,
+        method, receiptNumber: receipt, invoiceId: doc.id,
+        notes: body?.notes ?? `فاتورة ${doc.number}`,
+      } as any);
+      applied = toCollect;
+      toCollect = 0;
     }
 
+    // Nothing landed anywhere — every linked installment was cancelled, deleted
+    // or already settled. Carrying on would stamp the invoice paid and burn a
+    // receipt-voucher number over money that has no collection row behind it,
+    // which the Collections tab then reports as received.
+    if (applied <= 0.01) throw new BadRequestException("لا يوجد قسط مستحق لتحصيل هذا المبلغ عليه");
+
     // Only mark the invoice fully collected when prior + this collection cover
-    // the total; a partial collection keeps it confirmed (collectible again).
-    const collectedNow = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
-    const fullyCollected = round2(alreadyCollected + collectedNow) >= round2(Number(doc.total)) - 0.01;
+    // the net total; a partial collection keeps it confirmed (collectible again).
+    const fullyCollected = round2(alreadyCollected + applied) >= netTotal - 0.01;
     const [updated] = await this.db.update(simpleInvoicesTable).set({
       ...(fullyCollected ? { paidDate, receiptNumber: voucher } : {}),
       paymentMethod: method,
@@ -1348,6 +1406,19 @@ class SimpleInvoicesController {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
       .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
+    // An approved document has been issued — to the buyer, and to ZATCA. It is
+    // corrected by a credit note, never withdrawn. And a soft delete only hides
+    // the document: its collections live in payment_collections, which has no
+    // deleted_at, so the money would keep counting in every total with nothing
+    // left on screen to explain it.
+    if (doc.status === "confirmed") {
+      throw new BadRequestException("لا يمكن حذف مستند معتمد — أصدر إشعاراً دائناً لإلغاء أثره");
+    }
+    const [collAgg] = await this.db.select({ c: count() })
+      .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
+    if (Number(collAgg?.c ?? 0) > 0) {
+      throw new BadRequestException("لا يمكن حذف مستند له تحصيلات مسجَّلة — أصدر إشعاراً دائناً بدلاً من ذلك");
+    }
     await this.db.update(simpleInvoicesTable).set({ deletedAt: new Date() })
       .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scopeId(user))));
     return { ok: true };

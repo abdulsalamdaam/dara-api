@@ -4,7 +4,11 @@ import {
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, notInArray, inArray, sql, or, ilike, count, asc, desc } from "drizzle-orm";
-import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable } from "@dara/database";
+import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable, contractsTable, contractUnitsTable } from "@dara/database";
+import {
+  BOUNDS, LIMITS, applyBoolNonNull, applyFourDigitCode, applyInt, applyIntNonNull,
+  applyOneOfNonNull, applyPercent, applyPostalCode, applyRequiredText, applyText,
+} from "../../common/validation";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -34,6 +38,56 @@ function overlayTypeOther<T extends { type?: unknown; typeOther?: unknown }>(row
 /** When the caller is an employee, list their owner's data. Top-level users see their own. */
 function scopeId(user: AuthUser): number {
   return user.ownerUserId ?? user.id;
+}
+
+const PROPERTY_STATUSES = ["active", "inactive", "maintenance"] as const;
+
+/** Contract statuses that mean the contract is over — see units.module.ts. */
+const ENDED_CONTRACT_STATUSES = ["terminated", "cancelled"] as const;
+
+/**
+ * Shape, length and range checks for every property field a request may set.
+ *
+ * Shared by create and PATCH: the update path copied its allowlist straight
+ * into `set()`, so `floors: "abc"` (a NaN insert) and a
+ * `managementFeePercent` of `999999999999` (a numeric(5,2) overflow) both
+ * surfaced as 500s, and a 1-digit postal code was stored happily even though
+ * the create path's national-address check demands 5.
+ */
+function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): void {
+  applyRequiredText(v, "name", "اسم العقار", LIMITS.name);
+  applyOneOfNonNull(v, "status", PROPERTY_STATUSES, "حالة العقار");
+  applyText(v, "district", "الحي");
+  applyText(v, "street", "الشارع");
+  applyText(v, "deedNumber", "رقم الصك", LIMITS.code);
+  applyIntNonNull(v, "totalUnits", "عدد الوحدات", BOUNDS.totalUnits);
+  applyInt(v, "floors", "عدد الأدوار");
+  applyInt(v, "elevators", "عدد المصاعد");
+  applyInt(v, "parkings", "عدد المواقف");
+  applyText(v, "buildingType", "نوع المبنى");
+  applyInt(v, "yearBuilt", "سنة البناء", BOUNDS.year);
+  applyPercent(v, "managementFeePercent", "نسبة رسوم الإدارة");
+  // The national-address codes are exact formats, and a draft is explicitly
+  // incomplete — the same exemption `assertNationalAddress` already makes, so
+  // "save as draft" keeps working with half-typed values.
+  if (!isDraft) {
+    applyPostalCode(v, "postalCode");
+    applyFourDigitCode(v, "buildingNumber", "رقم المبنى");
+    applyFourDigitCode(v, "additionalNumber", "الرقم الإضافي");
+  } else {
+    applyText(v, "postalCode", "الرمز البريدي", LIMITS.identifier);
+    applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
+    applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
+  }
+  applyText(v, "mapUrl", "رابط الموقع", LIMITS.address);
+  applyText(v, "amenitiesData", "تفاصيل المرافق", LIMITS.blob);
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "imageKey", "صورة العقار", LIMITS.address);
+  applyBoolNonNull(v, "isDraft", "مسودة");
+  applyInt(v, "typeLookupId", "نوع العقار", BOUNDS.foreignKey);
+  applyInt(v, "usageLookupId", "استخدام العقار", BOUNDS.foreignKey);
+  applyInt(v, "regionLookupId", "المنطقة", BOUNDS.foreignKey);
+  applyInt(v, "cityLookupId", "المدينة", BOUNDS.foreignKey);
 }
 
 @ApiTags("properties")
@@ -220,7 +274,9 @@ class PropertiesController {
     const typeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "property_type", type);
     const typeOther = typeLookupId == null && type ? String(type).trim() || null : null;
 
-    const [prop] = await this.db.insert(propertiesTable).values({
+    // Built as a plain object so the SAME sanitiser the PATCH path uses can
+    // check it — `parseInt("abc")` used to reach the insert as NaN.
+    const values: Record<string, unknown> = {
       userId: owner,
       ownerId,
       name,
@@ -229,13 +285,12 @@ class PropertiesController {
       deedNumber: body.deedNumber ?? null,
       deedId,
       totalUnits: body.totalUnits ?? 0,
-      floors: body.floors ? parseInt(body.floors) : null,
-      elevators: body.elevators ? parseInt(body.elevators) : null,
-      parkings: body.parkings ? parseInt(body.parkings) : null,
+      floors: body.floors ?? null,
+      elevators: body.elevators ?? null,
+      parkings: body.parkings ?? null,
       buildingType: body.buildingType ?? null,
-      yearBuilt: body.yearBuilt ? parseInt(body.yearBuilt) : null,
-      managementFeePercent: body.managementFeePercent != null && body.managementFeePercent !== ""
-        ? String(body.managementFeePercent) : null,
+      yearBuilt: body.yearBuilt ?? null,
+      managementFeePercent: body.managementFeePercent ?? null,
       typeLookupId,
       typeOther,
       usageLookupId: body.usageLookupId ?? await resolveLookupId(this.db, "property_usage", body.usageType),
@@ -251,7 +306,10 @@ class PropertiesController {
       images: Array.isArray(body.images) ? body.images : null,
       isDraft: Boolean(body.isDraft ?? false),
       isDemo: false,
-    }).returning();
+    };
+    sanitizePropertyFields(values, isDraft);
+    if (values.totalUnits == null) values.totalUnits = 0; // NOT NULL, default 0
+    const [prop] = await this.db.insert(propertiesTable).values(values as any).returning();
 
     const [withLabels] = overlayTypeOther(await attachLookupLabels(this.db, [{ ...prop }], PROPERTY_LOOKUP_SPEC));
     return { ...withLabels, occupancyRate: 0, rentedUnits: 0 };
@@ -286,13 +344,20 @@ class PropertiesController {
   async update(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string, @Body() body: any) {
     const id = parseInt(propertyId, 10);
     const owner = scopeId(user);
+    // Needed to know whether this record is still a draft — drafts are exempt
+    // from the exact national-address formats, exactly as on create.
+    const [priorProp] = await this.db.select({ isDraft: propertiesTable.isDraft })
+      .from(propertiesTable)
+      .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)));
+    if (!priorProp) throw new NotFoundException("Property not found");
+    const isDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(priorProp.isDraft);
     const updateData: Record<string, unknown> = {};
     const fields = ["name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators", "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber", "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft", "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId"];
     for (const field of fields) if (body[field] !== undefined) updateData[field] = body[field];
-    if (body.managementFeePercent !== undefined) {
-      updateData.managementFeePercent = body.managementFeePercent == null || body.managementFeePercent === ""
-        ? null : String(body.managementFeePercent);
-    }
+    if (body.managementFeePercent !== undefined) updateData.managementFeePercent = body.managementFeePercent;
+    // The edit path enforces exactly what the create path does — it used to
+    // copy the body straight into `set()`.
+    sanitizePropertyFields(updateData, isDraft);
     // Keep the lookup FKs in sync when the matching text field changes.
     if (body.type !== undefined) {
       const typeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "property_type", body.type);
@@ -337,6 +402,31 @@ class PropertiesController {
   @RequirePermissions(PERMISSIONS.PROPERTIES_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
     const id = parseInt(propertyId, 10);
+    // Deleting a property cascades to its units — and used to leave every
+    // contract on those units `active`, still billing pending installments
+    // against a unit and a property that no longer exist. Refuse while any
+    // live contract is attached, the way `deeds.module.ts` refuses to delete a
+    // deed that still backs a property. Draft contracts don't count: a draft
+    // occupies nothing and generates no installments.
+    const live = await this.db
+      .select({ contractNumber: contractsTable.contractNumber })
+      .from(contractUnitsTable)
+      .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+      .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+      .where(and(
+        eq(unitsTable.propertyId, id),
+        isNull(unitsTable.deletedAt),
+        isNull(contractsTable.deletedAt),
+        eq(contractsTable.isDraft, false),
+        notInArray(contractsTable.status, ENDED_CONTRACT_STATUSES as any),
+      ))
+      .limit(5);
+    if (live.length > 0) {
+      const numbers = live.map((c) => c.contractNumber).join("، ");
+      throw new ConflictException(
+        `لا يمكن حذف العقار لوجود عقود سارية على وحداته (${numbers}). أنهِ العقود أولاً ثم احذف العقار · Cannot delete: the property has units under an active contract`,
+      );
+    }
     // Soft delete: mark deleted_at instead of removing the row.
     const now = new Date();
     const [prop] = await this.db.update(propertiesTable)
