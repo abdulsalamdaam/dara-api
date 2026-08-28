@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, UseGuards } from "@nestjs/common";
+import { ParseIntPipe, Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsOptional, IsString } from "class-validator";
 import { and, eq, isNull, inArray, desc, sql } from "drizzle-orm";
@@ -446,9 +446,9 @@ class LandlordMobileController {
 
   /** One landlord's FULL detail + their properties + contracts (read-only). */
   @Get("owners/:id")
-  async owner(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async owner(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const oid = parseInt(id, 10);
+    const oid = id;
     if (user.ownerScopeId != null && oid !== user.ownerScopeId) throw new NotFoundException("Landlord not found");
     const [o] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, oid), eq(ownersTable.userId, uid), isNull(ownersTable.deletedAt)));
@@ -675,11 +675,11 @@ class LandlordMobileController {
    *  uploads it when the document is approved / the voucher is created; until
    *  then `url` is null and the app shows "not generated yet". */
   @Get("invoices/:id/pdf")
-  async invoicePdf(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async invoicePdf(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
     const [r] = await this.db.select({ id: simpleInvoicesTable.id, pdfKey: simpleInvoicesTable.pdfKey }).from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt),
+      .where(and(eq(simpleInvoicesTable.id, id), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt),
         ...(scope.contractIds ? [inArray(simpleInvoicesTable.contractId, scope.contractIds)] : [])));
     if (!r) throw new NotFoundException("Invoice not found");
     const key = (r as any).pdfKey as string | null;
@@ -805,9 +805,9 @@ class LandlordMobileController {
 
   /** One property's FULL detail + its units + active contracts. */
   @Get("properties/:id")
-  async property(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async property(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const pid = parseInt(id, 10);
+    const pid = id;
     const [p] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, pid), eq(propertiesTable.userId, uid), isNull(propertiesTable.deletedAt),
         ...(user.ownerScopeId != null ? [eq(propertiesTable.ownerId, user.ownerScopeId)] : [])));
@@ -874,9 +874,9 @@ class LandlordMobileController {
 
   /** One unit's FULL detail + its current active contract/tenant. */
   @Get("units/:id")
-  async unit(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async unit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const unitId = parseInt(id, 10);
+    const unitId = id;
     const [row] = await this.db
       .select({ unit: unitsTable, propertyName: propertiesTable.name, propertyId: propertiesTable.id, propertyUsageLookupId: propertiesTable.usageLookupId })
       .from(unitsTable).innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
@@ -942,10 +942,10 @@ class LandlordMobileController {
 
   /** One tenant's full detail + their contracts (read-only). */
   @Get("tenants/:id")
-  async tenant(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async tenant(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
-    const tid = parseInt(id, 10);
+    const tid = id;
     const [t] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, uid), isNull(tenantsTable.deletedAt)));
     if (!t) throw new NotFoundException("Tenant not found");
@@ -992,9 +992,9 @@ class LandlordMobileController {
 
   /** One contract's full detail (read-only). */
   @Get("contracts/:id")
-  async contract(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async contract(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const cid = parseInt(id, 10);
+    const cid = id;
     const scope = await this.ownerScope(user);
     const [c] = await this.db.select().from(contractsTable)
       .where(and(eq(contractsTable.id, cid), eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt),

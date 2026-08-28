@@ -112,7 +112,12 @@ export class TenantPortalController {
         additionalFees: contractsTable.additionalFees,
       })
       .from(contractsTable)
-      .where(eq(contractsTable.tenantPhone, t.phone))
+      // Scoped to the tenant's OWN account as well as their phone. Saudi
+      // numbers get reused across landlords — the same person renting from two
+      // agencies, or a duplicated import — and matching on phone alone handed
+      // that tenant every contract on every account sharing the number, with
+      // the other landlords' names, national IDs and deed links attached.
+      .where(and(eq(contractsTable.userId, t.userId), eq(contractsTable.tenantPhone, t.phone)))
       .orderBy(desc(contractsTable.createdAt));
 
     // A contract can span many units — fetch them via contract_units and
@@ -236,7 +241,7 @@ export class TenantPortalController {
       })
       .from(paymentsTable)
       .innerJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
-      .where(eq(contractsTable.tenantPhone, t.phone))
+      .where(and(eq(contractsTable.userId, t.userId), eq(contractsTable.tenantPhone, t.phone)))
       .orderBy(paymentsTable.dueDate);
 
     // Attach the receipt(s) recorded against each installment — receipt number,
@@ -284,7 +289,7 @@ export class TenantPortalController {
     const [t] = await this.db.select().from(tenantsTable).where(eq(tenantsTable.id, tenant.id));
     if (!t || !t.phone) return [];
     const myContracts = await this.db.select({ id: contractsTable.id }).from(contractsTable)
-      .where(eq(contractsTable.tenantPhone, t.phone));
+      .where(and(eq(contractsTable.userId, t.userId), eq(contractsTable.tenantPhone, t.phone)));
     const cids = myContracts.map((c) => c.id);
     const scope = cids.length
       ? or(eq(simpleInvoicesTable.tenantId, t.id), inArray(simpleInvoicesTable.contractId, cids))
@@ -392,7 +397,7 @@ export class TenantPortalController {
     const [contract] = await this.db
       .select({ id: contractsTable.id, userId: contractsTable.userId })
       .from(contractsTable)
-      .where(and(eq(contractsTable.id, body.contractId), eq(contractsTable.tenantPhone, t.phone)));
+      .where(and(eq(contractsTable.id, body.contractId), eq(contractsTable.userId, t.userId), eq(contractsTable.tenantPhone, t.phone)));
 
     if (!contract) throw new NotFoundException("العقد غير موجود");
 
