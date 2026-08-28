@@ -51,6 +51,12 @@ import { ReportsModule } from "./modules/reports/reports.module";
      * via @Throttle() and the OtpThrottlerGuard with a per-(IP+target) tracker.
      */
     ThrottlerModule.forRoot([
+      // Every per-route `@Throttle({ default: ... })` was a no-op: the guard
+      // looks the override up by bucket name and there was no bucket called
+      // "default", so register/reset-password/OTP-verify fell back to the
+      // loose global limits. Sized to match `long`, so nothing undecorated
+      // gets newly restricted.
+      { name: "default", ttl: 3600_000, limit: 2000 },
       { name: "short",  ttl: 1000,    limit: 20  },     // burst: 20 req/sec
       { name: "medium", ttl: 60_000,  limit: 120 },     // sustained: 120 req/min
       { name: "long",   ttl: 3600_000, limit: 2000 },   // 2000 req/hour

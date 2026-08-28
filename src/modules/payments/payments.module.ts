@@ -50,20 +50,6 @@ class PaymentsController {
     const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null || status != null || statusIn != null || contractIds != null);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const baseWhere = and(eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt));
-    /**
-     * The DATASET the summary cards describe, as opposed to how it is being
-     * presented. Search text, the status tab and paging are presentation — the
-     * cards deliberately ignore those so they do not jump around while the user
-     * pages or types. A contract filter is not presentation: it selects which
-     * contract's money is on screen, and cards that ignore it describe a
-     * different contract's money than the table beneath them.
-     *
-     * That was the bug: opening the log for one contract showed its 10,000 of
-     * collections in the rows and the account's entire 82,000 in the card.
-     */
-    const scopeWhere = contractIds && contractIds.length > 0
-      ? and(baseWhere, inArray(paymentsTable.contractId, contractIds))
-      : baseWhere;
     const conds = [baseWhere];
     if (q.search) {
       conds.push(or(
@@ -84,6 +70,16 @@ class PaymentsController {
     // deposit rows created before the deposit-as-voucher change).
     conds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
     const where = and(...conds);
+
+    // The cards deliberately ignore search and the status tab, so they stay put
+    // while the table pages — but they must NOT ignore the contract filter. The
+    // by-contract finance view asks for one contract's figures with pageSize 1
+    // and got the whole account's totals back, so every card there described
+    // somebody else's money.
+    const statsConds: any[] = [baseWhere];
+    if (contractIds && contractIds.length > 0) statsConds.push(inArray(paymentsTable.contractId, contractIds));
+    statsConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
+    const statsWhere = and(...statsConds);
 
     let rowsQ = this.db
       .select({
@@ -118,7 +114,29 @@ class PaymentsController {
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow, statsRows, collectedRow] = await Promise.all([
+    // Money collected on a free invoice — a fee collected against an invoice
+    // with no installment behind it. It never produces a payment_collections
+    // row, so the sum above cannot see it, and the Payments card used to leave
+    // it out entirely: the row appeared in the table and the total did not move.
+    // Same conditions the Collections tab uses for these, kept in SQL so the
+    // figure covers every invoice rather than the first page of them.
+    const freeCollectedWhere = and(
+      eq(simpleInvoicesTable.userId, scopeId(user)),
+      eq(simpleInvoicesTable.status, "confirmed"),
+      eq(simpleInvoicesTable.type, "invoice"),
+      isNull(simpleInvoicesTable.paymentId),
+      isNull(simpleInvoicesTable.deletedAt),
+      isNotNull(simpleInvoicesTable.paidDate),
+      // Vouchers are evidence of money already counted elsewhere, not collections.
+      or(isNull(simpleInvoicesTable.kind), and(ne(simpleInvoicesTable.kind, "deposit"), ne(simpleInvoicesTable.kind, "receipt"))),
+      notExists(
+        this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+          .where(eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id)),
+      ),
+      ...(contractIds && contractIds.length > 0 ? [inArray(simpleInvoicesTable.contractId, contractIds)] : []),
+    );
+
+    const [rows, totalRow, statsRows, collectedRow, freeCollectedRow] = await Promise.all([
       rowsQ,
       usePaginated ? this.db.select({ total: count() }).from(paymentsTable)
         .leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
@@ -132,23 +150,28 @@ class PaymentsController {
         status: liveStatusSql,
         cnt: count(),
         amount: sum(paymentsTable.amount),
-      }).from(paymentsTable).where(scopeWhere).groupBy(sql`1`) : Promise.resolve([]),
-      // Money actually collected for the same scope (covers partial payments).
-      // Joined through the installment so it can be scoped and so a collection
-      // whose installment was since deleted stops being counted. Collections
-      // with no installment at all (a collected commission invoice, for
-      // example) are kept in the unfiltered view — they are real money — but
-      // cannot belong to a single contract, so a contract filter excludes them.
+      }).from(paymentsTable).where(statsWhere).groupBy(sql`1`) : Promise.resolve([]),
+      // Actual money collected across all collections (covers partial ones).
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
         .from(paymentCollectionsTable)
-        .leftJoin(paymentsTable, eq(paymentsTable.id, paymentCollectionsTable.paymentId))
+        // An invoice-only collection carries no payment, so its contract comes
+        // from the invoice — match either, or a filtered card loses that money.
+        .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
+        .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
         .where(and(
           eq(paymentCollectionsTable.userId, scopeId(user)),
-          contractIds && contractIds.length > 0
-            ? inArray(paymentsTable.contractId, contractIds)
-            : or(isNull(paymentCollectionsTable.paymentId), isNull(paymentsTable.deletedAt)),
+          // A collection whose installment was since deleted stops being
+          // counted. Collections with no installment at all — a collected
+          // commission invoice, say — are real money and stay.
+          or(isNull(paymentCollectionsTable.paymentId), isNull(paymentsTable.deletedAt)),
+          ...(contractIds && contractIds.length > 0
+            ? [or(inArray(paymentsTable.contractId, contractIds), inArray(simpleInvoicesTable.contractId, contractIds))]
+            : []),
         ))
         : Promise.resolve([{ amount: null }]),
+      usePaginated ? this.db.select({ amount: sum(simpleInvoicesTable.total), cnt: count() })
+        .from(simpleInvoicesTable).where(freeCollectedWhere)
+        : Promise.resolve([{ amount: null, cnt: 0 }]),
     ]);
 
     // Per-payment collected amount for the rows on this page.
@@ -184,8 +207,12 @@ class PaymentsController {
     });
     if (!usePaginated) return data;
 
+    const freeCollected = round2(Number((freeCollectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0));
+    const freeCollectedCount = Number((freeCollectedRow as Array<{ cnt: number }>)[0]?.cnt ?? 0);
     const stats = { paid: 0, pending: 0, overdue: 0, cancelled: 0, partiallyPaid: 0,
-      collected: round2(Number((collectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0)),
+      // `collected` is all the money in, whichever way it came in.
+      collected: round2(Number((collectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0) + freeCollected),
+      freeCollected, freeCollectedCount,
       paidCount: 0, pendingCount: 0, overdueCount: 0, cancelledCount: 0, partiallyPaidCount: 0 };
     for (const s of statsRows as Array<{ status: string; cnt: number; amount: string | null }>) {
       const amt = Number(s.amount ?? 0);
@@ -455,7 +482,14 @@ class PaymentsController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async addCollection(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string, @Body() body: any) {
     const id = parseInt(paymentId, 10);
-    const [payment] = await this.db.select().from(paymentsTable)
+    if (!Number.isInteger(id)) throw new BadRequestException("رقم القسط غير صالح");
+    // Read-then-insert with nothing holding the row: eight parallel requests
+    // each read "nothing collected yet", each passed the cap, and the same
+    // money landed five times. The lock is per installment, held to the end of
+    // the transaction, so the reads below see every earlier insert.
+    return this.db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${scopeId(user)}, ${id})`);
+    const [payment] = await tx.select().from(paymentsTable)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)));
     if (!payment) throw new NotFoundException("Payment not found");
     if (payment.status === "paid") throw new BadRequestException("هذا القسط محصّل بالكامل");
@@ -464,7 +498,7 @@ class PaymentsController {
     const amount = round2(Number(body?.amount));
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("مبلغ التحصيل غير صالح");
 
-    const prior = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
+    const prior = await tx.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.paymentId, id));
     const collectedBefore = round2(Number(prior[0]?.total ?? 0));
     const total = round2(Number(payment.amount));
@@ -472,7 +506,7 @@ class PaymentsController {
     if (amount > remaining + 0.01) throw new BadRequestException(`مبلغ التحصيل يتجاوز المتبقي (${remaining.toFixed(2)})`);
 
     const collectedDate = body?.collectedDate || new Date().toISOString().slice(0, 10);
-    const [collection] = await this.db.insert(paymentCollectionsTable).values({
+    const [collection] = await tx.insert(paymentCollectionsTable).values({
       paymentId: id,
       userId: scopeId(user),
       amount: amount.toFixed(2),
@@ -485,7 +519,7 @@ class PaymentsController {
 
     const collectedAfter = round2(collectedBefore + amount);
     const fullyPaid = collectedAfter >= total - 0.01;
-    const [updated] = await this.db.update(paymentsTable).set({
+    const [updated] = await tx.update(paymentsTable).set({
       status: fullyPaid ? "paid" : "partially_paid",
       paidDate: fullyPaid ? collectedDate : payment.paidDate,
       // Surface the latest evidence/receipt on the installment itself so the
@@ -496,6 +530,7 @@ class PaymentsController {
       .returning();
 
     return { collection, payment: updated, collectedAmount: collectedAfter, remaining: round2(total - collectedAfter) };
+    });
   }
 }
 

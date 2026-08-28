@@ -247,6 +247,10 @@ class UnitsController {
     // status is NOT NULL — fall back to the schema default if the loop above
     // set it to null because body.status was undefined.
     if (values.status == null) values.status = "available";
+    // is_draft is NOT NULL, and the field loop above writes an explicit null
+    // when the caller omits it — so creating a unit without `isDraft` in the
+    // body was a 500. The web form always sends it; nothing else does.
+    values.isDraft = isDraft;
     // Unit type / direction / finishing are FK-only now.
     const unitTypeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "unit_type", body.type || "apartment");
     values.typeLookupId = unitTypeLookupId;

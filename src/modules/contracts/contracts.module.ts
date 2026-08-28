@@ -89,7 +89,7 @@ class ContractsController {
       .from(contractUnitsTable)
       .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
       .leftJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
-      .where(inArray(contractUnitsTable.contractId, contractIds))
+      .where(and(inArray(contractUnitsTable.contractId, contractIds), isNull(unitsTable.deletedAt)))
       .orderBy(asc(contractUnitsTable.id));
     for (const r of rows) {
       const list = map.get(r.contractId) ?? [];
@@ -297,6 +297,28 @@ class ContractsController {
     if (unitIds.length === 0 || (!isDraft && (!body.tenantName || !body.startDate || !body.endDate || !body.monthlyRent))) {
       throw new BadRequestException(isDraft ? "اختر وحدة واحدة على الأقل لحفظ المسودة" : "البيانات الأساسية مطلوبة");
     }
+    // The units have to be the caller's. Nothing checked, so a contract could
+    // be written against another account's unit: it linked, it showed that
+    // account's property and unit in the list, and once active it flipped
+    // their unit to "rented" — a cross-account write, not just a read.
+    const ownedUnits = await this.db
+      .select({ id: unitsTable.id })
+      .from(unitsTable)
+      .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+      .where(and(
+        inArray(unitsTable.id, unitIds),
+        eq(propertiesTable.userId, scopeId(user)),
+        isNull(unitsTable.deletedAt),
+        isNull(propertiesTable.deletedAt),
+      ));
+    if (ownedUnits.length !== unitIds.length) {
+      throw new NotFoundException("الوحدة غير موجودة · Unit not found");
+    }
+    // Derive the VAT decision ONCE. The contract row stored the derived
+    // value while the installments were built from the raw request flag, so
+    // the same contract could say "exempt" and still bill 15% — VAT charged
+    // on exempt residential rent, and headed for a ZATCA invoice.
+    const rentVat = await this.resolveRentVat(body, Boolean(body.vatEnabled ?? false));
     // Draft contracts may be incomplete — fall back so NOT NULL columns hold.
     const today = new Date().toISOString().slice(0, 10);
     const tenantName = body.tenantName || (isDraft ? "—" : body.tenantName);
@@ -356,7 +378,7 @@ class ContractsController {
       depositMethod: body.depositMethod ?? null,
       prepaidRent: body.prepaidRent != null ? String(body.prepaidRent) : "0",
       prepaidMethod: body.prepaidMethod ?? null,
-      vatEnabled: await this.resolveRentVat(body, Boolean(body.vatEnabled ?? false)),
+      vatEnabled: rentVat,
       escalationType: body.escalationType === "amount" ? "amount" : "percent",
       escalationRate: body.escalationRate != null ? String(body.escalationRate) : "0",
       agencyFee: body.agencyFee ? String(body.agencyFee) : null,
@@ -407,7 +429,7 @@ class ContractsController {
     const rows = applyExternalSettlement(
       buildInstallments(
         contract!.id, ownerId, startDate, endDate, String(monthlyRent), freq, additionalFees,
-        Boolean(body.vatEnabled ?? false), Number(body.escalationRate) || 0,
+        rentVat, Number(body.escalationRate) || 0,
         body.escalationType === "amount" ? "amount" : "percent",
         rentTerms, 0, customSchedule,
       ),
