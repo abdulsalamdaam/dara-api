@@ -1212,6 +1212,23 @@ class SimpleInvoicesController {
           readiness,
         });
       }
+      // Some situations are not blockers but must be acknowledged out loud —
+      // a tax invoice for an individual tenant who has no VAT number. That
+      // acknowledgement used to be collected when the document was created;
+      // now that creating never refuses, it lives here, on the action that
+      // actually issues the document. The client ticks the box and sends it in
+      // the approve body under the same `confirmations` key the create path
+      // accepted, so there is one contract rather than two.
+      const acked = (body as any)?.confirmations ?? {};
+      const unacknowledged = readiness.confirmations.filter((c) => acked[c.key] !== true);
+      if (unacknowledged.length > 0) {
+        throw new BadRequestException({
+          error: "invoice_needs_confirmation",
+          message: "يلزم تأكيد إصدار الفاتورة قبل الاعتماد",
+          readiness,
+          confirmations: unacknowledged,
+        });
+      }
     }
 
     const isNote = doc.type === "credit" || doc.type === "debit";
