@@ -1,4 +1,9 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { rolesTable, usersTable } from "@dara/database";
+import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { STAFF_ROLE_KEYS } from "../../common/permissions";
+import { resolvePackage } from "../../common/packages";
 
 /**
  * Public URL of the brand logo used in the email layout. Gmail strips
@@ -81,6 +86,24 @@ export interface ContactEmailPayload {
 }
 
 /**
+ * A self-serve registration that has just landed in the admin portal's
+ * pending queue. Everything an admin needs to triage it without opening the
+ * portal — who signed up, what they asked for, and when.
+ */
+export interface AdminRegistrationEmailPayload {
+  id: number;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  /** "individual" | "company" — the account type chosen at sign-up. */
+  userType: string | null;
+  /** The plan picked on the landing page, if any (nothing is assigned yet). */
+  desiredPackagePlan?: string | null;
+  desiredBillingCycle?: string | null;
+  createdAt?: Date | string | null;
+}
+
+/**
  * Resend wrapper. We hit the REST API directly (same pattern as the Twilio
  * service) to avoid pulling in another SDK. Failures are logged but never
  * thrown to the caller — email is best-effort and must not block user flows
@@ -104,6 +127,14 @@ export class EmailService {
    */
   private readonly listUnsubscribeUrl = process.env.LIST_UNSUBSCRIBE_URL || `${SITE_URL}/email/unsubscribe`;
   private readonly listUnsubscribeMailto = process.env.LIST_UNSUBSCRIBE_MAILTO || `unsubscribe@${SITE_DOMAIN}`;
+
+  /**
+   * Read-only DB access, used solely to resolve "who are the platform admins"
+   * for `sendAdminNewRegistration`. `DatabaseModule` is `@Global`, so this
+   * needs no change to `EmailModule`. `db` is a lazy proxy (see
+   * `db/src/index.ts`) — importing this file still opens no connection.
+   */
+  constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
   isConfigured(): boolean {
     return Boolean(this.apiKey);
@@ -556,6 +587,115 @@ export class EmailService {
     });
   }
 
+  /**
+   * Who gets told that a registration is waiting: every active platform
+   * admin, read from the database by ROLE rather than hardcoded, so adding
+   * or removing an admin needs no deploy.
+   *
+   * There is no `users.role` column — the role key lives on `roles` and is
+   * reached through `users.role_id`. `companyId IS NULL` restricts the match
+   * to the system-wide presets: role keys are unique per (key, companyId),
+   * so a company-scoped custom role could otherwise be called "admin" and
+   * quietly join this list.
+   *
+   * `ADMIN_REGISTRATION_NOTIFY_EMAILS` (comma-separated) replaces the lookup
+   * entirely — the escape hatch for staging, whose admin rows are a copy of
+   * production's and therefore real people. Deliberately NOT
+   * `ADMIN_NOTIFY_EMAIL`: that is one global address for maintenance and
+   * contact-form mail, a different audience from the platform's own admins.
+   */
+  async adminRegistrationRecipients(): Promise<string[]> {
+    const override = process.env.ADMIN_REGISTRATION_NOTIFY_EMAILS || "";
+    if (override.trim()) return normaliseRecipients(override.split(","));
+    try {
+      const rows = await this.db
+        .select({ email: usersTable.email })
+        .from(usersTable)
+        .innerJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .where(and(
+          inArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[]),
+          isNull(rolesTable.companyId),
+          isNull(rolesTable.deletedAt),
+          eq(usersTable.isActive, true),
+          isNull(usersTable.deletedAt),
+        ));
+      return normaliseRecipients(rows.map((r) => r.email));
+    } catch (err: any) {
+      // Never throw at the caller: this runs fire-and-forget off the back of
+      // a registration, and a DB hiccup here must not surface there.
+      this.log.error(`adminRegistrationRecipients failed: ${err?.message || err}`);
+      return [];
+    }
+  }
+
+  /**
+   * Fires when a self-serve registration lands in the admin portal's pending
+   * queue. Before this, nothing told anyone — an admin found out by opening
+   * the portal and noticing the badge.
+   *
+   * Recipients default to every active platform admin
+   * (`adminRegistrationRecipients`); pass `to` to target the send explicitly.
+   * Like every other notification here it never throws — see `send`.
+   */
+  async sendAdminNewRegistration(payload: AdminRegistrationEmailPayload, to?: string[]): Promise<boolean> {
+    const recipients = to?.length ? normaliseRecipients(to) : await this.adminRegistrationRecipients();
+    if (!recipients.length) {
+      this.log.warn(
+        "sendAdminNewRegistration: no recipient — no active platform admin has an email "
+        + "(and ADMIN_REGISTRATION_NOTIFY_EMAILS is unset); skipping",
+      );
+      return false;
+    }
+    const name = payload.name || "—";
+    const typeLabel = payload.userType === "company" ? "منشأة" : payload.userType === "individual" ? "فرد" : "—";
+    const planLabel = payload.desiredPackagePlan
+      ? `${resolvePackage(payload.desiredPackagePlan).labelAr} (${payload.desiredPackagePlan})`
+      : "لم يختر باقة";
+    const cycleLabel = payload.desiredBillingCycle === "yearly" ? "سنوي"
+      : payload.desiredBillingCycle === "monthly" ? "شهري" : "—";
+    const when = riyadhTimestamp(payload.createdAt);
+    const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/admin`;
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">طلب تسجيل جديد بانتظار المراجعة #${payload.id}</h1>
+      <p style="margin:0 0 16px;color:#334155;line-height:1.7;">
+        وصل طلب تسجيل جديد إلى <strong>دارا</strong>، وهو الآن في قائمة الطلبات المعلّقة بانتظار المراجعة والتفعيل.
+      </p>
+      ${row("الاسم", name)}
+      ${row("البريد الإلكتروني", payload.email || "—")}
+      ${row("الجوال", payload.phone || "—")}
+      ${row("نوع الحساب", typeLabel)}
+      ${row("الباقة المطلوبة", planLabel)}
+      ${row("دورة الفوترة", cycleLabel)}
+      ${row("تاريخ الطلب", `${when} (بتوقيت الرياض)`)}
+      <div style="margin-top:24px;text-align:center;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">مراجعة طلبات التسجيل</a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
+        رسالة تلقائية إلى فريق دارا عند وصول كل طلب تسجيل جديد. يمكنك الرد على هذا البريد للتواصل مع مقدّم الطلب مباشرة.
+      </p>
+    `);
+    return this.send({
+      to: recipients,
+      subject: `طلب تسجيل جديد #${payload.id} — ${name}`,
+      html,
+      text: [
+        `طلب تسجيل جديد بانتظار المراجعة #${payload.id}`,
+        `الاسم: ${name}`,
+        `البريد الإلكتروني: ${payload.email || "—"}`,
+        `الجوال: ${payload.phone || "—"}`,
+        `نوع الحساب: ${typeLabel}`,
+        `الباقة المطلوبة: ${planLabel}`,
+        `دورة الفوترة: ${cycleLabel}`,
+        `تاريخ الطلب: ${when} (بتوقيت الرياض)`,
+        `مراجعة الطلبات: ${link}`,
+      ].join("\n"),
+      // Lets an admin reply straight to the person who registered, the same
+      // way sendContactReceived does for the contact form.
+      replyTo: payload.email || undefined,
+      category: "admin_new_registration",
+    });
+  }
+
   /** Notify a customer that the support team replied to their ticket. */
   async sendSupportReply(to: string, name: string, ticketId: number, message: string): Promise<boolean> {
     if (!to) return false;
@@ -589,6 +729,40 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Normalise a set of addresses into a `to:` list — trim, lowercase, drop
+ * blanks, drop duplicates. Order is preserved so the same input always logs
+ * the same line.
+ */
+function normaliseRecipients(values: (string | null | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const email = String(value ?? "").trim().toLowerCase();
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    out.push(email);
+  }
+  return out;
+}
+
+/**
+ * `YYYY-MM-DD HH:mm` in Riyadh time. Deliberately not `toLocaleString("ar-SA")`
+ * — that renders a Hijri date, which is not what an admin is reconciling a
+ * signup against. Falls back to "—" on an unparseable value.
+ */
+function riyadhTimestamp(value: Date | string | null | undefined): string {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return "—";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Riyadh",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
 /** Two app-store call-to-action buttons used in tenant-facing emails. */

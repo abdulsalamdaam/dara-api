@@ -17,6 +17,7 @@ import { EmailService } from "../email/email.service";
 import { isPackagePlan, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
+import { AdminCustomerOverviewController } from "./customer-overview.controller";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 import { TaqnyatService } from "../sms/taqnyat.service";
 
@@ -1017,5 +1018,12 @@ class AdminController {
   }
 }
 
-@Module({ imports: [EjarModule], controllers: [AdminController] })
+/**
+ * `AdminCustomerOverviewController` lives in its own file — this one is
+ * already long enough — but it is the same admin surface, behind the same
+ * `JwtAuthGuard` + `SuperAdminGuard` pair as everything above, and the
+ * account lists here (`GET /admin/companies`, `GET /admin/users`) are what
+ * link into it: both already carry the account's `id` on every row.
+ */
+@Module({ imports: [EjarModule], controllers: [AdminController, AdminCustomerOverviewController] })
 export class AdminModule {}

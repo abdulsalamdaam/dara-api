@@ -537,6 +537,27 @@ export class AuthService {
 
     void this.email.sendVerifyOtp(user!.email, user!.name, otp.code, EMAIL_VERIFY_OTP_TTL_MIN, false);
 
+    // The row above is the moment a registration becomes pending — the only
+    // place in the API that writes accountStatus: "pending". Employees added
+    // by a landlord are created active in team.service.ts and never reach
+    // here, and there is no auto-approve path: an account only leaves
+    // "pending" through the admin's own approve/reject endpoints.
+    //
+    // Fire-and-forget, exactly like the OTP above: the sign-up response must
+    // not wait on Resend, and a notification that fails must not fail the
+    // registration. sendAdminNewRegistration resolves its own recipients and
+    // swallows every failure, so this can never reject.
+    void this.email.sendAdminNewRegistration({
+      id: user!.id,
+      name: user!.name,
+      email: user!.email,
+      phone: user!.phone,
+      userType: user!.userType,
+      desiredPackagePlan: user!.desiredPackagePlan,
+      desiredBillingCycle: user!.desiredBillingCycle,
+      createdAt: user!.createdAt,
+    });
+
     return {
       pending: true,
       message: "تم استلام طلب التسجيل. أرسلنا رمز تأكيد إلى بريدك الإلكتروني — أدخله لتأكيد بريدك، ثم سيقوم المشرف بمراجعة الحساب وتفعيله.",
