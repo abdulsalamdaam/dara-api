@@ -117,3 +117,45 @@ describe("InvoiceSignerService (integration)", { skip: !shouldRun && "openssl/xm
     assert.ok(r.signatureValueBase64.length > 0, "signature empty");
   });
 });
+
+/**
+ * The seller's name reaches ZATCA through the CSR's subject, and Fatoora
+ * displays that subject verbatim. Without `utf8 = yes` in the openssl config,
+ * Arabic went in double-encoded and the portal showed "Ø§Ø¨Ø±Ø§Ù‡ÙŠÙ…".
+ */
+describe("CsrService — Arabic in the certificate subject", { skip: !shouldRun && "openssl unavailable" }, () => {
+  const csr = new CsrService(new ShellService());
+
+  it("puts Arabic into the CSR subject as Arabic", async () => {
+    const arabicName = "ابراهيم العقيل";
+    const out = await csr.generateCsr({
+      environment: "sandbox",
+      commonName: arabicName,
+      serialNumber: "1-Dara|2-PMS|3-1",
+      organizationIdentifier: "310404305800003",
+      organizationUnitName: "الرياض",
+      organizationName: arabicName,
+      countryName: "SA",
+      invoiceType: "1100",
+      locationAddress: "الرياض",
+      industryCategory: "العقارات",
+    });
+
+    const { execFileSync } = await import("node:child_process");
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const os = await import("node:os");
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "csr-utf8-"));
+    const file = path.join(dir, "req.csr");
+    await fs.writeFile(file, out.csr, "utf8");
+    const subject = execFileSync("openssl",
+      ["req", "-in", file, "-noout", "-subject", "-nameopt", "utf8,sep_comma_plus_space"],
+      { encoding: "utf8" });
+    await fs.rm(dir, { recursive: true, force: true });
+
+    assert.ok(subject.includes(arabicName), `Arabic was mangled in the subject: ${subject}`);
+    // The signature of double encoding: every Arabic byte rendered as two
+    // Latin-1 characters.
+    assert.ok(!subject.includes("Ø"), `subject is double-encoded: ${subject}`);
+  });
+});

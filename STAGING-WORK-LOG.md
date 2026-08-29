@@ -276,8 +276,33 @@ disabled for all four apps; the Actions workflow is the only trigger, kept
 because it fails loudly. Revert by setting
 `application_settings.is_auto_deploy_enabled = true`.
 
-Deploy timings, the duplicate-container mechanism and the build-cache fixes are
-measured in `DEPLOY-PERFORMANCE.md`.
+**Deploy speed — what was actually changed.** Four of the measured costs:
+
+| Change | Cost it removes |
+|---|---|
+| Coolify's GitHub App auto-deploy disabled | Every push deployed twice; the second built nothing and blocked the queue (~470s per push) |
+| BuildKit cache mount on `.next/cache` | `next build` started from zero every deploy — 146s alone, 209s under contention, 41% of a web deploy |
+| pnpm store cache mount, both images | A lockfile change re-downloaded all 554 packages; the layer cache cannot help, since that same change invalidates the layer |
+| `SIGTERM` handled in the API | Nothing listened, so every deploy sat out Docker's full 30s grace period and was killed — 34.5s, 14% of an API deploy |
+
+The `.next/cache` mount also stops 1.5 GB of build state being copied into the
+runtime image: a cache mount is unmounted before the layer is committed.
+
+**Still not done:** `output: "standalone"` on the web image (it ships the whole
+450–550 MB dependency tree), and `react-icons` (83 MB, zero importers) plus a
+duplicated `date-fns`.
+
+**Docker cleanup is now threshold-driven, not unconditional.** It ran nightly
+regardless of disk and wiped 100% of the BuildKit cache, so the first builds of
+each day were fully cold — which would have defeated the mounts above.
+`force_docker_cleanup` is off; the 80% threshold still protects the disk.
+Watch this: the disk reached **79%** during this session's build churn and was
+reclaimed to 58% by pruning stale images and build cache older than 12h. Note
+the API image tripled (534 MB → 1.67 GB) when Chromium was added for invoice
+PDFs.
+
+Full measurements, including the duplicate-container mechanism, are in
+`DEPLOY-PERFORMANCE.md`.
 
 ---
 
