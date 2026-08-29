@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get,
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable } from "@dara/database";
+import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
@@ -174,12 +174,19 @@ class AdminController {
     // The six months ending with the current one, oldest first.
     const months = Array.from({ length: 6 }, (_, i) => {
       const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
-      return { key: monthKey(d), label: d.toLocaleDateString("ar-SA", { month: "short" }) };
+      // The calendar is pinned rather than left to resolve. CLDR's default for
+      // ar-SA is islamic-umalqura, which would label these six Gregorian
+      // buckets with Hijri months that do not line up with them; both Node 22
+      // in the container and the dev machine happen to resolve `gregory`
+      // today, so this changes nothing now and stops an ICU build from
+      // changing it later.
+      return { key: monthKey(d), label: d.toLocaleDateString("ar-SA-u-ca-gregory", { month: "short" }) };
     });
     const earliest = `${months[0]!.key}-01`;
 
     const [
-      userRows, companyRows, propRow, unitRow, contractRows, paidRows, dueRow, monthRows,
+      userRows, companyRows, propRow, unitRow, contractRows,
+      subPaidRows, subPendingRows, monthRows, mrrRes, rentPaidRows, rentDueRows,
     ] = await Promise.all([
       this.db.select({ isActive: usersTable.isActive, cnt: count() })
         .from(usersTable).groupBy(usersTable.isActive),
@@ -194,28 +201,53 @@ class AdminController {
       // and `monthlyRecurring` come from the same scan as `totalContracts`.
       this.db.select({ status: contractsTable.status, cnt: count(), rent: sum(contractsTable.monthlyRent) })
         .from(contractsTable).groupBy(contractsTable.status),
+      // Revenue on this dashboard is DARA's revenue — what customers pay us for
+      // their subscription — not the rent flowing through the platform. These
+      // three used to read `payments`, i.e. tenants' rent installments, which
+      // made "الإيرادات" a number about the landlords' money rather than ours
+      // and put a figure in the millions where the true one is in the tens of
+      // thousands. `payments` is still summed below, under names that say what
+      // it is (rent volume), so nothing that wanted it has lost it.
+      this.db.select({ amount: sum(subscriptionPaymentsTable.amount) })
+        .from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.status, "paid")),
+      this.db.select({ amount: sum(subscriptionPaymentsTable.amount) })
+        .from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.status, "pending")),
+      // Subscription revenue per month for the last six months, keyed in the
+      // same Riyadh calendar the rest of the product reports in — paid_at is a
+      // timestamptz, so without the shift a payment taken late on the last
+      // evening of a month lands in the next one.
+      this.db.select({
+        month: sql<string>`to_char(${subscriptionPaymentsTable.paidAt} at time zone 'Asia/Riyadh', 'YYYY-MM')`.as("month"),
+        amount: sum(subscriptionPaymentsTable.amount),
+      })
+        .from(subscriptionPaymentsTable)
+        .where(and(
+          eq(subscriptionPaymentsTable.status, "paid"),
+          isNotNull(subscriptionPaymentsTable.paidAt),
+          gte(sql`(${subscriptionPaymentsTable.paidAt} at time zone 'Asia/Riyadh')::date`, sql`${earliest}::date`),
+        ))
+        .groupBy(sql`1`),
+      // True MRR: every account's latest paid subscription, each normalised to
+      // a month (a yearly plan contributes a twelfth). Summing the raw amounts
+      // would let one annual payment read as a month's income.
+      this.db.execute(sql`
+        select coalesce(sum(
+          case when latest.billing_cycle = 'yearly' then latest.amount / 12.0 else latest.amount end
+        ), 0) as mrr
+        from (
+          select distinct on (sp.user_id) sp.user_id, sp.amount, sp.billing_cycle
+          from ${subscriptionPaymentsTable} sp
+          join ${usersTable} u on u.id = sp.user_id
+          where sp.status = 'paid' and u.is_active = true and u.deleted_at is null
+          order by sp.user_id, sp.paid_at desc nulls last, sp.id desc
+        ) latest
+      `),
+      // Rent moving through the platform. Not our revenue — reported separately
+      // so the two can never be mistaken for one another again.
       this.db.select({ amount: sum(paymentsTable.amount) })
         .from(paymentsTable).where(eq(paymentsTable.status, "paid")),
       this.db.select({ amount: sum(paymentsTable.amount) })
         .from(paymentsTable).where(inArray(paymentsTable.status, ["pending", "overdue"])),
-      // Collected per month for the last six months. `paid_date` is a date
-      // column stored as YYYY-MM-DD, so its first seven characters are the
-      // month key - grouped in SQL rather than by scanning every payment row
-      // six times in JavaScript.
-      this.db.select({
-        // `paid_date` is a DATE, and Postgres has no substring(date, int, int) —
-        // the JS this replaced called startsWith on the string form. to_char
-        // does the same job without the implicit cast that never existed.
-        month: sql<string>`to_char(${paymentsTable.paidDate}, 'YYYY-MM')`.as("month"),
-        amount: sum(paymentsTable.amount),
-      })
-        .from(paymentsTable)
-        .where(and(
-          eq(paymentsTable.status, "paid"),
-          isNotNull(paymentsTable.paidDate),
-          gte(paymentsTable.paidDate, earliest),
-        ))
-        .groupBy(sql`1`),
     ]);
 
     const tally = (rows: Array<{ isActive: boolean; cnt: number }>) => {
@@ -232,14 +264,21 @@ class AdminController {
 
     let totalContracts = 0;
     let activeContracts = 0;
-    let monthlyRecurring = 0;
+    // The monthly rent under management. This is NOT the platform's MRR — it
+    // was being returned as `monthlyRecurring` and rendered on the
+    // subscriptions tab as our MRR, which overstated it by several orders of
+    // magnitude. It keeps its own name now.
+    let rentUnderManagement = 0;
     for (const r of contractRows as Array<{ status: string; cnt: number; rent: string | null }>) {
       totalContracts += Number(r.cnt);
       if (r.status === "active") {
         activeContracts = Number(r.cnt);
-        monthlyRecurring = Number(r.rent ?? 0);
+        rentUnderManagement = Number(r.rent ?? 0);
       }
     }
+    const mrrRows = (mrrRes as unknown as { rows?: Array<{ mrr: string | number | null }> }).rows
+      ?? (mrrRes as unknown as Array<{ mrr: string | number | null }>);
+    const monthlyRecurring = Number(mrrRows?.[0]?.mrr ?? 0);
 
     const byMonth = new Map<string, number>();
     for (const r of monthRows as Array<{ month: string | null; amount: string | null }>) {
@@ -256,11 +295,16 @@ class AdminController {
       totalUnits: Number(unitRow[0]?.c ?? 0),
       totalContracts,
       activeContracts,
+      // Dara's own revenue, from subscription payments.
       monthlyRevenue: byMonth.get(monthKey(now)) ?? 0,
       monthlyRecurring,
-      collectedTotal: Number((paidRows[0] as { amount: string | null })?.amount ?? 0),
-      pendingDue: Number((dueRow[0] as { amount: string | null })?.amount ?? 0),
+      collectedTotal: Number((subPaidRows[0] as { amount: string | null })?.amount ?? 0),
+      pendingDue: Number((subPendingRows[0] as { amount: string | null })?.amount ?? 0),
       monthlyData,
+      // Rent moving through the platform — a measure of scale, not income.
+      rentUnderManagement,
+      rentCollectedTotal: Number((rentPaidRows[0] as { amount: string | null })?.amount ?? 0),
+      rentOutstandingTotal: Number((rentDueRows[0] as { amount: string | null })?.amount ?? 0),
     };
   }
 
