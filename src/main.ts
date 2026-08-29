@@ -3,6 +3,7 @@ import { NestFactory } from "@nestjs/core";
 import { ValidationPipe, Logger } from "@nestjs/common";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
+import { ZodExceptionFilter } from "./common/zod-exception.filter";
 import { ensureSchema } from "./database/bootstrap";
 
 async function bootstrap() {
@@ -74,6 +75,9 @@ async function bootstrap() {
       app.close().then(() => process.exit(0)).catch(() => process.exit(0));
     });
   }
+
+  // A malformed query string must not read as a server failure.
+  app.useGlobalFilters(new ZodExceptionFilter());
 
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   await app.listen(port);

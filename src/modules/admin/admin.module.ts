@@ -202,7 +202,10 @@ class AdminController {
       // month key - grouped in SQL rather than by scanning every payment row
       // six times in JavaScript.
       this.db.select({
-        month: sql<string>`substring(${paymentsTable.paidDate} from 1 for 7)`.as("month"),
+        // `paid_date` is a DATE, and Postgres has no substring(date, int, int) —
+        // the JS this replaced called startsWith on the string form. to_char
+        // does the same job without the implicit cast that never existed.
+        month: sql<string>`to_char(${paymentsTable.paidDate}, 'YYYY-MM')`.as("month"),
         amount: sum(paymentsTable.amount),
       })
         .from(paymentsTable)
@@ -314,6 +317,11 @@ class AdminController {
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+      // The row query was built without this while the count query had it, so
+      // every filter — search, active, plan, and the customer-account test —
+      // applied to the total and to nothing else. The list came back unfiltered
+      // under a filtered count, which also produced pages past the last one.
+      .where(where)
       // Ordering was left entirely to the database before, which is
       // non-deterministic and would have made paging shuffle rows. Newest
       // account first, `id` as the tiebreak.

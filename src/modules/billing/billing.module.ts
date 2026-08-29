@@ -14,7 +14,7 @@ import type { InvoiceLineInput } from "../invoice/services/invoice-builder.servi
 import { PdfA3Service } from "../invoice/services/pdfa3.service";
 import { UploadsService } from "../uploads/uploads.service";
 import { UploadsModule } from "../uploads/uploads.module";
-import { listQuerySchema, wantsPagination, pageBounds} from "../../common/pagination";
+import { listQuerySchema, wantsPagination, pageBounds, parseIdList} from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -269,7 +269,9 @@ class SimpleInvoicesController {
     // frontend and passed through here.
     const contractIds: number[] | undefined =
       typeof rawQuery?.contractIds === "string" && rawQuery.contractIds.trim()
-        ? rawQuery.contractIds.split(",").map((x: string) => parseInt(x, 10)).filter((n: number) => Number.isFinite(n))
+        // parseIdList bounds each id to int4; the local parse here let a value
+        // past 2^31 reach the driver, which answers a 500 rather than a miss.
+        ? (parseIdList(rawQuery.contractIds) ?? [])
         : undefined;
     const base = and(eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt));
     const conds = [base];
@@ -674,10 +676,20 @@ class SimpleInvoicesController {
     let tenantName = body?.tenantName ?? null;
     let client = body?.client ?? null;
     const bodyPaymentId = foreignKeyId(body?.paymentId, "رقم القسط");
-    if (bodyPaymentId != null) {
+    // An invoice covering several same-day installments arrives as `paymentIds`
+    // with no single `paymentId`. Only the singular was read here, so such a
+    // document ended up with contractId null — and a null contract makes the
+    // readiness check vacuous, which silently switched the whole ZATCA gate
+    // off for that document. Fall back to the first of the list.
+    const snapshotPaymentId = bodyPaymentId
+      ?? (Array.isArray(body?.paymentIds)
+        ? (body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط"))
+            .find((n: number | null) => n != null) ?? null)
+        : null);
+    if (snapshotPaymentId != null) {
       const [pay] = await this.db.select({ contractId: paymentsTable.contractId, tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
         .from(paymentsTable).leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
-        .where(and(eq(paymentsTable.id, bodyPaymentId), eq(paymentsTable.userId, scopeId(user))));
+        .where(and(eq(paymentsTable.id, snapshotPaymentId), eq(paymentsTable.userId, scopeId(user))));
       if (pay) { contractId = contractId ?? pay.contractId; tenantId = tenantId ?? pay.tenantId; tenantName = tenantName ?? pay.tenantName; }
     }
     // Credit/debit note: snapshot client + contract from the referenced invoice
