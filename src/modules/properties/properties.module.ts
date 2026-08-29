@@ -16,7 +16,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 
@@ -128,25 +128,79 @@ class PropertiesController {
     if (!owner) throw new BadRequestException("المؤجر المختار غير موجود · Selected landlord not found");
   }
 
+  /**
+   * Properties, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (name / district / deed
+   * number, including the linked deed's own number), `status`,
+   * `typeLookupId`, `regionLookupId`, `cityLookupId`, `ownerId`, `deedId`,
+   * `hasDeed` and `isDraft`. The type / region / city pickers on the
+   * Properties tab are lookup-backed, so they filter by the lookup id rather
+   * than by the resolved Arabic label - matching on the label would break the
+   * moment a label is edited.
+   *
+   * Backwards compat: legacy callers send no query params and expect a bare
+   * Property[]. When `page`, `pageSize`, `paginated` or `search` is present we
+   * switch to `{ data, page, pageSize, total }`. Filters apply either way, so
+   * an unpaginated caller gets a filtered list rather than a filtered slice.
+   */
+  /**
+   * Resolve a comma-separated list of lookup keys or Arabic labels to ids, for
+   * filters that arrive spelled the way the UI holds them. Returns null when
+   * nothing was asked for, so a caller can `??` it against the id form; an
+   * unmatched value yields an empty list, which correctly matches no rows
+   * rather than silently ignoring the filter.
+   */
+  private async lookupIds(category: string, raw: unknown): Promise<number[] | null> {
+    if (raw == null || raw === "" || raw === "all") return null;
+    const values = String(raw).split(",").map((v) => v.trim()).filter(Boolean);
+    if (values.length === 0) return null;
+    const ids = await Promise.all(values.map((v) => resolveLookupId(this.db, category, v)));
+    return ids.filter((id): id is number => id != null);
+  }
+
   @Get()
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    // Backwards compat: legacy callers send no query params and expect a
-    // bare Property[]. When `page` or `pageSize` is present (or `search`),
-    // we switch to the paginated shape { data, page, pageSize, total }.
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
 
-    const baseWhere = and(eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt));
-    const where = q.search
-      ? and(baseWhere, or(
-          ilike(propertiesTable.name, `%${q.search}%`),
-          ilike(propertiesTable.district, `%${q.search}%`),
-          ilike(propertiesTable.deedNumber, `%${q.search}%`),
-          ilike(deedsTable.deedNumber, `%${q.search}%`),
-        ))
-      : baseWhere;
+    const conds: any[] = [eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(propertiesTable.name, `%${q.search}%`),
+        ilike(propertiesTable.district, `%${q.search}%`),
+        ilike(propertiesTable.street, `%${q.search}%`),
+        ilike(propertiesTable.deedNumber, `%${q.search}%`),
+        ilike(deedsTable.deedNumber, `%${q.search}%`),
+      ));
+    }
+    const statuses = parseEnumList(rawQuery?.status, ["active", "inactive", "maintenance"] as const);
+    if (statuses) conds.push(inArray(propertiesTable.status, statuses));
+    // Two spellings on purpose. The portal's filter chips carry the lookup KEY
+    // ("residential"), because that is what the chip list is built from and a
+    // key is stable where a label is editable; integrations tend to hold the
+    // id. `resolveLookupId` already accepts a key or an Arabic label, so both
+    // land on the same column and neither caller has to translate first.
+    const typeIds = parseIdList(rawQuery?.typeLookupId)
+      ?? await this.lookupIds("property_type", rawQuery?.type);
+    if (typeIds) conds.push(inArray(propertiesTable.typeLookupId, typeIds));
+    const regionIds = parseIdList(rawQuery?.regionLookupId)
+      ?? await this.lookupIds("region", rawQuery?.region);
+    if (regionIds) conds.push(inArray(propertiesTable.regionLookupId, regionIds));
+    const cityIds = parseIdList(rawQuery?.cityLookupId)
+      ?? await this.lookupIds("city", rawQuery?.city);
+    if (cityIds) conds.push(inArray(propertiesTable.cityLookupId, cityIds));
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds) conds.push(inArray(propertiesTable.ownerId, ownerIds));
+    const deedIds = parseIdList(rawQuery?.deedId);
+    if (deedIds) conds.push(inArray(propertiesTable.deedId, deedIds));
+    if (rawQuery?.hasDeed === "1" || rawQuery?.hasDeed === "true") conds.push(sql`${propertiesTable.deedId} IS NOT NULL`);
+    else if (rawQuery?.hasDeed === "0" || rawQuery?.hasDeed === "false") conds.push(isNull(propertiesTable.deedId));
+    if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(propertiesTable.isDraft, true));
+    else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(propertiesTable.isDraft, false));
+    const where = and(...conds);
 
     // Total respects the same WHERE so pagination headers are correct.
     const totalP = usePaginated
@@ -167,7 +221,10 @@ class PropertiesController {
       .from(propertiesTable)
       .leftJoin(deedsTable, and(eq(propertiesTable.deedId, deedsTable.id), isNull(deedsTable.deletedAt)))
       .where(where)
-      .orderBy(sortFn(propertiesTable.createdAt))
+      // `id` tiebreak - `created_at` is not unique (a bulk import writes a
+      // whole portfolio in one instant) and a non-deterministic order across
+      // pages repeats one property while dropping another.
+      .orderBy(sortFn(propertiesTable.createdAt), sortFn(propertiesTable.id))
       .$dynamic();
     if (usePaginated) {
       rowsQuery = rowsQuery.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
@@ -214,7 +271,9 @@ class PropertiesController {
    */
   @Get("available-deeds")
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
-  async availableDeeds(@CurrentUser() user: AuthUser) {
+  async availableDeeds(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
     // Sub-query of deed_ids already in use by a non-deleted property.
     const linkedDeedIds = this.db
@@ -226,19 +285,40 @@ class PropertiesController {
         sql`${propertiesTable.deedId} IS NOT NULL`,
       ));
 
-    return this.db.select({
+    const where = and(
+      eq(deedsTable.userId, owner),
+      isNull(deedsTable.deletedAt),
+      // Either not linked anywhere yet …
+      sql`${deedsTable.id} NOT IN ${linkedDeedIds}`,
+      // … and matching what the user has typed into the picker. Searching in
+      // SQL is what lets this dropdown be paged at all: an account with a few
+      // thousand unlinked deeds should send 25 rows and a search term, not the
+      // whole set for the browser to filter.
+      ...(q.search ? [or(
+        ilike(deedsTable.deedNumber, `%${q.search}%`),
+        ilike(deedsTable.issuingAuthority, `%${q.search}%`),
+      )] : []),
+    );
+
+    let rowsQ = this.db.select({
       id: deedsTable.id,
       deedNumber: deedsTable.deedNumber,
       deedType: deedsTable.deedType,
     })
     .from(deedsTable)
-    .where(and(
-      eq(deedsTable.userId, owner),
-      isNull(deedsTable.deletedAt),
-      // Either not linked anywhere yet …
-      sql`${deedsTable.id} NOT IN ${linkedDeedIds}`,
-    ))
-    .orderBy(deedsTable.createdAt);
+    .where(where)
+    // `id` tiebreak on a non-unique `created_at`, so this can be paged safely.
+    .orderBy(asc(deedsTable.createdAt), asc(deedsTable.id))
+    .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(deedsTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   @Post()

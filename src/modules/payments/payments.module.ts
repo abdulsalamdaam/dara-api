@@ -1,12 +1,12 @@
 import { Body, Controller, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists, sql } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
+import { alias, unionAll } from "drizzle-orm/pg-core";
 import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, simpleInvoicesTable } from "@dara/database";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 const ADVANCE_NOTE = "إيجار مدفوع مقدماً";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseIdList } from "../../common/pagination";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -308,6 +308,30 @@ class PaymentsController {
   /**
    * All collections (money actually received) across the account — powers the
    * Collections (التحصيل) tab. Paged, searchable by receipt/tenant/contract.
+   *
+   * Two sources make up one list:
+   *
+   *   1. `payment_collections` — money received against an installment. This
+   *      also covers invoices that were linked to an installment.
+   *   2. Confirmed invoices with NO installment behind them ("free" invoices,
+   *      e.g. a collected commission) — real money that produces no collection
+   *      row, so section 1 cannot see it. Surfaced with a negative id so it
+   *      cannot collide with a collection id.
+   *
+   * Both are unioned, grouped and paged BY THE DATABASE. They used to be two
+   * unbounded SELECTs merged, grouped, sorted and sliced in JavaScript: the
+   * filters were already in SQL, but the whole matching set had to be
+   * materialised in the API process to produce one page of 25 and a total. On
+   * a busy account that is every collection it has ever recorded, fetched to
+   * answer a question about the newest twenty-five.
+   *
+   * The grouping is the reason this cannot be a plain paged query. An invoice
+   * covering rent plus fees is collected as one `payment_collections` row per
+   * installment, all sharing one invoice and one receipt voucher — but the
+   * user issued ONE invoice and ONE voucher, so the tab shows ONE row with the
+   * combined amount. That collapse is now `GROUP BY` on the same key the
+   * JavaScript used, which is what makes `total` (the count of GROUPS, not of
+   * rows) correct.
    */
   @Get("collections-all")
   @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW)
@@ -317,13 +341,9 @@ class PaymentsController {
     const s = q.search ? `%${q.search}%` : null;
     // Optional landlord/property/unit filter — resolved to contract ids by the
     // frontend and passed through here.
-    const contractIds: number[] | undefined =
-      typeof rawQuery?.contractIds === "string" && rawQuery.contractIds.trim()
-        ? rawQuery.contractIds.split(",").map((x: string) => parseInt(x, 10)).filter((n: number) => Number.isFinite(n))
-        : undefined;
+    const contractIds = parseIdList(rawQuery?.contractIds);
 
-    // 1. Real collections (money received against installments — this also
-    //    covers invoices that were linked to an installment).
+    // ── Source 1: real collections ────────────────────────────────────────
     const collConds: any[] = [eq(paymentCollectionsTable.userId, uid)];
     if (s) collConds.push(or(ilike(paymentCollectionsTable.receiptNumber, s), ilike(contractsTable.tenantName, s), ilike(contractsTable.contractNumber, s), ilike(simpleInvoicesTable.number, s)));
     // Match the payment's contract OR the invoice's contract, so invoice-only
@@ -333,14 +353,14 @@ class PaymentsController {
     // Legacy deposit collections (on a deposit payment row) are not revenue —
     // exclude them; the deposit shows once, as its receipt voucher (section 2).
     collConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
-    // Advance/prepaid rent IS real money received — show it as its own collection
+    // Advance/prepaid rent IS real money received — it keeps its own collection
     // row (it carries its own receipt-voucher number). When the rent invoice is
     // later collected, the remaining balance produces a second voucher, so an
     // advance-paid rent shows two receipt vouchers (advance + remainder).
-    // For invoice-only collections (no installment, e.g. a collected commission
-    // invoice) the contract/tenant come from the invoice, not the payment.
+    // For invoice-only collections the contract/tenant come from the invoice,
+    // not the payment.
     const invContract = alias(contractsTable, "inv_contract");
-    const collections = await this.db
+    const collectionsQ = this.db
       .select({
         id: paymentCollectionsTable.id,
         paymentId: paymentCollectionsTable.paymentId,
@@ -351,14 +371,14 @@ class PaymentsController {
         attachmentKey: paymentCollectionsTable.attachmentKey,
         notes: paymentCollectionsTable.notes,
         createdAt: paymentCollectionsTable.createdAt,
-        contractId: paymentsTable.contractId,
-        contractNumber: contractsTable.contractNumber,
-        tenantName: contractsTable.tenantName,
+        contractId: sql<number | null>`coalesce(${paymentsTable.contractId}, ${simpleInvoicesTable.contractId})`.as("contract_id"),
+        contractNumber: sql<string | null>`coalesce(${contractsTable.contractNumber}, ${invContract.contractNumber})`.as("contract_number"),
+        tenantName: sql<string | null>`coalesce(${contractsTable.tenantName}, ${simpleInvoicesTable.tenantName})`.as("tenant_name"),
         invoiceId: paymentCollectionsTable.invoiceId,
         invoiceNumber: simpleInvoicesTable.number,
-        invContractId: simpleInvoicesTable.contractId,
-        invContractNumber: invContract.contractNumber,
-        invTenantName: simpleInvoicesTable.tenantName,
+        // The key the list is ordered by: creation time, falling back to the
+        // collection date. Mirrors what the JavaScript sort used to do.
+        sortAt: sql<Date | null>`coalesce(${paymentCollectionsTable.createdAt}, ${paymentCollectionsTable.collectedDate}::timestamptz)`.as("sort_at"),
       })
       .from(paymentCollectionsTable)
       .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
@@ -367,9 +387,7 @@ class PaymentsController {
       .leftJoin(invContract, eq(simpleInvoicesTable.contractId, invContract.id))
       .where(and(...collConds));
 
-    // 2. Confirmed invoices NOT linked to an installment (free invoices) —
-    //    surfaced as collection entries so every confirmed invoice's money
-    //    shows in the Collections tab with its chosen method.
+    // ── Source 2: confirmed invoices with no installment ──────────────────
     const invConds: any[] = [
       eq(simpleInvoicesTable.userId, uid),
       eq(simpleInvoicesTable.status, "confirmed"),
@@ -394,82 +412,89 @@ class PaymentsController {
       this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
         .where(eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id)),
     ));
-    const freeInvoices = await this.db
+    const freeInvoicesQ = this.db
       .select({
-        id: simpleInvoicesTable.id,
+        // Negative id-space avoids collision with collection ids.
+        id: sql<number>`-${simpleInvoicesTable.id}`.as("id"),
+        paymentId: sql<number | null>`null::integer`.as("payment_id"),
         amount: simpleInvoicesTable.total,
         collectedDate: simpleInvoicesTable.paidDate,
         method: simpleInvoicesTable.paymentMethod,
         receiptNumber: simpleInvoicesTable.receiptNumber,
         attachmentKey: simpleInvoicesTable.attachmentKey,
-        number: simpleInvoicesTable.number,
-        tenantName: simpleInvoicesTable.tenantName,
+        notes: simpleInvoicesTable.number,
         createdAt: simpleInvoicesTable.confirmedAt,
         contractId: simpleInvoicesTable.contractId,
         contractNumber: contractsTable.contractNumber,
+        tenantName: simpleInvoicesTable.tenantName,
         invoiceId: simpleInvoicesTable.id,
+        invoiceNumber: simpleInvoicesTable.number,
+        sortAt: sql<Date | null>`coalesce(${simpleInvoicesTable.confirmedAt}, ${simpleInvoicesTable.paidDate}::timestamptz)`.as("sort_at"),
       })
       .from(simpleInvoicesTable)
       .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id))
       .where(and(...invConds));
 
-    // Unify both sources into one collection shape.
-    const merged = [
-      ...collections.map((c) => ({
-        ...c,
-        // Fall back to the invoice's contract/tenant for invoice-only collections.
-        contractId: c.contractId ?? c.invContractId ?? null,
-        contractNumber: c.contractNumber ?? c.invContractNumber ?? null,
-        tenantName: c.tenantName ?? c.invTenantName ?? null,
-      })),
-      ...freeInvoices.map((iv) => ({
-        id: -iv.id, // negative id-space avoids collision with collection ids
-        paymentId: null as number | null,
-        amount: iv.amount,
-        collectedDate: iv.collectedDate,
-        method: iv.method,
-        receiptNumber: iv.receiptNumber,
-        attachmentKey: iv.attachmentKey,
-        notes: iv.number,
-        createdAt: iv.createdAt as any,
-        contractId: iv.contractId,
-        contractNumber: iv.contractNumber,
-        tenantName: iv.tenantName,
-        invoiceId: iv.invoiceId,
-        invoiceNumber: iv.number,
-      })),
-    ];
-    // Collapse multi-installment collections: an invoice with rent + fees is
-    // collected across one payment_collection per installment, all sharing the
-    // same invoice and receipt voucher. Since the user issued ONE invoice (and
-    // ONE voucher), show ONE collection row with the combined amount. Rows
-    // without both an invoice and a receipt number stay individual.
-    const groups = new Map<string, typeof merged[number]>();
-    for (const r of merged) {
-      const key = r.invoiceId != null && r.receiptNumber ? `inv:${r.invoiceId}|rv:${r.receiptNumber}` : `row:${r.id}`;
-      const existing = groups.get(key);
-      if (!existing) {
-        groups.set(key, { ...r });
-      } else {
-        existing.amount = round2(Number(existing.amount ?? 0) + Number(r.amount ?? 0)).toFixed(2) as any;
-        if (!existing.attachmentKey && r.attachmentKey) existing.attachmentKey = r.attachmentKey;
-      }
-    }
-    const grouped = Array.from(groups.values());
+    const merged = unionAll(collectionsQ, freeInvoicesQ).as("collections_union");
 
-    // Newest first by creation time.
-    grouped.sort((a, b) => {
-      const da = new Date(a.createdAt || a.collectedDate || 0).getTime();
-      const db = new Date(b.createdAt || b.collectedDate || 0).getTime();
-      return q.order === "asc" ? da - db : db - da;
-    });
+    // One row per invoice+voucher pair; anything without both stays on its own.
+    // `nullif(..., '')` because an empty receipt number is falsy in JavaScript
+    // but not NULL in SQL — without it, every row that has an invoice and a
+    // blank voucher number would collapse into a single bogus group.
+    const groupKey = sql`case
+      when ${merged.invoiceId} is not null and nullif(${merged.receiptNumber}, '') is not null
+        then 'inv:' || ${merged.invoiceId} || '|rv:' || ${merged.receiptNumber}
+      else 'row:' || ${merged.id}
+    end`;
+    const dir = q.order === "asc" ? sql`asc` : sql`desc`;
 
-    const total = grouped.length;
-    const totalCollected = round2(grouped.reduce((acc, r) => acc + Number(r.amount ?? 0), 0));
-    const pageRows = grouped.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
+    const [rows, totalRow, sumRow] = await Promise.all([
+      this.db
+        .select({
+          id: sql<number>`min(${merged.id})`,
+          paymentId: sql<number | null>`min(${merged.paymentId})`,
+          amount: sql<string>`sum(${merged.amount})`,
+          collectedDate: sql<string | null>`max(${merged.collectedDate})`,
+          method: sql<string | null>`max(${merged.method})`,
+          receiptNumber: sql<string | null>`max(${merged.receiptNumber})`,
+          // The evidence attachment can sit on any one of the grouped rows;
+          // `max` ignores NULLs, which is the "first non-null wins" the
+          // JavaScript merge did.
+          attachmentKey: sql<string | null>`max(${merged.attachmentKey})`,
+          notes: sql<string | null>`max(${merged.notes})`,
+          createdAt: sql<Date | null>`max(${merged.createdAt})`,
+          contractId: sql<number | null>`max(${merged.contractId})`,
+          contractNumber: sql<string | null>`max(${merged.contractNumber})`,
+          tenantName: sql<string | null>`max(${merged.tenantName})`,
+          invoiceId: sql<number | null>`max(${merged.invoiceId})`,
+          invoiceNumber: sql<string | null>`max(${merged.invoiceNumber})`,
+        })
+        .from(merged)
+        .groupBy(groupKey)
+        // `min(id)` as the tiebreak — two collections recorded in the same
+        // instant would otherwise order arbitrarily and shuffle between pages.
+        .orderBy(sql`max(${merged.sortAt}) ${dir} nulls last, min(${merged.id}) ${dir}`)
+        .limit(q.pageSize)
+        .offset((q.page - 1) * q.pageSize),
+
+      // `total` counts GROUPS, not union rows — a three-installment invoice is
+      // one line in this list, so counting rows would overstate it.
+      this.db.select({ total: count() }).from(
+        this.db.select({ k: sql`1`.as("k") }).from(merged).groupBy(groupKey).as("groups"),
+      ),
+
+      // Grouping only re-partitions the money, so the collected total is the
+      // sum over the whole filtered union.
+      this.db.select({ amount: sql<string | null>`sum(${merged.amount})` }).from(merged),
+    ]);
+
+    const total = Number(totalRow[0]?.total ?? 0);
     return {
-      data: pageRows, page: q.page, pageSize: q.pageSize, total,
-      stats: { totalCollected, count: total },
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total,
+      stats: { totalCollected: round2(Number(sumRow[0]?.amount ?? 0)), count: total },
     };
   }
 

@@ -3,10 +3,13 @@ import {
   Patch, Post, BadRequestException, ConflictException, UseGuards, Query,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, desc, asc, ilike, or, sql, count } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, desc, asc, gte, ilike, inArray, lte, or, sql, count } from "drizzle-orm";
 import { z } from "zod/v4";
 import { deedsTable, propertiesTable } from "@dara/database";
 import { attachLookupLabels } from "../../common/lookups-resolve";
+import {
+  listQuerySchema as baseListQuerySchema, parseDateBound, parseIdList,
+} from "../../common/pagination";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -56,13 +59,16 @@ type DeedCreateInput = z.infer<typeof deedCreateSchema>;
 
 const deedUpdateSchema = deedCreateSchema.partial();
 
-/** Pagination + search query params shared with the rest of the API. */
-const listQuerySchema = z.object({
-  page:     z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(200).default(20),
-  search:   z.string().trim().optional(),
-  sort:     z.enum(["createdAt", "deedNumber", "deedType"]).default("createdAt"),
-  order:    z.enum(["asc", "desc"]).default("desc"),
+/**
+ * Pagination + search query params, extending the shared schema so `page`,
+ * `pageSize` (and its 25 default / 200 cap) and `order` stay identical to
+ * every other list. This module had its own hand-rolled copy, which is how it
+ * kept a page size of 20 after the shared default moved.
+ *
+ * `sort` is narrowed to the columns this table can actually order by.
+ */
+const listQuerySchema = baseListQuerySchema.extend({
+  sort: z.enum(["createdAt", "deedNumber", "deedType", "issueDate"]).default("createdAt"),
 });
 
 @ApiTags("deeds")
@@ -72,23 +78,54 @@ const listQuerySchema = z.object({
 class DeedsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
+  /**
+   * Deeds, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (deed number / registry
+   * number / issuing authority / owner national ID / notes), `deedType`,
+   * `ownerId`, `hasProperty` (linked to a property or not yet), and a
+   * `from`/`to` window on the issue date.
+   *
+   * Always returns the paginated envelope - this endpoint has never had a bare
+   * array form, and both of its callers (the Deeds tab and the Reports
+   * whole-list walk) read `total`.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.DEEDS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const q = listQuerySchema.parse(rawQuery);
     const owner = scopeId(user);
 
-    const baseWhere = and(eq(deedsTable.userId, owner), isNull(deedsTable.deletedAt));
-    const where = q.search
-      ? and(baseWhere, or(
-          ilike(deedsTable.deedNumber, `%${q.search}%`),
-          ilike(deedsTable.issuingAuthority, `%${q.search}%`),
-          ilike(deedsTable.notes, `%${q.search}%`),
-        ))
-      : baseWhere;
+    const conds: any[] = [eq(deedsTable.userId, owner), isNull(deedsTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(deedsTable.deedNumber, `%${q.search}%`),
+        ilike(deedsTable.registryNumber, `%${q.search}%`),
+        ilike(deedsTable.issuingAuthority, `%${q.search}%`),
+        ilike(deedsTable.ownerNationalId, `%${q.search}%`),
+        ilike(deedsTable.notes, `%${q.search}%`),
+      ));
+    }
+    // `deed_type` is free text ("electronic", "paper", or whatever the user
+    // typed under "Other"), so it is matched verbatim rather than as an enum.
+    const deedTypes = typeof rawQuery?.deedType === "string" && rawQuery.deedType.trim()
+      ? rawQuery.deedType.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (deedTypes?.length) conds.push(inArray(deedsTable.deedType, deedTypes));
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds) conds.push(inArray(deedsTable.ownerId, ownerIds));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(deedsTable.issueDate, new Date(`${from}T00:00:00.000Z`)));
+    if (to) conds.push(lte(deedsTable.issueDate, new Date(`${to}T23:59:59.999Z`)));
+    // "Not yet attached to a property" is a real worklist. Expressed against
+    // the joined property so it uses the same 1:1 link the rows show.
+    if (rawQuery?.hasProperty === "1" || rawQuery?.hasProperty === "true") conds.push(isNotNull(propertiesTable.id));
+    else if (rawQuery?.hasProperty === "0" || rawQuery?.hasProperty === "false") conds.push(isNull(propertiesTable.id));
+    const where = and(...conds);
 
     const sortCol = q.sort === "deedNumber" ? deedsTable.deedNumber
                   : q.sort === "deedType"   ? deedsTable.deedType
+                  : q.sort === "issueDate"  ? deedsTable.issueDate
                   : deedsTable.createdAt;
     const sortFn = q.order === "asc" ? asc : desc;
 
@@ -116,11 +153,20 @@ class DeedsController {
       .from(deedsTable)
       .leftJoin(propertiesTable, and(eq(propertiesTable.deedId, deedsTable.id), isNull(propertiesTable.deletedAt)))
       .where(where)
-      .orderBy(sortFn(sortCol))
+      // `id` tiebreak - every sortable column here is non-unique (two deeds can
+      // share an issue date, a type, even a number across accounts), and paging
+      // on a non-unique key alone repeats one row while dropping another.
+      .orderBy(sortFn(sortCol), sortFn(deedsTable.id))
       .limit(q.pageSize)
       .offset((q.page - 1) * q.pageSize),
 
-      this.db.select({ total: count() }).from(deedsTable).where(where),
+      // The count repeats the property join because `hasProperty` filters on
+      // it - counting the bare table would report a total the filter never
+      // returns.
+      this.db.select({ total: count() })
+        .from(deedsTable)
+        .leftJoin(propertiesTable, and(eq(propertiesTable.deedId, deedsTable.id), isNull(propertiesTable.deletedAt)))
+        .where(where),
     ]);
 
     return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(total) };

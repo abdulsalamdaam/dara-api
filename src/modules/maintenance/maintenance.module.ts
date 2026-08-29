@@ -1,8 +1,10 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, asc, desc, eq, isNull, or, ilike, count } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, lte, or, ilike, count, inArray } from "drizzle-orm";
 import { maintenanceRequestsTable, contractsTable, contractUnitsTable, unitsTable, propertiesTable, tenantsTable } from "@dara/database";
-import { listQuerySchema } from "../../common/pagination";
+import {
+  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+} from "../../common/pagination";
 import { notifyTenant } from "../../common/notify";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 
@@ -32,17 +34,53 @@ class MaintenanceController {
     private readonly email: EmailService,
   ) {}
 
+  /**
+   * Maintenance tickets, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (unit label / description /
+   * supplier / tenant name), `status` (one or a comma-separated set),
+   * `priority`, `tenantId`, `contractId`, and a `from`/`to` window on when the
+   * ticket was raised.
+   *
+   * The board renders one column per status and used to build them with
+   * `requests.filter(...)` over the whole table. `stats.byStatus` returns those
+   * counts from the database, so a column badge stays right once this list is
+   * paged - and a `status=` request now fetches only that column.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.MAINTENANCE_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
-    const baseWhere = and(eq(maintenanceRequestsTable.userId, scopeId(user)), isNull(maintenanceRequestsTable.deletedAt));
-    const where = q.search ? and(baseWhere, or(
-      ilike(maintenanceRequestsTable.unitLabel, `%${q.search}%`),
-      ilike(maintenanceRequestsTable.description, `%${q.search}%`),
-      ilike(maintenanceRequestsTable.supplier, `%${q.search}%`),
-    )) : baseWhere;
+    const conds: any[] = [
+      eq(maintenanceRequestsTable.userId, scopeId(user)),
+      isNull(maintenanceRequestsTable.deletedAt),
+    ];
+    if (q.search) {
+      conds.push(or(
+        ilike(maintenanceRequestsTable.unitLabel, `%${q.search}%`),
+        ilike(maintenanceRequestsTable.description, `%${q.search}%`),
+        ilike(maintenanceRequestsTable.supplier, `%${q.search}%`),
+        ilike(tenantsTable.name, `%${q.search}%`),
+      ));
+    }
+    const statuses = parseEnumList(rawQuery?.status, ["open", "in_progress", "pending_approval", "completed"] as const);
+    const priorities = parseEnumList(rawQuery?.priority, ["low", "medium", "high"] as const);
+    if (priorities) conds.push(inArray(maintenanceRequestsTable.priority, priorities));
+    const tenantIds = parseIdList(rawQuery?.tenantId) ?? parseIdList(rawQuery?.tenantIds);
+    if (tenantIds) conds.push(inArray(maintenanceRequestsTable.tenantId, tenantIds));
+    const contractIds = parseIdList(rawQuery?.contractId) ?? parseIdList(rawQuery?.contractIds);
+    if (contractIds) conds.push(inArray(maintenanceRequestsTable.contractId, contractIds));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(maintenanceRequestsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    // `to` is inclusive of the whole day, so a same-day window returns that day.
+    if (to) conds.push(lte(maintenanceRequestsTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
+    // Every filter EXCEPT status - the board's column badges are the per-status
+    // counts, and fetching one column must not blank the other columns' badges.
+    const statsWhere = and(...conds);
+    if (statuses) conds.push(inArray(maintenanceRequestsTable.status, statuses));
+    const where = and(...conds);
 
     // Return tickets owned by the landlord, joined with tenant and unit info
     // for richer display in the dashboard.
@@ -68,18 +106,43 @@ class MaintenanceController {
       .leftJoin(tenantsTable, eq(maintenanceRequestsTable.tenantId, tenantsTable.id))
       .leftJoin(contractsTable, eq(maintenanceRequestsTable.contractId, contractsTable.id))
       .where(where)
-      .orderBy((q.order === "asc" ? asc : desc)(maintenanceRequestsTable.createdAt))
+      // `id` tiebreak so a page boundary inside a batch of tickets raised in
+      // the same instant cannot repeat one and drop another.
+      .orderBy(
+        (q.order === "asc" ? asc : desc)(maintenanceRequestsTable.createdAt),
+        (q.order === "asc" ? asc : desc)(maintenanceRequestsTable.id),
+      )
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow] = await Promise.all([
+    const [rows, totalRow, statusRows] = await Promise.all([
       rowsQ,
+      // Both aggregates repeat the tenants join, because `search` reaches the
+      // tenant name through it - counting the bare table would report a total
+      // the filter never returns.
       usePaginated
-        ? this.db.select({ total: count() }).from(maintenanceRequestsTable).where(where)
+        ? this.db.select({ total: count() }).from(maintenanceRequestsTable)
+            .leftJoin(tenantsTable, eq(maintenanceRequestsTable.tenantId, tenantsTable.id))
+            .where(where)
         : Promise.resolve([{ total: 0 }]),
+      usePaginated
+        ? this.db.select({ status: maintenanceRequestsTable.status, cnt: count() })
+            .from(maintenanceRequestsTable)
+            .leftJoin(tenantsTable, eq(maintenanceRequestsTable.tenantId, tenantsTable.id))
+            .where(statsWhere)
+            .groupBy(maintenanceRequestsTable.status)
+        : Promise.resolve([]),
     ]);
     if (!usePaginated) return rows;
-    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+    const byStatus: Record<string, number> = {};
+    for (const r of statusRows as Array<{ status: string; cnt: number }>) byStatus[r.status] = Number(r.cnt);
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { byStatus },
+    };
   }
 
   /**

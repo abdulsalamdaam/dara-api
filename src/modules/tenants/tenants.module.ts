@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, or, ilike, count, asc, desc } from "drizzle-orm";
+import { and, eq, isNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
 import { tenantsTable, contractsTable, simpleInvoicesTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -12,7 +12,7 @@ import { assertNationalAddress } from "../../common/national-address";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyMoney,
@@ -134,37 +134,76 @@ class TenantsController {
     private readonly email: EmailService,
   ) {}
 
+  /**
+   * Tenants, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (name / national ID / phone
+   * / email / tax number), `type` (individual|company), `status`, `isDraft`.
+   *
+   * `type` deliberately stays OUT of the pagination trigger: a caller that
+   * sends only `?type=company` has always received a bare array and still does.
+   * The tab's three headline cards - total, individuals, companies - come back
+   * as `stats.byType`, counted by the database; they were being derived from
+   * the fetched array, which stops being the whole truth the moment this list
+   * is paged.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.TENANTS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
-    const type: string | undefined = rawQuery?.type;
 
-    const baseCond = [eq(tenantsTable.userId, owner), isNull(tenantsTable.deletedAt)];
-    if (type === "individual" || type === "company") baseCond.push(eq(tenantsTable.type, type));
-    const searchCond = q.search ? [or(
-      ilike(tenantsTable.name, `%${q.search}%`),
-      ilike(tenantsTable.nationalId, `%${q.search}%`),
-      ilike(tenantsTable.phone, `%${q.search}%`),
-      ilike(tenantsTable.email, `%${q.search}%`),
-    )] : [];
-    const where = and(...baseCond, ...searchCond);
+    const conds: any[] = [eq(tenantsTable.userId, owner), isNull(tenantsTable.deletedAt)];
+    const types = parseEnumList(rawQuery?.type, ["individual", "company"] as const);
+    const statuses = parseEnumList(rawQuery?.status, ["active", "inactive"] as const);
+    if (statuses) conds.push(inArray(tenantsTable.status, statuses));
+    if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(tenantsTable.isDraft, true));
+    else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(tenantsTable.isDraft, false));
+    if (q.search) {
+      conds.push(or(
+        ilike(tenantsTable.name, `%${q.search}%`),
+        ilike(tenantsTable.shortName, `%${q.search}%`),
+        ilike(tenantsTable.nationalId, `%${q.search}%`),
+        ilike(tenantsTable.phone, `%${q.search}%`),
+        ilike(tenantsTable.email, `%${q.search}%`),
+        ilike(tenantsTable.taxNumber, `%${q.search}%`),
+      ));
+    }
+    // Every filter EXCEPT type - the three cards (total / individuals /
+    // companies) must keep their counts while one type is selected.
+    const statsWhere = and(...conds);
+    if (types) conds.push(inArray(tenantsTable.type, types));
+    const where = and(...conds);
 
     const sortFn = q.order === "asc" ? asc : desc;
-    let rowsQ = this.db.select().from(tenantsTable).where(where).orderBy(sortFn(tenantsTable.createdAt)).$dynamic();
+    // `id` tiebreak: `created_at` is not unique, and paging a list ordered on a
+    // non-unique key alone can show one tenant twice and skip another.
+    let rowsQ = this.db.select().from(tenantsTable).where(where)
+      .orderBy(sortFn(tenantsTable.createdAt), sortFn(tenantsTable.id)).$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow] = await Promise.all([
+    const [rows, totalRow, typeRows] = await Promise.all([
       rowsQ,
       usePaginated
         ? this.db.select({ total: count() }).from(tenantsTable).where(where)
         : Promise.resolve([{ total: 0 }]),
+      usePaginated
+        ? this.db.select({ type: tenantsTable.type, cnt: count() })
+            .from(tenantsTable).where(statsWhere).groupBy(tenantsTable.type)
+        : Promise.resolve([]),
     ]);
     await attachTenantNationality(this.db, rows as any[]);
     if (!usePaginated) return rows;
-    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+    const byType: Record<string, number> = {};
+    for (const r of typeRows as Array<{ type: string; cnt: number }>) byType[r.type] = Number(r.cnt);
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { byType },
+    };
   }
 
   @Post()

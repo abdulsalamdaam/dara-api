@@ -3,7 +3,7 @@ import {
   BadRequestException, ConflictException, StreamableFile, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql } from "drizzle-orm";
+import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql, isNotNull} from "drizzle-orm";
 import {
   simpleInvoicesTable, paymentsTable, paymentCollectionsTable, contractsTable,
   contractUnitsTable, unitsTable, propertiesTable, companiesTable, usersTable,
@@ -14,7 +14,7 @@ import type { InvoiceLineInput } from "../invoice/services/invoice-builder.servi
 import { PdfA3Service } from "../invoice/services/pdfa3.service";
 import { UploadsService } from "../uploads/uploads.service";
 import { UploadsModule } from "../uploads/uploads.module";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, wantsPagination, pageBounds} from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -23,7 +23,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
+import { checkInvoiceReadiness, readinessMessage, type InvoiceReadiness } from "../../common/invoice-readiness";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -291,6 +291,24 @@ class SimpleInvoicesController {
     const notDepositCond = or(isNull(simpleInvoicesTable.kind), ne(simpleInvoicesTable.kind, "deposit"));
     if (excludeVouchers) conds.push(notVoucherCond as any);
     else if (excludeDeposit) conds.push(notDepositCond as any);
+
+    // Filters the portal's finance tabs need. Each of these used to be decided
+    // in the browser over a fixed page of rows, so the list and its badge were
+    // both wrong past that page — "awaiting collection" in particular was a ten
+    // page walk that still showed "N+".
+    const flag = (v: unknown) => v === true || v === "true";
+    // Approved but no money against it yet.
+    if (flag(rawQuery?.awaitingCollection)) {
+      conds.push(eq(simpleInvoicesTable.status, "confirmed") as any);
+      conds.push(isNull(simpleInvoicesTable.paidDate) as any);
+      conds.push(isNull(simpleInvoicesTable.receiptNumber) as any);
+    }
+    // Money actually received against it.
+    if (flag(rawQuery?.collected)) conds.push(isNotNull(simpleInvoicesTable.paidDate) as any);
+    // Documents with no installment behind them — a commission or a one-off.
+    if (flag(rawQuery?.withoutInstallment)) conds.push(isNull(simpleInvoicesTable.paymentId) as any);
+    // Carries a receipt voucher number.
+    if (flag(rawQuery?.hasReceipt)) conds.push(isNotNull(simpleInvoicesTable.receiptNumber) as any);
     if (q.search) {
       conds.push(or(
         ilike(simpleInvoicesTable.number, `%${q.search}%`),
@@ -434,7 +452,7 @@ class SimpleInvoicesController {
    */
   @Get("customers")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async customers(@CurrentUser() user: AuthUser) {
+  async customers(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const rows = await this.db
       .select({
         id: simpleInvoicesTable.id,
@@ -519,12 +537,39 @@ class SimpleInvoicesController {
       });
     }
 
-    return [...byKey.values()]
+    let list = [...byKey.values()]
       .map((c) => ({ ...c, totalAmount: Math.round((c.totalAmount + Number.EPSILON) * 100) / 100 }))
       .sort((a, b) => (b.lastIssueDate ?? "").localeCompare(a.lastIssueDate ?? "") || b.invoiceCount - a.invoiceCount);
+
+    // Search and paging happen after the grouping, not before it: a customer is
+    // only a customer once their invoices have been folded together by the
+    // identifier precedence above, so there is nothing to page until then.
+    // The account's invoices are still all read to build that — the same cost
+    // as before this endpoint took any parameters.
+    const search = typeof rawQuery?.search === "string" ? rawQuery.search.trim().toLowerCase() : "";
+    if (search) {
+      list = list.filter((c) =>
+        [c.name, c.vatNumber, c.phone, c.email, c.city]
+          .some((v) => v != null && String(v).toLowerCase().includes(search)));
+    }
+    if (!wantsPagination(rawQuery)) return list;
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const { limit, offset } = pageBounds(q);
+    return {
+      data: list.slice(offset, offset + limit),
+      page: q.page, pageSize: q.pageSize, total: list.length,
+    };
   }
 
   /**
+   * GET /simple-invoices/readiness — "could this contract's invoice be approved
+   * right now?", answered without creating anything. Nothing refuses at create
+   * time any more (see create()), so this is how the user learns BEFORE filling
+   * the form that the document they are about to save will not be approvable
+   * until the landlord links ZATCA / a VAT number or address is filled in. The
+   * create response repeats the same object for the after-the-fact advisory,
+   * and approve() is where it finally blocks.
+   *
    * NOTE: every STATIC path under this controller must be declared ABOVE
    * `@Get(":id")` — Nest matches routes in declaration order, so ":id" claims
    * anything that reaches it first. `readiness` sat below it and every call
@@ -603,9 +648,11 @@ class SimpleInvoicesController {
   }
 
   /**
-   * Can an invoice be issued for this contract? The UI calls this when the
-   * Create Invoice screen opens so it can block the button and show exactly
-   * what is missing, instead of letting the user fill a form and fail on save.
+   * Create a billing document. It is always saved as a DRAFT and creation never
+   * refuses on invoice readiness — see the note further down, and the gate in
+   * approve(). Everything else the request has to satisfy (line-item totals,
+   * non-negative figures, a resolvable credit/debit reference, a known `kind`)
+   * is unchanged and still enforced here.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -713,29 +760,31 @@ class SimpleInvoicesController {
       }
     }
 
-    // Refuse to issue a tax invoice against parties that are not invoice-ready
-    // (no VAT number, no email, landlord not onboarded with ZATCA…). Receipt
-    // vouchers and commission docs are exempt — a voucher is not a tax invoice,
-    // and the deposit diversion above has already returned by this point.
+    // Readiness is NOT a create-time gate. Saving a draft is bookkeeping, not
+    // issuance: the landlord may not have linked ZATCA yet, a party may still be
+    // missing a VAT number or a national address, and none of that is a reason
+    // to refuse to WRITE the document down. The gate now lives on the action
+    // that actually issues it — approve() — so it is evaluated against the row
+    // as it stands at that moment, regardless of when the row was created.
+    //
+    // What survives here is the ADVISORY: the same readiness object is computed
+    // (best-effort) and returned alongside the created document, so the UI can
+    // say "saved, but it cannot be approved until …" without a second round
+    // trip. It never changes the status code and never refuses — a failure to
+    // compute it is silently a null.
+    //
+    // The `confirmations` acknowledgement (tenant with no VAT number) rides
+    // along in that advisory too. It is no longer enforced at create — nothing
+    // is — and it is not enforced at approve either, because the shipped web
+    // client posts an empty approve body and would otherwise be unable to
+    // approve any residential invoice. It stays visible in the readiness
+    // payload both endpoints return.
+    let readiness: InvoiceReadiness | null = null;
     if (type === "invoice" && !isTaxExemptKind(docKind)) {
-      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
-      // A tenant with no VAT number needs an explicit acknowledgement — the
-      // client ticks a box rather than the invoice quietly going out without
-      // one. Enforced here so the check cannot be skipped by calling the API
-      // directly.
-      if (readiness.confirmations.length > 0 && !body?.confirmations?.tenantNoVat) {
-        throw new BadRequestException({
-          error: "invoice_needs_confirmation",
-          message: "يرجى تأكيد أن المستأجر لا يملك رقماً ضريبياً قبل إصدار الفاتورة",
-          readiness,
-        });
-      }
-      if (!readiness.ok) {
-        throw new BadRequestException({
-          error: "invoice_not_ready",
-          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
-          readiness,
-        });
+      try {
+        readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
+      } catch {
+        readiness = null; // advisory only — never fails the save
       }
     }
 
@@ -787,7 +836,11 @@ class SimpleInvoicesController {
           eq(paymentCollectionsTable.userId, scopeId(user)),
         ));
     }
-    return doc;
+    // Non-blocking advisory: null for a document the gate does not apply to,
+    // `{ ok: true, … }` for one that is ready, and the full blocker list for one
+    // that is not — the same shape GET /simple-invoices/readiness returns, so
+    // the UI renders it with the same panel.
+    return { ...doc, readiness };
   }
 
   /**
@@ -1121,16 +1174,44 @@ class SimpleInvoicesController {
     // can be edited after it is created (and PATCH used to accept a bare
     // `total`), so a figure that create would never have taken could still walk
     // in through the edit and go live at approval.
-    //
-    // Deliberately NOT re-run: the invoice-readiness gate. It is answered with
-    // an explicit `confirmations` acknowledgement the caller sends at create
-    // time, and approve carries no body — re-checking it here would fail
-    // approvals whose acknowledgement was already given.
     {
       const items = normalizeItems(doc.items);
       const total = round2(Number(doc.total));
       assertNonNegative(items, total);
       assertTotalMatchesItems(items, total);
+    }
+
+    // THE invoice-readiness gate. It used to sit on create, which refused to
+    // even save a draft for a landlord who had not linked ZATCA yet; it belongs
+    // here, on the action that actually issues the document and mirrors it to
+    // ZATCA. Consequences of it living on the action rather than on the row:
+    //
+    //  · a document created BEFORE this moved — while the landlord was still
+    //    unlinked — is checked exactly like one created after it, because the
+    //    check reads the records as they stand now, not as they stood then;
+    //  · fixing the VAT number / national address / ZATCA onboarding unblocks
+    //    every draft already sitting in the list, with nothing to re-create;
+    //  · a document with no contract has no parties to validate against and
+    //    checkInvoiceReadiness returns ok for it — approval is unaffected.
+    //
+    // Scope matches what create refused: tax invoices only. Receipt vouchers,
+    // deposits and commission invoices are not tax invoices (isTaxExemptKind),
+    // and a credit/debit note corrects an invoice that was already issued — it
+    // must stay issuable, and its ZATCA mirror is best-effort either way.
+    //
+    // The refusal names EVERY blocker (readinessMessage joins them all), and
+    // carries the full readiness payload under the same `invoice_not_ready`
+    // code the create path used, so the client renders the same panel with the
+    // same deep links — only now on approve.
+    if (doc.type === "invoice" && !isTaxExemptKind(doc.kind)) {
+      const readiness = await checkInvoiceReadiness(this.db, uid, doc.contractId ?? null);
+      if (!readiness.ok) {
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن اعتماد الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
+        });
+      }
     }
 
     const isNote = doc.type === "credit" || doc.type === "debit";

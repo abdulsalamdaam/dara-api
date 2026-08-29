@@ -7,13 +7,14 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import bcrypt from "bcryptjs";
-import { eq, and, asc, isNotNull, isNull, or } from "drizzle-orm";
+import { eq, and, asc, count, desc, ilike, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { rolesTable, usersTable, type User } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EmailService } from "../email/email.service";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage, UNLIMITED } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
+import { listQuerySchema, wantsPagination } from "../../common/pagination";
 
 /**
  * What a team endpoint may hand back about a user row. Beyond the password
@@ -85,14 +86,53 @@ export class TeamService {
     return r?.id ?? null;
   }
 
-  async listEmployees(actorId: number) {
+  /**
+   * The account's team: the owner plus every employee under them.
+   *
+   * `search` (name / email / phone) and `role` (one or a comma-separated set of
+   * role keys) and `isActive` are applied in SQL. The settings screen filtered
+   * both in the browser over the whole team, which is fine for five people and
+   * wrong for a managing office with two hundred - and it made the "active"
+   * tile count only the employees that had been fetched.
+   *
+   * Pagination is opt-in via `page`/`pageSize`/`paginated`; without them the
+   * bare array the settings screen already reads is returned unchanged.
+   */
+  async listEmployees(actorId: number, rawQuery?: any) {
     const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [
+      // The account holder is part of the team, not outside it: on a company
+      // account they ARE the General Manager, and a team screen that omitted
+      // them showed an org with no one at the top. Flagged as `isOwner` below
+      // so the UI can render them without the remove/downgrade actions - the
+      // service refuses those anyway, since an owner has no ownerUserId to
+      // match.
+      or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+      isNull(usersTable.deletedAt),
+    ];
+    if (q.search) {
+      conds.push(or(
+        ilike(usersTable.name, `%${q.search}%`),
+        ilike(usersTable.email, `%${q.search}%`),
+        ilike(usersTable.phone, `%${q.search}%`),
+      ));
+    }
+    const roleKeys = typeof rawQuery?.role === "string" && rawQuery.role.trim() && rawQuery.role !== "all"
+      ? rawQuery.role.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (roleKeys?.length) conds.push(inArray(rolesTable.key, roleKeys));
+    if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
+    else if (rawQuery?.isActive === "0" || rawQuery?.isActive === "false") conds.push(eq(usersTable.isActive, false));
+    const where = and(...conds);
+
     // Join the role so the UI gets the live role key, label and the
     // effective permission list (permissions live on the role row).
-    const rows = await this.db
+    let rowsQ = this.db
       .select({
         id: usersTable.id,
         email: usersTable.email,
@@ -112,22 +152,51 @@ export class TeamService {
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      // The account holder is part of the team, not outside it: on a company
-      // account they ARE the General Manager, and a team screen that omitted
-      // them showed an org with no one at the top. Flagged as `isOwner` so the
-      // UI can render them without the remove/downgrade actions — the service
-      // refuses those anyway, since an owner has no ownerUserId to match.
-      .where(and(
-        or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
-        isNull(usersTable.deletedAt),
-      ))
-      .orderBy(asc(usersTable.createdAt));
+      .where(where)
+      // Owner first, then oldest employee first. This was a JS sort after the
+      // fetch - which cannot survive paging, since page 2 would have sorted its
+      // own slice and put a second "owner" at its top. Expressed in SQL as a
+      // leading boolean key instead: `owner_user_id IS NULL` is TRUE for the
+      // account holder, and DESC puts TRUE first. `id` is the final tiebreak on
+      // a non-unique `created_at`.
+      .orderBy(
+        desc(sql`${usersTable.ownerUserId} is null`),
+        asc(usersTable.createdAt),
+        asc(usersTable.id),
+      )
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    // Owner first. Not done in SQL because the owner's ownerUserId is NULL and
-    // Postgres sorts NULLs last in ASC, which would bury them at the bottom.
-    return rows
-      .map((r) => ({ ...r, isOwner: r.ownerUserId == null }))
-      .sort((a, b) => Number(b.isOwner) - Number(a.isOwner));
+    const [rows, totalRow, activeRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+      // "Active members" counted by the database over the same team, minus the
+      // isActive filter itself so the tile keeps its number while the list is
+      // narrowed to one state.
+      paged ? this.db.select({ isActive: usersTable.isActive, cnt: count() }).from(usersTable)
+        .where(and(
+          or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+          isNull(usersTable.deletedAt),
+        ))
+        .groupBy(usersTable.isActive) : Promise.resolve([]),
+    ]);
+
+    const data = rows.map((r) => ({ ...r, isOwner: r.ownerUserId == null }));
+    if (!paged) return data;
+    let active = 0;
+    let inactive = 0;
+    for (const r of activeRow as Array<{ isActive: boolean; cnt: number }>) {
+      if (r.isActive) active = Number(r.cnt); else inactive = Number(r.cnt);
+    }
+    return {
+      data,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { active, inactive },
+    };
   }
 
   async createEmployee(

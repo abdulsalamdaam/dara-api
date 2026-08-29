@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -32,9 +32,14 @@ class UpdateEmployeeDto {
 export class TeamController {
   constructor(private readonly team: TeamService) {}
 
+  /**
+   * The team list. `search`, `role` and `isActive` filter in SQL; `page` /
+   * `pageSize` / `paginated` switch on the `{ data, page, pageSize, total }`
+   * envelope. Sending none of them returns the bare array as before.
+   */
   @Get("employees")
-  list(@CurrentUser() user: AuthUser) {
-    return this.team.listEmployees(user.id);
+  list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    return this.team.listEmployees(user.id, rawQuery);
   }
 
   @Post("employees")

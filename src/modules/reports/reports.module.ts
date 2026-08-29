@@ -1,8 +1,8 @@
 import {
-  Body, Controller, Delete, Get, Inject, Module, Param, Post, BadRequestException, UseGuards,
+  Body, Controller, Delete, Get, Inject, Module, Param, Post, Query, BadRequestException, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, or, sum } from "drizzle-orm";
 import {
   contractsTable, contractUnitsTable, unitsTable, propertiesTable, ownersTable, tenantsTable,
   paymentsTable, paymentCollectionsTable, simpleInvoicesTable, maintenanceRequestsTable,
@@ -15,6 +15,9 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import {
+  listQuerySchema, parseDateBound, parseIdList, wantsPagination,
+} from "../../common/pagination";
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const DEPOSIT_DESC = "تأمين (وديعة)";
@@ -276,11 +279,69 @@ class ReportsController {
   }
 
   /* ── Expenses CRUD ── */
+  /**
+   * Expenses booked against properties.
+   *
+   * This list had no ORDER BY at all, which means Postgres was free to return
+   * the rows in any order it liked - fine while the whole table came back in
+   * one response, and the first thing that breaks under paging, since "page 2"
+   * of an unordered query is not a well-defined set of rows.
+   *
+   * Filters, all in SQL: `search` (category / notes), `propertyId`, `ownerId`,
+   * `category`, and a `from`/`to` window on the expense date. `stats.amount` is
+   * the summed total for that filter, so the figure does not depend on how many
+   * rows were fetched. Pagination is opt-in.
+   */
   @Get("expenses")
   @RequirePermissions(PERMISSIONS.EXPENSES_VIEW)
-  async listExpenses(@CurrentUser() user: AuthUser) {
-    return this.db.select().from(expensesTable)
-      .where(and(eq(expensesTable.userId, scopeId(user)), isNull(expensesTable.deletedAt)));
+  async listExpenses(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [eq(expensesTable.userId, scopeId(user)), isNull(expensesTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(expensesTable.category, `%${q.search}%`),
+        ilike(expensesTable.notes, `%${q.search}%`),
+      ));
+    }
+    const propertyIds = parseIdList(rawQuery?.propertyId) ?? parseIdList(rawQuery?.propertyIds);
+    if (propertyIds) conds.push(inArray(expensesTable.propertyId, propertyIds));
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds) conds.push(inArray(expensesTable.ownerId, ownerIds));
+    const categories = typeof rawQuery?.category === "string" && rawQuery.category.trim()
+      ? rawQuery.category.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (categories?.length) conds.push(inArray(expensesTable.category, categories));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(expensesTable.expenseDate, from));
+    if (to) conds.push(lte(expensesTable.expenseDate, to));
+    const where = and(...conds);
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db.select().from(expensesTable).where(where)
+      .orderBy(dir(expensesTable.expenseDate), dir(expensesTable.id)).$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow, sumRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(expensesTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+      paged ? this.db.select({ amount: sum(expensesTable.amount) }).from(expensesTable).where(where)
+            : Promise.resolve([{ amount: null }]),
+    ]);
+    if (!paged) return rows;
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      // `totalAmount` is what the portal reads; `stats.amount` is the shape the
+      // other paginated lists use. Same number, both spellings, so neither
+      // caller has to change.
+      totalAmount: round2(Number((sumRow[0] as { amount: string | null })?.amount ?? 0)),
+      stats: { amount: round2(Number((sumRow[0] as { amount: string | null })?.amount ?? 0)) },
+    };
   }
 
   @Post("expenses")
@@ -312,11 +373,60 @@ class ReportsController {
   }
 
   /* ── Landlord payouts (transfers) CRUD ── */
+  /**
+   * Transfers paid out to landlords. Same treatment as expenses above: it had
+   * no ORDER BY, so it could not be paged safely; `ownerId`, `method`,
+   * `search` (reference / notes) and a `from`/`to` window on the transfer date
+   * are applied in SQL, and `stats.amount` is the summed total for the filter.
+   */
   @Get("landlord-payouts")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
-  async listPayouts(@CurrentUser() user: AuthUser) {
-    return this.db.select().from(landlordPayoutsTable)
-      .where(and(eq(landlordPayoutsTable.userId, scopeId(user)), isNull(landlordPayoutsTable.deletedAt)));
+  async listPayouts(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [eq(landlordPayoutsTable.userId, scopeId(user)), isNull(landlordPayoutsTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(landlordPayoutsTable.reference, `%${q.search}%`),
+        ilike(landlordPayoutsTable.notes, `%${q.search}%`),
+      ));
+    }
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds) conds.push(inArray(landlordPayoutsTable.ownerId, ownerIds));
+    const methods = typeof rawQuery?.method === "string" && rawQuery.method.trim()
+      ? rawQuery.method.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (methods?.length) conds.push(inArray(landlordPayoutsTable.method, methods));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(landlordPayoutsTable.transferDate, from));
+    if (to) conds.push(lte(landlordPayoutsTable.transferDate, to));
+    const where = and(...conds);
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db.select().from(landlordPayoutsTable).where(where)
+      .orderBy(dir(landlordPayoutsTable.transferDate), dir(landlordPayoutsTable.id)).$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow, sumRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(landlordPayoutsTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+      paged ? this.db.select({ amount: sum(landlordPayoutsTable.amount) }).from(landlordPayoutsTable).where(where)
+            : Promise.resolve([{ amount: null }]),
+    ]);
+    if (!paged) return rows;
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      // `totalAmount` is what the portal reads; `stats.amount` is the shape the
+      // other paginated lists use. Same number, both spellings, so neither
+      // caller has to change.
+      totalAmount: round2(Number((sumRow[0] as { amount: string | null })?.amount ?? 0)),
+      stats: { amount: round2(Number((sumRow[0] as { amount: string | null })?.amount ?? 0)) },
+    };
   }
 
   @Post("landlord-payouts")

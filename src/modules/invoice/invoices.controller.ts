@@ -43,7 +43,8 @@ export class InvoicesController {
     if (page != null || pageSize != null || search != null) {
       return this.invoices.listPaged(scopeId(user), {
         page: Math.max(1, parseInt(page ?? "1", 10) || 1),
-        pageSize: Math.min(100, Math.max(1, parseInt(pageSize ?? "10", 10) || 10)),
+        // 25 to match every other list in the product; cap raised to the shared 200.
+        pageSize: Math.min(200, Math.max(1, parseInt(pageSize ?? "25", 10) || 25)),
         search: search?.trim() || undefined,
       });
     }
@@ -64,6 +65,13 @@ export class InvoicesController {
    * POST /invoices
    * Build, sign, submit, and persist an invoice in a single call.
    * Body matches CreateInvoiceDto.
+   *
+   * Despite the name, this is NOT a draft-creating endpoint: there is no draft
+   * state on this side — the call signs the document and sends it to ZATCA
+   * before it returns. So the readiness gate below is a SUBMISSION gate, the
+   * counterpart of the one on POST /simple-invoices/:id/approve, and it stays.
+   * The gate that was removed is the one on saving a billing DRAFT
+   * (POST /simple-invoices), which refuses nothing on readiness any more.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -72,9 +80,11 @@ export class InvoicesController {
     if (!body.profile) throw new BadRequestException("profile required");
     if (!Array.isArray(body.lines) || body.lines.length === 0)
       throw new BadRequestException("at least one line required");
-    // Same guard as the plain billing path — a contract-linked e-invoice must
-    // have complete tenant/landlord data and an onboarded landlord, otherwise
-    // ZATCA rejects it after we have already burned an ICV.
+    // Same guard as the approval path on the plain billing side — a
+    // contract-linked e-invoice must have complete tenant/landlord data and an
+    // onboarded landlord, otherwise ZATCA rejects it after we have already
+    // burned an ICV. Nothing is saved as a draft here, so refusing costs the
+    // caller no work.
     if (body.contractId) {
       const readiness = await checkInvoiceReadiness(this.db, scopeId(user), body.contractId);
       if (!readiness.ok) {

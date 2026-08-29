@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql, notInArray } from "drizzle-orm";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { unitsTable, propertiesTable, contractsTable, contractUnitsTable , lookupsTable } from "@dara/database";
 import {
   BOUNDS, LIMITS, applyBool, applyBoolNonNull, applyDecimal, applyForeignKey, applyInt,
@@ -200,21 +200,80 @@ class UnitsController {
       .limit(5);
   }
 
+  /**
+   * Units across the account, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (unit number / property
+   * name), `status`, `propertyId`, `typeLookupId`, `floor` and `isDraft`. The
+   * Units tab drives its four headline cards off the status counts, so those
+   * come back in `stats.byStatus` - counted by the database over the same
+   * filter, rather than by counting whatever rows the browser happened to hold.
+   */
   @Get("units")
   @RequirePermissions(PERMISSIONS.UNITS_VIEW)
   async listAll(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
 
-    const baseWhere = and(
+    const conds: any[] = [
       eq(propertiesTable.userId, scopeId(user)),
       isNull(propertiesTable.deletedAt),
       isNull(unitsTable.deletedAt),
-    );
-    const where = q.search ? and(baseWhere, or(
-      ilike(unitsTable.unitNumber, `%${q.search}%`),
-      ilike(propertiesTable.name, `%${q.search}%`),
-    )) : baseWhere;
+    ];
+    if (q.search) {
+      conds.push(or(
+        ilike(unitsTable.unitNumber, `%${q.search}%`),
+        ilike(propertiesTable.name, `%${q.search}%`),
+      ));
+    }
+    const statuses = parseEnumList(rawQuery?.status, ["available", "rented", "maintenance", "reserved"] as const);
+    const propertyIds = parseIdList(rawQuery?.propertyId) ?? parseIdList(rawQuery?.propertyIds);
+    if (propertyIds) conds.push(inArray(unitsTable.propertyId, propertyIds));
+    // Same two spellings as properties: the portal's chips carry the lookup
+    // key, integrations carry the id.
+    const typeIds = parseIdList(rawQuery?.typeLookupId)
+      ?? await (async () => {
+        const raw = rawQuery?.type;
+        if (raw == null || raw === "" || raw === "all") return null;
+        const values = String(raw).split(",").map((v: string) => v.trim()).filter(Boolean);
+        if (values.length === 0) return null;
+        const ids = await Promise.all(values.map((v: string) => resolveLookupId(this.db, "unit_type", v)));
+        return ids.filter((id): id is number => id != null);
+      })();
+    if (typeIds) conds.push(inArray(unitsTable.typeLookupId, typeIds));
+    if (typeof rawQuery?.floor === "string" && rawQuery.floor.trim() !== "") {
+      const floors = rawQuery.floor.split(",").map((x: string) => parseInt(x.trim(), 10)).filter(Number.isInteger);
+      if (floors.length) conds.push(inArray(unitsTable.floor, floors));
+    }
+    if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(unitsTable.isDraft, true));
+    else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(unitsTable.isDraft, false));
+    // Every filter EXCEPT status - the four status cards ARE the status filter,
+    // so picking one must not blank the other three.
+    const statsWhere = and(...conds);
+    if (statuses) conds.push(inArray(unitsTable.status, statuses));
+    const where = and(...conds);
+
+    /**
+     * The current tenant, as a correlated sub-query rather than a join.
+     *
+     * Joining `contract_units` -> `contracts` multiplied a unit into one row
+     * per active contract, and the de-duplication that hid it ran AFTER
+     * LIMIT/OFFSET: a unit with two active contracts consumed two slots on the
+     * page and collapsed back to one, so that page came back short and the row
+     * it displaced belonged to nobody's page. One row per unit here, which is
+     * also exactly what the `total` below counts.
+     */
+    const fromActiveContract = (col: any) => sql<string | null>`(${this.db
+      .select({ v: col })
+      .from(contractUnitsTable)
+      .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+      .where(and(
+        eq(contractUnitsTable.unitId, unitsTable.id),
+        eq(contractsTable.status, "active"),
+        isNull(contractsTable.deletedAt),
+      ))
+      .orderBy(desc(contractsTable.id))
+      .limit(1)})`;
 
     let rowsQ = this.db
       .select({
@@ -260,39 +319,50 @@ class UnitsController {
         isDraft: unitsTable.isDraft,
         notes: unitsTable.notes,
         createdAt: unitsTable.createdAt,
-        tenantName: contractsTable.tenantName,
-        tenantPhone: contractsTable.tenantPhone,
+        tenantName: fromActiveContract(contractsTable.tenantName).as("tenant_name"),
+        tenantPhone: fromActiveContract(contractsTable.tenantPhone).as("tenant_phone"),
       })
       .from(unitsTable)
       .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
-      // A unit's active contract is reached through the contract_units
-      // join table now that a contract can span many units.
-      .leftJoin(contractUnitsTable, eq(contractUnitsTable.unitId, unitsTable.id))
-      .leftJoin(contractsTable, and(
-        eq(contractsTable.id, contractUnitsTable.contractId),
-        eq(contractsTable.status, "active"),
-        isNull(contractsTable.deletedAt),
-      ))
       .where(where)
-      .orderBy((q.order === "asc" ? asc : desc)(unitsTable.createdAt))
+      // `id` tiebreak on a non-unique `created_at`, so a page boundary landing
+      // inside a batch of units created together cannot repeat or drop one.
+      .orderBy(
+        (q.order === "asc" ? asc : desc)(unitsTable.createdAt),
+        (q.order === "asc" ? asc : desc)(unitsTable.id),
+      )
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow] = await Promise.all([
+    const [rows, totalRow, statusRows] = await Promise.all([
       rowsQ,
       usePaginated
         ? this.db.select({ total: count() }).from(unitsTable)
             .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
             .where(where)
         : Promise.resolve([{ total: 0 }]),
+      // The Units tab's four status cards. Counted by the database over the
+      // same filter so a card can never disagree with the table below it.
+      usePaginated
+        ? this.db.select({ status: unitsTable.status, cnt: count() })
+            .from(unitsTable)
+            .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+            .where(statsWhere)
+            .groupBy(unitsTable.status)
+        : Promise.resolve([]),
     ]);
-    // A unit with more than one active contract would be joined into multiple
-    // rows — dedupe by id so each unit appears once.
-    const deduped = Array.from(new Map(rows.map((r) => [r.id, r])).values());
-    await attachLookupLabels(this.db, deduped, UNIT_LOOKUP_SPEC);
-    overlayUnitTypeOther(deduped);
-    if (!usePaginated) return deduped;
-    return { data: deduped, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+    await attachLookupLabels(this.db, rows as any[], UNIT_LOOKUP_SPEC);
+    overlayUnitTypeOther(rows as any[]);
+    if (!usePaginated) return rows;
+    const byStatus: Record<string, number> = {};
+    for (const r of statusRows as Array<{ status: string; cnt: number }>) byStatus[r.status] = Number(r.cnt);
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { byStatus },
+    };
   }
 
   @Get("properties/:propertyId/units")

@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, lt, gt, isNull, or, ilike, count, asc, desc, inArray, notInArray, notExists, sql } from "drizzle-orm";
+import { and, eq, ne, lt, gt, gte, lte, isNull, or, ilike, count, asc, desc, inArray, notInArray, notExists, exists, sql } from "drizzle-orm";
 import { contractsTable, contractUnitsTable, contractRentTermsTable, unitsTable, propertiesTable, paymentsTable, paymentCollectionsTable, tenantsTable, simpleInvoicesTable, invoicesTable, auditLogsTable, lookupsTable } from "@dara/database";
 import {
   BOUNDS, LIMITS, applyBoolNonNull, applyDate, applyEmail, applyForeignKey, applyFourDigitCode,
@@ -166,7 +166,9 @@ function parseRentTerms(raw: any): { year: number; amount: number }[] {
     .map((t: any) => ({ year: parseInt(t?.year, 10), amount: Number(t?.amount) }))
     .filter((t) => Number.isFinite(t.year) && t.year > 0 && Number.isFinite(t.amount) && t.amount > 0);
 }
-import { listQuerySchema } from "../../common/pagination";
+import {
+  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+} from "../../common/pagination";
 import { rentVatFromUsage } from "../../common/usage-vat";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -387,18 +389,84 @@ class ContractsController {
     });
   }
 
+  /**
+   * Contracts, paginated and filtered by the database.
+   *
+   * Every filter the Contracts tab offers is a query parameter resolved in SQL:
+   *
+   *   search       contract number / tenant name / tenant ID / phone / Ejar number
+   *   status       one or a comma-separated set of contract statuses
+   *   isDraft      drafts only, or finalised only
+   *   propertyId   contracts covering any unit in these properties
+   *   unitId       contracts covering these units
+   *   ownerId      contracts on properties filed under these landlords
+   *   tenantId     contracts for these registered tenants
+   *   from / to    contracts whose period overlaps the window
+   *
+   * The tab used to fetch the whole table and do all of this in the browser,
+   * with `filteredContracts.length` standing in for the total. That is fine at
+   * a demo account's size and wrong at a real one's: the numbers describe only
+   * what was fetched. `total` here is the database's count for the same WHERE,
+   * and `stats.byStatus` gives the per-status counts the cards want without
+   * anyone having to hold the whole list to compute them.
+   *
+   * The property / unit / landlord filters go through EXISTS sub-queries rather
+   * than joining `contract_units`: a contract spanning three units would
+   * otherwise be joined into three rows, which both duplicates it on the page
+   * and inflates `count()` past the number of contracts that actually match.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
-    const baseWhere = and(eq(contractsTable.userId, scopeId(user)), isNull(contractsTable.deletedAt));
-    const where = q.search ? and(baseWhere, or(
-      ilike(contractsTable.contractNumber, `%${q.search}%`),
-      ilike(contractsTable.tenantName, `%${q.search}%`),
-      ilike(contractsTable.tenantIdNumber, `%${q.search}%`),
-      ilike(contractsTable.tenantPhone, `%${q.search}%`),
-    )) : baseWhere;
+    const scopeWhere = and(eq(contractsTable.userId, scopeId(user)), isNull(contractsTable.deletedAt));
+
+    const conds: any[] = [scopeWhere];
+    if (q.search) {
+      conds.push(or(
+        ilike(contractsTable.contractNumber, `%${q.search}%`),
+        ilike(contractsTable.tenantName, `%${q.search}%`),
+        ilike(contractsTable.tenantIdNumber, `%${q.search}%`),
+        ilike(contractsTable.tenantPhone, `%${q.search}%`),
+        ilike(contractsTable.ejarContractNumber, `%${q.search}%`),
+      ));
+    }
+    const statuses = parseEnumList(rawQuery?.status, CONTRACT_STATUSES);
+    if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(contractsTable.isDraft, true));
+    else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(contractsTable.isDraft, false));
+    const tenantIds = parseIdList(rawQuery?.tenantId) ?? parseIdList(rawQuery?.tenantIds);
+    if (tenantIds) conds.push(inArray(contractsTable.tenantId, tenantIds));
+
+    // Period overlap, not containment: a contract is "in" the window when it is
+    // still running at `from` and had already started by `to`. Asking for
+    // contracts wholly inside the window would hide every long lease.
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(contractsTable.endDate, from));
+    if (to) conds.push(lte(contractsTable.startDate, to));
+
+    const propertyIds = parseIdList(rawQuery?.propertyId) ?? parseIdList(rawQuery?.propertyIds);
+    const unitIds = parseIdList(rawQuery?.unitId) ?? parseIdList(rawQuery?.unitIds);
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (propertyIds || unitIds || ownerIds) {
+      const linkConds: any[] = [eq(contractUnitsTable.contractId, contractsTable.id)];
+      if (unitIds) linkConds.push(inArray(contractUnitsTable.unitId, unitIds));
+      if (propertyIds) linkConds.push(inArray(unitsTable.propertyId, propertyIds));
+      if (ownerIds) linkConds.push(inArray(propertiesTable.ownerId, ownerIds));
+      conds.push(exists(
+        this.db.select({ one: sql`1` })
+          .from(contractUnitsTable)
+          .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+          .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
+          .where(and(...linkConds)),
+      ));
+    }
+    // `statsWhere` is every filter EXCEPT status: the per-status counts below
+    // are the tab badges, so selecting one status must not zero the others.
+    const statsWhere = and(...conds);
+    if (statuses) conds.push(inArray(contractsTable.status, statuses));
+    const where = and(...conds);
 
     let rowsQ = this.db
       .select({
@@ -459,13 +527,27 @@ class ContractsController {
       .from(contractsTable)
       .leftJoin(tenantsTable, eq(contractsTable.tenantId, tenantsTable.id))
       .where(where)
-      .orderBy((q.order === "asc" ? asc : desc)(contractsTable.createdAt))
+      // `id` breaks the tie on `created_at`, which is not unique - an Ejar
+      // import stamps a whole batch of contracts at the same instant, and
+      // without a deterministic second key those rows can shuffle between one
+      // page request and the next, showing a contract twice and hiding another.
+      .orderBy(
+        (q.order === "asc" ? asc : desc)(contractsTable.createdAt),
+        (q.order === "asc" ? asc : desc)(contractsTable.id),
+      )
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow] = await Promise.all([
+    const [rows, totalRow, statusRows] = await Promise.all([
       rowsQ,
       usePaginated ? this.db.select({ total: count() }).from(contractsTable).where(where) : Promise.resolve([{ total: 0 }]),
+      // Per-status counts over the SAME filtered set, so a card and the table
+      // below it can never disagree. Deliberately not the whole account: the
+      // cards describe what the current filter selected.
+      usePaginated
+        ? this.db.select({ status: contractsTable.status, cnt: count() })
+            .from(contractsTable).where(statsWhere).groupBy(contractsTable.status)
+        : Promise.resolve([]),
     ]);
     const ids = rows.map((r) => r.id);
     const [unitsMap, termsMap] = await Promise.all([
@@ -474,7 +556,15 @@ class ContractsController {
     ]);
     const data = this.withUnits(rows, unitsMap).map((c) => ({ ...c, rentTerms: termsMap.get(c.id) ?? [] }));
     if (!usePaginated) return data;
-    return { data, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+    const byStatus: Record<string, number> = {};
+    for (const r of statusRows as Array<{ status: string; cnt: number }>) byStatus[r.status] = Number(r.cnt);
+    return {
+      data,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { byStatus },
+    };
   }
 
 

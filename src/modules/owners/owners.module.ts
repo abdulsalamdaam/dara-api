@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, or, ilike, count, asc, desc } from "drizzle-orm";
+import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
 import { ownersTable, contractsTable, ownerNotificationsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -11,7 +11,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { assertNationalAddress } from "../../common/national-address";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { EmailService } from "../email/email.service";
 import { sendExpoPush } from "../../common/push";
@@ -133,25 +133,58 @@ class OwnersController {
     private readonly email: EmailService,
   ) {}
 
+  /**
+   * Landlords, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (name / ID / phone / email /
+   * tax number), `type` (individual|company, comma-separated), `status`
+   * (active|inactive), `isDraft`, `isRepresentative`, `hasIban`, and
+   * `nationalityLookupId`. `total` is the database's count for that same WHERE,
+   * so the tab's "N landlords" figure is the real one rather than the size of
+   * the page it happens to be showing.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.OWNERS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
 
-    const baseWhere = and(eq(ownersTable.userId, owner), isNull(ownersTable.deletedAt));
-    const where = q.search
-      ? and(baseWhere, or(
-          ilike(ownersTable.name, `%${q.search}%`),
-          ilike(ownersTable.idNumber, `%${q.search}%`),
-          ilike(ownersTable.phone, `%${q.search}%`),
-          ilike(ownersTable.email, `%${q.search}%`),
-        ))
-      : baseWhere;
+    const conds: any[] = [eq(ownersTable.userId, owner), isNull(ownersTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(ownersTable.name, `%${q.search}%`),
+        ilike(ownersTable.shortName, `%${q.search}%`),
+        ilike(ownersTable.idNumber, `%${q.search}%`),
+        ilike(ownersTable.phone, `%${q.search}%`),
+        ilike(ownersTable.email, `%${q.search}%`),
+        ilike(ownersTable.taxNumber, `%${q.search}%`),
+      ));
+    }
+    const types = parseEnumList(rawQuery?.type, ["individual", "company"] as const);
+    if (types) conds.push(inArray(ownersTable.type, types));
+    const statuses = parseEnumList(rawQuery?.status, ["active", "inactive"] as const);
+    if (statuses) conds.push(inArray(ownersTable.status, statuses));
+    const bool = (v: unknown) => v === "1" || v === "true" ? true : v === "0" || v === "false" ? false : undefined;
+    const draft = bool(rawQuery?.isDraft);
+    if (draft !== undefined) conds.push(eq(ownersTable.isDraft, draft));
+    const rep = bool(rawQuery?.isRepresentative);
+    if (rep !== undefined) conds.push(eq(ownersTable.isRepresentative, rep));
+    // "Missing a bank account" is a real worklist on the landlords tab; it was
+    // a JS filter over the fetched page, so it only ever saw one page's worth.
+    const hasIban = bool(rawQuery?.hasIban);
+    if (hasIban === true) conds.push(and(isNotNull(ownersTable.iban), ne(ownersTable.iban, "")));
+    else if (hasIban === false) conds.push(or(isNull(ownersTable.iban), eq(ownersTable.iban, "")));
+    const nats = parseIdList(rawQuery?.nationalityLookupId);
+    if (nats) conds.push(inArray(ownersTable.nationalityLookupId, nats));
+    const where = and(...conds);
 
     const sortFn = q.order === "asc" ? asc : desc;
-    let rowsQ = this.db.select().from(ownersTable).where(where).orderBy(sortFn(ownersTable.createdAt)).$dynamic();
+    // `id` is the tiebreak — `created_at` is not unique (a bulk import stamps a
+    // whole batch identically), and an unstable order across pages repeats one
+    // landlord while hiding another.
+    let rowsQ = this.db.select().from(ownersTable).where(where)
+      .orderBy(sortFn(ownersTable.createdAt), sortFn(ownersTable.id)).$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
     const [rows, totalRow] = await Promise.all([
@@ -368,11 +401,41 @@ class SendOwnerNotificationDto {
 class OwnerNotificationsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
-  /** Notifications the account has sent to its landlords (newest first). */
+  /**
+   * Notifications the account has sent to its landlords (newest first).
+   *
+   * `search` (title / body / landlord name), `ownerId`, `type` and `unread`
+   * are all resolved in SQL. Pagination is opt-in via `page`/`pageSize`/
+   * `paginated` so existing bare-array callers are untouched.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.OWNERS_VIEW)
-  async list(@CurrentUser() user: AuthUser) {
-    return this.db
+  async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [
+      eq(ownerNotificationsTable.userId, scopeId(user)),
+      isNull(ownerNotificationsTable.deletedAt),
+    ];
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds?.length) conds.push(inArray(ownerNotificationsTable.ownerId, ownerIds));
+    const types = typeof rawQuery?.type === "string" && rawQuery.type.trim()
+      ? rawQuery.type.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (types?.length) conds.push(inArray(ownerNotificationsTable.type, types));
+    if (rawQuery?.unread === "1" || rawQuery?.unread === "true") conds.push(isNull(ownerNotificationsTable.readAt));
+    else if (rawQuery?.unread === "0" || rawQuery?.unread === "false") conds.push(isNotNull(ownerNotificationsTable.readAt));
+    if (q.search) {
+      conds.push(or(
+        ilike(ownerNotificationsTable.title, `%${q.search}%`),
+        ilike(ownerNotificationsTable.body, `%${q.search}%`),
+        ilike(ownersTable.name, `%${q.search}%`),
+      ));
+    }
+    const where = and(...conds);
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db
       .select({
         id: ownerNotificationsTable.id,
         ownerId: ownerNotificationsTable.ownerId,
@@ -385,11 +448,20 @@ class OwnerNotificationsController {
       })
       .from(ownerNotificationsTable)
       .leftJoin(ownersTable, eq(ownerNotificationsTable.ownerId, ownersTable.id))
-      .where(and(
-        eq(ownerNotificationsTable.userId, scopeId(user)),
-        isNull(ownerNotificationsTable.deletedAt),
-      ))
-      .orderBy(desc(ownerNotificationsTable.createdAt));
+      .where(where)
+      .orderBy(dir(ownerNotificationsTable.createdAt), dir(ownerNotificationsTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      // Same join in the count — `search` reaches the landlord name through it.
+      paged ? this.db.select({ total: count() }).from(ownerNotificationsTable)
+        .leftJoin(ownersTable, eq(ownerNotificationsTable.ownerId, ownersTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   /** Send a notification to one of the account's landlords. */
