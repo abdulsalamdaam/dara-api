@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, NotFoundException, Param, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Controller, Get, Inject, NotFoundException, Param, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -18,13 +18,37 @@ import { ParseInt4Pipe } from "../../common/int4.pipe";
  * can raise it as far as MAX and no further: a cap the client chooses is not a
  * cap.
  */
-const PREVIEW_DEFAULT = 10;
+/**
+ * 25 — the page size used everywhere else in the portal, and deliberately the
+ * SAME number for the overview's previews and for one page of the list
+ * endpoint. That identity is what lets the UI treat the overview's list as
+ * page 1 and fetch only page 2 onward: if the preview held 10 and a page held
+ * 25, "page 2" would start at row 26 and rows 11–25 would be unreachable.
+ */
+const PREVIEW_DEFAULT = 25;
 const PREVIEW_MAX = 25;
 
 function previewLimit(raw: unknown): number {
   const n = Math.floor(Number(raw));
   if (!Number.isFinite(n) || n < 1) return PREVIEW_DEFAULT;
   return Math.min(n, PREVIEW_MAX);
+}
+
+/**
+ * The lists that can be paged. A whitelist rather than a lookup on whatever
+ * string arrives: `entity` is used to pick a method on this controller, and an
+ * unchecked string there would let a caller reach any property of it.
+ */
+const LIST_ENTITIES = ["landlords", "tenants", "properties", "contracts", "employees"] as const;
+type ListEntity = (typeof LIST_ENTITIES)[number];
+
+/** 1-based; anything unparseable, zero or negative is page 1. */
+function pageNumber(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  // A page far past the end is not an error — it returns no rows and the true
+  // total, so the UI can correct itself. But the offset must stay inside int4.
+  return Math.min(n, 1_000_000);
 }
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -116,6 +140,96 @@ export class AdminCustomerOverviewController {
      * endpoint should be called with. Both the requested row and the account
      * root must be alive; a soft-deleted account is a 404, not an empty one.
      */
+    const account = await this.resolveAccount(userId);
+    const acct = account.id;
+
+    /* Every query below is scoped to `acct` in its own WHERE clause — there
+     * is no query here that could return a row belonging to another
+     * customer, including the ones that reach the account through a join
+     * (units via properties, contract units via properties). */
+    const [totalsRow, moneyRow, zatcaRow, landlords, tenants, properties, contracts, employees] =
+      await Promise.all([
+        this.totals(acct),
+        this.money(acct),
+        this.zatca(acct),
+        this.landlords(acct, limit),
+        this.tenants(acct, limit),
+        this.properties(acct, limit),
+        this.contracts(acct, limit),
+        this.employees(acct, limit),
+      ]);
+
+    return {
+      account,
+      totals: totalsRow,
+      money: moneyRow,
+      zatca: zatcaRow,
+      landlords,
+      tenants,
+      properties,
+      contracts,
+      employees,
+    };
+  }
+
+  /**
+   * One page of a single list.
+   *
+   * The overview's five lists are previews, and on an account with 26
+   * landlords and 77 contracts a preview is a dead end — the UI could say
+   * "showing 10 of 47" and offer no way to reach the other 37. This is how
+   * it reaches them.
+   *
+   * Each list keeps the exact ORDER BY the overview uses, and every one of
+   * those orderings ends in a unique id, so a row can neither be skipped nor
+   * repeated as the admin pages through. `total` comes from the same counts
+   * the overview reports, so "of N" cannot disagree between the two.
+   */
+  @Get(":userId/list/:entity")
+  async list(
+    @Param("userId", ParseInt4Pipe) userId: number,
+    @Param("entity") entity: string,
+    @Query("page") rawPage?: string,
+    @Query("pageSize") rawPageSize?: string,
+  ) {
+    if (!(LIST_ENTITIES as readonly string[]).includes(entity)) {
+      throw new BadRequestException(
+        `قائمة غير معروفة · Unknown list "${entity}" — expected one of ${LIST_ENTITIES.join(", ")}`,
+      );
+    }
+    const kind = entity as ListEntity;
+    const pageSize = previewLimit(rawPageSize);
+    const page = pageNumber(rawPage);
+
+    const account = await this.resolveAccount(userId);
+    const acct = account.id;
+
+    const [totalsRow, data] = await Promise.all([
+      this.totals(acct),
+      this[kind](acct, pageSize, (page - 1) * pageSize),
+    ]);
+
+    const total = Number((totalsRow as Record<string, number>)[kind] ?? 0);
+    return {
+      data,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
+  }
+
+  /**
+   * Resolve a user id to the ACCOUNT it belongs to, or 404.
+   *
+   * Data is scoped per account, not per user: `scopeId(user) = ownerUserId ??
+   * id`. So an id belonging to an employee resolves to the account they work
+   * under — the same resolution every other endpoint makes — rather than
+   * returning an account-shaped object full of zeros. Both the requested row
+   * and the account root must be alive; a soft-deleted account is a 404, not
+   * an empty one.
+   */
+  private async resolveAccount(userId: number) {
     const acctUser = alias(usersTable, "acct");
     const [account] = await this.db
       .select({
@@ -146,35 +260,7 @@ export class AdminCustomerOverviewController {
       .limit(1);
 
     if (!account) throw new NotFoundException("الحساب غير موجود · Customer not found");
-    const acct = account.id;
-
-    /* Every query below is scoped to `acct` in its own WHERE clause — there
-     * is no query here that could return a row belonging to another
-     * customer, including the ones that reach the account through a join
-     * (units via properties, contract units via properties). */
-    const [totalsRow, moneyRow, zatcaRow, landlords, tenants, properties, contracts, employees] =
-      await Promise.all([
-        this.totals(acct),
-        this.money(acct),
-        this.zatca(acct),
-        this.landlords(acct, limit),
-        this.tenants(acct, limit),
-        this.properties(acct, limit),
-        this.contracts(acct, limit),
-        this.employees(acct, limit),
-      ]);
-
-    return {
-      account,
-      totals: totalsRow,
-      money: moneyRow,
-      zatca: zatcaRow,
-      landlords,
-      tenants,
-      properties,
-      contracts,
-      employees,
-    };
+    return account;
   }
 
   /**
@@ -385,7 +471,7 @@ export class AdminCustomerOverviewController {
   }
 
   /** Landlords, biggest portfolio first. */
-  private landlords(acct: number, limit: number) {
+  private landlords(acct: number, limit: number, offset = 0) {
     return this.db
       .select({
         id: ownersTable.id,
@@ -412,11 +498,12 @@ export class AdminCustomerOverviewController {
       .from(ownersTable)
       .where(and(eq(ownersTable.userId, acct), isNull(ownersTable.deletedAt)))
       .orderBy(sql`properties_count desc, contracts_count desc, owners.id desc`)
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /** Tenants, most contracts first. */
-  private tenants(acct: number, limit: number) {
+  private tenants(acct: number, limit: number, offset = 0) {
     return this.db
       .select({
         id: tenantsTable.id,
@@ -430,11 +517,12 @@ export class AdminCustomerOverviewController {
       .from(tenantsTable)
       .where(and(eq(tenantsTable.userId, acct), isNull(tenantsTable.deletedAt)))
       .orderBy(sql`contracts_count desc, ${tenantsTable.createdAt} desc, tenants.id desc`)
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /** Properties, largest first. `city` is a lookup, not a column. */
-  private properties(acct: number, limit: number) {
+  private properties(acct: number, limit: number, offset = 0) {
     return this.db
       .select({
         id: propertiesTable.id,
@@ -450,11 +538,12 @@ export class AdminCustomerOverviewController {
       .leftJoin(lookupsTable, eq(lookupsTable.id, propertiesTable.cityLookupId))
       .where(and(eq(propertiesTable.userId, acct), isNull(propertiesTable.deletedAt)))
       .orderBy(sql`units_count desc, ${propertiesTable.createdAt} desc, properties.id desc`)
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /** Contracts, live ones first, then the most recently started. */
-  private contracts(acct: number, limit: number) {
+  private contracts(acct: number, limit: number, offset = 0) {
     return this.db
       .select({
         id: contractsTable.id,
@@ -489,7 +578,8 @@ export class AdminCustomerOverviewController {
         desc(contractsTable.startDate),
         desc(contractsTable.id),
       )
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 
   /**
@@ -499,7 +589,7 @@ export class AdminCustomerOverviewController {
    * on `roles` (joined through `users.role_id`) and says what someone may do,
    * not whose account they belong to.
    */
-  private employees(acct: number, limit: number) {
+  private employees(acct: number, limit: number, offset = 0) {
     return this.db
       .select({
         id: usersTable.id,
@@ -517,6 +607,7 @@ export class AdminCustomerOverviewController {
         desc(usersTable.createdAt),
         desc(usersTable.id),
       )
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
   }
 }
