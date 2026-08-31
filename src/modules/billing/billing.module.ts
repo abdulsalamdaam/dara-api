@@ -23,7 +23,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { checkInvoiceReadiness, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -41,7 +41,16 @@ type LineItem = { description: string; quantity: number; unitPrice: number; amou
 /** Result of the best-effort ZATCA mirror on approval — surfaced to the UI. */
 type ZatcaSubmitOutcome =
   | { submitted: true; status: string; profile: string; environment: string; httpStatus: number; invoiceId: number; qr: string | null; warnings: number }
-  | { submitted: false; code: "not_linked" | "not_onboarded" | "no_items" | "skipped" | "not_required" | "error"; reason: string };
+  | {
+      submitted: false;
+      /**
+       * `link_invalid` is not a flavour of `error`. ZATCA refused the
+       * CREDENTIALS, so nothing was filed, no ICV was spent, and no amount of
+       * correcting the document will help — the seller has to link again.
+       */
+      code: "not_linked" | "not_onboarded" | "link_invalid" | "no_items" | "skipped" | "not_required" | "error";
+      reason: string;
+    };
 
 /**
  * ZATCA's own QR out of a CLEARED standard invoice.
@@ -584,6 +593,8 @@ class SimpleInvoicesController {
     @CurrentUser() user: AuthUser,
     @Query("contractId") contractId?: string,
     @Query("paymentId") paymentId?: string,
+    @Query("tenantId") buyerTenantId?: string,
+    @Query("ownerId") buyerOwnerId?: string,
   ) {
     const uid = scopeId(user);
     let id = foreignKeyId(contractId, "رقم العقد");
@@ -599,7 +610,15 @@ class SimpleInvoicesController {
         .limit(1);
       id = pay?.contractId ?? null;
     }
-    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
+    // A free invoice has no contract, so the buyer has to be named in the query
+    // for the pre-check to have anything to look at. The external customer typed
+    // into the form cannot be pre-checked at all — the create call refuses that
+    // one and returns the same payload.
+    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null, {
+      tenantId: foreignKeyId(buyerTenantId, "رقم المستأجر"),
+      ownerId: foreignKeyId(buyerOwnerId, "رقم المؤجر"),
+      client: buyerOwnerId ? { kind: "landlord" } : null,
+    });
   }
 
   /**
@@ -802,7 +821,9 @@ class SimpleInvoicesController {
     let readiness: InvoiceReadiness | null = null;
     if (type === "invoice" && !isTaxExemptKind(docKind)) {
       try {
-        readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
+        readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId, {
+          tenantId, ownerId: (client as any)?.ownerId ?? null, tenantName, client,
+        });
       } catch (e) {
         // Never fail the save on a lookup error — but do not let it disappear
         // either. A null here now means the gate did not run at all, so a
@@ -1250,7 +1271,12 @@ class SimpleInvoicesController {
     // code the create path used, so the client renders the same panel with the
     // same deep links — only now on approve.
     if (doc.type === "invoice" && !isTaxExemptKind(doc.kind)) {
-      const readiness = await checkInvoiceReadiness(this.db, uid, doc.contractId ?? null);
+      const readiness = await checkInvoiceReadiness(this.db, uid, doc.contractId ?? null, {
+        tenantId: doc.tenantId ?? null,
+        ownerId: (doc.client as any)?.ownerId ?? null,
+        tenantName: doc.tenantName ?? null,
+        client: (doc.client as any) ?? null,
+      });
       if (!readiness.ok) {
         throw new BadRequestException({
           error: "invoice_not_ready",
@@ -1353,14 +1379,39 @@ class SimpleInvoicesController {
       let qr: string | null = null;
       let zatcaInvoiceId: number | null = null;
       if (o.submitted) {
-        status = o.profile === "standard" ? "cleared" : "reported";
+        // `submitted: true` means the CALL completed, not that ZATCA accepted
+        // the document. This used to derive the status from the PROFILE alone —
+        // "standard ⇒ cleared, otherwise reported" — so an invoice ZATCA
+        // rejected, or answered 401 to, was stamped `cleared` with no error
+        // recorded at all; `isSubmittedToZatca` then read that as proof it had
+        // been filed and permanently blocked the contract rebuild over a
+        // document ZATCA never accepted. Read what ZATCA actually said
+        // (`invoices.status`, from deriveStatus) and claim success only for the
+        // two values that mean it.
+        // `submitted` is ZATCA accepting the document without a clearance or
+        // reporting verdict — which is exactly what the compliance endpoint
+        // returns, and sandbox AND simulation both submit there. Collapsing it
+        // into `failed` would have stamped every accepted rehearsal as an
+        // error. It travelled and it spent an ICV, so it counts as submitted;
+        // it just is not a verdict.
+        status = o.status === "cleared" ? "cleared"
+          : o.status === "reported" ? "reported"
+          : o.status === "submitted" ? "submitted"
+          : "failed";
+        if (status === "failed") {
+          error = `ZATCA: ${o.status}${o.httpStatus ? ` (HTTP ${o.httpStatus})` : ""}`;
+        }
         qr = typeof o.qr === "string" && o.qr.trim() ? o.qr : null;
         // Remember WHICH e-invoice this document became, so the PDF/A-3 copy
         // can find the cleared XML later.
         zatcaInvoiceId = Number.isFinite(o.invoiceId) ? Number(o.invoiceId) : null;
       } else {
+        // `link_invalid` groups with the other "nothing was sent" codes on
+        // purpose: no ICV was consumed and ZATCA holds no record of the
+        // document, so it must stay re-submittable and must NOT block a
+        // contract rebuild.
         status = o.code === "error" ? "failed"
-          : (o.code === "not_linked" || o.code === "not_onboarded") ? "pending"
+          : (o.code === "not_linked" || o.code === "not_onboarded" || o.code === "link_invalid") ? "pending"
           : "skipped";
         error = o.reason ?? null;
       }
@@ -1428,12 +1479,40 @@ class SimpleInvoicesController {
         buyer = this.buyerFromParty(doc, {
           name: doc.tenantName || contract?.landlordName || owner?.name,
           vat: owner?.taxNumber || contract?.landlordTaxNumber,
+          id: owner?.idNumber, type: owner?.type,
           street: owner?.nationalAddressStreet || contract?.landlordAddress,
           buildingNo: owner?.buildingNumber || contract?.landlordBuildingNumber,
           district: owner?.nationalAddressDistrict || null,
           city: owner?.nationalAddressCity || null,
           postalZone: owner?.postalCode || contract?.landlordPostalCode,
           additionalNo: owner?.additionalNumber || contract?.landlordAdditionalNumber,
+        });
+      } else if ((doc.client as any)?.kind === "landlord" && (doc.client as any)?.ownerId) {
+        // A free invoice billed TO one of the account's landlords. Without this
+        // branch it fell through to the tenant branch below, where `tenantId` is
+        // null by construction (the web clears it for a landlord pick) so every
+        // address field collapsed to the one-line `client.address` — and a
+        // VAT-registered landlord buyer then failed `assertAddressComplete` on
+        // every single attempt. The readiness gate reads the owner row; so must
+        // this, or the two disagree about a document the gate has passed.
+        const buyerOwner = (await this.db.select().from(ownersTable)
+          .where(and(
+            eq(ownersTable.id, Number((doc.client as any).ownerId)),
+            eq(ownersTable.userId, uid),
+            isNull(ownersTable.deletedAt),
+          )))[0] ?? null;
+        const cl = (doc.client ?? {}) as Record<string, any>;
+        buyer = this.buyerFromParty(doc, {
+          name: buyerOwner?.name || doc.tenantName || cl.name,
+          vat: buyerOwner?.taxNumber || cl.vatNumber,
+          id: buyerOwner?.idNumber || cl.idNumber,
+          type: buyerOwner?.type || cl.type,
+          street: buyerOwner?.nationalAddressStreet || cl.street,
+          buildingNo: buyerOwner?.buildingNumber || cl.buildingNumber,
+          district: buyerOwner?.nationalAddressDistrict || cl.district || null,
+          city: buyerOwner?.nationalAddressCity || cl.city || null,
+          postalZone: buyerOwner?.postalCode || cl.postalCode,
+          additionalNo: buyerOwner?.additionalNumber || cl.additionalNumber,
         });
       } else {
         const tenant = doc.tenantId ? (await this.db.select().from(tenantsTable)
@@ -1447,6 +1526,8 @@ class SimpleInvoicesController {
         buyer = this.buyerFromParty(doc, {
           name: doc.tenantName || tenant?.name || contract?.tenantName || cl.name,
           vat: doc.client?.vatNumber || tenant?.taxNumber || contract?.tenantTaxNumber,
+          id: tenant?.nationalId || cl.idNumber,
+          type: tenant?.type || cl.type,
           street: tenant?.nationalAddressStreet || contract?.tenantAddress || tenant?.address || cl.street,
           buildingNo: tenant?.buildingNumber || contract?.tenantBuildingNumber || cl.buildingNumber,
           district: tenant?.nationalAddressDistrict || cl.district || null,
@@ -1455,7 +1536,16 @@ class SimpleInvoicesController {
           additionalNo: tenant?.additionalNumber || contract?.tenantAdditionalNumber || cl.additionalNumber,
         });
       }
-      // B2B (buyer has a VAT number) → standard/clearance; otherwise simplified/reporting.
+      // Which document this becomes, and therefore where it goes: a buyer with a
+      // VAT number is a registered business, so the invoice is STANDARD (B2B)
+      // and must be CLEARED by ZATCA before it is valid; a buyer without one is
+      // a consumer, so it is SIMPLIFIED (B2C) and merely REPORTED within 24h.
+      //
+      // The VAT number is the deciding fact — registration is what makes a
+      // buyer B2B, and an individual can be registered too. The buyer's TYPE
+      // does not override it; it decides the identification scheme above, and
+      // the readiness gate uses it to insist a company actually carries the VAT
+      // number and address this branch would otherwise silently do without.
       const profile: "standard" | "simplified" = buyer?.vat ? "standard" : "simplified";
 
       const dto: CreateInvoiceDto = {
@@ -1483,14 +1573,36 @@ class SimpleInvoicesController {
       const printableQr = clearedInvoiceQr((result.invoice as any).clearedXml) ?? result.invoice.qrBase64 ?? null;
       return { submitted: true, status: result.invoice.status, profile, environment: env, httpStatus: result.invoice.httpStatus ?? 0, invoiceId: result.invoice.id, qr: printableQr, warnings };
     } catch (e: any) {
+      // `issue()` refuses with this the moment ZATCA answers 401/403, BEFORE it
+      // writes an invoices row or advances the ICV — so this document has not
+      // travelled and must not be recorded as though it had.
+      const body = e?.response ?? (typeof e?.getResponse === "function" ? e.getResponse() : null);
+      if (body && typeof body === "object" && (body as any).error === "zatca_link_invalid") {
+        const b = body as any;
+        this.logger.warn(`ZATCA: ${doc?.number} not sent — ZATCA refused the credentials (HTTP ${b.httpStatus ?? "?"})`);
+        return { submitted: false, code: "link_invalid", reason: String(b.message ?? "ZATCA refused the credentials") };
+      }
       this.logger.warn(`ZATCA submit failed for ${doc?.number}: ${e?.message ?? e}`);
       return { submitted: false, code: "error", reason: e?.message ? String(e.message).slice(0, 300) : "ZATCA submission failed" };
     }
   }
 
-  /** Landlord (owner) for a contract: contract → unit → property → owner. */
+  /**
+   * Which landlord is the SELLER of this document.
+   *
+   * For a contract-linked invoice it is the landlord who owns the property:
+   * contract → unit → property → owner. For a free invoice there is no contract
+   * to walk, so it falls to `resolveStandaloneSellerId` — the account-level
+   * seller if one exists, otherwise the account's own landlord record. That
+   * fallback is what makes a free invoice submittable at all: nothing in the
+   * product can create the account-level credentials row, so before it the
+   * answer was always "not linked", about a link the user had no way to make.
+   *
+   * The readiness gate calls the same resolver, so the seller it checks is
+   * always the seller this path submits under.
+   */
   private async resolveOwnerId(uid: number, contractId: number | null): Promise<number | null> {
-    if (!contractId) return null;
+    if (!contractId) return resolveStandaloneSellerId(this.db, uid);
     const [row] = await this.db
       .select({ ownerId: propertiesTable.ownerId })
       .from(contractUnitsTable)
@@ -1527,14 +1639,23 @@ class SimpleInvoicesController {
   /** Normalize a resolved party into a ZATCA BuyerSnapshot (blanks → null). */
   private buyerFromParty(
     doc: any,
-    p: { name?: string | null; vat?: string | null; street?: string | null; buildingNo?: string | null;
+    p: { name?: string | null; vat?: string | null; id?: string | null; type?: string | null;
+         street?: string | null; buildingNo?: string | null;
          district?: string | null; city?: string | null; postalZone?: string | null; additionalNo?: string | null },
   ): BuyerSnapshot {
     const blank = (v: string | null | undefined) => { const s = (v ?? "").toString().trim(); return s || null; };
+    const cl = (doc.client ?? {}) as Record<string, any>;
+    const type = blank(p.type) || blank(cl.type);
     return {
-      name: blank(p.name) || doc.client?.name || (doc.kind === "commission" ? "المؤجر" : "العميل"),
+      name: blank(p.name) || cl.name || (doc.kind === "commission" ? "المؤجر" : "العميل"),
       vat: blank(p.vat),
-      street: blank(p.street) || doc.client?.address || null,
+      // BT-46: the buyer's own identifier. A company states its commercial
+      // registration; an individual states a national ID or iqama, for which
+      // ZATCA's only valid scheme is OTH — NAT and IQA are not accepted values
+      // (see DARA-NOTES §2b-i, verified against ZATCA's validator).
+      id: blank(p.id) || blank(cl.idNumber),
+      idScheme: type === "company" ? "CRN" : type === "individual" ? "OTH" : null,
+      street: blank(p.street) || cl.address || null,
       buildingNo: blank(p.buildingNo),
       district: blank(p.district),
       city: blank(p.city),

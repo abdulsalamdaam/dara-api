@@ -360,6 +360,88 @@ to be deleted in Fatoora separately. Say that in any UI that offers this.
 
 ---
 
+### 2b-iii. The free invoice, the buyer's identity, and losing the link from the far side
+
+**A document with no contract is no longer waved through.** `checkInvoiceReadiness`
+returned `ok: true` for a null `contractId` — "no parties to validate against" —
+which was true of the buyer only in the sense that nobody had looked. A free
+invoice has a buyer (on the document) and a seller (the account); both are now
+checked, with the same draft/approve split as everywhere else. Pass the buyer as
+the 4th argument (`InvoiceBuyerInput`); the buyer is resolved three ways, in
+order: `tenantId` → a picked tenant, `client.ownerId` + `client.kind ===
+"landlord"` → a picked landlord, otherwise the `client` block itself (an
+external customer, whose blocker carries `entity: "buyer"`, `action:
+"edit_document"` and a null id — there is no record to deep-link to).
+
+**The buyer's `type` is required, and it is not decoration.** It decides what
+else is required and how the buyer is identified:
+
+| buyer | also required | ZATCA `schemeID` | document |
+|---|---|---|---|
+| `individual` | — | `OTH` | simplified → **reported** |
+| `company` | VAT number + full national address | `CRN` | standard → **cleared** |
+
+The VAT NUMBER, not the type, is what actually selects the profile
+(`billing.module.ts`) — registration is what makes a buyer B2B, and an
+individual can be registered too. The type decides the scheme and lets the gate
+insist a company really carries the VAT number and address that clearance
+needs. `BuyerSnapshot` gained `id`/`idScheme` and the builder now emits
+`<cac:PartyIdentification>` inside `AccountingCustomerParty` — **standard
+invoices only**: a B2C buyer has no identifier to state and ZATCA does not ask
+for one. Valid schemes are CRN, MOM, MLS, SAG, OTH, 700 — never NAT or IQA.
+
+**Who signs a free invoice.** `resolveStandaloneSellerId`: the account-level
+credentials row (`owner_id IS NULL`) when one exists, otherwise the
+`is_account_holder` landlord. The fallback exists because **nothing in the
+product can create the account-level row** — the settings tab always sends an
+`ownerId` — so every free invoice used to report "landlord not linked" about a
+link the user had no way to make. The readiness gate and `resolveOwnerId` call
+the same resolver, so the seller the gate checks is the seller the submission
+uses.
+
+**Losing the link from ZATCA's side.** The taxpayer can delete our EGS device in
+the Fatoora portal, or ZATCA can revoke the CSID, and nothing tells us: the row
+still holds a certificate, a key and a secret, so every local check passes and
+every invoice is signed into a void. The gateway reports it as **401/403**
+(`isCredentialRejection`).
+
+- `InvoiceService.issue` aborts on it **before** inserting the `invoices` row and
+  before `commitInvoiceState`. This ordering is the whole point: past that line
+  the ICV is spent unconditionally and `invoices_user_owner_env_icv_uniq` has no
+  `deleted_at` predicate, so a burned counter cannot be reclaimed — and a
+  persisted row would set `zatca_invoice_id`, which `isSubmittedToZatca` reads as
+  "this reached ZATCA" and uses to block a contract rebuild forever.
+- `zatca_credentials.link_invalid_at` / `link_invalid_reason` record it (added by
+  `bootstrap.ts`, not a migration — so **deploy the API before anything reads
+  the column**; a failed ALTER only warns, and every read of the table would
+  then 500). `isOnboarded()` returns false while it is set — as does its SQL
+  twin in the admin 360 view, which must be kept in step — so readiness reports
+  `zatcaLinkRevoked` and approval refuses.
+- **Getting back out matters as much as getting in.** The flag is raised by an
+  HTTP status, and a 403 can be a gateway or IP hiccup, so a self-lock with no
+  escape would be worse than the bug: approvals are blocked, and an approval was
+  the only other thing that could clear the flag. So a 403 carrying
+  `validationResults` is treated as a rejected DOCUMENT and never flags, and the
+  "فحص" (compliance-check) button both clears the flag on a pass and raises it on
+  a 401/403 — a real submission under the real credentials, needing no fresh
+  Fatoora OTP. It is also cleared by any accepted document, by re-onboarding and
+  by `unlink`.
+- It deliberately does **not** erase the credentials: a 403 can be a gateway or
+  IP problem, and deleting a seller's private key on one HTTP status is not an
+  automatic decision. Flagging is reversible; erasing is not.
+- The document gets `zatca_status = "pending"`, grouped with the other "nothing
+  was sent" codes, so it stays re-submittable and does not block a rebuild.
+
+**And the bug this uncovered:** `submitApprovedDocToZatca` derived the status
+from the PROFILE alone — `standard ⇒ cleared, otherwise reported` — where
+`submitted: true` meant only that the call returned. So a document ZATCA
+**rejected**, or answered 401 to, was stamped `cleared` with no error recorded,
+and `isSubmittedToZatca` then blocked the contract rebuild over an invoice that
+had never been accepted. It now reads `invoices.status` and claims success only
+for `cleared`/`reported`.
+
+---
+
 ## 3. Packages, roles and account classification
 
 - Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,

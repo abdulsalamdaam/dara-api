@@ -188,3 +188,54 @@ test("unlink is scoped to the account — one account cannot unlink another's la
     assert.equal(row!.prodCertPem, "CERT", "the certificate must be untouched by a foreign account");
   });
 });
+
+/* ── Link health: when ZATCA cuts the link from the other side ─────────────
+ * The taxpayer removes our EGS device in the Fatoora portal, or ZATCA revokes
+ * the CSID. Nothing notifies us and the row still holds a certificate, a key
+ * and a secret — so without a flag every check passes and every invoice is
+ * signed into a void.
+ */
+
+test("markLinkInvalid flags the link without destroying the credentials", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).markLinkInvalid(userId, ownerId, "ZATCA رفضت بيانات الربط (401)");
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    assert.ok(row!.linkInvalidAt, "the flag is what makes the state knowable");
+    assert.match(row!.linkInvalidReason ?? "", /401/);
+    // A 403 can also be a gateway or IP problem. Deleting a seller's private
+    // key on the strength of one HTTP status is not an automatic decision —
+    // flagging is reversible, erasing is not.
+    assert.equal(row!.prodCertPem, "CERT");
+    assert.equal(row!.prodPrivateKeyEnc, "ENC-KEY");
+  });
+});
+
+test("clearLinkInvalid retires the flag once ZATCA accepts something again", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).markLinkInvalid(userId, ownerId, "transient 403");
+    await svc(tx).clearLinkInvalid(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    assert.equal(row!.linkInvalidAt, null);
+    assert.equal(row!.linkInvalidReason, null);
+  });
+});
+
+test("unlink clears the flag — it described a link that is now gone", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).markLinkInvalid(userId, ownerId, "ZATCA refused the credentials");
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    // Left set, it would be a stale complaint about a link the user has just
+    // deliberately removed, and would survive into their next onboarding.
+    assert.equal(row!.linkInvalidAt, null);
+    assert.equal(row!.linkInvalidReason, null);
+  });
+});
+
+test("the flag is scoped like everything else — one account cannot flag another's", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).markLinkInvalid(userId + 1_000_000, ownerId, "not yours");
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    assert.equal(row!.linkInvalidAt, null);
+  });
+});

@@ -114,6 +114,18 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure simple_invoices.zatca_status/zatca_error/zatca_qr failed: ${err?.message || err}`);
     }
 
+    // ZATCA link health. The taxpayer can remove our EGS device in the Fatoora
+    // portal, and nothing tells us — the row keeps its certificate, so every
+    // local check passes while every submission is refused. These two columns
+    // are the only record of that state; both nullable, so existing rows read
+    // as "link fine", which is the correct default.
+    try {
+      await client.query(`alter table zatca_credentials add column if not exists link_invalid_at timestamptz`);
+      await client.query(`alter table zatca_credentials add column if not exists link_invalid_reason text`);
+    } catch (err: any) {
+      log.warn(`ensure zatca_credentials.link_invalid_at/link_invalid_reason failed: ${err?.message || err}`);
+    }
+
     // Unit-level usage override. NULL keeps the historical behaviour of
     // inheriting the property's usage; only mixed-use properties set it.
     try {

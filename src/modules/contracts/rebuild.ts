@@ -35,20 +35,27 @@ export const DEPOSIT_KIND = "deposit";
  * `simple_invoices.zatca_status` values that mean the document REACHED ZATCA.
  *
  * `billing.module.ts` (`submitApprovedDocToZatca`) is the only writer of this
- * column and it writes exactly five values:
+ * column and it writes exactly six values:
  *
- *   cleared  — standard (B2B) invoice accepted by ZATCA clearance → submitted
- *   reported — simplified (B2C) invoice reported to ZATCA          → submitted
- *   failed   — submission was ATTEMPTED and ZATCA rejected it      → submitted
- *   pending  — landlord not linked / not onboarded: nothing sent   → not sent
- *   skipped  — exempt or out-of-scope supply, no e-invoice needed  → not sent
+ *   cleared   — standard (B2B) invoice accepted by ZATCA clearance → submitted
+ *   reported  — simplified (B2C) invoice reported to ZATCA          → submitted
+ *   submitted — accepted with no verdict (the compliance endpoint,
+ *               which is where sandbox and simulation both post)    → submitted
+ *   failed    — submission was ATTEMPTED and ZATCA rejected it      → submitted
+ *   pending   — nothing was sent: landlord not linked, not onboarded,
+ *               or ZATCA refused the credentials outright           → not sent
+ *   skipped   — exempt or out-of-scope supply, no e-invoice needed  → not sent
  *
  * `failed` counts as submitted deliberately. A rejected submission still
  * travelled: it consumed an ICV in the landlord's ZATCA chain and ZATCA has a
  * record of the attempt. Treating it as "never happened" is exactly the kind of
- * optimism this gate exists to refuse.
+ * optimism this gate exists to refuse. `submitted` counts for the same reason.
+ *
+ * `pending` does NOT, and that is what makes the credential-rejection case safe
+ * to retry: the submission path aborts before writing an invoices row or
+ * advancing the ICV, so nothing travelled and nothing was consumed.
  */
-export const ZATCA_SUBMITTED_STATUSES = ["cleared", "reported", "failed"] as const;
+export const ZATCA_SUBMITTED_STATUSES = ["cleared", "reported", "submitted", "failed"] as const;
 
 /** The `simple_invoices` columns the gate needs. */
 export type ContractDocRow = {

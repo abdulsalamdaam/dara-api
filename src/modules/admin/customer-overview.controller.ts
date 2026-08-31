@@ -418,7 +418,12 @@ export class AdminCustomerOverviewController {
    *    (`submitted_at` set), whatever ZATCA then answered.
    */
   private async zatca(acct: number) {
-    const onboardedSql = sql`case when z.active_environment = 'sandbox'
+    // Must stay in step with `isOnboarded()` in common/invoice-readiness.ts —
+    // including the link-health flag, which is the whole point of it: a seller
+    // whose link ZATCA has revoked still holds every certificate column, so
+    // without this clause the admin 360 view reports "integrated" for precisely
+    // the account that cannot issue a single invoice.
+    const onboardedSql = sql`z.link_invalid_at is null and case when z.active_environment = 'sandbox'
         then (z.sandbox_cert_pem is not null and z.sandbox_private_key_enc is not null
               and z.sandbox_binary_security_token is not null and z.sandbox_secret_enc is not null)
         else (z.prod_cert_pem is not null and z.prod_private_key_enc is not null

@@ -217,8 +217,25 @@ export class InvoiceBuilderService {
   </cac:AccountingSupplierParty>`;
 
     const b = (buyer || {}) as Record<string, unknown>;
+    // BT-46: the buyer's own identifier, mirroring the seller's block above.
+    //
+    // STANDARD invoices only, and deliberately so. A simplified invoice is
+    // issued to a walk-in consumer who has no identifier to state, and ZATCA
+    // does not ask for one — emitting an empty or invented element on a B2C
+    // document is worse than omitting it. So this appears exactly where the
+    // buyer is a business we actually identified.
+    //
+    // Both the id AND its scheme are required to emit anything. Defaulting a
+    // missing scheme to "CRN" the way the seller block does would publish an
+    // individual's national ID as a commercial registration — a confident,
+    // wrong statement about who the buyer is. Silence is the honest fallback.
+    const buyerIdXml =
+      profile === "standard" && b.id && b.idScheme
+        ? `<cac:PartyIdentification><cbc:ID schemeID="${escapeXml(String(b.idScheme))}">${escapeXml(String(b.id))}</cbc:ID></cac:PartyIdentification>`
+        : "";
     const buyerXml = `<cac:AccountingCustomerParty>
     <cac:Party>
+      ${buyerIdXml}
       ${addressXml(b)}
       ${
         b.vat

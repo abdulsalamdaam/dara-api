@@ -24,15 +24,32 @@ import type { Drizzle } from "../database/database.module";
 
 /** One thing standing between the user and a valid invoice. */
 export interface InvoiceBlocker {
-  /** Which record to fix. `zatca` means onboarding, not a field. */
-  entity: "tenant" | "landlord" | "contract" | "zatca";
-  /** Row id, so the UI can deep-link straight to it. */
+  /**
+   * Which record to fix. `zatca` means onboarding, not a field; `buyer` is the
+   * external customer typed onto the document itself, which has no row to send
+   * anyone to — the user is already looking at it.
+   */
+  entity: "tenant" | "landlord" | "contract" | "zatca" | "buyer";
+  /** Row id, so the UI can deep-link straight to it. Null for `buyer`. */
   id: number | null;
   name: string | null;
   /** Machine-readable field keys — the UI localizes them. */
   missing: string[];
   /** Where the user should be sent to fix it. */
-  action: "edit_tenant" | "edit_landlord" | "zatca_settings" | "edit_contract";
+  action: "edit_tenant" | "edit_landlord" | "zatca_settings" | "edit_contract" | "edit_document";
+}
+
+/**
+ * The buyer of a document that has no contract to read one from — the "free
+ * invoice" on the Invoices page. Either a party the account already holds
+ * (a tenant or a landlord picked from the list) or a customer typed straight
+ * onto the document.
+ */
+export interface InvoiceBuyerInput {
+  tenantId?: number | null;
+  ownerId?: number | null;
+  tenantName?: string | null;
+  client?: Record<string, unknown> | null;
 }
 
 /**
@@ -131,12 +148,258 @@ async function resolveOwnerId(db: Drizzle, contractId: number): Promise<number |
  */
 function isOnboarded(creds: typeof zatcaCredentialsTable.$inferSelect | undefined): boolean {
   if (!creds) return false;
+  // ZATCA has stopped accepting these credentials — the device was removed in
+  // Fatoora, or the CSID was revoked. Everything below still passes (the
+  // certificate is right there in the row), which is exactly why this has to be
+  // checked first: holding valid-looking material is not the same as being
+  // linked, and the difference is invisible from our side until a submission
+  // comes back 401.
+  if (creds.linkInvalidAt) return false;
   const sandbox = creds.activeEnvironment === "sandbox";
   const cert = sandbox ? creds.sandboxCertPem : creds.prodCertPem;
   const key = sandbox ? creds.sandboxPrivateKeyEnc : creds.prodPrivateKeyEnc;
   const token = sandbox ? creds.sandboxBinarySecurityToken : creds.prodBinarySecurityToken;
   const secret = sandbox ? creds.sandboxSecretEnc : creds.prodSecretEnc;
   return !!(cert && key && token && secret);
+}
+
+/**
+ * Which ZATCA seller signs a document that has no contract?
+ *
+ * The account-level credentials row (`owner_id IS NULL`) is the historical
+ * answer, and it stays the answer whenever one exists — that row owns an ICV
+ * chain, and quietly moving a seller to a different chain is how invoices start
+ * colliding. But nothing in the product can CREATE that row: the settings tab
+ * onboards per landlord and always sends an ownerId. So an account whose only
+ * rows are per-landlord had no reachable seller at all, and every free-standing
+ * invoice reported "landlord not linked" about a link the user could not make.
+ *
+ * Hence the fallback: the account's own landlord record — the one flagged
+ * `is_account_holder`, which IS onboardable from the settings tab. Both the
+ * readiness gate and the submission path call this, so the seller the gate
+ * checks is always the seller the submission uses.
+ */
+export async function resolveStandaloneSellerId(db: Drizzle, userId: number): Promise<number | null> {
+  const [accountLevel] = await db
+    .select({ id: zatcaCredentialsTable.id })
+    .from(zatcaCredentialsTable)
+    .where(and(
+      eq(zatcaCredentialsTable.userId, userId),
+      isNull(zatcaCredentialsTable.ownerId),
+      isNull(zatcaCredentialsTable.deletedAt),
+    ))
+    .limit(1);
+  if (accountLevel) return null; // null = the account-level seller itself
+  const [holder] = await db
+    .select({ id: ownersTable.id })
+    .from(ownersTable)
+    .where(and(
+      eq(ownersTable.userId, userId),
+      eq(ownersTable.isAccountHolder, true),
+      isNull(ownersTable.deletedAt),
+    ))
+    .limit(1);
+  return holder?.id ?? null;
+}
+
+/**
+ * Is the seller of a contract-less document VAT-registered, and therefore
+ * obliged to e-invoice at all?
+ *
+ * Read from the landlord record when there is one, and otherwise from the
+ * account-level seller profile — which is the only place an account-level
+ * seller states a VAT number.
+ */
+async function sellerIsVatRegistered(db: Drizzle, userId: number, ownerId: number | null): Promise<boolean> {
+  if (ownerId != null) {
+    const [owner] = await db
+      .select({ taxNumber: ownersTable.taxNumber })
+      .from(ownersTable)
+      .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)))
+      .limit(1);
+    return !blank(owner?.taxNumber);
+  }
+  const [creds] = await db
+    .select({ vat: zatcaCredentialsTable.sellerVatNumber })
+    .from(zatcaCredentialsTable)
+    .where(and(
+      eq(zatcaCredentialsTable.userId, userId),
+      isNull(zatcaCredentialsTable.ownerId),
+      isNull(zatcaCredentialsTable.deletedAt),
+    ))
+    .limit(1);
+  return !blank(creds?.vat);
+}
+
+/** Load the seller's credentials row and report it as a blocker if unusable. */
+async function sellerZatcaBlocker(
+  db: Drizzle,
+  userId: number,
+  ownerId: number | null,
+  name: string | null,
+): Promise<InvoiceBlocker | null> {
+  const [creds] = await db
+    .select()
+    .from(zatcaCredentialsTable)
+    .where(and(
+      eq(zatcaCredentialsTable.userId, userId),
+      ownerId == null ? isNull(zatcaCredentialsTable.ownerId) : eq(zatcaCredentialsTable.ownerId, ownerId),
+      isNull(zatcaCredentialsTable.deletedAt),
+    ))
+    .limit(1);
+  if (isOnboarded(creds)) return null;
+  return {
+    entity: "zatca", id: ownerId, name,
+    missing: [
+      creds?.linkInvalidAt ? "zatcaLinkRevoked"
+        : creds ? "zatcaOnboardingIncomplete"
+        : "zatcaNotConfigured",
+    ],
+    action: "zatca_settings",
+  };
+}
+
+/**
+ * The buyer's own data, checked the same way on every path.
+ *
+ * `type` is not decoration: it decides what else is required and which ZATCA
+ * document this becomes. A company buyer must carry a VAT number and a full
+ * national address, because that is what makes the invoice a STANDARD one that
+ * goes to clearance; an individual needs neither, and gets a simplified invoice
+ * that is merely reported. Leaving the type unstated means we cannot tell which
+ * of the two we are about to file, so it is required rather than guessed.
+ */
+function buyerBlockers(buyer: {
+  name?: unknown; email?: unknown; phone?: unknown; idNumber?: unknown; type?: unknown;
+  vatNumber?: unknown; street?: unknown; buildingNumber?: unknown; district?: unknown;
+  city?: unknown; postalCode?: unknown;
+}): string[] {
+  const missing: string[] = [];
+  if (blank(buyer.name)) missing.push("name");
+  if (blank(buyer.email)) missing.push("email");
+  if (blank(buyer.phone)) missing.push("phone");
+  // CR for a company, national ID or iqama for an individual. ZATCA's BT-46 on
+  // a standard invoice, and the only way to tell two same-named customers apart
+  // on any of them.
+  if (blank(buyer.idNumber)) missing.push("idNumber");
+  const type = String(buyer.type ?? "").trim();
+  if (type !== "individual" && type !== "company") {
+    missing.push("buyerType");
+    return missing; // what else is required depends on it — do not guess.
+  }
+  if (type === "company" && blank(buyer.vatNumber)) missing.push("vatNumber");
+  // The national address is required by whatever makes this a STANDARD invoice
+  // bound for clearance — and that is the VAT number, not the type. A company
+  // must have one (so it always needs the address); an individual may also be
+  // registered, and when they are, the same address applies. Keying this on the
+  // type alone let a VAT-registered individual pass the gate and then fail
+  // `assertAddressComplete` at submission, which the user never sees.
+  if (type === "company" || !blank(buyer.vatNumber)) {
+    for (const [key, v] of [
+      ["street", buyer.street], ["buildingNumber", buyer.buildingNumber],
+      ["district", buyer.district], ["city", buyer.city], ["postalCode", buyer.postalCode],
+    ] as const) {
+      if (blank(v)) missing.push(key);
+    }
+  }
+  return missing;
+}
+
+/**
+ * Readiness for a document with NO contract — the "free invoice" on the
+ * Invoices page.
+ *
+ * This used to return `ok` unconditionally ("a free-standing document has no
+ * parties to validate against"), which was true of the buyer only in the sense
+ * that nobody had looked. The document still has a buyer and still has a
+ * seller; they just live on the document and on the account rather than on a
+ * contract. Both are checked here, and the ZATCA link stays on the approval
+ * side exactly as it does for a contract-linked invoice.
+ */
+async function standaloneReadiness(
+  db: Drizzle,
+  userId: number,
+  buyer: InvoiceBuyerInput,
+): Promise<InvoiceReadiness> {
+  const blockers: InvoiceBlocker[] = [];
+  const confirmations: InvoiceConfirmation[] = [];
+  const client = (buyer.client ?? {}) as Record<string, unknown>;
+  const tenantId = buyer.tenantId ?? null;
+  // `client.kind` records how the buyer was picked, which is the only way to
+  // tell a landlord-as-buyer from a landlord-as-seller.
+  const buyerOwnerId = String(client.kind ?? "") === "landlord" ? (buyer.ownerId ?? null) : null;
+
+  if (tenantId) {
+    const [tenant] = await db.select().from(tenantsTable)
+      .where(and(eq(tenantsTable.id, tenantId), eq(tenantsTable.userId, userId), isNull(tenantsTable.deletedAt)))
+      .limit(1);
+    if (!tenant) {
+      blockers.push({ entity: "buyer", id: null, name: null, missing: ["name"], action: "edit_document" });
+    } else {
+      const missing = buyerBlockers({
+        name: tenant.name, email: tenant.email, phone: tenant.phone,
+        idNumber: tenant.nationalId, type: tenant.type, vatNumber: tenant.taxNumber,
+        street: tenant.nationalAddressStreet, buildingNumber: tenant.buildingNumber,
+        district: tenant.nationalAddressDistrict, city: tenant.nationalAddressCity,
+        postalCode: tenant.postalCode,
+      });
+      if (missing.length) {
+        blockers.push({ entity: "tenant", id: tenant.id, name: tenant.name, missing, action: "edit_tenant" });
+      }
+      if (tenant.type !== "company" && blank(tenant.taxNumber)) {
+        confirmations.push({ key: "tenantNoVat", entity: "tenant", id: tenant.id, name: tenant.name });
+      }
+    }
+  } else if (buyerOwnerId) {
+    const [owner] = await db.select().from(ownersTable)
+      .where(and(eq(ownersTable.id, buyerOwnerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)))
+      .limit(1);
+    if (!owner) {
+      blockers.push({ entity: "buyer", id: null, name: null, missing: ["name"], action: "edit_document" });
+    } else {
+      const missing = buyerBlockers({
+        name: owner.name, email: owner.email, phone: owner.phone,
+        idNumber: owner.idNumber, type: owner.type, vatNumber: owner.taxNumber,
+        street: owner.nationalAddressStreet, buildingNumber: owner.buildingNumber,
+        district: owner.nationalAddressDistrict, city: owner.nationalAddressCity,
+        postalCode: owner.postalCode,
+      });
+      if (missing.length) {
+        blockers.push({ entity: "landlord", id: owner.id, name: owner.name, missing, action: "edit_landlord" });
+      }
+    }
+  } else {
+    // An external customer: everything we know about them is on the document,
+    // so the blocker points at the form rather than at a record.
+    const missing = buyerBlockers({
+      name: client.name || buyer.tenantName, email: client.email, phone: client.phone,
+      idNumber: client.idNumber, type: client.type, vatNumber: client.vatNumber,
+      street: client.street, buildingNumber: client.buildingNumber,
+      district: client.district, city: client.city, postalCode: client.postalCode,
+    });
+    if (missing.length) {
+      blockers.push({
+        entity: "buyer", id: null,
+        name: (client.name as string) || buyer.tenantName || null,
+        missing, action: "edit_document",
+      });
+    }
+  }
+
+  // The seller. A free invoice is still a tax invoice, so the account has to be
+  // linked to ZATCA before it can be issued — and, exactly as on the contract
+  // path, the VAT number is what triggers that. Demanding the link
+  // unconditionally would permanently block every free invoice for an account
+  // that is not VAT-registered at all (a residential-only manager, whose
+  // supplies are exempt and whose documents ZATCA does not want), which is the
+  // opposite of the point.
+  const sellerId = await resolveStandaloneSellerId(db, userId);
+  if (await sellerIsVatRegistered(db, userId, sellerId)) {
+    const sellerBlocker = await sellerZatcaBlocker(db, userId, sellerId, null);
+    if (sellerBlocker) blockers.push(sellerBlocker);
+  }
+
+  return readinessOf(blockers, { confirmations, tenantId, ownerId: sellerId });
 }
 
 /**
@@ -150,12 +413,14 @@ export async function checkInvoiceReadiness(
   db: Drizzle,
   userId: number,
   contractId: number | null | undefined,
+  buyer?: InvoiceBuyerInput,
 ): Promise<InvoiceReadiness> {
   const blockers: InvoiceBlocker[] = [];
   const confirmations: InvoiceConfirmation[] = [];
   if (!contractId) {
-    // A free-standing document has no parties to validate against.
-    return readinessOf([], { confirmations: [], tenantId: null, ownerId: null });
+    // No contract to read the parties from — but the document still has a buyer
+    // and a seller. See `standaloneReadiness`.
+    return standaloneReadiness(db, userId, buyer ?? {});
   }
 
   const [contract] = await db
@@ -193,8 +458,13 @@ export async function checkInvoiceReadiness(
     // from them would block every residential invoice. Organizations must have
     // one — that is what makes it a standard (B2B) tax invoice.
     const tenantIsCompany = tenant.type === "company";
-    if (tenantIsCompany) {
-      if (blank(tenant.taxNumber)) missing.push("vatNumber");
+    if (tenantIsCompany && blank(tenant.taxNumber)) missing.push("vatNumber");
+    // The address is required by whatever makes this a STANDARD invoice bound
+    // for clearance, and that is the VAT number rather than the type — an
+    // individual can be VAT-registered too, and one who is used to pass this
+    // gate and then fail `assertAddressComplete` deep in the submission, where
+    // the refusal reaches nobody.
+    if (tenantIsCompany || !blank(tenant.taxNumber)) {
       for (const f of ADDRESS_REQUIRED) {
         const v = f === "street" ? tenant.nationalAddressStreet
           : f === "district" ? tenant.nationalAddressDistrict
@@ -257,22 +527,8 @@ export async function checkInvoiceReadiness(
      * errand (certificate + a Fatoora OTP), not a field on the invoice, so it
      * is demanded at approval rather than at save. */
     if (!blank(owner.taxNumber)) {
-      const [creds] = await db
-        .select()
-        .from(zatcaCredentialsTable)
-        .where(and(
-          eq(zatcaCredentialsTable.userId, userId),
-          eq(zatcaCredentialsTable.ownerId, owner.id),
-          isNull(zatcaCredentialsTable.deletedAt),
-        ))
-        .limit(1);
-      if (!isOnboarded(creds)) {
-        blockers.push({
-          entity: "zatca", id: owner.id, name: owner.name,
-          missing: [creds ? "zatcaOnboardingIncomplete" : "zatcaNotConfigured"],
-          action: "zatca_settings",
-        });
-      }
+      const b = await sellerZatcaBlocker(db, userId, owner.id, owner.name);
+      if (b) blockers.push(b);
     }
   }
 
@@ -291,7 +547,8 @@ export function readinessMessage(
   scope: "issue" | "draft" = "issue",
 ): string {
   const label: Record<InvoiceBlocker["entity"], string> = {
-    tenant: "المستأجر", landlord: "المؤجر", contract: "العقد", zatca: "الزكاة والضريبة",
+    tenant: "المستأجر", landlord: "المؤجر", contract: "العقد",
+    buyer: "العميل", zatca: "الزكاة والضريبة",
   };
   return (scope === "draft" ? readiness.draftBlockers : readiness.blockers)
     .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.join("، ")}`)

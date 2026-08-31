@@ -14,7 +14,7 @@ import {
 import { DRIZZLE, type Drizzle } from "../../../database/database.module";
 import { InvoiceBuilderService, type InvoiceLineInput, todayIsoDate, todayIsoTime } from "./invoice-builder.service";
 import { InvoiceSignerService } from "./invoice-signer.service";
-import { ZatcaApiService } from "./zatca-api.service";
+import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
 
 export interface CreateInvoiceDto {
@@ -176,6 +176,37 @@ export class InvoiceService {
       resp = { status: 0, raw: (e as Error).message, json: null, headers: {} };
     }
 
+    // ZATCA refused the CREDENTIALS, not the document — the EGS device has been
+    // removed in Fatoora, or the CSID was revoked. Bail out HERE, before the
+    // `invoices` row is written and before `commitInvoiceState` below, because
+    // everything past this point is irreversible in a way this case does not
+    // deserve:
+    //
+    //   · the ICV is consumed unconditionally (see the comment further down),
+    //     and `invoices_user_owner_env_icv_uniq` has no `deleted_at` predicate,
+    //     so a burned counter cannot be reclaimed by deleting the row;
+    //   · the row itself would make `simple_invoices.zatca_invoice_id` non-null,
+    //     which `isSubmittedToZatca` reads as "this document reached ZATCA" and
+    //     uses to block a contract rebuild — permanently, for a document ZATCA
+    //     never saw.
+    //
+    // Nothing was filed, so nothing should be recorded as filed. The seller has
+    // to link again; correcting the invoice cannot help.
+    if (isCredentialRejection(resp)) {
+      await this.onboarding.markLinkInvalid(
+        userId, ownerId,
+        `ZATCA رفضت بيانات الربط (${resp.status}) — يجب إعادة الربط مع هيئة الزكاة والضريبة`,
+      );
+      throw new ConflictException({
+        error: "zatca_link_invalid",
+        message:
+          "انقطع الربط مع هيئة الزكاة والضريبة — لم تعد الشهادة مقبولة لدى الهيئة. أعد الربط من الإعدادات ثم أعد إرسال الفاتورة.",
+        // ZATCA's status, not this response's — naming it `httpStatus` next to a
+        // 409 invited exactly the confusion it sounds like.
+        zatcaHttpStatus: resp.status,
+      });
+    }
+
     const status = this.deriveStatus(resp);
     const clearedXml =
       submitTo === "clearance" && (resp.json as any)?.clearedInvoice
@@ -253,6 +284,16 @@ export class InvoiceService {
       ownerId,
     );
 
+    // ZATCA accepted a document, so the link works — retire any earlier "ZATCA
+    // stopped accepting this" flag. Proving it with an accepted document rather
+    // than only with a fresh CSID matters because the flag can be raised by a
+    // transient 403, and a seller who is in fact fine should not have to
+    // re-onboard to clear it.
+    if (status === "cleared" || status === "reported" || status === "submitted") {
+      try { await this.onboarding.clearLinkInvalid(userId, ownerId); }
+      catch { /* the invoice is filed; a stale flag must not fail the call */ }
+    }
+
     return { invoice, lines: linesRows };
   }
 
@@ -304,6 +345,22 @@ export class InvoiceService {
       const detail = `${who} http=${r.httpStatus} status=${r.status}`;
       if (r.ok) this.logger.log(`compliance-check PASS ${detail} warnings=${r.warnings.length}`);
       else this.logger.warn(`compliance-check FAIL ${detail} errors=${JSON.stringify(r.errors).slice(0, 400)}`);
+      // This is the way OUT of a link flagged invalid, and it has to be, because
+      // the flag blocks approvals and approvals were the only other thing that
+      // could clear it — a seller knocked offline by one transient 403 would
+      // otherwise have no route back except a fresh Fatoora OTP. "فحص" submits a
+      // throwaway document under the real credentials, so a pass is exactly the
+      // proof needed; a credential rejection here is equally good evidence the
+      // other way.
+      try {
+        if (r.ok) await this.onboarding.clearLinkInvalid(userId, ownerId);
+        else if (r.httpStatus === 401 || r.httpStatus === 403) {
+          await this.onboarding.markLinkInvalid(
+            userId, ownerId,
+            `ZATCA رفضت بيانات الربط (${r.httpStatus}) — يجب إعادة الربط مع هيئة الزكاة والضريبة`,
+          );
+        }
+      } catch { /* the verdict is what the caller asked for — never fail on the flag */ }
       return { ok: r.ok, httpStatus: r.httpStatus, status: r.status, warnings: r.warnings, errors: r.errors };
     } catch (e) {
       const msg = (e as Error)?.message || String(e);
@@ -535,7 +592,12 @@ export class InvoiceService {
     if (!invoice.signedXml || !invoice.invoiceHash) {
       throw new BadRequestException("Invoice has no signed XML to resubmit");
     }
-    const { decrypted } = await this.onboarding.getActiveCredentials(userId);
+    // Under the invoice's OWN seller. This read the account-level credentials
+    // regardless of which landlord signed the document, which silently
+    // resubmitted landlord X's signed XML under a different seller's Basic auth
+    // — and now that a free invoice carries the account holder's owner_id, it
+    // would simply 404 for any account with no account-level row.
+    const { decrypted } = await this.onboarding.getActiveCredentials(userId, invoice.ownerId ?? null);
     const submitTo = (invoice.submittedTo ?? "compliance") as "compliance" | "clearance" | "reporting";
     const submission =
       submitTo === "clearance"

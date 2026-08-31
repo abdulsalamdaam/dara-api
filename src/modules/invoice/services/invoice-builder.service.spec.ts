@@ -113,6 +113,38 @@ describe("InvoiceBuilderService", () => {
       assert.match(r.xml, /Anonymous/);
     });
 
+    it("identifies the buyer on a standard invoice (BT-46), with the scheme it was given", () => {
+      const r = builder.build({
+        profile: "standard", docType: "invoice", invoiceId: "X", icv: 1, pih: "Z", seller,
+        buyer: { name: "Buyer Co.", vat: "311111111100003", id: "4030000001", idScheme: "CRN" },
+        lines: [{ name: "S", quantity: 1, unitPrice: 1, vatPercent: 15 }],
+      });
+      assert.match(r.xml, /<cac:AccountingCustomerParty>[\s\S]*?<cac:PartyIdentification><cbc:ID schemeID="CRN">4030000001<\/cbc:ID>/);
+    });
+
+    it("does NOT identify the buyer on a simplified invoice", () => {
+      const r = builder.build({
+        profile: "simplified", docType: "invoice", invoiceId: "X", icv: 1, pih: "Z", seller,
+        buyer: { name: "Walk-in", id: "1000000003", idScheme: "OTH" },
+        lines: [{ name: "S", quantity: 1, unitPrice: 1, vatPercent: 15 }],
+      });
+      // A B2C document goes to a consumer who has no identifier to state, and
+      // ZATCA does not ask for one — an invented or empty element is worse than
+      // no element.
+      const customer = r.xml.slice(r.xml.indexOf("<cac:AccountingCustomerParty>"));
+      assert.ok(!customer.includes("<cac:PartyIdentification>"), "no buyer identification on simplified");
+    });
+
+    it("omits the buyer identification when there is no id to state", () => {
+      const r = builder.build({
+        profile: "standard", docType: "invoice", invoiceId: "X", icv: 1, pih: "Z", seller,
+        buyer: { name: "Buyer Co.", vat: "311111111100003" },
+        lines: [{ name: "S", quantity: 1, unitPrice: 1, vatPercent: 15 }],
+      });
+      const customer = r.xml.slice(r.xml.indexOf("<cac:AccountingCustomerParty>"));
+      assert.ok(!customer.includes("<cac:PartyIdentification>"));
+    });
+
     it("escapes XML metacharacters in seller/buyer/line names", () => {
       const r = builder.build({
         profile: "standard", docType: "invoice", invoiceId: "X", icv: 1, pih: "Z",

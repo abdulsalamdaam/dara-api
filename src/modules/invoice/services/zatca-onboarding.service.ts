@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, isNotNull } from "drizzle-orm";
 import {
   zatcaCredentialsTable,
   ZATCA_INITIAL_PIH,
@@ -146,6 +146,11 @@ export class ZatcaOnboardingService {
         productionOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "production",
         simulationOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "simulation",
         onboardedAt: c?.sandboxOnboardedAt ?? c?.prodOnboardedAt ?? null,
+        // ZATCA refused these credentials — the device was most likely removed
+        // in Fatoora. The row still holds a certificate, so without this the
+        // landlord would keep reading as perfectly integrated.
+        linkInvalidAt: c?.linkInvalidAt ?? null,
+        linkInvalidReason: c?.linkInvalidReason ?? null,
       };
     });
   }
@@ -256,6 +261,11 @@ export class ZatcaOnboardingService {
     // Point the record at the slot this CSID lands in, so the compliance suite
     // that must run next reads THESE credentials and not an empty slot.
     updates.activeEnvironment = environment;
+    // A fresh CSID is a working link by definition — drop any earlier "ZATCA
+    // stopped accepting this" flag rather than leaving the seller blocked by
+    // the very state they have just fixed.
+    updates.linkInvalidAt = null;
+    updates.linkInvalidReason = null;
     if (environment === "sandbox") {
       updates.sandboxPrivateKeyEnc = encryptString(csr.privateKey);
       updates.sandboxPublicKeyPem = csr.publicKey;
@@ -429,6 +439,46 @@ export class ZatcaOnboardingService {
     return row;
   }
 
+  /* ─── Link health ───────────────────────────────────────────────────── */
+
+  /**
+   * Record that ZATCA has stopped accepting this landlord's credentials.
+   *
+   * The link can be broken from the far side: the taxpayer removes our EGS
+   * device in the Fatoora portal, or ZATCA revokes the CSID. Nothing notifies
+   * us, and our row still looks complete — certificate, key, token, secret all
+   * present — so `isOnboarded()` keeps returning true and every invoice is
+   * signed and posted into a void. Writing the failure down is what turns an
+   * invisible, repeating error into a state the app can reason about: the
+   * readiness gate refuses approval, and the settings tab can say "re-link".
+   *
+   * Deliberately does NOT erase the credentials. They may yet be valid — a 403
+   * can also be a gateway or IP problem — and destroying key material on the
+   * strength of one HTTP status is not a decision to make automatically. This
+   * only flags; `unlink` remains the only thing that deletes.
+   */
+  async markLinkInvalid(userId: number, ownerId: number | null, reason: string): Promise<void> {
+    await this.db
+      .update(zatcaCredentialsTable)
+      .set({ linkInvalidAt: new Date(), linkInvalidReason: reason.slice(0, 500) })
+      .where(this.credsWhere(userId, ownerId));
+  }
+
+  /**
+   * Clear the flag — ZATCA accepted something, so the link works after all.
+   *
+   * Called on every successful submission rather than only on re-onboarding,
+   * because the flag can be raised by a transient 403 (a gateway hiccup, an IP
+   * block) and a seller who is in fact fine should not have to re-onboard to
+   * clear it. One accepted document is proof enough.
+   */
+  async clearLinkInvalid(userId: number, ownerId: number | null): Promise<void> {
+    await this.db
+      .update(zatcaCredentialsTable)
+      .set({ linkInvalidAt: null, linkInvalidReason: null })
+      .where(and(this.credsWhere(userId, ownerId), isNotNull(zatcaCredentialsTable.linkInvalidAt)));
+  }
+
   /* ─── Unlink ────────────────────────────────────────────────────────── */
 
   /**
@@ -502,6 +552,10 @@ export class ZatcaOnboardingService {
       .update(zatcaCredentialsTable)
       .set({
         activeEnvironment: "sandbox",
+        // The flag described credentials that no longer exist — left set, it is
+        // a stale complaint about a link the user has now deliberately removed.
+        linkInvalidAt: null,
+        linkInvalidReason: null,
         sandboxPrivateKeyEnc: null,
         sandboxPublicKeyPem: null,
         sandboxCsrPem: null,
