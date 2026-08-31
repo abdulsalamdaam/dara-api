@@ -564,13 +564,13 @@ class SimpleInvoicesController {
   }
 
   /**
-   * GET /simple-invoices/readiness — "could this contract's invoice be approved
-   * right now?", answered without creating anything. Nothing refuses at create
-   * time any more (see create()), so this is how the user learns BEFORE filling
-   * the form that the document they are about to save will not be approvable
-   * until the landlord links ZATCA / a VAT number or address is filled in. The
-   * create response repeats the same object for the after-the-fact advisory,
-   * and approve() is where it finally blocks.
+   * GET /simple-invoices/readiness — "could this contract's invoice be saved,
+   * and could it be approved?", answered without creating anything. The reply
+   * carries both verdicts: `draftOk` (the parties' own data, which create()
+   * refuses on) and `ok` (that plus the landlord's ZATCA link, which approve()
+   * refuses on). So the user learns BEFORE filling the form both that a field
+   * is missing and that the document will not be approvable until ZATCA is
+   * linked. The create response repeats the same object as an advisory.
    *
    * NOTE: every STATIC path under this controller must be declared ABOVE
    * `@Get(":id")` — Nest matches routes in declaration order, so ":id" claims
@@ -772,33 +772,48 @@ class SimpleInvoicesController {
       }
     }
 
-    // Readiness is NOT a create-time gate. Saving a draft is bookkeeping, not
-    // issuance: the landlord may not have linked ZATCA yet, a party may still be
-    // missing a VAT number or a national address, and none of that is a reason
-    // to refuse to WRITE the document down. The gate now lives on the action
-    // that actually issues it — approve() — so it is evaluated against the row
-    // as it stands at that moment, regardless of when the row was created.
+    // Readiness at create time, in two halves — the split is the whole point.
     //
-    // What survives here is the ADVISORY: the same readiness object is computed
-    // (best-effort) and returned alongside the created document, so the UI can
-    // say "saved, but it cannot be approved until …" without a second round
-    // trip. It never changes the status code and never refuses — a failure to
-    // compute it is silently a null.
+    //  · The PARTIES' data (name, e-mail, phone, ID/CR, VAT number, national
+    //    address on both sides) is checked and REFUSED here. A draft written on
+    //    top of a tenant with no ID or a landlord with no address is simply
+    //    wrong data, and the moment to catch that is while the user is still on
+    //    the form with the record one click away — not weeks later at approval.
+    //  · The ZATCA LINK is NOT checked here. Linking is an account errand: a
+    //    certificate and an OTP the taxpayer generates in the Fatoora portal,
+    //    nothing the person drafting this invoice can do from this form. It
+    //    would refuse to even write the document down for a reason unrelated to
+    //    the document, so it stays on approve() — the action that actually
+    //    signs and mirrors it to ZATCA.
     //
-    // The `confirmations` acknowledgement (tenant with no VAT number) rides
-    // along in that advisory too. It is no longer enforced at create — nothing
-    // is — and it is not enforced at approve either, because the shipped web
-    // client posts an empty approve body and would otherwise be unable to
-    // approve any residential invoice. It stays visible in the readiness
-    // payload both endpoints return.
+    // Both halves come from ONE checkInvoiceReadiness call; `draftBlockers` is
+    // the first, `blockers` the second. The refusal below therefore names only
+    // what the user can fix from here, while the full payload rides along so
+    // the UI can also say "…and the landlord still needs to link ZATCA before
+    // this can be approved".
+    //
+    // The failure to COMPUTE readiness is still non-fatal (advisory null): a
+    // broken lookup must not become an unexplained 500 on save.
     let readiness: InvoiceReadiness | null = null;
     if (type === "invoice" && !isTaxExemptKind(docKind)) {
       try {
         readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
       } catch {
-        readiness = null; // advisory only — never fails the save
+        readiness = null; // never fails the save on a lookup error
+      }
+      if (readiness && !readiness.draftOk) {
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن حفظ الفاتورة — بيانات ناقصة: ${readinessMessage(readiness, "draft")}`,
+          readiness,
+        });
       }
     }
+
+    // The `confirmations` acknowledgement (a tax invoice for an individual
+    // tenant with no VAT number) is deliberately NOT collected here. It is a
+    // statement about issuing the document, so it is taken at approve(); at
+    // create it only rides along in the advisory payload below.
 
     // Generate the number + insert inside ONE transaction guarded by a per
     // (account, doc-type) advisory lock, so two invoices created at the same
@@ -848,10 +863,12 @@ class SimpleInvoicesController {
           eq(paymentCollectionsTable.userId, scopeId(user)),
         ));
     }
-    // Non-blocking advisory: null for a document the gate does not apply to,
-    // `{ ok: true, … }` for one that is ready, and the full blocker list for one
-    // that is not — the same shape GET /simple-invoices/readiness returns, so
-    // the UI renders it with the same panel.
+    // Reaching here means `draftOk` — so what rides along is the leftover: null
+    // for a document the gate does not apply to, `{ ok: true, … }` for one that
+    // is ready to approve outright, and, for one whose landlord has not linked
+    // ZATCA yet, the same payload with that single blocker still standing. Same
+    // shape GET /simple-invoices/readiness returns, so the UI renders it with
+    // the same panel — as a heads-up about approval, not a failure to save.
     return { ...doc, readiness };
   }
 
@@ -1193,10 +1210,15 @@ class SimpleInvoicesController {
       assertTotalMatchesItems(items, total);
     }
 
-    // THE invoice-readiness gate. It used to sit on create, which refused to
-    // even save a draft for a landlord who had not linked ZATCA yet; it belongs
-    // here, on the action that actually issues the document and mirrors it to
-    // ZATCA. Consequences of it living on the action rather than on the row:
+    // THE FULL invoice-readiness gate — the parties' data (which create() has
+    // already refused on) AND the landlord's ZATCA link, which only this side
+    // demands. Approval is the action that actually issues the document and
+    // mirrors it to ZATCA, so it is the first point at which not being linked
+    // matters; refusing to even save a draft over it would have blocked
+    // bookkeeping on an errand that has nothing to do with the invoice.
+    //
+    // Re-running the party checks here is not redundant. Consequences of the
+    // gate living on the action rather than on the row:
     //
     //  · a document created BEFORE this moved — while the landlord was still
     //    unlinked — is checked exactly like one created after it, because the

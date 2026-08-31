@@ -9,6 +9,11 @@
  *
  * Shared by the ZATCA e-invoice controller and the plain billing-doc
  * controller so the two can never drift apart.
+ *
+ * The result carries TWO views of the same blocker list — `draftBlockers`
+ * (everything except the ZATCA link) and `blockers` (everything). Saving a
+ * draft is gated on the first, approving it on the second; see
+ * `InvoiceReadiness` for why the ZATCA link is the one thing held back.
  */
 import { and, eq, isNull } from "drizzle-orm";
 import {
@@ -44,12 +49,52 @@ export interface InvoiceConfirmation {
 }
 
 export interface InvoiceReadiness {
+  /** Everything is in place — the document can be ISSUED (approved). */
   ok: boolean;
+  /** Every blocker, ZATCA onboarding included. The gate for approve(). */
   blockers: InvoiceBlocker[];
+  /**
+   * The subset that has to hold before the document may even be WRITTEN: the
+   * parties' own data — name, e-mail, phone, ID/CR, VAT number, national
+   * address. Everything except the ZATCA link.
+   *
+   * The split exists because the two are different kinds of problem. A missing
+   * VAT number or national address is a mistake in the document being drafted,
+   * and the moment to catch it is while the user is still on the form — a draft
+   * saved on top of it is simply wrong data. Linking ZATCA, by contrast, is an
+   * account-level errand that involves a certificate, an OTP the taxpayer
+   * generates in the Fatoora portal, and no part of the invoice at hand; it
+   * cannot be done from the invoice form and must not stop the bookkeeping.
+   * So it is only demanded at approval, the moment the document is actually
+   * signed and mirrored to ZATCA.
+   */
+  draftBlockers: InvoiceBlocker[];
+  /** `draftBlockers` is empty — the document can be SAVED as a draft. */
+  draftOk: boolean;
   /** Must be acknowledged by the caller before an invoice can be issued. */
   confirmations: InvoiceConfirmation[];
   tenantId: number | null;
   ownerId: number | null;
+}
+
+/** `blockers` minus the ZATCA link — see `InvoiceReadiness.draftBlockers`. */
+export function draftBlockersOf(blockers: InvoiceBlocker[]): InvoiceBlocker[] {
+  return blockers.filter((b) => b.entity !== "zatca");
+}
+
+/** Assemble the two views of one blocker list, so no caller has to. */
+function readinessOf(
+  blockers: InvoiceBlocker[],
+  rest: Omit<InvoiceReadiness, "ok" | "blockers" | "draftBlockers" | "draftOk">,
+): InvoiceReadiness {
+  const draftBlockers = draftBlockersOf(blockers);
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    draftBlockers,
+    draftOk: draftBlockers.length === 0,
+    ...rest,
+  };
 }
 
 /**
@@ -110,7 +155,7 @@ export async function checkInvoiceReadiness(
   const confirmations: InvoiceConfirmation[] = [];
   if (!contractId) {
     // A free-standing document has no parties to validate against.
-    return { ok: true, blockers: [], confirmations: [], tenantId: null, ownerId: null };
+    return readinessOf([], { confirmations: [], tenantId: null, ownerId: null });
   }
 
   const [contract] = await db
@@ -119,10 +164,10 @@ export async function checkInvoiceReadiness(
     .where(and(eq(contractsTable.id, Number(contractId)), eq(contractsTable.userId, userId)))
     .limit(1);
   if (!contract) {
-    return {
-      ok: false, tenantId: null, ownerId: null, confirmations: [],
-      blockers: [{ entity: "contract", id: Number(contractId), name: null, missing: ["contract"], action: "edit_contract" }],
-    };
+    return readinessOf(
+      [{ entity: "contract", id: Number(contractId), name: null, missing: ["contract"], action: "edit_contract" }],
+      { tenantId: null, ownerId: null, confirmations: [] },
+    );
   }
 
   /* ── Tenant (buyer) ── */
@@ -206,7 +251,11 @@ export async function checkInvoiceReadiness(
      * VAT-registered, their invoices are e-invoices and must be signed with
      * that landlord's own CSID. A VAT number with no completed onboarding is
      * the single most common way to produce an invoice ZATCA rejects, so it
-     * blocks and points at Settings. */
+     * blocks and points at Settings.
+     *
+     * This is the ONLY blocker excluded from `draftBlockers`: it is an account
+     * errand (certificate + a Fatoora OTP), not a field on the invoice, so it
+     * is demanded at approval rather than at save. */
     if (!blank(owner.taxNumber)) {
       const [creds] = await db
         .select()
@@ -227,15 +276,24 @@ export async function checkInvoiceReadiness(
     }
   }
 
-  return { ok: blockers.length === 0, blockers, confirmations, tenantId, ownerId };
+  return readinessOf(blockers, { confirmations, tenantId, ownerId });
 }
 
-/** Human-readable one-liner for an API error message. */
-export function readinessMessage(readiness: InvoiceReadiness): string {
+/**
+ * Human-readable one-liner for an API error message.
+ *
+ * `scope` picks which of the two blocker lists to name: "draft" for the
+ * save-time refusal (which never mentions ZATCA, because the user cannot act on
+ * it from the invoice form), "issue" for the approval refusal.
+ */
+export function readinessMessage(
+  readiness: InvoiceReadiness,
+  scope: "issue" | "draft" = "issue",
+): string {
   const label: Record<InvoiceBlocker["entity"], string> = {
     tenant: "المستأجر", landlord: "المؤجر", contract: "العقد", zatca: "الزكاة والضريبة",
   };
-  return readiness.blockers
+  return (scope === "draft" ? readiness.draftBlockers : readiness.blockers)
     .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.join("، ")}`)
     .join(" | ");
 }

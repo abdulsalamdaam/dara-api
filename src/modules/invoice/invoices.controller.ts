@@ -70,8 +70,10 @@ export class InvoicesController {
    * state on this side — the call signs the document and sends it to ZATCA
    * before it returns. So the readiness gate below is a SUBMISSION gate, the
    * counterpart of the one on POST /simple-invoices/:id/approve, and it stays.
-   * The gate that was removed is the one on saving a billing DRAFT
-   * (POST /simple-invoices), which refuses nothing on readiness any more.
+   * Saving a billing DRAFT (POST /simple-invoices) applies only the half of the
+   * same gate the drafter can act on — `draftBlockers`, i.e. everything except
+   * the landlord's ZATCA link. Here there is no draft to save, so the full
+   * check applies.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)

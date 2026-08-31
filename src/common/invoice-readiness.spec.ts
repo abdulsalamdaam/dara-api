@@ -227,3 +227,50 @@ test("a company tenant with no VAT stays a hard blocker, not a confirmation", { 
     assert.equal(r.confirmations.length, 0, "a company must HAVE one — nothing to confirm");
   });
 });
+
+/* ── The draft/issue split ──────────────────────────────────────────────────
+ * Saving a draft is gated on `draftOk` (the parties' own data); approving it
+ * is gated on `ok` (that plus the landlord's ZATCA link). These pin the one
+ * asymmetry between the two lists — nothing but `entity: "zatca"` may differ.
+ */
+
+test("an unlinked ZATCA landlord can still be DRAFTED for, just not approved", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ zatca: "none" }, async () => {}, (r) => {
+    assert.equal(r.ok, false, "not approvable — the landlord has a VAT number and no CSID");
+    assert.equal(r.draftOk, true, "but the draft must still be writable");
+    assert.deepEqual(r.draftBlockers, [], "linking ZATCA is not a field on this invoice");
+  });
+});
+
+test("a missing party field blocks the DRAFT too, not just the approval", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ zatca: "onboarded" }, async ({ tx, tenantId }) => {
+    await tx.update(tenantsTable).set({ nationalId: null }).where(eq(tenantsTable.id, tenantId));
+  }, (r) => {
+    assert.equal(r.draftOk, false, "a tenant with no ID is wrong data, caught while the user is still on the form");
+    assert.deepEqual(r.draftBlockers.map((b) => b.entity), ["tenant"]);
+    assert.deepEqual(r.draftBlockers[0]!.missing, ["idNumber"]);
+  });
+});
+
+test("draftBlockers is blockers minus ZATCA, and nothing else", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withScenario({ zatca: "none" }, async ({ tx, ownerId, tenantId }) => {
+    await tx.update(ownersTable).set({ nationalAddressCity: null }).where(eq(ownersTable.id, ownerId));
+    await tx.update(tenantsTable).set({ phone: null }).where(eq(tenantsTable.id, tenantId));
+  }, (r) => {
+    assert.equal(r.ok, false);
+    assert.equal(r.draftOk, false);
+    assert.deepEqual(
+      r.blockers.filter((b) => b.entity !== "zatca"),
+      r.draftBlockers,
+      "the two lists differ by the ZATCA blocker alone",
+    );
+    assert.ok(r.blockers.some((b) => b.entity === "zatca"));
+    assert.equal(r.draftBlockers.length, 2, "landlord address + tenant phone");
+  });
+});
+
+test("a document with no contract is draft-ready as well as issue-ready", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  const r = await checkInvoiceReadiness(db, userId, null);
+  assert.equal(r.draftOk, true);
+  assert.deepEqual(r.draftBlockers, []);
+});
