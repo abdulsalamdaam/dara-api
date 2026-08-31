@@ -429,6 +429,92 @@ export class ZatcaOnboardingService {
     return row;
   }
 
+  /* ─── Unlink ────────────────────────────────────────────────────────── */
+
+  /**
+   * Disconnect a landlord from ZATCA — the reverse of onboarding.
+   *
+   * A seller who linked the wrong VAT number, rehearsed on simulation and
+   * wants a clean production run, moved to another provider, or simply stopped
+   * being VAT-registered has to be able to undo the link from the portal. Until
+   * now there was no way back: onboarding only ever wrote forward.
+   *
+   * What it does — and, just as importantly, what it does NOT:
+   *
+   *  · Every piece of ZATCA-issued material is wiped: both the sandbox and the
+   *    prod/simulation slots lose their private key, public key, CSR,
+   *    certificate, binary security token, shared secret, compliance request id
+   *    and onboarding timestamp. The encrypted key material is genuinely gone
+   *    from our database, not merely hidden behind a flag — soft-deleting the
+   *    row would leave the seller's private key sitting on disk.
+   *  · `activeEnvironment` goes back to the `sandbox` default and
+   *    `prodSlotEnv` is cleared, so nothing points at a slot that no longer
+   *    holds a certificate. (That mismatch is the exact failure §2b of
+   *    DARA-NOTES describes: a pointer naming an empty slot blocks every
+   *    invoice while a valid certificate sits unused in the next column.)
+   *  · The ICV counter and the PIH chain head are KEPT. They are not
+   *    credentials; they are the position this landlord has reached in a
+   *    sequence ZATCA requires to be monotonic, and `invoices` enforces the
+   *    same thing locally with a unique index on
+   *    (user, owner, environment, icv). Zeroing them would make the very first
+   *    invoice after a re-link collide with one already submitted.
+   *  · The row itself SURVIVES (no `deletedAt`), for the counters above and
+   *    because `upsertProfile` updates an existing row but inserts when it
+   *    finds none — and the insert would hit the (user, owner) unique index,
+   *    which has no `deleted_at` predicate. Keeping the row is what makes
+   *    re-linking work at all.
+   *  · Invoices already submitted to ZATCA are untouched. They are filed legal
+   *    documents; the seller party is snapshotted on each one, so they keep
+   *    printing correctly with no credentials row to join against.
+   *
+   * After this the landlord reads as "profile saved, not integrated" — exactly
+   * the state they were in between saving a profile and issuing a CSID — so the
+   * settings tab offers "Onboard" again and nothing special has to be taught to
+   * the rest of the app. Invoice readiness starts reporting the ZATCA blocker
+   * again, which means drafts for this landlord can still be written but not
+   * approved until they link again. Submission degrades to `not_onboarded`
+   * rather than throwing.
+   *
+   * We do NOT tell ZATCA. There is no revoke call in its API, so the CSID stays
+   * valid on their side; this is a local disconnection, and a seller who wants
+   * the device gone from Fatoora has to remove it there.
+   */
+  async unlink(userId: number, ownerId: number | null = null): Promise<ZatcaCredentials> {
+    const creds = await this.getCredentials(userId, ownerId);
+    if (!creds) throw new NotFoundException("لا يوجد ربط مع هيئة الزكاة والضريبة لهذا المؤجر");
+    // `getCredentials` falls back to the account-level row (ownerId null) only
+    // when asked for it, but be explicit: unlinking landlord X must never wipe
+    // the account-level seller that X happens to have been inheriting.
+    if ((creds.ownerId ?? null) !== ownerId) {
+      throw new NotFoundException("لا يوجد ربط مع هيئة الزكاة والضريبة لهذا المؤجر");
+    }
+    const [row] = await this.db
+      .update(zatcaCredentialsTable)
+      .set({
+        activeEnvironment: "sandbox",
+        prodSlotEnv: null,
+        sandboxPrivateKeyEnc: null,
+        sandboxPublicKeyPem: null,
+        sandboxCsrPem: null,
+        sandboxBinarySecurityToken: null,
+        sandboxSecretEnc: null,
+        sandboxCertPem: null,
+        sandboxComplianceRequestId: null,
+        sandboxOnboardedAt: null,
+        prodPrivateKeyEnc: null,
+        prodPublicKeyPem: null,
+        prodCsrPem: null,
+        prodBinarySecurityToken: null,
+        prodSecretEnc: null,
+        prodCertPem: null,
+        prodComplianceRequestId: null,
+        prodOnboardedAt: null,
+      })
+      .where(eq(zatcaCredentialsTable.id, creds.id))
+      .returning();
+    return row;
+  }
+
   /* ─── Active credentials access (for invoice submission) ───────────── */
 
   /**

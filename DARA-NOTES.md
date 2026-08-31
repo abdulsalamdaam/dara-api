@@ -296,6 +296,61 @@ and IQA are NOT valid — they were briefly added to the UI and removed (859d2a7
 (534cfc0) is on master/staging only. Cherry-pick it if you need the endpoint
 responses server-side; otherwise read the HTTP response the call returns.
 
+### 2b-ii. The invoice gate is split in two, and ZATCA can be unlinked
+
+**One `checkInvoiceReadiness` call, two verdicts** (`common/invoice-readiness.ts`).
+The reason is that the two halves are different kinds of problem and the user
+can act on them at different moments:
+
+| verdict | covers | refused by |
+|---|---|---|
+| `draftOk` / `draftBlockers` | the parties' own data — name, e-mail, phone, ID/CR, VAT number, national address, on tenant **and** landlord | `POST /simple-invoices` (saving the draft) |
+| `ok` / `blockers` | all of the above **plus** the landlord's ZATCA link | `POST /simple-invoices/:id/approve`, and `POST /invoices` |
+
+A missing VAT number is a mistake in the document being drafted, and the moment
+to catch it is while the user is still on the form with the record one click
+away. Linking ZATCA is an account errand — a certificate and an OTP the taxpayer
+generates in the Fatoora portal — that nobody can do from an invoice form, so it
+must never stand between a user and the save button. Both live in one function
+so the two can't drift; `draftBlockersOf()` is just `blockers` minus
+`entity: "zatca"`.
+
+The web mirrors it: `InvoiceReadinessPanel` takes `stage="create" | "approve"`.
+At create, `draftBlockers` render red (and disable Save) while the ZATCA blocker
+renders amber underneath as "this saves, but it can't be approved until…". At
+approve, everything is red. `useInvoiceGate` returns both `notReady` (approval)
+and `cannotSave` (the save); **only `cannotSave` may disable a control in the
+create flow.**
+
+**Unlinking a landlord from ZATCA** — `DELETE /zatca/landlords/:ownerId/link`
+(and `DELETE /zatca/link` for the legacy account-level seller),
+`ZatcaOnboardingService.unlink`, gated on `ZATCA_PROMOTE_PRODUCTION`, audited by
+the global DELETE interceptor. It wipes every certificate, key, secret, token,
+compliance-request id and onboarding timestamp in **both** slots, and resets
+`activeEnvironment` to `sandbox` with `prodSlotEnv` null — never leave the
+pointer naming an emptied slot (§2b).
+
+Three things it deliberately does NOT do, each of which breaks a later re-link:
+
+- **It does not soft-delete the row.** `zatca_credentials_user_owner_uniq` is
+  plain, with no `deleted_at` predicate, and `upsertProfile` looks up with
+  `deletedAt IS NULL` and then INSERTs — soft-delete + re-link is a raw 23505.
+- **It does not reset ICV/PIH.** Those are not credentials; they are the
+  landlord's position in a sequence ZATCA requires to be monotonic, and
+  `invoices_user_owner_env_icv_uniq` enforces the same thing locally. Zeroing
+  them makes the first invoice after a re-link collide with a submitted one.
+- **It does not touch invoices already filed.** They are legal documents and the
+  seller party is snapshotted on each, so they keep printing with no credentials
+  row to join against.
+
+The landlord drops back to "profile saved, not integrated" — the same state as
+between saving a profile and issuing a CSID — so the Onboard action returns and
+nothing else in the app needs to learn a new state. **ZATCA is not told**: its
+API has no revoke call, so the CSID stays valid on their side and the device has
+to be deleted in Fatoora separately. Say that in any UI that offers this.
+
+---
+
 ## 3. Packages, roles and account classification
 
 - Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,

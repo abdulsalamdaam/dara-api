@@ -1,0 +1,166 @@
+/**
+ * Unlinking a landlord from ZATCA.
+ *
+ * The interesting part of `unlink` is not what it clears — it is the three
+ * things it deliberately KEEPS, each of which breaks a later re-link if it
+ * goes: the row itself (the (user, owner) unique index has no `deleted_at`
+ * predicate, so an insert would collide), the ICV counter and the PIH chain
+ * head (`invoices` is unique on (user, owner, environment, icv), so a reset
+ * counter collides with an invoice already submitted).
+ *
+ * Everything runs inside a transaction that is always rolled back, so it is
+ * safe against any database. Skipped when DATABASE_URL is unset.
+ */
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { eq } from "drizzle-orm";
+import { db, getPool, usersTable, ownersTable, zatcaCredentialsTable, ZATCA_INITIAL_PIH } from "@dara/database";
+import { ZatcaOnboardingService } from "./zatca-onboarding.service";
+
+const HAS_DB = !!process.env.DATABASE_URL;
+class Rollback extends Error {}
+
+let userId = 0;
+
+before(async () => {
+  if (!HAS_DB) return;
+  const [u] = await db.select({ id: usersTable.id }).from(usersTable).limit(1);
+  userId = u?.id ?? 0;
+});
+after(async () => {
+  if (HAS_DB) await getPool().end();
+});
+
+/**
+ * `unlink` touches nothing but the database, so the CSR / API / builder /
+ * signer collaborators are never reached. Constructing it with the transaction
+ * alone keeps the test to the one method under examination.
+ */
+const svc = (tx: unknown) =>
+  new ZatcaOnboardingService(tx as never, null as never, null as never, null as never, null as never);
+
+/** A landlord onboarded on production, mid-chain — the hardest case to undo. */
+const LIVE_CREDS = {
+  activeEnvironment: "production" as const,
+  prodSlotEnv: "production",
+  sellerName: "Seller", sellerVatNumber: "300000000000003",
+  sellerStreet: "S", sellerBuildingNo: "1", sellerDistrict: "D",
+  sellerCity: "R", sellerPostalZone: "12211",
+  serialNumber: "1-Dara|2-Test|3-0001",
+  organizationIdentifier: "300000000000003",
+  organizationUnitName: "Test Unit",
+  locationAddress: "Riyadh",
+  industryCategory: "Real Estate",
+  commonName: "Dara Test",
+  prodPrivateKeyEnc: "ENC-KEY", prodPublicKeyPem: "PUB", prodCsrPem: "CSR",
+  prodBinarySecurityToken: "TOKEN", prodSecretEnc: "ENC-SECRET", prodCertPem: "CERT",
+  prodComplianceRequestId: "1787837521875", prodOnboardedAt: new Date(),
+  prodIcv: 42, prodPih: "MID-CHAIN-PIH",
+  sandboxPrivateKeyEnc: "ENC-KEY-S", sandboxCertPem: "CERT-S",
+  sandboxBinarySecurityToken: "TOKEN-S", sandboxSecretEnc: "ENC-SECRET-S",
+  sandboxIcv: 7, sandboxPih: "SANDBOX-PIH",
+};
+
+/** Build a live landlord, run `fn`, then roll everything back. */
+async function withLinkedLandlord(
+  fn: (ctx: { tx: typeof db; ownerId: number; credsId: number }) => Promise<void>,
+) {
+  try {
+    await db.transaction(async (tx) => {
+      const [owner] = await tx.insert(ownersTable).values({
+        userId, name: "مؤجر الاختبار", type: "individual", idNumber: "1000000009",
+        phone: "+966500000009", email: "unlink@test.local",
+        taxNumber: "300000000000003", status: "active",
+      }).returning();
+      const [creds] = await tx.insert(zatcaCredentialsTable)
+        .values({ userId, ownerId: owner!.id, ...LIVE_CREDS } as never).returning();
+      await fn({ tx: tx as never, ownerId: owner!.id, credsId: creds!.id });
+      throw new Rollback();
+    });
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e;
+  }
+}
+
+test("unlink wipes every certificate, key and secret in both slots", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    for (const col of [
+      "prodPrivateKeyEnc", "prodPublicKeyPem", "prodCsrPem", "prodBinarySecurityToken",
+      "prodSecretEnc", "prodCertPem", "prodComplianceRequestId", "prodOnboardedAt",
+      "sandboxPrivateKeyEnc", "sandboxPublicKeyPem", "sandboxCsrPem", "sandboxBinarySecurityToken",
+      "sandboxSecretEnc", "sandboxCertPem", "sandboxComplianceRequestId", "sandboxOnboardedAt",
+    ] as const) {
+      assert.equal((row as Record<string, unknown>)[col], null, `${col} must not survive an unlink`);
+    }
+    // The private key is the point: hiding the row would leave it on disk.
+    assert.equal(row!.prodSlotEnv, null, "nothing may still point at the emptied slot");
+  });
+});
+
+test("unlink leaves the active environment on a slot that is at least consistent", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    // Back to the insert-time default. A pointer left on "production" over an
+    // empty slot is the failure mode that blocked every invoice for owner 264.
+    assert.equal(row!.activeEnvironment, "sandbox");
+  });
+});
+
+test("unlink keeps the ICV counter and the PIH chain head", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    // Not credentials — the position in a sequence ZATCA requires to be
+    // monotonic, and that `invoices` enforces with a unique index. Zeroing it
+    // makes the first invoice after a re-link collide with a submitted one.
+    assert.equal(row!.prodIcv, 42);
+    assert.equal(row!.prodPih, "MID-CHAIN-PIH");
+    assert.equal(row!.sandboxIcv, 7);
+    assert.equal(row!.sandboxPih, "SANDBOX-PIH");
+    assert.notEqual(row!.prodPih, ZATCA_INITIAL_PIH);
+  });
+});
+
+test("unlink keeps the row and the seller profile, so re-linking is an update", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    assert.equal(row!.deletedAt, null, "a soft-deleted row still occupies the (user, owner) unique slot");
+    assert.equal(row!.sellerVatNumber, "300000000000003");
+    assert.equal(row!.serialNumber, "1-Dara|2-Test|3-0001");
+    // getCredentials is what upsertProfile consults before choosing insert vs
+    // update — it must still find this row.
+    const found = await svc(tx).getCredentials(userId, ownerId);
+    assert.ok(found, "an unlinked landlord must still be found, or re-linking inserts and collides");
+    assert.equal(found!.id, credsId);
+  });
+});
+
+test("unlinking a landlord never wipes the account-level seller it inherits from", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  try {
+    await db.transaction(async (tx) => {
+      const [owner] = await tx.insert(ownersTable).values({
+        userId, name: "مؤجر بلا ربط", type: "individual", idNumber: "1000000010",
+        phone: "+966500000010", email: "inherit@test.local",
+        taxNumber: "300000000000003", status: "active",
+      }).returning();
+      // The legacy account-level row: ownerId null, and the only one there is.
+      const [acct] = await tx.insert(zatcaCredentialsTable)
+        .values({ userId, ownerId: null, ...LIVE_CREDS } as never).returning();
+
+      await assert.rejects(
+        () => svc(tx as never).unlink(userId, owner!.id),
+        /لا يوجد ربط/,
+        "a landlord with no row of its own has nothing to unlink",
+      );
+      const [still] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, acct!.id));
+      assert.equal(still!.prodCertPem, "CERT", "the account-level certificate must be untouched");
+      throw new Rollback();
+    });
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e;
+  }
+});
