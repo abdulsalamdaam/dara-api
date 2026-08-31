@@ -259,13 +259,20 @@ test("draftBlockers is blockers minus ZATCA, and nothing else", { skip: !HAS_DB 
   }, (r) => {
     assert.equal(r.ok, false);
     assert.equal(r.draftOk, false);
+    // Spelled out rather than re-derived with the implementation's own filter,
+    // which would agree with itself no matter what the rule became.
     assert.deepEqual(
-      r.blockers.filter((b) => b.entity !== "zatca"),
-      r.draftBlockers,
-      "the two lists differ by the ZATCA blocker alone",
+      r.blockers.map((b) => b.entity).sort(),
+      ["landlord", "tenant", "zatca"],
+      "landlord address + tenant phone + the unlinked landlord",
     );
-    assert.ok(r.blockers.some((b) => b.entity === "zatca"));
-    assert.equal(r.draftBlockers.length, 2, "landlord address + tenant phone");
+    assert.deepEqual(
+      r.draftBlockers.map((b) => b.entity).sort(),
+      ["landlord", "tenant"],
+      "the save side sees the same two, and never the ZATCA link",
+    );
+    assert.deepEqual(r.draftBlockers.find((b) => b.entity === "tenant")?.missing, ["phone"]);
+    assert.deepEqual(r.draftBlockers.find((b) => b.entity === "landlord")?.missing, ["city"]);
   });
 });
 

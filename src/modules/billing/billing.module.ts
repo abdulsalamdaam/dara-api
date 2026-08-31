@@ -650,11 +650,13 @@ class SimpleInvoicesController {
   }
 
   /**
-   * Create a billing document. It is always saved as a DRAFT and creation never
-   * refuses on invoice readiness — see the note further down, and the gate in
-   * approve(). Everything else the request has to satisfy (line-item totals,
-   * non-negative figures, a resolvable credit/debit reference, a known `kind`)
-   * is unchanged and still enforced here.
+   * Create a billing document. It is always saved as a DRAFT, and it refuses on
+   * HALF the invoice-readiness verdict: the parties' own data (`draftBlockers`)
+   * is required here, while the landlord's ZATCA link is left to approve() —
+   * see the note further down for why the line is drawn there. Everything else
+   * the request has to satisfy (line-item totals, non-negative figures, a
+   * resolvable credit/debit reference, a known `kind`) is unchanged and still
+   * enforced here.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -792,14 +794,24 @@ class SimpleInvoicesController {
     // the UI can also say "…and the landlord still needs to link ZATCA before
     // this can be approved".
     //
-    // The failure to COMPUTE readiness is still non-fatal (advisory null): a
-    // broken lookup must not become an unexplained 500 on save.
+    // A failure to COMPUTE readiness is still non-fatal: a broken lookup must
+    // not become an unexplained 500 on save. But it is no longer silent —
+    // now that the verdict is normative, a null means the gate did not run,
+    // and that has to be visible in the log rather than inferred from a
+    // document nobody can approve later.
     let readiness: InvoiceReadiness | null = null;
     if (type === "invoice" && !isTaxExemptKind(docKind)) {
       try {
         readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
-      } catch {
-        readiness = null; // never fails the save on a lookup error
+      } catch (e) {
+        // Never fail the save on a lookup error — but do not let it disappear
+        // either. A null here now means the gate did not run at all, so a
+        // recurring warning is the only way anyone finds out that the check has
+        // quietly stopped protecting anything.
+        readiness = null;
+        this.logger.warn(
+          `readiness check failed for contract ${contractId ?? "—"} — document saved UNGATED: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
       if (readiness && !readiness.draftOk) {
         throw new BadRequestException({
@@ -1248,9 +1260,9 @@ class SimpleInvoicesController {
       }
       // Some situations are not blockers but must be acknowledged out loud —
       // a tax invoice for an individual tenant who has no VAT number. That
-      // acknowledgement used to be collected when the document was created;
-      // now that creating never refuses, it lives here, on the action that
-      // actually issues the document. The client ticks the box and sends it in
+      // acknowledgement used to be collected when the document was created; it
+      // lives here now because it is a statement about ISSUING the document,
+      // not about writing it down. The client ticks the box and sends it in
       // the approve body under the same `confirmations` key the create path
       // accepted, so there is one contract rather than two.
       const acked = (body as any)?.confirmations ?? {};

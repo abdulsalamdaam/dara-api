@@ -86,6 +86,7 @@ test("unlink wipes every certificate, key and secret in both slots", { skip: !HA
   await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
     await svc(tx).unlink(userId, ownerId);
     const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    // The private key is the point: hiding the row would leave it on disk.
     for (const col of [
       "prodPrivateKeyEnc", "prodPublicKeyPem", "prodCsrPem", "prodBinarySecurityToken",
       "prodSecretEnc", "prodCertPem", "prodComplianceRequestId", "prodOnboardedAt",
@@ -94,8 +95,19 @@ test("unlink wipes every certificate, key and secret in both slots", { skip: !HA
     ] as const) {
       assert.equal((row as Record<string, unknown>)[col], null, `${col} must not survive an unlink`);
     }
-    // The private key is the point: hiding the row would leave it on disk.
-    assert.equal(row!.prodSlotEnv, null, "nothing may still point at the emptied slot");
+  });
+});
+
+test("unlink keeps prodSlotEnv — it describes the counters, not the erased cert", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    await svc(tx).unlink(userId, ownerId);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    // Simulation and production share prodIcv/prodPih, so this column is the
+    // only record of which chain the retained counter belongs to. Clearing it
+    // would make that unknowable — and it is harmless to keep, because every
+    // reader gates on prodCertPem or activeEnvironment, both cleared above.
+    assert.equal(row!.prodSlotEnv, "production");
+    assert.equal(row!.prodCertPem, null, "…while the certificate it described is gone");
   });
 });
 
@@ -139,7 +151,7 @@ test("unlink keeps the row and the seller profile, so re-linking is an update", 
   });
 });
 
-test("unlinking a landlord never wipes the account-level seller it inherits from", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+test("a landlord with no row of its own has nothing to unlink, and the account-level seller survives", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   try {
     await db.transaction(async (tx) => {
       const [owner] = await tx.insert(ownersTable).values({
@@ -163,4 +175,16 @@ test("unlinking a landlord never wipes the account-level seller it inherits from
   } catch (e) {
     if (!(e instanceof Rollback)) throw e;
   }
+});
+
+test("unlink is scoped to the account — one account cannot unlink another's landlord", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId, credsId }) => {
+    // The one authorization property worth pinning: `credsWhere` filters on
+    // userId, and the controller passes `scopeId(user)` — so a landlord id
+    // guessed from another account resolves to nothing rather than to a row.
+    const otherAccount = userId + 1_000_000;
+    await assert.rejects(() => svc(tx).unlink(otherAccount, ownerId), /لا يوجد ربط/);
+    const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
+    assert.equal(row!.prodCertPem, "CERT", "the certificate must be untouched by a foreign account");
+  });
 });

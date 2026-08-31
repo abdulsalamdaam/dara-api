@@ -337,8 +337,17 @@ Three things it deliberately does NOT do, each of which breaks a later re-link:
   `deletedAt IS NULL` and then INSERTs — soft-delete + re-link is a raw 23505.
 - **It does not reset ICV/PIH.** Those are not credentials; they are the
   landlord's position in a sequence ZATCA requires to be monotonic, and
-  `invoices_user_owner_env_icv_uniq` enforces the same thing locally. Zeroing
-  them makes the first invoice after a re-link collide with a submitted one.
+  `invoices_user_owner_env_icv_uniq` enforces the same thing locally (also with
+  no `deleted_at` predicate, so `reset-chain`'s soft-delete does **not** free
+  the ICV slots it zeroes the counter past). Zeroing them makes the first
+  invoice after a re-link collide with a submitted one.
+- **It does not clear `prodSlotEnv`,** even though the slot it describes is now
+  empty. Simulation and production share `prod_icv`/`prod_pih`, so that column
+  is the only record of which chain the retained counter came from; erase it and
+  nobody can ever tell afterwards. Safe to keep — every reader of it
+  (`listLandlordStatus`, `switchEnvironment`, the compliance-check guard in
+  `InvoiceService`) gates on `prodCertPem` or `activeEnvironment` first, and
+  unlink clears both.
 - **It does not touch invoices already filed.** They are legal documents and the
   seller party is snapshotted on each, so they keep printing with no credentials
   row to join against.
@@ -676,6 +685,25 @@ makes that claim true rather than aspirational.
 - Coolify → Settings → Instance Domain is `https://coolify.dara-sa.net`; the
   legacy `*.oqudk.com` routers live in
   `/data/coolify/proxy/dynamic/dara-rebrand.yaml`, which Coolify does not manage.
+
+- **A landlord with no VAT number cannot save a tax invoice at all.** The
+  create-time gate requires `owner.taxNumber`, so a non-VAT-registered landlord
+  (most residential-only ones — residential rent is exempt) is refused at SAVE,
+  not just at approve. This is the pre-rebuild behaviour restored deliberately:
+  a document whose seller has no VAT number is not a tax invoice. But it is a
+  real dead end for that population, and the honest fix is a non-tax document
+  type for them rather than a gate that lets a tax invoice through. Decide
+  before anyone in that group tries to bill.
+
+- **`prod_icv` / `prod_pih` survive a simulation rehearsal into production.**
+  Neither `issueComplianceCsid` nor `issueProductionCsid` resets them, and
+  simulation writes to the same two columns — so a seller who rehearses on
+  simulation up to ICV 30 and then onboards for real files their FIRST
+  production invoice as ICV 31, carrying a PIH from a chain that only ever
+  existed on simulation. Pre-existing and unrelated to unlink (which is why
+  unlink now preserves `prod_slot_env`: it is the only thing that records which
+  chain the counter belongs to). Nobody has hit it because no invoice has ever
+  cleared in production — fix it before the first one does.
 
 - **ZATCA B2C (simplified) onboarding is blocked on production** — standard
   clears, simplified fails `Invalid signed properties hashing` for a reason

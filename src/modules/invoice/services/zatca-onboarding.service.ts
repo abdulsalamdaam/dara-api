@@ -447,17 +447,27 @@ export class ZatcaOnboardingService {
    *    and onboarding timestamp. The encrypted key material is genuinely gone
    *    from our database, not merely hidden behind a flag — soft-deleting the
    *    row would leave the seller's private key sitting on disk.
-   *  · `activeEnvironment` goes back to the `sandbox` default and
-   *    `prodSlotEnv` is cleared, so nothing points at a slot that no longer
-   *    holds a certificate. (That mismatch is the exact failure §2b of
-   *    DARA-NOTES describes: a pointer naming an empty slot blocks every
-   *    invoice while a valid certificate sits unused in the next column.)
+   *  · `activeEnvironment` goes back to the `sandbox` default, so nothing
+   *    SELECTS a slot that no longer holds a certificate. (That mismatch is the
+   *    exact failure §2b of DARA-NOTES describes: a pointer naming an empty
+   *    slot blocks every invoice while a valid certificate sits unused in the
+   *    next column.)
    *  · The ICV counter and the PIH chain head are KEPT. They are not
    *    credentials; they are the position this landlord has reached in a
    *    sequence ZATCA requires to be monotonic, and `invoices` enforces the
    *    same thing locally with a unique index on
-   *    (user, owner, environment, icv). Zeroing them would make the very first
-   *    invoice after a re-link collide with one already submitted.
+   *    (user, owner, environment, icv) that has no `deleted_at` predicate.
+   *    Zeroing them would make the very first invoice after a re-link collide
+   *    with one already submitted.
+   *  · `prodSlotEnv` is KEPT too, which looks odd next to an emptied slot but
+   *    is deliberate: it is the only record of WHICH chain the retained
+   *    `prodIcv`/`prodPih` belong to, since simulation and production share
+   *    those two columns. Erase it and nobody — code or human — can ever tell
+   *    afterwards whether that counter came from a rehearsal or from real
+   *    filings. It is safe to leave: every reader of it (`listLandlordStatus`,
+   *    `switchEnvironment`, the compliance-check guard in `InvoiceService`)
+   *    gates on `prodCertPem` or `activeEnvironment` first, and this method
+   *    clears both.
    *  · The row itself SURVIVES (no `deletedAt`), for the counters above and
    *    because `upsertProfile` updates an existing row but inserts when it
    *    finds none — and the insert would hit the (user, owner) unique index,
@@ -492,7 +502,6 @@ export class ZatcaOnboardingService {
       .update(zatcaCredentialsTable)
       .set({
         activeEnvironment: "sandbox",
-        prodSlotEnv: null,
         sandboxPrivateKeyEnc: null,
         sandboxPublicKeyPem: null,
         sandboxCsrPem: null,
