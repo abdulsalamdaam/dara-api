@@ -101,6 +101,25 @@ export const zatcaCredentialsTable = pgTable("zatca_credentials", {
    */
   prodSlotEnv: text("prod_slot_env"),
 
+  /**
+   * When ZATCA itself stopped accepting these credentials — set the moment a
+   * submission comes back 401/403.
+   *
+   * Unlinking can happen from the OTHER side: the taxpayer deletes the EGS
+   * device in the Fatoora portal, and nothing tells us. Our row still looks
+   * perfectly onboarded — certificate, key, secret all present — so every
+   * check passes and every invoice is submitted into a void. This column is
+   * the only way the app can know the difference between "not linked yet" and
+   * "was linked, and is not any more".
+   *
+   * Set by the submission path, cleared by a successful submission and by
+   * re-onboarding. While it is set the landlord reads as not onboarded, so the
+   * readiness gate refuses approval and points at Settings.
+   */
+  linkInvalidAt: timestamp("link_invalid_at", { withTimezone: true }),
+  /** What ZATCA said when it refused the credentials — shown to the user. */
+  linkInvalidReason: text("link_invalid_reason"),
+
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

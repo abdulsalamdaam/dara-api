@@ -2,6 +2,7 @@ import {
   BadRequestException, Body, Controller, Delete, Get, Header, Inject,
   NotFoundException, Param, ParseIntPipe, Post, Query, Res, UseGuards,
 } from "@nestjs/common";
+import { ParseInt4Pipe } from "../../common/int4.pipe";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import type { Response } from "express";
 import { eq, and, isNull } from "drizzle-orm";
@@ -12,11 +13,55 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
+import {
+  checkInvoiceReadiness, checkSellerLink, draftBlockersOf, eInvoiceBuyerBlockers,
+  readinessMessage, resolveStandaloneSellerId,
+  type InvoiceBlocker, type InvoiceReadiness,
+} from "../../common/invoice-readiness";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
+
+/**
+ * The values the invoice columns can actually hold.
+ *
+ * `CreateInvoiceDto` is a TypeScript interface, so the global
+ * `ValidationPipe({ whitelist: true })` resolves its metatype to `Object` and
+ * passes the body through untouched — every field below is raw client input at
+ * runtime. Left unchecked, a bad `profile` is caught by the `pgEnum` on INSERT,
+ * which is to say after the document has been built, signed, submitted to ZATCA
+ * and an ICV consumed: the one place where a rejection costs something
+ * irreversible.
+ */
+const PROFILES = ["standard", "simplified"] as const;
+const DOC_TYPES = ["invoice", "credit", "debit"] as const;
+const SUBMIT_TARGETS = ["compliance", "clearance", "reporting"] as const;
+
+/** Name what arrived — a caller sending garbage needs to see its own value. */
+function assertOneOf<T extends string>(field: string, value: unknown, allowed: readonly T[]): T {
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) return value as T;
+  throw new BadRequestException(
+    `${field} must be one of ${allowed.join(" | ")} — received ${JSON.stringify(value)}`,
+  );
+}
+
+/**
+ * Dress a single blocker as the readiness envelope the contract path returns,
+ * so a client renders one "here is what to fix" panel whatever the path was.
+ */
+function readinessOf(blockers: InvoiceBlocker[], ownerId: number | null): InvoiceReadiness {
+  const draftBlockers = draftBlockersOf(blockers);
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    draftBlockers,
+    draftOk: draftBlockers.length === 0,
+    confirmations: [],
+    tenantId: null,
+    ownerId,
+  };
+}
 
 @ApiTags("invoices")
 @ApiBearerAuth("user-jwt")
@@ -43,7 +88,8 @@ export class InvoicesController {
     if (page != null || pageSize != null || search != null) {
       return this.invoices.listPaged(scopeId(user), {
         page: Math.max(1, parseInt(page ?? "1", 10) || 1),
-        pageSize: Math.min(100, Math.max(1, parseInt(pageSize ?? "10", 10) || 10)),
+        // 25 to match every other list in the product; cap raised to the shared 200.
+        pageSize: Math.min(200, Math.max(1, parseInt(pageSize ?? "25", 10) || 25)),
         search: search?.trim() || undefined,
       });
     }
@@ -56,7 +102,7 @@ export class InvoicesController {
   /** GET /invoices/:id */
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async get(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async get(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.getOneWithLines(scopeId(user), id);
   }
 
@@ -64,6 +110,15 @@ export class InvoicesController {
    * POST /invoices
    * Build, sign, submit, and persist an invoice in a single call.
    * Body matches CreateInvoiceDto.
+   *
+   * Despite the name, this is NOT a draft-creating endpoint: there is no draft
+   * state on this side — the call signs the document and sends it to ZATCA
+   * before it returns. So the readiness gate below is a SUBMISSION gate, the
+   * counterpart of the one on POST /simple-invoices/:id/approve, and it stays.
+   * Saving a billing DRAFT (POST /simple-invoices) applies only the half of the
+   * same gate the drafter can act on — `draftBlockers`, i.e. everything except
+   * the landlord's ZATCA link. Here there is no draft to save, so the full
+   * check applies.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -72,11 +127,46 @@ export class InvoicesController {
     if (!body.profile) throw new BadRequestException("profile required");
     if (!Array.isArray(body.lines) || body.lines.length === 0)
       throw new BadRequestException("at least one line required");
-    // Same guard as the plain billing path — a contract-linked e-invoice must
-    // have complete tenant/landlord data and an onboarded landlord, otherwise
-    // ZATCA rejects it after we have already burned an ICV.
+
+    // Presence was the only thing ever asked of these — see PROFILES above for
+    // why that is not enough.
+    const profile = assertOneOf("profile", body.profile, PROFILES);
+    if (body.docType != null) assertOneOf("docType", body.docType, DOC_TYPES);
+    const submitTo = body.submitTo == null
+      ? null
+      : assertOneOf("submitTo", body.submitTo, SUBMIT_TARGETS);
+    // Same reasoning, one field further: an unchecked ownerId reaches the driver
+    // as a query parameter and comes back as `invalid input syntax for type
+    // integer` — a 500 on what is plainly a bad request.
+    if (body.ownerId != null && !Number.isInteger(body.ownerId)) {
+      throw new BadRequestException(`ownerId must be an integer — received ${JSON.stringify(body.ownerId)}`);
+    }
+    // The compliance endpoint is the ONBOARDING one. The service already routes
+    // there by itself for sandbox and simulation, so a client never needs to ask
+    // — and a live seller asking would spend a real ICV on a document ZATCA
+    // files nowhere.
+    if (submitTo === "compliance") {
+      throw new BadRequestException("submitTo=compliance is chosen automatically during onboarding and cannot be requested");
+    }
+
+    // `submitTo` overrides the profile→endpoint derivation in the service, so a
+    // client could file a simplified document at clearance (or a standard one
+    // at reporting) and leave the stored profile describing a document that
+    // went somewhere else. Clearance is for B2B and reporting for B2C; the two
+    // are not interchangeable, and the row must keep saying where it went.
+    if (submitTo === "clearance" && profile === "simplified")
+      throw new BadRequestException("submitTo=clearance is for standard (B2B) invoices — a simplified invoice is reported, not cleared");
+    if (submitTo === "reporting" && profile === "standard")
+      throw new BadRequestException("submitTo=reporting is for simplified (B2C) invoices — a standard invoice must be cleared");
+
+    // Same guard as the approval path on the plain billing side — a
+    // contract-linked e-invoice must have complete tenant/landlord data and an
+    // onboarded landlord, otherwise ZATCA rejects it after we have already
+    // burned an ICV. Nothing is saved as a draft here, so refusing costs the
+    // caller no work.
+    const scoped = scopeId(user);
     if (body.contractId) {
-      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), body.contractId);
+      const readiness = await checkInvoiceReadiness(this.db, scoped, body.contractId);
       if (!readiness.ok) {
         throw new BadRequestException({
           error: "invoice_not_ready",
@@ -84,6 +174,49 @@ export class InvoicesController {
           readiness,
         });
       }
+    } else {
+      // No contract is not "no parties". The seller still has to be linked to
+      // ZATCA before anything can be signed on their behalf, and this used to
+      // be skipped entirely: `if (body.contractId)` around the whole gate meant
+      // a contract-less call was checked for nothing at all.
+      const sellerId = body.ownerId ?? await resolveStandaloneSellerId(this.db, scoped);
+      // A credit or debit note corrects an invoice that has ALREADY gone out.
+      // The billing side exempts notes from this gate for exactly that reason
+      // ("it must stay issuable"), and the two doors have to give the same
+      // answer — otherwise a link revoked after the original was filed would
+      // leave the correction issuable on one endpoint and refused on the other.
+      const isNote = body.docType === "credit" || body.docType === "debit";
+      const sellerBlocker = isNote ? null : await checkSellerLink(this.db, scoped, sellerId);
+      if (sellerBlocker) {
+        const readiness = readinessOf([sellerBlocker], sellerId);
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
+        });
+      }
+    }
+
+    // The buyer, on every path. `assertAddressComplete` inside the service
+    // covers the address and only for standard, which leaves a standard invoice
+    // with no buyer VAT number to be built with an empty PartyTaxScheme, signed,
+    // and POSTed to clearance — a document we already knew ZATCA would reject,
+    // for an ICV that cannot be reclaimed. So it is refused here, before
+    // `issue()` touches anything.
+    const buyerMissing = eInvoiceBuyerBlockers(body.buyer, profile);
+    if (buyerMissing.length) {
+      const readiness = readinessOf(
+        [{
+          entity: "buyer", id: null, name: body.buyer?.name ?? null,
+          missing: buyerMissing, action: "edit_document",
+        }],
+        body.ownerId ?? null,
+      );
+      throw new BadRequestException({
+        error: "invoice_not_ready",
+        message: `لا يمكن إصدار الفاتورة — بيانات المشتري ناقصة: ${buyerMissing.join("، ")}`,
+        readiness,
+      });
     }
     return this.invoices.issue(scopeId(user), body);
   }
@@ -94,14 +227,14 @@ export class InvoicesController {
    */
   @Post(":id/resubmit")
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
-  async resubmit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async resubmit(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.resubmit(scopeId(user), id);
   }
 
   /** DELETE /invoices/:id  (soft-delete) */
   @Delete(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_DELETE)
-  async remove(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async remove(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     return this.invoices.softDelete(scopeId(user), id);
   }
 
@@ -109,7 +242,7 @@ export class InvoicesController {
   @Get(":id/xml")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   @Header("Content-Type", "application/xml; charset=utf-8")
-  async getXml(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+  async getXml(@CurrentUser() user: AuthUser, @Param("id", ParseInt4Pipe) id: number) {
     const { invoice } = await this.invoices.getOneWithLines(scopeId(user), id);
     return invoice.signedXml ?? invoice.unsignedXml;
   }
@@ -120,7 +253,7 @@ export class InvoicesController {
   @Header("Content-Type", "text/html; charset=utf-8")
   async getHtml(
     @CurrentUser() user: AuthUser,
-    @Param("id", ParseIntPipe) id: number,
+    @Param("id", ParseInt4Pipe) id: number,
     @Query("lang") lang?: "ar" | "en",
   ) {
     const ctx = await this.buildRenderContext(user, id, lang);
@@ -132,7 +265,7 @@ export class InvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async getPdf(
     @CurrentUser() user: AuthUser,
-    @Param("id", ParseIntPipe) id: number,
+    @Param("id", ParseInt4Pipe) id: number,
     @Query("lang") lang: "ar" | "en" | undefined,
     @Res() res: Response,
   ) {

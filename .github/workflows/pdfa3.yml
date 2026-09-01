@@ -1,0 +1,92 @@
+# PDF/A-3 conformance gate.
+#
+# The invoices we hand buyers carry XMP metadata CLAIMING PDF/A-3B. This is what
+# keeps that claim true: it builds one the way the API does and puts it through
+# veraPDF, the reference validator. Without it, a refactor could drop the
+# OutputIntent or the file identifier and nothing would notice until a buyer's
+# tax software rejected the invoice.
+#
+# The check also asserts the UNWRAPPED source still FAILS, so a broken veraPDF
+# install cannot turn this into a gate that passes everything.
+name: PDF/A-3 conformance
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "src/modules/invoice/services/pdfa3.service.ts"
+      - "src/modules/invoice/assets/srgb-icc.ts"
+      - "scripts/check-pdfa3.mjs"
+      - ".github/workflows/pdfa3.yml"
+      - "package.json"
+  pull_request:
+    paths:
+      - "src/modules/invoice/services/pdfa3.service.ts"
+      - "src/modules/invoice/assets/srgb-icc.ts"
+      - "scripts/check-pdfa3.mjs"
+  workflow_dispatch:
+
+jobs:
+  verapdf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The check runs against dist/, so it validates what actually ships.
+      - run: pnpm build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache veraPDF
+        id: verapdf-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/verapdf
+          key: verapdf-1.30.2
+
+      - name: Install veraPDF
+        if: steps.verapdf-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/verapdf.zip https://software.verapdf.org/releases/verapdf-installer.zip
+          unzip -q /tmp/verapdf.zip -d /tmp/verapdf-inst
+          DIR=$(find /tmp/verapdf-inst -maxdepth 1 -type d -name 'verapdf-greenfield-*' | head -1)
+          cat > /tmp/auto-install.xml <<'XML'
+          <AutomatedInstallation langpack="eng">
+            <com.izforge.izpack.panels.htmlhello.HTMLHelloPanel id="welcome"/>
+            <com.izforge.izpack.panels.target.TargetPanel id="install_dir">
+              <installpath>VERAPDF_HOME</installpath>
+            </com.izforge.izpack.panels.target.TargetPanel>
+            <com.izforge.izpack.panels.packs.PacksPanel id="sdk_pack_select">
+              <pack index="0" name="veraPDF GUI" selected="true"/>
+              <pack index="1" name="veraPDF Batch files" selected="true"/>
+              <pack index="2" name="veraPDF Validation model" selected="false"/>
+              <pack index="3" name="veraPDF Documentation" selected="false"/>
+              <pack index="4" name="veraPDF Sample Plugins" selected="false"/>
+            </com.izforge.izpack.panels.packs.PacksPanel>
+            <com.izforge.izpack.panels.install.InstallPanel id="install"/>
+            <com.izforge.izpack.panels.finish.FinishPanel id="finish"/>
+          </AutomatedInstallation>
+          XML
+          sed -i "s#VERAPDF_HOME#$HOME/verapdf#" /tmp/auto-install.xml
+          java -jar "$DIR"/verapdf-izpack-installer-*.jar /tmp/auto-install.xml
+
+      - name: Validate
+        run: VERAPDF="$HOME/verapdf/verapdf" node scripts/check-pdfa3.mjs
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: pdfa3-failure
+          path: pdfa3-failure.pdf
+          if-no-files-found: ignore

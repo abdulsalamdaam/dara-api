@@ -1,9 +1,9 @@
 import {
-  Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query,
-  BadRequestException, UseGuards,
+  Body, Controller, Delete, Get, Header, Inject, Module, NotFoundException, Param, Patch, Post, Query,
+  BadRequestException, ConflictException, StreamableFile, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql } from "drizzle-orm";
+import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql, isNotNull} from "drizzle-orm";
 import {
   simpleInvoicesTable, paymentsTable, paymentCollectionsTable, contractsTable,
   contractUnitsTable, unitsTable, propertiesTable, companiesTable, usersTable,
@@ -11,7 +11,10 @@ import {
   type BuyerSnapshot,
 } from "@dara/database";
 import type { InvoiceLineInput } from "../invoice/services/invoice-builder.service";
-import { listQuerySchema } from "../../common/pagination";
+import { PdfA3Service } from "../invoice/services/pdfa3.service";
+import { UploadsService } from "../uploads/uploads.service";
+import { UploadsModule } from "../uploads/uploads.module";
+import { listQuerySchema, wantsPagination, pageBounds, parseIdList} from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -20,10 +23,12 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
+import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
+import { CHAIN_BUSY } from "../invoice/services/chain-lock";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
 
@@ -38,7 +43,16 @@ type LineItem = { description: string; quantity: number; unitPrice: number; amou
 /** Result of the best-effort ZATCA mirror on approval — surfaced to the UI. */
 type ZatcaSubmitOutcome =
   | { submitted: true; status: string; profile: string; environment: string; httpStatus: number; invoiceId: number; qr: string | null; warnings: number }
-  | { submitted: false; code: "not_linked" | "not_onboarded" | "no_items" | "skipped" | "not_required" | "error"; reason: string };
+  | {
+      submitted: false;
+      /**
+       * `link_invalid` is not a flavour of `error`. ZATCA refused the
+       * CREDENTIALS, so nothing was filed, no ICV was spent, and no amount of
+       * correcting the document will help — the seller has to link again.
+       */
+      code: "not_linked" | "not_onboarded" | "link_invalid" | "chain_busy" | "no_items" | "skipped" | "not_required" | "error";
+      reason: string;
+    };
 
 
 function normalizeItems(raw: any): LineItem[] {
@@ -79,6 +93,58 @@ function assertNonNegative(items: LineItem[], total: number): void {
   }
 }
 
+/** The VAT rate a taxable line carries. Mirrors the wizard's `VAT_RATE`. */
+const VAT_RATE = 0.15;
+/** One halala — money is compared at the precision it is stored in. */
+const HALALA = 0.01;
+
+/**
+ * Refuse a document whose total does not follow from its own line items.
+ *
+ * `subtotal` is derived (Σ of the line amounts) but `total` was taken from the
+ * request verbatim, and VAT is implied everywhere downstream as
+ * `total − subtotal` — so `{"items":[{…,"amount":100}],"total":999999}` stored
+ * `subtotal 100.00, total 999999.00` and minted 999,899 of VAT out of nothing,
+ * on a document that goes to ZATCA.
+ *
+ * The expected total is the subtotal plus 15% on the lines that are flagged
+ * VAT-able, which covers every shape the wizard produces: a mixed document
+ * (some lines taxed, some not), zero-rated/exempt lines (`vat: false`) and a
+ * VAT-disabled document (every line `vat: false`, so total === subtotal).
+ * Two roundings are accepted — the whole VAT rounded once, which is what the
+ * web computes, and each line's VAT rounded on its own — because both are a
+ * correct reading of the same figures and they can differ by a halala.
+ */
+function assertTotalMatchesItems(items: LineItem[], total: number): void {
+  const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
+  const taxable = items.reduce((s, it) => s + (it.vat ? it.amount : 0), 0);
+  // Σ VAT rounded once (the wizard's arithmetic) …
+  const roundedOnce = round2(subtotal + round2(taxable * VAT_RATE));
+  // … and VAT rounded per line (what a line-by-line reading gives).
+  const roundedPerLine = round2(items.reduce((s, it) => s + it.amount + (it.vat ? round2(it.amount * VAT_RATE) : 0), 0));
+  if (Math.abs(total - roundedOnce) <= HALALA || Math.abs(total - roundedPerLine) <= HALALA) return;
+  if (items.length === 0) {
+    throw new BadRequestException("لا يمكن إصدار مستند بإجمالي بدون بنود · A document total needs line items behind it");
+  }
+  throw new BadRequestException(
+    `إجمالي المستند (${total.toFixed(2)}) لا يطابق بنوده — المجموع ${subtotal.toFixed(2)} ` +
+    `والإجمالي المتوقع ${roundedOnce.toFixed(2)} · Document total does not match its line items and their VAT flags`,
+  );
+}
+
+/**
+ * Sub-kinds that are not tax invoices and so are exempt from the invoice
+ * readiness gate. Anything outside this set — including an unrecognised value —
+ * is treated as a tax invoice.
+ */
+const TAX_EXEMPT_KINDS = new Set(["receipt", "deposit", "commission"]);
+function isTaxExemptKind(kind: unknown): boolean {
+  return typeof kind === "string" && TAX_EXEMPT_KINDS.has(kind.trim());
+}
+
+/** Every sub-kind the product actually issues; anything else is refused. */
+const KNOWN_DOC_KINDS = new Set([...TAX_EXEMPT_KINDS, "invoice", "manual"]);
+
 @ApiTags("simple-invoices")
 @ApiBearerAuth("user-jwt")
 @Controller("simple-invoices")
@@ -89,7 +155,64 @@ class SimpleInvoicesController {
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly invoices: InvoiceService,
     private readonly zatcaOnboarding: ZatcaOnboardingService,
+    private readonly pdfa3: PdfA3Service,
+    private readonly uploads: UploadsService,
   ) {}
+
+  /**
+   * GET /simple-invoices/:id/pdfa3
+   *
+   * The buyer's copy of a cleared invoice as PDF/A-3: the rendered page with
+   * ZATCA's cleared XML embedded inside it. ZATCA accepts the e-invoice being
+   * shared as XML or as PDF/A-3 carrying that XML, and this is the second form.
+   *
+   * Deliberately refuses rather than improvising when either half is missing —
+   * a PDF/A-3 without the cleared XML would claim to be an e-invoice while
+   * carrying nothing verifiable.
+   */
+  @Get(":id/pdfa3")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  @Header("Content-Type", "application/pdf")
+  async pdfA3(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    const uid = scopeId(user);
+    const [doc] = await this.db.select().from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+    if (!doc) throw new NotFoundException("Document not found");
+
+    // The cleared XML: by the stored link, falling back to a match on the
+    // invoice number for documents submitted before that link existed.
+    const linkId = (doc as any).zatcaInvoiceId as number | null;
+    const [einv] = linkId
+      ? await this.db.select({ clearedXml: invoicesTable.clearedXml, signedXml: invoicesTable.signedXml })
+          .from(invoicesTable).where(and(eq(invoicesTable.id, linkId), eq(invoicesTable.userId, uid)))
+      : await this.db.select({ clearedXml: invoicesTable.clearedXml, signedXml: invoicesTable.signedXml })
+          .from(invoicesTable)
+          .where(and(eq(invoicesTable.userId, uid), eq(invoicesTable.invoiceNumber, doc.number), isNull(invoicesTable.deletedAt)));
+
+    const xml = einv?.clearedXml ?? null;
+    if (!xml) {
+      throw new ConflictException(
+        "لا توجد نسخة معتمدة من هيئة الزكاة لهذا المستند بعد — لا يمكن إنشاء نسخة PDF/A-3.",
+      );
+    }
+    const pdfKey = (doc as any).pdfKey as string | null;
+    if (!pdfKey) {
+      throw new ConflictException(
+        "لم يتم إنشاء ملف PDF لهذا المستند بعد. افتح المستند مرة واحدة ثم أعد المحاولة.",
+      );
+    }
+
+    const pdf = await this.uploads.getObject(pdfKey);
+    const out = await this.pdfa3.build({
+      pdf, xml: Buffer.from(xml, "utf8"),
+      number: doc.number,
+      issuedAt: doc.issueDate ? new Date(doc.issueDate) : null,
+    });
+    return new StreamableFile(out, {
+      type: "application/pdf",
+      disposition: `attachment; filename="${doc.number.replace(/[^A-Za-z0-9._-]/g, "_")}-pdfa3.pdf"`,
+    });
+  }
 
   /**
    * Next document number for a type, e.g. INV-000123 / CRN-000005 / DBN-000002.
@@ -127,7 +250,9 @@ class SimpleInvoicesController {
     // frontend and passed through here.
     const contractIds: number[] | undefined =
       typeof rawQuery?.contractIds === "string" && rawQuery.contractIds.trim()
-        ? rawQuery.contractIds.split(",").map((x: string) => parseInt(x, 10)).filter((n: number) => Number.isFinite(n))
+        // parseIdList bounds each id to int4; the local parse here let a value
+        // past 2^31 reach the driver, which answers a 500 rather than a miss.
+        ? (parseIdList(rawQuery.contractIds) ?? [])
         : undefined;
     const base = and(eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt));
     const conds = [base];
@@ -149,6 +274,24 @@ class SimpleInvoicesController {
     const notDepositCond = or(isNull(simpleInvoicesTable.kind), ne(simpleInvoicesTable.kind, "deposit"));
     if (excludeVouchers) conds.push(notVoucherCond as any);
     else if (excludeDeposit) conds.push(notDepositCond as any);
+
+    // Filters the portal's finance tabs need. Each of these used to be decided
+    // in the browser over a fixed page of rows, so the list and its badge were
+    // both wrong past that page — "awaiting collection" in particular was a ten
+    // page walk that still showed "N+".
+    const flag = (v: unknown) => v === true || v === "true";
+    // Approved but no money against it yet.
+    if (flag(rawQuery?.awaitingCollection)) {
+      conds.push(eq(simpleInvoicesTable.status, "confirmed") as any);
+      conds.push(isNull(simpleInvoicesTable.paidDate) as any);
+      conds.push(isNull(simpleInvoicesTable.receiptNumber) as any);
+    }
+    // Money actually received against it.
+    if (flag(rawQuery?.collected)) conds.push(isNotNull(simpleInvoicesTable.paidDate) as any);
+    // Documents with no installment behind them — a commission or a one-off.
+    if (flag(rawQuery?.withoutInstallment)) conds.push(isNull(simpleInvoicesTable.paymentId) as any);
+    // Carries a receipt voucher number.
+    if (flag(rawQuery?.hasReceipt)) conds.push(isNotNull(simpleInvoicesTable.receiptNumber) as any);
     if (q.search) {
       conds.push(or(
         ilike(simpleInvoicesTable.number, `%${q.search}%`),
@@ -292,7 +435,7 @@ class SimpleInvoicesController {
    */
   @Get("customers")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
-  async customers(@CurrentUser() user: AuthUser) {
+  async customers(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const rows = await this.db
       .select({
         id: simpleInvoicesTable.id,
@@ -377,12 +520,39 @@ class SimpleInvoicesController {
       });
     }
 
-    return [...byKey.values()]
+    let list = [...byKey.values()]
       .map((c) => ({ ...c, totalAmount: Math.round((c.totalAmount + Number.EPSILON) * 100) / 100 }))
       .sort((a, b) => (b.lastIssueDate ?? "").localeCompare(a.lastIssueDate ?? "") || b.invoiceCount - a.invoiceCount);
+
+    // Search and paging happen after the grouping, not before it: a customer is
+    // only a customer once their invoices have been folded together by the
+    // identifier precedence above, so there is nothing to page until then.
+    // The account's invoices are still all read to build that — the same cost
+    // as before this endpoint took any parameters.
+    const search = typeof rawQuery?.search === "string" ? rawQuery.search.trim().toLowerCase() : "";
+    if (search) {
+      list = list.filter((c) =>
+        [c.name, c.vatNumber, c.phone, c.email, c.city]
+          .some((v) => v != null && String(v).toLowerCase().includes(search)));
+    }
+    if (!wantsPagination(rawQuery)) return list;
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const { limit, offset } = pageBounds(q);
+    return {
+      data: list.slice(offset, offset + limit),
+      page: q.page, pageSize: q.pageSize, total: list.length,
+    };
   }
 
   /**
+   * GET /simple-invoices/readiness — "could this contract's invoice be saved,
+   * and could it be approved?", answered without creating anything. The reply
+   * carries both verdicts: `draftOk` (the parties' own data, which create()
+   * refuses on) and `ok` (that plus the landlord's ZATCA link, which approve()
+   * refuses on). So the user learns BEFORE filling the form both that a field
+   * is missing and that the document will not be approvable until ZATCA is
+   * linked. The create response repeats the same object as an advisory.
+   *
    * NOTE: every STATIC path under this controller must be declared ABOVE
    * `@Get(":id")` — Nest matches routes in declaration order, so ":id" claims
    * anything that reaches it first. `readiness` sat below it and every call
@@ -395,44 +565,65 @@ class SimpleInvoicesController {
     @CurrentUser() user: AuthUser,
     @Query("contractId") contractId?: string,
     @Query("paymentId") paymentId?: string,
+    @Query("tenantId") buyerTenantId?: string,
+    @Query("ownerId") buyerOwnerId?: string,
   ) {
     const uid = scopeId(user);
-    let id = contractId ? Number(contractId) : null;
+    let id = foreignKeyId(contractId, "رقم العقد");
     // "Create invoice from installment" only knows the payment — resolve its
     // contract here so the UI can pre-check from that entry point too, instead
     // of discovering the problem when the user hits save.
-    if (!Number.isFinite(id as number) && paymentId) {
+    const payId = foreignKeyId(paymentId, "رقم القسط");
+    if (id == null && payId != null) {
       const [pay] = await this.db
         .select({ contractId: paymentsTable.contractId })
         .from(paymentsTable)
-        .where(and(eq(paymentsTable.id, Number(paymentId)), eq(paymentsTable.userId, uid)))
+        .where(and(eq(paymentsTable.id, payId), eq(paymentsTable.userId, uid)))
         .limit(1);
       id = pay?.contractId ?? null;
     }
-    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null);
+    // A free invoice has no contract, so the buyer has to be named in the query
+    // for the pre-check to have anything to look at. The external customer typed
+    // into the form cannot be pre-checked at all — the create call refuses that
+    // one and returns the same payload.
+    return checkInvoiceReadiness(this.db, uid, Number.isFinite(id as number) ? id : null, {
+      tenantId: foreignKeyId(buyerTenantId, "رقم المستأجر"),
+      ownerId: foreignKeyId(buyerOwnerId, "رقم المؤجر"),
+      client: buyerOwnerId ? { kind: "landlord" } : null,
+    });
+  }
+
+  /**
+   * Net effect of the confirmed credit/debit notes that reference an invoice:
+   * −Σ credit +Σ debit. The original document is immutable (ZATCA), so what is
+   * actually owed on it is `total` plus this figure — and every path that
+   * reasons about that obligation (the read handlers, the collection cap) has
+   * to agree on one number, which is why it lives here rather than being
+   * rebuilt per handler.
+   */
+  private async notesAdjustmentFor(uid: number, doc: { type: string; number: string }): Promise<number> {
+    if (doc.type !== "invoice") return 0;
+    const [c] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "credit"),
+        eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
+    const [d] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "debit"),
+        eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
+    return round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
   }
 
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     const uid = scopeId(user);
     const [agg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const collected = round2(Number(agg?.total ?? 0));
     // Net of confirmed credit/debit notes referencing this invoice (immutable).
-    let notesAdjustment = 0;
-    if (doc.type === "invoice") {
-      const [c] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
-        .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "credit"),
-          eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
-      const [d] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
-        .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "debit"),
-          eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
-      notesAdjustment = round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
-    }
+    const notesAdjustment = await this.notesAdjustmentFor(uid, doc);
     const netTotal = round2(Number(doc.total) + notesAdjustment);
     const balanceDue = Math.max(0, round2(netTotal - collected));
     // Numbers of the confirmed credit/debit notes referencing this invoice — a
@@ -450,9 +641,13 @@ class SimpleInvoicesController {
   }
 
   /**
-   * Can an invoice be issued for this contract? The UI calls this when the
-   * Create Invoice screen opens so it can block the button and show exactly
-   * what is missing, instead of letting the user fill a form and fail on save.
+   * Create a billing document. It is always saved as a DRAFT, and it refuses on
+   * HALF the invoice-readiness verdict: the parties' own data (`draftBlockers`)
+   * is required here, while the landlord's ZATCA link is left to approve() —
+   * see the note further down for why the line is drawn there. Everything else
+   * the request has to satisfy (line-item totals, non-negative figures, a
+   * resolvable credit/debit reference, a known `kind`) is unchanged and still
+   * enforced here.
    */
   @Post()
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -462,48 +657,101 @@ class SimpleInvoicesController {
     const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
     const total = body?.total != null ? round2(Number(body.total)) : subtotal;
     assertNonNegative(items, total);
+    assertTotalMatchesItems(items, total);
     // An explicit number wins; otherwise it's generated atomically below.
     const explicitNumber = (body?.number && String(body.number).trim()) || null;
 
-    // If linked to an installment, snapshot tenant/contract from it.
-    let contractId = body?.contractId ?? null;
-    let tenantId = body?.tenantId ?? null;
+    // If linked to an installment, snapshot tenant/contract from it. Every id
+    // off the body is range-checked before it is used as a key — these columns
+    // are int4, so an oversized id was a driver error rather than a miss.
+    let contractId = foreignKeyId(body?.contractId, "رقم العقد");
+    let tenantId = foreignKeyId(body?.tenantId, "رقم المستأجر");
     let tenantName = body?.tenantName ?? null;
     let client = body?.client ?? null;
-    if (body?.paymentId) {
+    const bodyPaymentId = foreignKeyId(body?.paymentId, "رقم القسط");
+    // An invoice covering several same-day installments arrives as `paymentIds`
+    // with no single `paymentId`. Only the singular was read here, so such a
+    // document ended up with contractId null — and a null contract makes the
+    // readiness check vacuous, which silently switched the whole ZATCA gate
+    // off for that document. Fall back to the first of the list.
+    const snapshotPaymentId = bodyPaymentId
+      ?? (Array.isArray(body?.paymentIds)
+        ? (body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط"))
+            .find((n: number | null) => n != null) ?? null)
+        : null);
+    if (snapshotPaymentId != null) {
       const [pay] = await this.db.select({ contractId: paymentsTable.contractId, tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
         .from(paymentsTable).leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
-        .where(and(eq(paymentsTable.id, Number(body.paymentId)), eq(paymentsTable.userId, scopeId(user))));
+        .where(and(eq(paymentsTable.id, snapshotPaymentId), eq(paymentsTable.userId, scopeId(user))));
       if (pay) { contractId = contractId ?? pay.contractId; tenantId = tenantId ?? pay.tenantId; tenantName = tenantName ?? pay.tenantName; }
     }
     // Credit/debit note: snapshot client + contract from the referenced invoice
     // (the note's parties come from the invoice, not entered manually).
-    if ((type === "credit" || type === "debit") && body?.billingReference) {
+    //
+    // The reference is what gives the note its meaning, so it is required and
+    // must resolve. A note that references nothing — or a number that doesn't
+    // exist, or a draft that was never issued — is a standalone amount the
+    // reports still net into revenue: it subtracts from money that was never
+    // billed and, having no buyer to snapshot, files itself under a nameless
+    // customer. A credit note is likewise bounded by the invoice it corrects:
+    // you cannot refund more than was charged.
+    if (type === "credit" || type === "debit") {
+      const ref = body?.billingReference != null ? String(body.billingReference).trim() : "";
+      if (!ref) throw new BadRequestException("يجب ربط الإشعار برقم الفاتورة الأصلية");
       const [refInv] = await this.db.select({
         contractId: simpleInvoicesTable.contractId, tenantId: simpleInvoicesTable.tenantId,
         tenantName: simpleInvoicesTable.tenantName, client: simpleInvoicesTable.client,
+        total: simpleInvoicesTable.total, status: simpleInvoicesTable.status,
       }).from(simpleInvoicesTable).where(and(
         eq(simpleInvoicesTable.userId, scopeId(user)), eq(simpleInvoicesTable.type, "invoice"),
-        eq(simpleInvoicesTable.number, String(body.billingReference)), isNull(simpleInvoicesTable.deletedAt),
+        eq(simpleInvoicesTable.number, ref), isNull(simpleInvoicesTable.deletedAt),
       ));
-      if (refInv) {
-        contractId = contractId ?? refInv.contractId;
-        tenantId = tenantId ?? refInv.tenantId;
-        tenantName = refInv.tenantName ?? tenantName;
-        client = refInv.client ?? client;
+      if (!refInv) throw new BadRequestException(`لا توجد فاتورة بالرقم ${ref}`);
+      if (refInv.status !== "confirmed") throw new BadRequestException(`الفاتورة ${ref} غير معتمدة — لا يمكن إصدار إشعار عليها`);
+      contractId = contractId ?? refInv.contractId;
+      tenantId = tenantId ?? refInv.tenantId;
+      tenantName = refInv.tenantName ?? tenantName;
+      client = refInv.client ?? client;
+      if (type === "credit") {
+        const [prior] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+          .where(and(eq(simpleInvoicesTable.userId, scopeId(user)), eq(simpleInvoicesTable.type, "credit"),
+            eq(simpleInvoicesTable.billingReference, ref), eq(simpleInvoicesTable.status, "confirmed"),
+            isNull(simpleInvoicesTable.deletedAt)));
+        const creditable = round2(round2(Number(refInv.total)) - round2(Number(prior?.total ?? 0)));
+        if (creditable <= 0.01) throw new BadRequestException(`تم إصدار إشعارات دائنة بكامل قيمة الفاتورة ${ref}`);
+        if (total > creditable + 0.01) {
+          throw new BadRequestException(`قيمة الإشعار الدائن تتجاوز المتبقي من الفاتورة ${ref} (${creditable.toFixed(2)})`);
+        }
       }
     }
 
     const paymentIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
-      : (body?.paymentId ? [Number(body.paymentId)] : []);
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      : (bodyPaymentId != null ? [bodyPaymentId] : []);
 
-    // A security deposit (الوديعة/الضمان) is held trust money (amanat), never
+    // Only these sub-kinds are genuinely not tax invoices: a voucher is evidence
+  // of money received, and a commission bill is the managing account invoicing
+  // the landlord. Everything else — including a `kind` nobody recognises — is a
+  // tax invoice and must face the readiness gate.
+  //
+  // The gates below used to read `!body?.kind`, so ANY value at all skipped
+  // them. Staging holds 6 documents with kind "invoice" and 6 with "manual"
+  // that were issued without the check ever running.
+  // A security deposit (الوديعة/الضمان) is held trust money (amanat), never
     // revenue — collecting it must produce a receipt voucher (سند قبض), not a
     // tax invoice. If a linked installment is a deposit and the caller hasn't
     // explicitly opted to bill it (billDeposit), divert to a receipt voucher
     // (which also records the collection against the deposit installment).
-    if (type === "invoice" && !body?.kind && paymentIds.length && !body?.billDeposit) {
+    // An unrecognised `kind` used to be stored verbatim AND to skip the gates
+    // below, so an arbitrary string bought an exemption. Refuse it instead.
+    const docKind = body?.kind == null || String(body.kind).trim() === ""
+      ? null
+      : String(body.kind).trim();
+    if (docKind != null && !KNOWN_DOC_KINDS.has(docKind)) {
+      throw new BadRequestException(`نوع المستند غير معروف: ${docKind} · Unknown document kind`);
+    }
+
+    if (type === "invoice" && !isTaxExemptKind(docKind) && paymentIds.length && !body?.billDeposit) {
       const linked = await this.db.select({ description: paymentsTable.description })
         .from(paymentsTable)
         .where(and(inArray(paymentsTable.id, paymentIds), eq(paymentsTable.userId, scopeId(user))));
@@ -517,31 +765,60 @@ class SimpleInvoicesController {
       }
     }
 
-    // Refuse to issue a tax invoice against parties that are not invoice-ready
-    // (no VAT number, no email, landlord not onboarded with ZATCA…). Receipt
-    // vouchers and commission docs are exempt — a voucher is not a tax invoice,
-    // and the deposit diversion above has already returned by this point.
-    if (type === "invoice" && !body?.kind) {
-      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId);
-      // A tenant with no VAT number needs an explicit acknowledgement — the
-      // client ticks a box rather than the invoice quietly going out without
-      // one. Enforced here so the check cannot be skipped by calling the API
-      // directly.
-      if (readiness.confirmations.length > 0 && !body?.confirmations?.tenantNoVat) {
-        throw new BadRequestException({
-          error: "invoice_needs_confirmation",
-          message: "يرجى تأكيد أن المستأجر لا يملك رقماً ضريبياً قبل إصدار الفاتورة",
-          readiness,
+    // Readiness at create time, in two halves — the split is the whole point.
+    //
+    //  · The PARTIES' data (name, e-mail, phone, ID/CR, VAT number, national
+    //    address on both sides) is checked and REFUSED here. A draft written on
+    //    top of a tenant with no ID or a landlord with no address is simply
+    //    wrong data, and the moment to catch that is while the user is still on
+    //    the form with the record one click away — not weeks later at approval.
+    //  · The ZATCA LINK is NOT checked here. Linking is an account errand: a
+    //    certificate and an OTP the taxpayer generates in the Fatoora portal,
+    //    nothing the person drafting this invoice can do from this form. It
+    //    would refuse to even write the document down for a reason unrelated to
+    //    the document, so it stays on approve() — the action that actually
+    //    signs and mirrors it to ZATCA.
+    //
+    // Both halves come from ONE checkInvoiceReadiness call; `draftBlockers` is
+    // the first, `blockers` the second. The refusal below therefore names only
+    // what the user can fix from here, while the full payload rides along so
+    // the UI can also say "…and the landlord still needs to link ZATCA before
+    // this can be approved".
+    //
+    // A failure to COMPUTE readiness is still non-fatal: a broken lookup must
+    // not become an unexplained 500 on save. But it is no longer silent —
+    // now that the verdict is normative, a null means the gate did not run,
+    // and that has to be visible in the log rather than inferred from a
+    // document nobody can approve later.
+    let readiness: InvoiceReadiness | null = null;
+    if (type === "invoice" && !isTaxExemptKind(docKind)) {
+      try {
+        readiness = await checkInvoiceReadiness(this.db, scopeId(user), contractId, {
+          tenantId, ownerId: (client as any)?.ownerId ?? null, tenantName, client,
         });
+      } catch (e) {
+        // Never fail the save on a lookup error — but do not let it disappear
+        // either. A null here now means the gate did not run at all, so a
+        // recurring warning is the only way anyone finds out that the check has
+        // quietly stopped protecting anything.
+        readiness = null;
+        this.logger.warn(
+          `readiness check failed for contract ${contractId ?? "—"} — document saved UNGATED: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
-      if (!readiness.ok) {
+      if (readiness && !readiness.draftOk) {
         throw new BadRequestException({
           error: "invoice_not_ready",
-          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          message: `لا يمكن حفظ الفاتورة — بيانات ناقصة: ${readinessMessage(readiness, "draft")}`,
           readiness,
         });
       }
     }
+
+    // The `confirmations` acknowledgement (a tax invoice for an individual
+    // tenant with no VAT number) is deliberately NOT collected here. It is a
+    // statement about issuing the document, so it is taken at approve(); at
+    // create it only rides along in the advisory payload below.
 
     // Generate the number + insert inside ONE transaction guarded by a per
     // (account, doc-type) advisory lock, so two invoices created at the same
@@ -559,7 +836,7 @@ class SimpleInvoicesController {
         type,
         status: "draft",
         contractId: contractId ?? null,
-        paymentId: body?.paymentId ?? (paymentIds[0] ?? null),
+        paymentId: bodyPaymentId ?? (paymentIds[0] ?? null),
         paymentIds: paymentIds.length ? paymentIds : null,
         tenantId: tenantId ?? null,
         tenantName: tenantName ?? null,
@@ -567,7 +844,7 @@ class SimpleInvoicesController {
         items,
         subtotal: subtotal.toFixed(2),
         total: total.toFixed(2),
-        kind: body?.kind ?? null,
+        kind: docKind,
         issueDate: body?.issueDate || today(),
         dueDate: body?.dueDate || null,
         billingReference: body?.billingReference ?? null,
@@ -591,14 +868,31 @@ class SimpleInvoicesController {
           eq(paymentCollectionsTable.userId, scopeId(user)),
         ));
     }
-    return doc;
+    // Reaching here means `draftOk` — so what rides along is the leftover: null
+    // for a document the gate does not apply to, `{ ok: true, … }` for one that
+    // is ready to approve outright, and, for one whose landlord has not linked
+    // ZATCA yet, the same payload with that single blocker still standing. Same
+    // shape GET /simple-invoices/readiness returns, so the UI renders it with
+    // the same panel — as a heads-up about approval, not a failure to save.
+    return { ...doc, readiness };
   }
 
-  /** Next commission-invoice number for an account: COM-000001, … */
+  /**
+   * Next commission-invoice number for an account: COM-000001, …
+   *
+   * MAX(sequence)+1 over the COM- prefix, for the same reason as `nextNumber`:
+   * counting the rows that are still there hands the next document a number a
+   * deleted one already spent, so two commissions end up sharing it.
+   */
   private async nextCommissionNumber(userId: number): Promise<string> {
-    const [row] = await this.db.select({ c: count() }).from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.userId, userId), eq(simpleInvoicesTable.kind, "commission")));
-    return `COM-${String(Number(row?.c ?? 0) + 1).padStart(6, "0")}`;
+    const res: any = await this.db.execute(sql`
+      select coalesce(max(cast(substring(${simpleInvoicesTable.number} from '[0-9]+$') as integer)), 0) as m
+      from ${simpleInvoicesTable}
+      where ${simpleInvoicesTable.userId} = ${userId} and ${simpleInvoicesTable.number} like ${"COM-%"}
+    `);
+    const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+    const max = Number(rows?.[0]?.m ?? 0);
+    return `COM-${String(max + 1).padStart(6, "0")}`;
   }
 
   /**
@@ -706,15 +1000,16 @@ class SimpleInvoicesController {
     // Optional installment link(s) — the voucher also records a collection
     // against each, so a deposit/fee/rent collected this way reflects its real
     // collected/remaining figures (no orphaned "paid but collected = 0").
+    const singlePayId = foreignKeyId(body?.paymentId, "رقم القسط");
     const payIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
-      : (body?.paymentId ? [Number(body.paymentId)] : []);
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      : (singlePayId != null ? [singlePayId] : []);
 
     // Optional contract link — snapshot its number/tenant. Fall back to the
     // contract of the first linked installment when not given explicitly.
-    let contractId: number | null = body?.contractId ?? null;
+    let contractId: number | null = foreignKeyId(body?.contractId, "رقم العقد");
     let tenantName: string | null = body?.tenantName ?? null;
-    let tenantId: number | null = body?.tenantId ?? null;
+    let tenantId: number | null = foreignKeyId(body?.tenantId, "رقم المستأجر");
     if (contractId) {
       const [c] = await this.db.select({ id: contractsTable.id, tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
         .from(contractsTable).where(and(eq(contractsTable.id, contractId), eq(contractsTable.userId, uid)));
@@ -834,7 +1129,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("لا يمكن تعديل مستند مؤكَّد");
     const patch: any = {};
@@ -842,16 +1137,32 @@ class SimpleInvoicesController {
       const items = normalizeItems(body.items);
       const total = body?.total != null ? round2(Number(body.total)) : round2(items.reduce((s, it) => s + it.amount, 0));
       assertNonNegative(items, total);
+      assertTotalMatchesItems(items, total);
       patch.items = items;
       patch.subtotal = round2(items.reduce((s, it) => s + it.amount, 0)).toFixed(2);
       patch.total = total.toFixed(2);
     } else if (body?.total != null) {
       const total = round2(Number(body.total));
       assertNonNegative([], total);
+      // A total sent on its own is still a total for THESE line items — the
+      // stored ones. Without the merge this branch was the shortest route to a
+      // document whose VAT is whatever the caller asked for.
+      assertTotalMatchesItems(normalizeItems(doc.items), total);
       patch.total = total.toFixed(2);
     }
-    for (const k of ["tenantName", "client", "issueDate", "dueDate", "notes", "billingReference", "contractId", "tenantId", "paymentId", "paymentIds"]) {
+    for (const k of ["tenantName", "client", "issueDate", "dueDate", "notes", "billingReference"]) {
       if (body?.[k] !== undefined) patch[k] = body[k];
+    }
+    // The id fields on the same allowlist were copied through untouched — the
+    // one place a PATCH could still put an out-of-range value into an int4
+    // column. `null` still clears the link.
+    for (const [k, label] of [["contractId", "رقم العقد"], ["tenantId", "رقم المستأجر"], ["paymentId", "رقم القسط"]] as const) {
+      if (body?.[k] !== undefined) patch[k] = foreignKeyId(body[k], label);
+    }
+    if (body?.paymentIds !== undefined) {
+      patch.paymentIds = Array.isArray(body.paymentIds)
+        ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+        : null;
     }
     const [updated] = await this.db.update(simpleInvoicesTable).set(patch)
       .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scopeId(user)))).returning();
@@ -875,7 +1186,7 @@ class SimpleInvoicesController {
     const key = typeof body?.key === "string" ? body.key.trim() : "";
     if (!key) throw new BadRequestException("key is required");
     const [updated] = await this.db.update(simpleInvoicesTable).set({ pdfKey: key } as any)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)))
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)))
       .returning({ id: simpleInvoicesTable.id });
     if (!updated) throw new NotFoundException("Document not found");
     return { ok: true };
@@ -887,9 +1198,82 @@ class SimpleInvoicesController {
     void body;
     const uid = scopeId(user);
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
+
+    // Approval is where a draft becomes a real, issued document — the copy the
+    // buyer keeps and the one mirrored to ZATCA. Everything the create path
+    // refuses has to hold HERE too, against the row as it now stands: a draft
+    // can be edited after it is created (and PATCH used to accept a bare
+    // `total`), so a figure that create would never have taken could still walk
+    // in through the edit and go live at approval.
+    {
+      const items = normalizeItems(doc.items);
+      const total = round2(Number(doc.total));
+      assertNonNegative(items, total);
+      assertTotalMatchesItems(items, total);
+    }
+
+    // THE FULL invoice-readiness gate — the parties' data (which create() has
+    // already refused on) AND the landlord's ZATCA link, which only this side
+    // demands. Approval is the action that actually issues the document and
+    // mirrors it to ZATCA, so it is the first point at which not being linked
+    // matters; refusing to even save a draft over it would have blocked
+    // bookkeeping on an errand that has nothing to do with the invoice.
+    //
+    // Re-running the party checks here is not redundant. Consequences of the
+    // gate living on the action rather than on the row:
+    //
+    //  · a document created BEFORE this moved — while the landlord was still
+    //    unlinked — is checked exactly like one created after it, because the
+    //    check reads the records as they stand now, not as they stood then;
+    //  · fixing the VAT number / national address / ZATCA onboarding unblocks
+    //    every draft already sitting in the list, with nothing to re-create;
+    //  · a document with no contract has no parties to validate against and
+    //    checkInvoiceReadiness returns ok for it — approval is unaffected.
+    //
+    // Scope matches what create refused: tax invoices only. Receipt vouchers,
+    // deposits and commission invoices are not tax invoices (isTaxExemptKind),
+    // and a credit/debit note corrects an invoice that was already issued — it
+    // must stay issuable, and its ZATCA mirror is best-effort either way.
+    //
+    // The refusal names EVERY blocker (readinessMessage joins them all), and
+    // carries the full readiness payload under the same `invoice_not_ready`
+    // code the create path used, so the client renders the same panel with the
+    // same deep links — only now on approve.
+    if (doc.type === "invoice" && !isTaxExemptKind(doc.kind)) {
+      const readiness = await checkInvoiceReadiness(this.db, uid, doc.contractId ?? null, {
+        tenantId: doc.tenantId ?? null,
+        ownerId: (doc.client as any)?.ownerId ?? null,
+        tenantName: doc.tenantName ?? null,
+        client: (doc.client as any) ?? null,
+      });
+      if (!readiness.ok) {
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن اعتماد الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
+        });
+      }
+      // Some situations are not blockers but must be acknowledged out loud —
+      // a tax invoice for an individual tenant who has no VAT number. That
+      // acknowledgement used to be collected when the document was created; it
+      // lives here now because it is a statement about ISSUING the document,
+      // not about writing it down. The client ticks the box and sends it in
+      // the approve body under the same `confirmations` key the create path
+      // accepted, so there is one contract rather than two.
+      const acked = (body as any)?.confirmations ?? {};
+      const unacknowledged = readiness.confirmations.filter((c) => acked[c.key] !== true);
+      if (unacknowledged.length > 0) {
+        throw new BadRequestException({
+          error: "invoice_needs_confirmation",
+          message: "يلزم تأكيد إصدار الفاتورة قبل الاعتماد",
+          readiness,
+          confirmations: unacknowledged,
+        });
+      }
+    }
 
     const isNote = doc.type === "credit" || doc.type === "debit";
     if (isNote) {
@@ -942,7 +1326,7 @@ class SimpleInvoicesController {
   async submitZatca(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const uid = scopeId(user);
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status !== "confirmed") throw new BadRequestException("اعتمد المستند قبل إرساله لهيئة الزكاة");
     // Already mirrored? Don't duplicate — report its current ZATCA status.
@@ -965,12 +1349,41 @@ class SimpleInvoicesController {
       let status: string;
       let error: string | null = null;
       let qr: string | null = null;
+      let zatcaInvoiceId: number | null = null;
       if (o.submitted) {
-        status = o.profile === "standard" ? "cleared" : "reported";
+        // `submitted: true` means the CALL completed, not that ZATCA accepted
+        // the document. This used to derive the status from the PROFILE alone —
+        // "standard ⇒ cleared, otherwise reported" — so an invoice ZATCA
+        // rejected, or answered 401 to, was stamped `cleared` with no error
+        // recorded at all; `isSubmittedToZatca` then read that as proof it had
+        // been filed and permanently blocked the contract rebuild over a
+        // document ZATCA never accepted. Read what ZATCA actually said
+        // (`invoices.status`, from deriveStatus) and claim success only for the
+        // two values that mean it.
+        // `submitted` is ZATCA accepting the document without a clearance or
+        // reporting verdict — which is exactly what the compliance endpoint
+        // returns, and sandbox AND simulation both submit there. Collapsing it
+        // into `failed` would have stamped every accepted rehearsal as an
+        // error. It travelled and it spent an ICV, so it counts as submitted;
+        // it just is not a verdict.
+        status = o.status === "cleared" ? "cleared"
+          : o.status === "reported" ? "reported"
+          : o.status === "submitted" ? "submitted"
+          : "failed";
+        if (status === "failed") {
+          error = `ZATCA: ${o.status}${o.httpStatus ? ` (HTTP ${o.httpStatus})` : ""}`;
+        }
         qr = typeof o.qr === "string" && o.qr.trim() ? o.qr : null;
+        // Remember WHICH e-invoice this document became, so the PDF/A-3 copy
+        // can find the cleared XML later.
+        zatcaInvoiceId = Number.isFinite(o.invoiceId) ? Number(o.invoiceId) : null;
       } else {
+        // `link_invalid` groups with the other "nothing was sent" codes on
+        // purpose: no ICV was consumed and ZATCA holds no record of the
+        // document, so it must stay re-submittable and must NOT block a
+        // contract rebuild.
         status = o.code === "error" ? "failed"
-          : (o.code === "not_linked" || o.code === "not_onboarded") ? "pending"
+          : (o.code === "not_linked" || o.code === "not_onboarded" || o.code === "link_invalid" || o.code === "chain_busy") ? "pending"
           : "skipped";
         error = o.reason ?? null;
       }
@@ -978,7 +1391,11 @@ class SimpleInvoicesController {
         // Only ever WRITE the QR — never blank an existing one. A later
         // re-submission that fails must not strip the signed QR off a document
         // that was already cleared.
-        .set({ zatcaStatus: status, zatcaError: error, ...(qr ? { zatcaQr: qr } : {}) } as any)
+        .set({
+          zatcaStatus: status, zatcaError: error,
+          ...(qr ? { zatcaQr: qr } : {}),
+          ...(zatcaInvoiceId ? { zatcaInvoiceId } : {}),
+        } as any)
         .where(and(eq(simpleInvoicesTable.id, Number(doc.id)), eq(simpleInvoicesTable.userId, uid)));
     } catch { /* status persistence is best-effort — never block approval */ }
     return outcome;
@@ -1004,8 +1421,14 @@ class SimpleInvoicesController {
       const creds = await this.zatcaOnboarding.getCredentials(uid, ownerId);
       if (!creds) { this.logger.debug(`ZATCA: ${doc.number} skipped — seller not configured (ownerId=${ownerId})`); return { submitted: false, code: "not_linked", reason: "Landlord is not linked to ZATCA" }; }
       const env = creds.activeEnvironment;
-      const onboarded = env === "sandbox" ? !!creds.sandboxCertPem : !!creds.prodCertPem;
-      if (!onboarded) { this.logger.debug(`ZATCA: ${doc.number} skipped — landlord not onboarded for ${env}`); return { submitted: false, code: "not_onboarded", reason: `Landlord not onboarded for ${env}` }; }
+      // The SAME definition the gate uses, not a looser local one. This tested
+      // the certificate alone, so it disagreed with `isOnboarded` about a row
+      // holding a cert but no key, and about a link ZATCA has revoked — and the
+      // documents that skip the gate (credit/debit notes, tax-exempt kinds)
+      // reach here directly, so the difference was reachable: a note under a
+      // revoked link was submitted, 401'd, and recorded as a failure rather
+      // than as the dead link it was.
+      if (!isOnboarded(creds)) { this.logger.debug(`ZATCA: ${doc.number} skipped — landlord not onboarded for ${env}`); return { submitted: false, code: "not_onboarded", reason: `Landlord not onboarded for ${env}` }; }
 
       const contract = doc.contractId
         ? (await this.db.select().from(contractsTable)
@@ -1034,12 +1457,40 @@ class SimpleInvoicesController {
         buyer = this.buyerFromParty(doc, {
           name: doc.tenantName || contract?.landlordName || owner?.name,
           vat: owner?.taxNumber || contract?.landlordTaxNumber,
+          id: owner?.idNumber, type: owner?.type,
           street: owner?.nationalAddressStreet || contract?.landlordAddress,
           buildingNo: owner?.buildingNumber || contract?.landlordBuildingNumber,
           district: owner?.nationalAddressDistrict || null,
           city: owner?.nationalAddressCity || null,
           postalZone: owner?.postalCode || contract?.landlordPostalCode,
           additionalNo: owner?.additionalNumber || contract?.landlordAdditionalNumber,
+        });
+      } else if ((doc.client as any)?.kind === "landlord" && (doc.client as any)?.ownerId) {
+        // A free invoice billed TO one of the account's landlords. Without this
+        // branch it fell through to the tenant branch below, where `tenantId` is
+        // null by construction (the web clears it for a landlord pick) so every
+        // address field collapsed to the one-line `client.address` — and a
+        // VAT-registered landlord buyer then failed `assertAddressComplete` on
+        // every single attempt. The readiness gate reads the owner row; so must
+        // this, or the two disagree about a document the gate has passed.
+        const buyerOwner = (await this.db.select().from(ownersTable)
+          .where(and(
+            eq(ownersTable.id, Number((doc.client as any).ownerId)),
+            eq(ownersTable.userId, uid),
+            isNull(ownersTable.deletedAt),
+          )))[0] ?? null;
+        const cl = (doc.client ?? {}) as Record<string, any>;
+        buyer = this.buyerFromParty(doc, {
+          name: buyerOwner?.name || doc.tenantName || cl.name,
+          vat: buyerOwner?.taxNumber || cl.vatNumber,
+          id: buyerOwner?.idNumber || cl.idNumber,
+          type: buyerOwner?.type || cl.type,
+          street: buyerOwner?.nationalAddressStreet || cl.street,
+          buildingNo: buyerOwner?.buildingNumber || cl.buildingNumber,
+          district: buyerOwner?.nationalAddressDistrict || cl.district || null,
+          city: buyerOwner?.nationalAddressCity || cl.city || null,
+          postalZone: buyerOwner?.postalCode || cl.postalCode,
+          additionalNo: buyerOwner?.additionalNumber || cl.additionalNumber,
         });
       } else {
         const tenant = doc.tenantId ? (await this.db.select().from(tenantsTable)
@@ -1053,6 +1504,8 @@ class SimpleInvoicesController {
         buyer = this.buyerFromParty(doc, {
           name: doc.tenantName || tenant?.name || contract?.tenantName || cl.name,
           vat: doc.client?.vatNumber || tenant?.taxNumber || contract?.tenantTaxNumber,
+          id: tenant?.nationalId || cl.idNumber,
+          type: tenant?.type || cl.type,
           street: tenant?.nationalAddressStreet || contract?.tenantAddress || tenant?.address || cl.street,
           buildingNo: tenant?.buildingNumber || contract?.tenantBuildingNumber || cl.buildingNumber,
           district: tenant?.nationalAddressDistrict || cl.district || null,
@@ -1061,7 +1514,16 @@ class SimpleInvoicesController {
           additionalNo: tenant?.additionalNumber || contract?.tenantAdditionalNumber || cl.additionalNumber,
         });
       }
-      // B2B (buyer has a VAT number) → standard/clearance; otherwise simplified/reporting.
+      // Which document this becomes, and therefore where it goes: a buyer with a
+      // VAT number is a registered business, so the invoice is STANDARD (B2B)
+      // and must be CLEARED by ZATCA before it is valid; a buyer without one is
+      // a consumer, so it is SIMPLIFIED (B2C) and merely REPORTED within 24h.
+      //
+      // The VAT number is the deciding fact — registration is what makes a
+      // buyer B2B, and an individual can be registered too. The buyer's TYPE
+      // does not override it; it decides the identification scheme above, and
+      // the readiness gate uses it to insist a company actually carries the VAT
+      // number and address this branch would otherwise silently do without.
       const profile: "standard" | "simplified" = buyer?.vat ? "standard" : "simplified";
 
       const dto: CreateInvoiceDto = {
@@ -1089,14 +1551,44 @@ class SimpleInvoicesController {
       const printableQr = clearedInvoiceQr((result.invoice as any).clearedXml) ?? result.invoice.qrBase64 ?? null;
       return { submitted: true, status: result.invoice.status, profile, environment: env, httpStatus: result.invoice.httpStatus ?? 0, invoiceId: result.invoice.id, qr: printableQr, warnings };
     } catch (e: any) {
+      // `issue()` refuses with this the moment ZATCA answers 401/403, BEFORE it
+      // writes an invoices row or advances the ICV — so this document has not
+      // travelled and must not be recorded as though it had.
+      const body = e?.response ?? (typeof e?.getResponse === "function" ? e.getResponse() : null);
+      // The seller's chain was busy for longer than we were willing to queue.
+      // Nothing was sent and no ICV moved, so this belongs with the other
+      // "not sent" outcomes and must stay retryable — calling it a failure
+      // would also let it block a contract rebuild.
+      if (body && typeof body === "object" && (body as any).error === CHAIN_BUSY) {
+        this.logger.warn(`ZATCA: ${doc?.number} not sent — the seller's chain was busy`);
+        return { submitted: false, code: "chain_busy", reason: String((body as any).message ?? "Seller chain busy") };
+      }
+      if (body && typeof body === "object" && (body as any).error === "zatca_link_invalid") {
+        const b = body as any;
+        this.logger.warn(`ZATCA: ${doc?.number} not sent — ZATCA refused the credentials (HTTP ${b.httpStatus ?? "?"})`);
+        return { submitted: false, code: "link_invalid", reason: String(b.message ?? "ZATCA refused the credentials") };
+      }
       this.logger.warn(`ZATCA submit failed for ${doc?.number}: ${e?.message ?? e}`);
       return { submitted: false, code: "error", reason: e?.message ? String(e.message).slice(0, 300) : "ZATCA submission failed" };
     }
   }
 
-  /** Landlord (owner) for a contract: contract → unit → property → owner. */
+  /**
+   * Which landlord is the SELLER of this document.
+   *
+   * For a contract-linked invoice it is the landlord who owns the property:
+   * contract → unit → property → owner. For a free invoice there is no contract
+   * to walk, so it falls to `resolveStandaloneSellerId` — the account-level
+   * seller if one exists, otherwise the account's own landlord record. That
+   * fallback is what makes a free invoice submittable at all: nothing in the
+   * product can create the account-level credentials row, so before it the
+   * answer was always "not linked", about a link the user had no way to make.
+   *
+   * The readiness gate calls the same resolver, so the seller it checks is
+   * always the seller this path submits under.
+   */
   private async resolveOwnerId(uid: number, contractId: number | null): Promise<number | null> {
-    if (!contractId) return null;
+    if (!contractId) return resolveStandaloneSellerId(this.db, uid);
     const [row] = await this.db
       .select({ ownerId: propertiesTable.ownerId })
       .from(contractUnitsTable)
@@ -1133,14 +1625,23 @@ class SimpleInvoicesController {
   /** Normalize a resolved party into a ZATCA BuyerSnapshot (blanks → null). */
   private buyerFromParty(
     doc: any,
-    p: { name?: string | null; vat?: string | null; street?: string | null; buildingNo?: string | null;
+    p: { name?: string | null; vat?: string | null; id?: string | null; type?: string | null;
+         street?: string | null; buildingNo?: string | null;
          district?: string | null; city?: string | null; postalZone?: string | null; additionalNo?: string | null },
   ): BuyerSnapshot {
     const blank = (v: string | null | undefined) => { const s = (v ?? "").toString().trim(); return s || null; };
+    const cl = (doc.client ?? {}) as Record<string, any>;
+    const type = blank(p.type) || blank(cl.type);
     return {
-      name: blank(p.name) || doc.client?.name || (doc.kind === "commission" ? "المؤجر" : "العميل"),
+      name: blank(p.name) || cl.name || (doc.kind === "commission" ? "المؤجر" : "العميل"),
       vat: blank(p.vat),
-      street: blank(p.street) || doc.client?.address || null,
+      // BT-46: the buyer's own identifier. A company states its commercial
+      // registration; an individual states a national ID or iqama, for which
+      // ZATCA's only valid scheme is OTH — NAT and IQA are not accepted values
+      // (see DARA-NOTES §2b-i, verified against ZATCA's validator).
+      id: blank(p.id) || blank(cl.idNumber),
+      idScheme: type === "company" ? "CRN" : type === "individual" ? "OTH" : null,
+      street: blank(p.street) || cl.address || null,
       buildingNo: blank(p.buildingNo),
       district: blank(p.district),
       city: blank(p.city),
@@ -1159,8 +1660,17 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async collect(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const uid = scopeId(user);
-    const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
+    const docId = requiredForeignKeyId(id, "رقم المستند");
+    if (!Number.isInteger(docId)) throw new BadRequestException("رقم المستند غير صالح");
+    // Everything below reads what has been collected so far and then writes.
+    // With no lock, parallel requests all read "nothing yet", all pass the cap,
+    // and the same money lands several times — a 1,000 invoice was measured
+    // recording 4,000 across four rows, sharing one receipt-voucher number.
+    // The installment path was given this lock; its invoice-level twin was not.
+    return this.db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(${uid}, ${docId})`);
+    const [doc] = await tx.select().from(simpleInvoicesTable)
+      .where(and(eq(simpleInvoicesTable.id, docId), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.type !== "invoice") throw new BadRequestException("التحصيل يتم على الفواتير فقط");
     if (doc.status !== "confirmed") throw new BadRequestException("يجب اعتماد الفاتورة قبل التحصيل");
@@ -1172,32 +1682,42 @@ class SimpleInvoicesController {
     const paidDate = body?.paidDate || today();
     // Per-account sequential receipt-voucher number (RV-000001…), unique across
     // both invoice docs and collections (e.g. the advance-rent voucher).
-    const voucher = await nextReceiptVoucherNumber(this.db, uid);
+    const voucher = await nextReceiptVoucherNumber(tx as any, uid);
     const method = body?.method ?? "bank_transfer";
     const receipt = (body?.receiptNumber && String(body.receiptNumber).trim()) || voucher;
     const ids = (doc.paymentIds && doc.paymentIds.length) ? doc.paymentIds : (doc.paymentId ? [doc.paymentId] : []);
     // Cap at what's still uncollected on this invoice (supports partial).
-    const [priorAgg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
+    // Against the NET total — the same figure every read path reports as the
+    // balance due — not the gross one printed on the immutable document. A
+    // credit note has to actually stop the money coming in, and a debit note
+    // has to let the amount it added be collected.
+    const [priorAgg] = await tx.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const alreadyCollected = round2(Number(priorAgg?.total ?? 0));
-    const invoiceRemaining = round2(round2(Number(doc.total)) - alreadyCollected);
+    const netTotal = round2(Number(doc.total) + (await this.notesAdjustmentFor(uid, doc)));
+    const invoiceRemaining = round2(netTotal - alreadyCollected);
     if (invoiceRemaining <= 0.01) throw new BadRequestException("تم تحصيل هذه الفاتورة بالكامل");
     let toCollect = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
     if (toCollect > invoiceRemaining + 0.01) throw new BadRequestException(`مبلغ التحصيل يتجاوز المتبقي (${invoiceRemaining.toFixed(2)})`);
 
+    // What the loop below could actually write. The requested amount is only an
+    // intention: an installment that is cancelled, deleted or already settled
+    // absorbs none of it.
+    let applied = 0;
+
     for (const pid of ids) {
       if (toCollect <= 0.01) break;
-      const [payment] = await this.db.select().from(paymentsTable)
+      const [payment] = await tx.select().from(paymentsTable)
         .where(and(eq(paymentsTable.id, pid), eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt)));
       if (!payment || payment.status === "cancelled") continue;
-      const prior = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
+      const prior = await tx.select({ total: sum(paymentCollectionsTable.amount) })
         .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.paymentId, pid));
       const collectedBefore = round2(Number(prior[0]?.total ?? 0));
       const totalDue = round2(Number(payment.amount));
       const remaining = round2(totalDue - collectedBefore);
       if (remaining <= 0.01) continue;
       const amt = round2(Math.min(remaining, toCollect));
-      await this.db.insert(paymentCollectionsTable).values({
+      await tx.insert(paymentCollectionsTable).values({
         paymentId: pid,
         userId: uid,
         amount: amt.toFixed(2),
@@ -1210,52 +1730,71 @@ class SimpleInvoicesController {
       });
       const collectedAfter = round2(collectedBefore + amt);
       const status = collectedAfter >= totalDue - 0.01 ? "paid" : "partially_paid";
-      await this.db.update(paymentsTable).set({
+      await tx.update(paymentsTable).set({
         status,
         paidDate: status === "paid" ? paidDate : payment.paidDate,
         receiptNumber: receipt,
         attachmentKey: body?.attachmentKey ?? payment.attachmentKey,
       }).where(eq(paymentsTable.id, pid));
+      applied = round2(applied + amt);
       toCollect = round2(toCollect - amt);
     }
 
     // Invoices not backed by an installment (commission / free invoices) still
     // record a collection — against the invoice only — so their collected
     // amount is consistent with the "paid" stamp (no "paid but collected = 0").
-    if (!ids.length) {
-      const collectAmt = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
-      if (collectAmt > 0.01) {
-        await this.db.insert(paymentCollectionsTable).values({
-          paymentId: null, userId: uid, amount: collectAmt.toFixed(2), collectedDate: paidDate,
-          method, receiptNumber: receipt, invoiceId: doc.id,
-          notes: body?.notes ?? `فاتورة ${doc.number}`,
-        } as any);
-      }
+    if (!ids.length && toCollect > 0.01) {
+      await tx.insert(paymentCollectionsTable).values({
+        paymentId: null, userId: uid, amount: toCollect.toFixed(2), collectedDate: paidDate,
+        method, receiptNumber: receipt, invoiceId: doc.id,
+        notes: body?.notes ?? `فاتورة ${doc.number}`,
+      } as any);
+      applied = toCollect;
+      toCollect = 0;
     }
 
+    // Nothing landed anywhere — every linked installment was cancelled, deleted
+    // or already settled. Carrying on would stamp the invoice paid and burn a
+    // receipt-voucher number over money that has no collection row behind it,
+    // which the Collections tab then reports as received.
+    if (applied <= 0.01) throw new BadRequestException("لا يوجد قسط مستحق لتحصيل هذا المبلغ عليه");
+
     // Only mark the invoice fully collected when prior + this collection cover
-    // the total; a partial collection keeps it confirmed (collectible again).
-    const collectedNow = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
-    const fullyCollected = round2(alreadyCollected + collectedNow) >= round2(Number(doc.total)) - 0.01;
-    const [updated] = await this.db.update(simpleInvoicesTable).set({
+    // the net total; a partial collection keeps it confirmed (collectible again).
+    const fullyCollected = round2(alreadyCollected + applied) >= netTotal - 0.01;
+    const [updated] = await tx.update(simpleInvoicesTable).set({
       ...(fullyCollected ? { paidDate, receiptNumber: voucher } : {}),
       paymentMethod: method,
       attachmentKey: body?.attachmentKey ?? doc.attachmentKey,
     }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
     return updated;
+    });
   }
 
   @Delete(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const [doc] = await this.db.select().from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
+      .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
+    // An approved document has been issued — to the buyer, and to ZATCA. It is
+    // corrected by a credit note, never withdrawn. And a soft delete only hides
+    // the document: its collections live in payment_collections, which has no
+    // deleted_at, so the money would keep counting in every total with nothing
+    // left on screen to explain it.
+    if (doc.status === "confirmed") {
+      throw new BadRequestException("لا يمكن حذف مستند معتمد — أصدر إشعاراً دائناً لإلغاء أثره");
+    }
+    const [collAgg] = await this.db.select({ c: count() })
+      .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
+    if (Number(collAgg?.c ?? 0) > 0) {
+      throw new BadRequestException("لا يمكن حذف مستند له تحصيلات مسجَّلة — أصدر إشعاراً دائناً بدلاً من ذلك");
+    }
     await this.db.update(simpleInvoicesTable).set({ deletedAt: new Date() })
       .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scopeId(user))));
     return { ok: true };
   }
 }
 
-@Module({ imports: [InvoiceModule], controllers: [SimpleInvoicesController] })
+@Module({ imports: [InvoiceModule, UploadsModule], controllers: [SimpleInvoicesController] })
 export class BillingModule {}

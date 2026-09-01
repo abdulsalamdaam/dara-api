@@ -16,6 +16,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { listQuerySchema, wantsPagination } from "../../common/pagination";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { EjarPolicyService, type ManualAddOverride } from "./ejar.policy.service";
@@ -1015,14 +1016,40 @@ export class EjarController {
     return row ?? null;
   }
 
+  /**
+   * Ejar call log.
+   *
+   * `endpoint` and `status` were already applied in SQL. What was wrong was the
+   * answer: `count` reported how many rows came back from a query capped at
+   * 300, not how many matched - so the number silently stopped growing at the
+   * cap. `total` is the database's real count for the filter now, and
+   * `page`/`pageSize` walk the whole log instead of only its head.
+   *
+   * The legacy `{ count, logs }` shape is preserved for the existing admin
+   * screen; sending `page`/`pageSize`/`paginated` returns the standard
+   * `{ data, page, pageSize, total }` envelope like every other list.
+   */
   @Get("logs")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
-  async listLogs(@Query("endpoint") endpoint?: string, @Query("status") status?: string, @Query("limit") limit?: string) {
-    const filter: EjarLogFilter = { endpoint: endpoint || undefined, limit: limit ? Number(limit) : undefined };
+  async listLogs(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const status = typeof rawQuery?.status === "string" ? rawQuery.status : undefined;
+    const filter: EjarLogFilter = {
+      endpoint: typeof rawQuery?.endpoint === "string" && rawQuery.endpoint ? rawQuery.endpoint : undefined,
+    };
     if (status === "ok" || status === "error") filter.status = status;
     else if (status && !Number.isNaN(Number(status))) filter.status = Number(status);
-    const logs = await this.logs.list(filter);
-    return { count: logs.length, logs };
+
+    if (paged) {
+      filter.limit = q.pageSize;
+      filter.offset = (q.page - 1) * q.pageSize;
+      const { rows, total } = await this.logs.list(filter);
+      return { data: rows, page: q.page, pageSize: q.pageSize, total };
+    }
+    filter.limit = rawQuery?.limit ? Number(rawQuery.limit) : undefined;
+    const { rows, total } = await this.logs.list(filter);
+    return { count: rows.length, total, logs: rows };
   }
 
   /** Re-run a logged call verbatim (params were persisted on the row). */

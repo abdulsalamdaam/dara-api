@@ -115,6 +115,17 @@ export class UploadsService {
     return getSignedUrl(this.client(), cmd, { expiresIn: ttlSeconds ?? this.defaultTtl });
   }
 
+  /** Read an object back into memory. For server-side post-processing (e.g.
+   *  wrapping a stored invoice PDF as PDF/A-3), where a signed URL would mean
+   *  the API making an HTTP round trip to itself. */
+  async getObject(key: string): Promise<Buffer> {
+    if (!key) throw new BadRequestException("key is required");
+    const out = await this.client().send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    const chunks: Buffer[] = [];
+    for await (const chunk of out.Body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks);
+  }
+
   /** Pre-signed PUT URL — for direct-from-browser uploads if we need it later. */
   async presignPut(args: { key: string; contentType?: string; ttlSeconds?: number }): Promise<{ url: string; key: string; expiresIn: number }> {
     const ttl = args.ttlSeconds ?? this.defaultTtl;

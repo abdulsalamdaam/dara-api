@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Param, Post, Query, UseGuards,
+  BadRequestException, Body, Controller, Delete, Get, Param, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -222,5 +222,43 @@ export class ZatcaOnboardingController {
     if (!body?.env) throw new BadRequestException("env is required");
     await this.onboarding.resetChain(scopeId(user), body.env, this.oid(body.ownerId));
     return { ok: true };
+  }
+
+  /**
+   * DELETE /zatca/landlords/:ownerId/link
+   * Disconnect a landlord from ZATCA: wipe every certificate, key and secret we
+   * hold for them and put the seller back to "profile saved, not integrated".
+   * Nothing already filed with ZATCA is touched, and the ICV/PIH counters are
+   * kept so a later re-link continues the chain instead of colliding with it —
+   * see `ZatcaOnboardingService.unlink`.
+   *
+   * DELETE rather than a POST verb so the global audit interceptor records it
+   * with the landlord's id; severing a live seller is exactly the kind of thing
+   * an account owner should be able to find in the trail afterwards.
+   *
+   * Gated on ZATCA_PROMOTE_PRODUCTION, not ZATCA_ONBOARD: an accountant can
+   * link a landlord, but taking a production seller offline belongs with the
+   * same authority that puts one live (and that runs `reset-chain`).
+   */
+  @Delete("landlords/:ownerId/link")
+  @RequirePermissions(PERMISSIONS.ZATCA_PROMOTE_PRODUCTION)
+  async unlinkLandlord(@CurrentUser() user: AuthUser, @Param("ownerId") ownerId: string) {
+    const oid = this.oid(ownerId);
+    if (oid == null) throw new BadRequestException("رقم المؤجر غير صالح");
+    const row = await this.onboarding.unlink(scopeId(user), oid);
+    return { ok: true, ownerId: oid, configured: true, onboarded: false, activeEnvironment: row.activeEnvironment };
+  }
+
+  /**
+   * DELETE /zatca/link
+   * The same thing for the legacy account-level seller (the row with no
+   * landlord). Kept separate from the route above so an absent/garbage
+   * `ownerId` can never silently fall through to wiping it.
+   */
+  @Delete("link")
+  @RequirePermissions(PERMISSIONS.ZATCA_PROMOTE_PRODUCTION)
+  async unlinkAccount(@CurrentUser() user: AuthUser) {
+    const row = await this.onboarding.unlink(scopeId(user), null);
+    return { ok: true, ownerId: null, configured: true, onboarded: false, activeEnvironment: row.activeEnvironment };
   }
 }

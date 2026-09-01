@@ -214,10 +214,13 @@ request a production CSID with an OTP the taxpayer generates in the Fatoora
 portal. That OTP cannot be automated — it belongs to the taxpayer, per VAT
 number. Only then does `activeEnvironment` move to `production`.
 
-Also: e-invoicing only applies to VAT-registered sellers, and the billing
-module deliberately skips documents whose lines are all exempt/out-of-scope
+Also: ZATCA only *wants* documents from VAT-registered sellers, and the billing
+module deliberately skips ones whose lines are all exempt/out-of-scope
 (residential rent) — a skipped submission there is correct behaviour, not a
-broken integration. In production 12 of 19 VAT-registered landlords have no
+broken integration. Note this is no longer the same thing as who may ISSUE:
+since 01 Sep 2026 the gate requires every seller of a tax invoice to be linked,
+registered or not (§2b-iii), so a seller can be obliged to link for documents
+ZATCA will then decline to receive. In production 12 of 19 VAT-registered landlords have no
 credentials row at all, so their invoices skip with `not_linked`.
 
 ### 2b-i. ZATCA onboarding flow, the B2C signing wall, and how to test it
@@ -332,6 +335,25 @@ sign the matrix inside the API container (where the private key can be
 decrypted) and run the validator over the output. Owner 264's ten documents
 passed 6/6 checks that way on 28 Aug 2026 — with the production CSID, before
 anything was submitted.
+**The B2C wall — still open.** On production, the 3 STANDARD docs CLEAR, the 3
+SIMPLIFIED docs fail `Invalid signed properties hashing, SignedProperties
+id='xadesSignedProperties'`. Proven facts (do not re-chase these):
+- The error is MISLEADING. Our SignedProperties digest is correct: literal,
+  inclusive C14N, and exclusive C14N of the embedded element ALL produce the
+  same hash, which equals the DigestValue we emit. The embedded element is
+  already in canonical form (attribute order fixed in a1f0966).
+- The QR is correct: all 9 Phase-2 tags present; tag 8 = 88-byte SPKI DER, tag
+  9 = 70-byte DER cert signature — both byte-match the wes4m reference and
+  openssl. Tags 6/7 are base64 strings of the invoice hash / signature.
+- ZATCA SANDBOX accepts our simplified invoices fully (REPORTED). Only
+  production reporting rejects them. Same code, differs only by the certificate.
+- extractCertSignature matches openssl for both the sandbox and production certs.
+So every field we send is provably correct and sandbox-accepted; production's
+reporting endpoint rejects B2C for a reason its error text hides. This is a
+widely-reported, undocumented ZATCA B2C issue (Fatoora developer community has
+many threads; none with a definitive fix). Likely needs ZATCA support to give a
+clearer error, or a diff against a known-good production-accepted simplified XML
+from another solution.
 
 **How to test all 6 on production WITHOUT a new OTP or creating invoices.**
 The compliance suite persists nothing and simplified is re-runnable; standard,
@@ -364,6 +386,235 @@ and IQA are NOT valid — they were briefly added to the UI and removed (859d2a7
 **Onboarding is not logged on production.** The compliance-check logging fix
 (534cfc0) is on master/staging only. Cherry-pick it if you need the endpoint
 responses server-side; otherwise read the HTTP response the call returns.
+
+### 2b-ii. The invoice gate is split in two, and ZATCA can be unlinked
+
+**One `checkInvoiceReadiness` call, two verdicts** (`common/invoice-readiness.ts`).
+The reason is that the two halves are different kinds of problem and the user
+can act on them at different moments:
+
+| verdict | covers | refused by |
+|---|---|---|
+| `draftOk` / `draftBlockers` | the parties' own data — name, e-mail, phone, ID/CR, VAT number, national address, on tenant **and** landlord | `POST /simple-invoices` (saving the draft) |
+| `ok` / `blockers` | all of the above **plus** the landlord's ZATCA link | `POST /simple-invoices/:id/approve`, and `POST /invoices` |
+
+A missing VAT number is a mistake in the document being drafted, and the moment
+to catch it is while the user is still on the form with the record one click
+away. Linking ZATCA is an account errand — a certificate and an OTP the taxpayer
+generates in the Fatoora portal — that nobody can do from an invoice form, so it
+must never stand between a user and the save button. Both live in one function
+so the two can't drift; `draftBlockersOf()` is just `blockers` minus
+`entity: "zatca"`.
+
+The web mirrors it: `InvoiceReadinessPanel` takes `stage="create" | "approve"`.
+At create, `draftBlockers` render red (and disable Save) while the ZATCA blocker
+renders amber underneath as "this saves, but it can't be approved until…". At
+approve, everything is red. `useInvoiceGate` returns both `notReady` (approval)
+and `cannotSave` (the save); **only `cannotSave` may disable a control in the
+create flow.**
+
+**Unlinking a landlord from ZATCA** — `DELETE /zatca/landlords/:ownerId/link`
+(and `DELETE /zatca/link` for the legacy account-level seller),
+`ZatcaOnboardingService.unlink`, gated on `ZATCA_PROMOTE_PRODUCTION`, audited by
+the global DELETE interceptor. It wipes every certificate, key, secret, token,
+compliance-request id and onboarding timestamp in **both** slots, and resets
+`activeEnvironment` to `sandbox` with `prodSlotEnv` null — never leave the
+pointer naming an emptied slot (§2b).
+
+Three things it deliberately does NOT do, each of which breaks a later re-link:
+
+- **It does not soft-delete the row.** `zatca_credentials_user_owner_uniq` is
+  plain, with no `deleted_at` predicate, and `upsertProfile` looks up with
+  `deletedAt IS NULL` and then INSERTs — soft-delete + re-link is a raw 23505.
+- **It does not reset ICV/PIH.** Those are not credentials; they are the
+  landlord's position in a sequence ZATCA requires to be monotonic, and
+  `invoices_user_owner_env_icv_uniq` enforces the same thing locally (also with
+  no `deleted_at` predicate, so `reset-chain`'s soft-delete does **not** free
+  the ICV slots it zeroes the counter past). Zeroing them makes the first
+  invoice after a re-link collide with a submitted one.
+- **It does not clear `prodSlotEnv`,** even though the slot it describes is now
+  empty. Simulation and production share `prod_icv`/`prod_pih`, so that column
+  is the only record of which chain the retained counter came from; erase it and
+  nobody can ever tell afterwards. Safe to keep — every reader of it
+  (`listLandlordStatus`, `switchEnvironment`, the compliance-check guard in
+  `InvoiceService`) gates on `prodCertPem` or `activeEnvironment` first, and
+  unlink clears both.
+- **It does not touch invoices already filed.** They are legal documents and the
+  seller party is snapshotted on each, so they keep printing with no credentials
+  row to join against.
+
+The landlord drops back to "profile saved, not integrated" — the same state as
+between saving a profile and issuing a CSID — so the Onboard action returns and
+nothing else in the app needs to learn a new state. **ZATCA is not told**: its
+API has no revoke call, so the CSID stays valid on their side and the device has
+to be deleted in Fatoora separately. Say that in any UI that offers this.
+
+---
+
+### 2b-iii. The free invoice, the buyer's identity, and losing the link from the far side
+
+**A document with no contract is no longer waved through.** `checkInvoiceReadiness`
+returned `ok: true` for a null `contractId` — "no parties to validate against" —
+which was true of the buyer only in the sense that nobody had looked. A free
+invoice has a buyer (on the document) and a seller (the account); both are now
+checked, with the same draft/approve split as everywhere else. Pass the buyer as
+the 4th argument (`InvoiceBuyerInput`); the buyer is resolved three ways, in
+order: `tenantId` → a picked tenant, `client.ownerId` + `client.kind ===
+"landlord"` → a picked landlord, otherwise the `client` block itself (an
+external customer, whose blocker carries `entity: "buyer"`, `action:
+"edit_document"` and a null id — there is no record to deep-link to).
+
+**The buyer's `type` is required, and it is not decoration.** It decides what
+else is required and how the buyer is identified:
+
+| buyer | also required | ZATCA `schemeID` | document |
+|---|---|---|---|
+| `individual` | — | `OTH` | simplified → **reported** |
+| `company` | VAT number + full national address | `CRN` | standard → **cleared** |
+
+The VAT NUMBER, not the type, is what actually selects the profile
+(`billing.module.ts`) — registration is what makes a buyer B2B, and an
+individual can be registered too. The type decides the scheme and lets the gate
+insist a company really carries the VAT number and address that clearance
+needs. `BuyerSnapshot` gained `id`/`idScheme` and the builder now emits
+`<cac:PartyIdentification>` inside `AccountingCustomerParty` — **standard
+invoices only**: a B2C buyer has no identifier to state and ZATCA does not ask
+for one. Valid schemes are CRN, MOM, MLS, SAG, OTH, 700 — never NAT or IQA.
+
+**No tax invoice is issued by an unlinked seller — unconditionally.** The gate
+first demanded the ZATCA link only of a VAT-registered seller, on the reasoning
+that e-invoicing is an obligation of registered sellers and an unregistered one
+should not be blocked on a link they do not owe. The product rule is stricter:
+issuing a tax invoice requires the seller to be linked, whatever their
+registration says. Applied identically on the contract path, the free path and
+`checkSellerLink` (which `POST /invoices` uses) — except for credit and debit
+notes, which the billing side has always exempted because they correct an
+invoice that already went out, and which `POST /invoices` now exempts too.
+
+**The link implies a VAT number, so the gate names both.** Onboarding cannot
+proceed without one: `POST /zatca/profile` requires it, the settings tab
+replaces the Onboard button with "N/A" without it, and ZATCA keys the CSR to it.
+Telling an unregistered seller only "link with ZATCA" therefore sent them to a
+screen offering them nothing — a dead end with no way out. `sellerVatBlocker`
+names the missing VAT number alongside the link, so the route is add-then-link.
+The VAT half refuses the SAVE (it is a field on a record) and the link half only
+the approval (it is an account errand), which is the same split as everywhere.
+
+**The cost is large and deliberate.** Measured on staging, 01 Sep 2026: 52
+landlords, of which 22 are VAT-registered and **7 actually onboarded**; 5 of 19
+accounts hold any ZATCA link at all. So 45 of 52 landlords cannot approve
+anything until they onboard. Drafts are unaffected — this is the one blocker
+excluded from `draftBlockers` — so bookkeeping continues and only issuance
+waits. Note also that a document whose lines are all exempt (residential rent)
+still needs the link even though `runZatcaSubmission` would skip it as
+`not_required`: the seller must be linked to issue, regardless of whether that
+particular document is ever submitted. If that combination needs relaxing, the
+condition to restore is the VAT check on `sellerZatcaBlocker`'s three call sites.
+
+**Who signs a free invoice.** `resolveStandaloneSellerId`: the account-level
+credentials row (`owner_id IS NULL`) when one exists, otherwise the
+`is_account_holder` landlord. The fallback exists because **nothing in the
+product can create the account-level row** — the settings tab always sends an
+`ownerId` — so every free invoice used to report "landlord not linked" about a
+link the user had no way to make. The readiness gate and `resolveOwnerId` call
+the same resolver, so the seller the gate checks is the seller the submission
+uses.
+
+**Losing the link from ZATCA's side.** The taxpayer can delete our EGS device in
+the Fatoora portal, or ZATCA can revoke the CSID, and nothing tells us: the row
+still holds a certificate, a key and a secret, so every local check passes and
+every invoice is signed into a void. The gateway reports it as **401/403**
+(`isCredentialRejection`).
+
+- `InvoiceService.issue` aborts on it **before** inserting the `invoices` row and
+  before `commitInvoiceState`. This ordering is the whole point: past that line
+  the ICV is spent unconditionally and `invoices_user_owner_env_icv_uniq` has no
+  `deleted_at` predicate, so a burned counter cannot be reclaimed — and a
+  persisted row would set `zatca_invoice_id`, which `isSubmittedToZatca` reads as
+  "this reached ZATCA" and uses to block a contract rebuild forever.
+- `zatca_credentials.link_invalid_at` / `link_invalid_reason` record it (added by
+  `bootstrap.ts`, not a migration — so **deploy the API before anything reads
+  the column**; a failed ALTER only warns, and every read of the table would
+  then 500). `isOnboarded()` returns false while it is set — as does its SQL
+  twin in the admin 360 view, which must be kept in step — so readiness reports
+  `zatcaLinkRevoked` and approval refuses.
+- **Getting back out matters as much as getting in.** The flag is raised by an
+  HTTP status, and a 403 can be a gateway or IP hiccup, so a self-lock with no
+  escape would be worse than the bug: approvals are blocked, and an approval was
+  the only other thing that could clear the flag. So a 403 carrying
+  `validationResults` is treated as a rejected DOCUMENT and never flags, and the
+  "فحص" (compliance-check) button both clears the flag on a pass and raises it on
+  a 401/403 — a real submission under the real credentials, needing no fresh
+  Fatoora OTP. It is also cleared by any accepted document, by re-onboarding and
+  by `unlink`.
+- It deliberately does **not** erase the credentials: a 403 can be a gateway or
+  IP problem, and deleting a seller's private key on one HTTP status is not an
+  automatic decision. Flagging is reversible; erasing is not.
+- The document gets `zatca_status = "pending"`, grouped with the other "nothing
+  was sent" codes, so it stays re-submittable and does not block a rebuild.
+
+**And the bug this uncovered:** `submitApprovedDocToZatca` derived the status
+from the PROFILE alone — `standard ⇒ cleared, otherwise reported` — where
+`submitted: true` meant only that the call returned. So a document ZATCA
+**rejected**, or answered 401 to, was stamped `cleared` with no error recorded,
+and `isSubmittedToZatca` then blocked the contract rebuild over an invoice that
+had never been accepted. It now reads `invoices.status` and claims success only
+for `cleared`/`reported`.
+
+---
+
+### 2b-iv. The ZATCA chain is serial, and `POST /invoices` is a gate too
+
+**One seller, one submission at a time** — `services/chain-lock.ts`. A ZATCA
+chain is genuinely sequential: invoice N+1 carries ICV N+1 and a PIH that is the
+hash of invoice N. `issue()` read the counter, spent up to 30s at ZATCA, then
+wrote it back, so two approvals for one landlord arriving together computed the
+same ICV — colliding on `invoices_user_owner_env_icv_uniq` *after* the document
+was signed and submitted. `withSellerChainLock(userId, ownerId, fn)` now spans
+the whole submission.
+
+Three things about it that are not obvious and were each a bug first:
+
+- **A waiter must hold no connection.** The blocking `pg_advisory_lock` parks the
+  waiter on a connection; a queue on one busy landlord then eats the pool. Hence
+  `pg_try_advisory_lock` in a jittered retry loop, releasing between attempts.
+- **The holder must not draw on the REQUEST pool.** It holds a connection idle
+  across the ZATCA call while its own work needs one. With `max: 20` and 24
+  unrelated landlords approving at once, every connection is held by a holder
+  and each holder waits for a connection only another holder can free — a
+  deadlock that appears only above the pool size, and never in a small test.
+  Hence `createAuxPool` and a dedicated pool of 6.
+- **A failed unlock must not pool the connection.** A session-scoped lock lives
+  on the connection, so returning it would wedge that seller for the life of the
+  connection with nothing to explain it — `client.release(true)` destroys it
+  instead. And the unlock must never replace the body's error: `fn` throwing is
+  routine, and losing "ZATCA rejected this" to a driver message hides the only
+  useful fact.
+
+A chain that stays busy past the deadline throws `zatca_chain_busy`, which maps
+to `zatca_status = "pending"` — nothing was sent and no counter moved, so it must
+stay retryable and must not block a contract rebuild. `resetChain` takes the same
+lock; it is the only other writer of the counter.
+
+**`POST /invoices` no longer skips its gate.** The readiness check sat inside
+`if (body.contractId)`, so a contract-less call was checked for nothing at all.
+It now validates the seller's link and, on every path, the buyer — before
+anything is signed, because a refusal after signing has already spent an ICV that
+cannot be reclaimed. `eInvoiceBuyerBlockers` is deliberately NOT `buyerBlockers`:
+that one governs our RECORD of a customer (e-mail, phone, so an invoice can be
+delivered), this one governs the DOCUMENT — only what ZATCA reads off the XML,
+which for a standard invoice is a VAT number, the national address, and `id`
+**with** `idScheme` (the builder emits the identification only when it has both).
+
+`CreateInvoiceDto` is a TS *interface*, so `ValidationPipe({whitelist:true})`
+resolves its metatype to `Object` and validates nothing: `profile`, `docType`,
+`submitTo` and `ownerId` are raw client input at runtime. They are checked
+explicitly now. `submitTo` may not contradict the profile (clearance is B2B,
+reporting is B2C) and `compliance` cannot be requested at all — the service
+chooses it for sandbox and simulation, and a live seller asking for it would
+spend a real ICV on a document ZATCA files nowhere.
+
+---
 
 ## 3. Packages, roles and account classification
 
@@ -698,6 +949,68 @@ makes that claim true rather than aspirational.
   wrong SignedProperties digest, so anything already sent to sandbox is not a
   usable precedent. Owner 264 has since been promoted and holds a real
   PRODUCTION CSID.
+- **A landlord with no VAT number cannot save a tax invoice, and no landlord can
+  approve one without a ZATCA link.** The create-time gate requires
+  `owner.taxNumber`, so a non-VAT-registered landlord (most residential-only
+  ones — residential rent is exempt) is refused at SAVE; and since 01 Sep 2026
+  the approval gate demands the ZATCA link of every seller unconditionally, so
+  45 of 52 landlords on staging cannot approve at all until they onboard. Both
+  are deliberate product decisions, and both are dead ends for that population.
+  The honest fix remains a non-tax document type for sellers outside
+  e-invoicing, rather than a gate that lets a tax invoice through. Decide before
+  anyone in that group tries to bill.
+
+- **`prod_icv` / `prod_pih` survive a simulation rehearsal into production.**
+  Neither `issueComplianceCsid` nor `issueProductionCsid` resets them, and
+  simulation writes to the same two columns — so a seller who rehearses on
+  simulation up to ICV 30 and then onboards for real files their FIRST
+  production invoice as ICV 31, carrying a PIH from a chain that only ever
+  existed on simulation. Pre-existing and unrelated to unlink (which is why
+  unlink now preserves `prod_slot_env`: it is the only thing that records which
+  chain the counter belongs to). Nobody has hit it because no invoice has ever
+  cleared in production — fix it before the first one does.
+
+- **ZATCA B2C (simplified) onboarding is blocked on production** — standard
+  clears, simplified fails `Invalid signed properties hashing` for a reason
+  ZATCA's error hides (every field we send is provably correct and
+  sandbox-accepted). See §2b-i. Workaround: onboard B2B-only sellers with
+  invoiceType `1000`. Owner 264 is mid-onboarding (compliance CSID held, 3
+  standard already passed on ZATCA, awaiting the 3 simplified or a `1000`
+  re-onboard with a fresh OTP).
+
+### The subscription webhook activated on an anonymous request (28 Aug 2026)
+
+`POST /api/subscription/webhook` is unauthenticated by design — Moyasar calls
+it — and it was meant to verify rather than trust. It only did so when the
+payload happened to carry an `invoice_id`. Without one, `paid` was read
+straight from the request body, so an anonymous
+
+```json
+{"data":{"status":"paid","metadata":{"subscriptionPaymentId":N}}}
+```
+
+activated that subscription. The shared-secret guard did not close it: a WRONG
+`secret_token` was rejected, but an OMITTED one only logged a warning and
+carried on. `parseInt` on the row id meant `"3.7"` resolved to row 3, and a
+13-digit value passed `Number.isSafeInteger` and then overflowed int4 — a 500
+on a public route.
+
+Found on 28 Aug 2026 while verifying an unrelated fix, and proven by activating
+a real staging row (reverted). Fixed on **master/staging** (`9ca04ae`): a
+configured secret is now required rather than merely checked when present; the
+payload's own status is trusted only when that secret proves the sender;
+otherwise the row must be confirmed with Moyasar or the request is refused. A
+transient Moyasar failure refuses rather than activates — Moyasar retries.
+
+**This fix is not on `main`.** Production still runs the version that activates
+on an anonymous request.
+
+Two neighbours found at the same time, also master-only: an employee created
+without a `preset` silently inherited the account-owner role (40 permissions,
+including deletes and `subscription.manage`) because the resolver defaulted to
+`"user"`; and `/me/subscription/pay` was the one path to `users.package_plan`
+that skipped `planAllowedForUserType`, so an individual could buy the
+company-only tenant plan.
 
 ### ZATCA — what "compliant" still needs (25 Aug 2026)
 
@@ -711,6 +1024,7 @@ established**. Do not tell anyone it is until at least the first item is done.
    can do it — and as of 28 Aug 2026 it now can: it passes the compliance suite
    6/6 and holds a production CSID (§2b-i). What is left is a real invoice
    through `/core`, which nothing has done yet.
+   can do it.
 2. **Six landlords are live on the sandbox** (see §2b). Their invoices are not
    e-invoices. Each needs production onboarding with its own Fatoora OTP.
 3. **15 VAT-registered landlords have no credentials at all.**
@@ -725,6 +1039,9 @@ established**. Do not tell anyone it is until at least the first item is done.
 6. ~~`seller_id_scheme` should be `NAT`~~ — **wrong, and left here because it
    was acted on.** `NAT` is not a scheme ZATCA accepts; `OTH` is correct for a
    national ID (see §2b-i, commit 859d2a7). Nothing to change on owner 264.
+6. **`seller_id_scheme = 'OTH'` on owner 264** where the value is a national ID.
+   `NAT` is the correct scheme. It is per-invoice (`PartyIdentification/@schemeID`),
+   not baked into the CSR, so it is a one-row fix with no re-onboarding.
 7. Beyond this repo entirely: onboarding every VAT-registered seller, reporting
    simplified invoices within 24h, and archiving. Those belong to a ZATCA
    advisor, not to the code.

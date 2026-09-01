@@ -8,6 +8,7 @@ import { ZatcaApiService } from "./services/zatca-api.service";
 import { InvoiceBuilderService } from "./services/invoice-builder.service";
 import { InvoiceSignerService } from "./services/invoice-signer.service";
 import { InvoiceService } from "./services/invoice.service";
+import { PdfA3Service } from "./services/pdfa3.service";
 import { ZatcaOnboardingService } from "./services/zatca-onboarding.service";
 import { PdfService } from "./services/pdf.service";
 
@@ -38,7 +39,7 @@ import { PdfService } from "./services/pdf.service";
  */
 @Module({
   controllers: [ZatcaOnboardingController, InvoicesController],
-  providers: [
+  providers: [PdfA3Service, 
     ShellService,
     CsrService,
     QrService,
@@ -49,6 +50,6 @@ import { PdfService } from "./services/pdf.service";
     ZatcaOnboardingService,
     PdfService,
   ],
-  exports: [InvoiceService, ZatcaOnboardingService],
+  exports: [InvoiceService, ZatcaOnboardingService, PdfA3Service],
 })
 export class InvoiceModule {}

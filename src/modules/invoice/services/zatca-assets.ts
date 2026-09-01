@@ -42,6 +42,11 @@ certificateTemplateName = 1.3.6.1.4.1.311.20.2
 
 [ req ]
 prompt              = no
+# Without this, openssl reads the already-UTF-8 Arabic below as Latin-1 and
+# re-encodes it, so every byte becomes two. The seller's name went into the
+# certificate as "Ø§Ø¨Ø±Ø§Ù‡ÙŠÙ…" and that is what ZATCA's Fatoora portal
+# displays, because the portal shows the certificate subject verbatim.
+utf8                = yes
 default_md          = sha256
 req_extensions      = req_ext
 distinguished_name  = dn

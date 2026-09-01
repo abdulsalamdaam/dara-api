@@ -1,19 +1,23 @@
 import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable } from "@dara/database";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
+import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { seedDemoData } from "./demo-seed";
-import { ALL_PERMISSIONS, ROLE_PRESETS, isCustomerAccount } from "../../common/permissions";
+import { ALL_PERMISSIONS, ROLE_PRESETS, STAFF_ROLE_KEYS } from "../../common/permissions";
+import {
+  listQuerySchema, parseDateBound, parseEnumList, wantsPagination,
+} from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { isPackagePlan, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
+import { AdminCustomerOverviewController } from "./customer-overview.controller";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 import { TaqnyatService } from "../sms/taqnyat.service";
 
@@ -68,6 +72,25 @@ function resolveAdminPlan(requested: unknown, desired: string | null | undefined
   if (isPackagePlan(desired)) return desired;
   return "basic";
 }
+
+/**
+ * `isCustomerAccount` as a WHERE clause.
+ *
+ * The JS predicate in `common/permissions.ts` stays the definition; this is the
+ * same rule expressed for the database, because these lists used to SELECT
+ * every user row and then filter with it in memory. That is fine at today's
+ * size and wrong the moment it is paged: page 1 of a paginated query would be
+ * filtered down to whatever of its 25 rows happened to be customers, and the
+ * count beside it would have been counting staff and employees too.
+ *
+ * Topology, not role key: no owner above the row, and not Dara staff. A NULL
+ * role key is a customer (`NOT IN` is NULL-valued in SQL, so it is spelled out
+ * rather than left to three-valued logic).
+ */
+const isCustomerAccountSql = and(
+  isNull(usersTable.ownerUserId),
+  or(isNull(rolesTable.key), notInArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[])),
+);
 
 @ApiTags("admin")
 @ApiBearerAuth("user-jwt")
@@ -132,75 +155,198 @@ class AdminController {
     };
   }
 
+  /**
+   * Platform-wide admin figures.
+   *
+   * Every number here is a database aggregate. It used to SELECT the whole
+   * users table, the whole contracts table and the whole payments table and
+   * reduce them in JavaScript - three unbounded scans dragged across the wire
+   * to produce a dozen scalars, on a dashboard that is opened constantly.
+   *
+   * "Companies" = customer accounts (see `isCustomerAccountSql`); internal
+   * staff rows are excluded. `monthlyRevenue` is money actually collected this
+   * month; `monthlyRecurring` is the sum of active contracts' monthly rent.
+   */
   @Get("stats")
   async stats() {
-    // Join the role row so we filter by `roles.key` rather than the dropped
-    // `users.role` enum. "Companies" here = customer landlords (user/demo);
-    // internal team rows (super_admin/admin) are excluded.
-    const allUsers = await this.db
-      .select({
-        id: usersTable.id,
-        isActive: usersTable.isActive,
-        roleKey: rolesTable.key,
-        ownerUserId: usersTable.ownerUserId,
-      })
-      .from(usersTable)
-      .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id));
-    const companies = allUsers.filter(isCustomerAccount);
-    const [totalProps] = await this.db.select({ count: count() }).from(propertiesTable);
-    const [totalUnits] = await this.db.select({ count: count() }).from(unitsTable);
-    const [totalContracts] = await this.db.select({ count: count() }).from(contractsTable);
-    const contracts = await this.db.select().from(contractsTable);
-    const activeContracts = contracts.filter(c => c.status === "active").length;
-    const monthlyRecurring = contracts.filter(c => c.status === "active").reduce((s, c) => s + parseFloat(c.monthlyRent), 0);
-
-    const payments = await this.db.select().from(paymentsTable);
     const now = new Date();
-    const num = (s: string | null) => parseFloat(s || "0") || 0;
-    const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const monthlyData = Array.from({ length: 6 }, (_, i) => {
+    const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    // The six months ending with the current one, oldest first.
+    const months = Array.from({ length: 6 }, (_, i) => {
       const d = new Date(now.getFullYear(), now.getMonth() - (5 - i), 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      const monthName = d.toLocaleDateString("ar-SA", { month: "short" });
-      const revenue = payments.filter(p => p.status === "paid" && p.paidDate && p.paidDate.startsWith(key)).reduce((s, p) => s + num(p.amount), 0);
-      return { month: monthName, revenue };
+      // The calendar is pinned rather than left to resolve. CLDR's default for
+      // ar-SA is islamic-umalqura, which would label these six Gregorian
+      // buckets with Hijri months that do not line up with them; both Node 22
+      // in the container and the dev machine happen to resolve `gregory`
+      // today, so this changes nothing now and stops an ICU build from
+      // changing it later.
+      return { key: monthKey(d), label: d.toLocaleDateString("ar-SA-u-ca-gregory", { month: "short" }) };
     });
+    const earliest = `${months[0]!.key}-01`;
 
-    // monthlyRevenue is now actual collected money this month (sum of paid
-    // payments whose paidDate falls in the current month). The previous value
-    // (sum of active contracts' monthlyRent) is exposed as `monthlyRecurring`.
-    const monthlyRevenue = payments
-      .filter(p => p.status === "paid" && p.paidDate && p.paidDate.startsWith(currentKey))
-      .reduce((s, p) => s + num(p.amount), 0);
+    const [
+      userRows, companyRows, propRow, unitRow, contractRows,
+      subPaidRows, subPendingRows, monthRows, mrrRes, rentPaidRows, rentDueRows,
+    ] = await Promise.all([
+      this.db.select({ isActive: usersTable.isActive, cnt: count() })
+        .from(usersTable).groupBy(usersTable.isActive),
+      this.db.select({ isActive: usersTable.isActive, cnt: count() })
+        .from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .where(isCustomerAccountSql)
+        .groupBy(usersTable.isActive),
+      this.db.select({ c: count() }).from(propertiesTable),
+      this.db.select({ c: count() }).from(unitsTable),
+      // Count and monthly-rent sum per status in one pass, so `activeContracts`
+      // and `monthlyRecurring` come from the same scan as `totalContracts`.
+      this.db.select({ status: contractsTable.status, cnt: count(), rent: sum(contractsTable.monthlyRent) })
+        .from(contractsTable).groupBy(contractsTable.status),
+      // Revenue on this dashboard is DARA's revenue — what customers pay us for
+      // their subscription — not the rent flowing through the platform. These
+      // three used to read `payments`, i.e. tenants' rent installments, which
+      // made "الإيرادات" a number about the landlords' money rather than ours
+      // and put a figure in the millions where the true one is in the tens of
+      // thousands. `payments` is still summed below, under names that say what
+      // it is (rent volume), so nothing that wanted it has lost it.
+      this.db.select({ amount: sum(subscriptionPaymentsTable.amount) })
+        .from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.status, "paid")),
+      this.db.select({ amount: sum(subscriptionPaymentsTable.amount) })
+        .from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.status, "pending")),
+      // Subscription revenue per month for the last six months, keyed in the
+      // same Riyadh calendar the rest of the product reports in — paid_at is a
+      // timestamptz, so without the shift a payment taken late on the last
+      // evening of a month lands in the next one.
+      this.db.select({
+        month: sql<string>`to_char(${subscriptionPaymentsTable.paidAt} at time zone 'Asia/Riyadh', 'YYYY-MM')`.as("month"),
+        amount: sum(subscriptionPaymentsTable.amount),
+      })
+        .from(subscriptionPaymentsTable)
+        .where(and(
+          eq(subscriptionPaymentsTable.status, "paid"),
+          isNotNull(subscriptionPaymentsTable.paidAt),
+          gte(sql`(${subscriptionPaymentsTable.paidAt} at time zone 'Asia/Riyadh')::date`, sql`${earliest}::date`),
+        ))
+        .groupBy(sql`1`),
+      // True MRR: every account's latest paid subscription, each normalised to
+      // a month (a yearly plan contributes a twelfth). Summing the raw amounts
+      // would let one annual payment read as a month's income.
+      this.db.execute(sql`
+        select coalesce(sum(
+          case when latest.billing_cycle = 'yearly' then latest.amount / 12.0 else latest.amount end
+        ), 0) as mrr
+        from (
+          select distinct on (sp.user_id) sp.user_id, sp.amount, sp.billing_cycle
+          from ${subscriptionPaymentsTable} sp
+          join ${usersTable} u on u.id = sp.user_id
+          where sp.status = 'paid' and u.is_active = true and u.deleted_at is null
+          order by sp.user_id, sp.paid_at desc nulls last, sp.id desc
+        ) latest
+      `),
+      // Rent moving through the platform. Not our revenue — reported separately
+      // so the two can never be mistaken for one another again.
+      this.db.select({ amount: sum(paymentsTable.amount) })
+        .from(paymentsTable).where(eq(paymentsTable.status, "paid")),
+      this.db.select({ amount: sum(paymentsTable.amount) })
+        .from(paymentsTable).where(inArray(paymentsTable.status, ["pending", "overdue"])),
+    ]);
 
-    const collectedTotal = payments
-      .filter(p => p.status === "paid")
-      .reduce((s, p) => s + num(p.amount), 0);
+    const tally = (rows: Array<{ isActive: boolean; cnt: number }>) => {
+      let total = 0;
+      let active = 0;
+      for (const r of rows) {
+        total += Number(r.cnt);
+        if (r.isActive) active += Number(r.cnt);
+      }
+      return { total, active };
+    };
+    const users = tally(userRows as Array<{ isActive: boolean; cnt: number }>);
+    const companies = tally(companyRows as Array<{ isActive: boolean; cnt: number }>);
 
-    const pendingDue = payments
-      .filter(p => p.status === "pending" || p.status === "overdue")
-      .reduce((s, p) => s + num(p.amount), 0);
+    let totalContracts = 0;
+    let activeContracts = 0;
+    // The monthly rent under management. This is NOT the platform's MRR — it
+    // was being returned as `monthlyRecurring` and rendered on the
+    // subscriptions tab as our MRR, which overstated it by several orders of
+    // magnitude. It keeps its own name now.
+    let rentUnderManagement = 0;
+    for (const r of contractRows as Array<{ status: string; cnt: number; rent: string | null }>) {
+      totalContracts += Number(r.cnt);
+      if (r.status === "active") {
+        activeContracts = Number(r.cnt);
+        rentUnderManagement = Number(r.rent ?? 0);
+      }
+    }
+    const mrrRows = (mrrRes as unknown as { rows?: Array<{ mrr: string | number | null }> }).rows
+      ?? (mrrRes as unknown as Array<{ mrr: string | number | null }>);
+    const monthlyRecurring = Number(mrrRows?.[0]?.mrr ?? 0);
+
+    const byMonth = new Map<string, number>();
+    for (const r of monthRows as Array<{ month: string | null; amount: string | null }>) {
+      if (r.month) byMonth.set(r.month, Number(r.amount ?? 0));
+    }
+    const monthlyData = months.map((m) => ({ month: m.label, revenue: byMonth.get(m.key) ?? 0 }));
 
     return {
-      totalCompanies: companies.length,
-      activeCompanies: companies.filter(u => u.isActive).length,
-      totalUsers: allUsers.length,
-      activeUsers: allUsers.filter(u => u.isActive).length,
-      totalProperties: totalProps?.count ?? 0,
-      totalUnits: totalUnits?.count ?? 0,
-      totalContracts: totalContracts?.count ?? 0,
+      totalCompanies: companies.total,
+      activeCompanies: companies.active,
+      totalUsers: users.total,
+      activeUsers: users.active,
+      totalProperties: Number(propRow[0]?.c ?? 0),
+      totalUnits: Number(unitRow[0]?.c ?? 0),
+      totalContracts,
       activeContracts,
-      monthlyRevenue,
+      // Dara's own revenue, from subscription payments.
+      monthlyRevenue: byMonth.get(monthKey(now)) ?? 0,
       monthlyRecurring,
-      collectedTotal,
-      pendingDue,
+      collectedTotal: Number((subPaidRows[0] as { amount: string | null })?.amount ?? 0),
+      pendingDue: Number((subPendingRows[0] as { amount: string | null })?.amount ?? 0),
       monthlyData,
+      // Rent moving through the platform — a measure of scale, not income.
+      rentUnderManagement,
+      rentCollectedTotal: Number((rentPaidRows[0] as { amount: string | null })?.amount ?? 0),
+      rentOutstandingTotal: Number((rentDueRows[0] as { amount: string | null })?.amount ?? 0),
     };
   }
 
+  /**
+   * Customer accounts ("companies").
+   *
+   * Two things used to happen in JavaScript here and both now happen in SQL:
+   * the `isCustomerAccount` topology test (see `isCustomerAccountSql`), and the
+   * admin tab's own search box, which was filtering the fetched array. `total`
+   * is the database's count of matching accounts.
+   *
+   * The six per-account counts were six queries PER ROW - a 7N+1 that grew with
+   * the customer base. They are six grouped sub-queries now, each scanning its
+   * table once and joined by account id, so the cost no longer depends on how
+   * many accounts are on the page.
+   *
+   * Pagination is opt-in (`page`/`pageSize`/`paginated`/`search`) so the
+   * existing bare-array caller keeps working.
+   */
   @Get("companies")
-  async companies() {
-    const rows = await this.db
+  async companies(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery, ["search"]);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [isCustomerAccountSql];
+    if (q.search) {
+      conds.push(or(
+        ilike(usersTable.name, `%${q.search}%`),
+        ilike(usersTable.email, `%${q.search}%`),
+        ilike(usersTable.phone, `%${q.search}%`),
+        ilike(companiesTable.name, `%${q.search}%`),
+      ));
+    }
+    if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
+    else if (rawQuery?.isActive === "0" || rawQuery?.isActive === "false") conds.push(eq(usersTable.isActive, false));
+    const plans = typeof rawQuery?.plan === "string" && rawQuery.plan.trim()
+      ? rawQuery.plan.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (plans?.length) conds.push(inArray(usersTable.packagePlan, plans as any));
+    const where = and(...conds);
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db
       .select({
         id: usersTable.id,
         name: usersTable.name,
@@ -215,22 +361,32 @@ class AdminController {
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id));
-    const companies = rows.filter(isCustomerAccount);
-    return Promise.all(companies.map(async (user) => {
-      const [propCount] = await this.db.select({ count: count() }).from(propertiesTable).where(eq(propertiesTable.userId, user.id));
-      const [unitCount] = await this.db.select({ count: count() }).from(unitsTable)
-        .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
-        .where(eq(propertiesTable.userId, user.id));
-      const [contractCount] = await this.db.select({ count: count() }).from(contractsTable).where(eq(contractsTable.userId, user.id));
-      // Linked people under this account — visible to the admin as counts and
-      // drilled into via GET /admin/companies/:id/members.
-      const [empCount] = await this.db.select({ count: count() }).from(usersTable)
-        .where(and(eq(usersTable.ownerUserId, user.id), isNull(usersTable.deletedAt)));
-      const [landlordCount] = await this.db.select({ count: count() }).from(ownersTable)
-        .where(and(eq(ownersTable.userId, user.id), isNull(ownersTable.deletedAt)));
-      const [tenantCount] = await this.db.select({ count: count() }).from(tenantsTable)
-        .where(and(eq(tenantsTable.userId, user.id), isNull(tenantsTable.deletedAt)));
+      .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+      // The row query was built without this while the count query had it, so
+      // every filter — search, active, plan, and the customer-account test —
+      // applied to the total and to nothing else. The list came back unfiltered
+      // under a filtered count, which also produced pages past the last one.
+      .where(where)
+      // Ordering was left entirely to the database before, which is
+      // non-deterministic and would have made paging shuffle rows. Newest
+      // account first, `id` as the tiebreak.
+      .orderBy(dir(usersTable.createdAt), dir(usersTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() })
+        .from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+
+    const ids = rows.map((r) => r.id);
+    const counts = await this.accountCounts(ids);
+    const data = rows.map((user) => {
+      const c = counts.get(user.id);
       return {
         id: user.id,
         name: user.companyName || user.name,
@@ -239,15 +395,64 @@ class AdminController {
         isActive: user.isActive,
         phone: user.phone,
         plan: user.roleKey === "demo" ? "تجريبي" : "مجاني",
-        propertiesCount: Number(propCount?.count ?? 0),
-        unitsCount: Number(unitCount?.count ?? 0),
-        contractsCount: Number(contractCount?.count ?? 0),
-        employeesCount: Number(empCount?.count ?? 0),
-        landlordsCount: Number(landlordCount?.count ?? 0),
-        tenantsCount: Number(tenantCount?.count ?? 0),
+        propertiesCount: c?.properties ?? 0,
+        unitsCount: c?.units ?? 0,
+        contractsCount: c?.contracts ?? 0,
+        employeesCount: c?.employees ?? 0,
+        landlordsCount: c?.landlords ?? 0,
+        tenantsCount: c?.tenants ?? 0,
         createdAt: user.createdAt,
       };
-    }));
+    });
+    if (!paged) return data;
+    return { data, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+  }
+
+  /**
+   * Properties / units / contracts / employees / landlords / tenants per
+   * account, for the given account ids, in six grouped queries rather than six
+   * per row.
+   */
+  private async accountCounts(ids: number[]) {
+    const out = new Map<number, {
+      properties: number; units: number; contracts: number;
+      employees: number; landlords: number; tenants: number;
+    }>();
+    if (ids.length === 0) return out;
+    for (const id of ids) out.set(id, { properties: 0, units: 0, contracts: 0, employees: 0, landlords: 0, tenants: 0 });
+
+    const [props, units, contracts, employees, landlords, tenants] = await Promise.all([
+      this.db.select({ k: propertiesTable.userId, c: count() }).from(propertiesTable)
+        .where(inArray(propertiesTable.userId, ids)).groupBy(propertiesTable.userId),
+      this.db.select({ k: propertiesTable.userId, c: count() }).from(unitsTable)
+        .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+        .where(inArray(propertiesTable.userId, ids)).groupBy(propertiesTable.userId),
+      this.db.select({ k: contractsTable.userId, c: count() }).from(contractsTable)
+        .where(inArray(contractsTable.userId, ids)).groupBy(contractsTable.userId),
+      this.db.select({ k: usersTable.ownerUserId, c: count() }).from(usersTable)
+        .where(and(inArray(usersTable.ownerUserId, ids), isNull(usersTable.deletedAt)))
+        .groupBy(usersTable.ownerUserId),
+      this.db.select({ k: ownersTable.userId, c: count() }).from(ownersTable)
+        .where(and(inArray(ownersTable.userId, ids), isNull(ownersTable.deletedAt)))
+        .groupBy(ownersTable.userId),
+      this.db.select({ k: tenantsTable.userId, c: count() }).from(tenantsTable)
+        .where(and(inArray(tenantsTable.userId, ids), isNull(tenantsTable.deletedAt)))
+        .groupBy(tenantsTable.userId),
+    ]);
+    const apply = (rows: Array<{ k: number | null; c: number }>, field: keyof NonNullable<ReturnType<typeof out.get>>) => {
+      for (const r of rows) {
+        if (r.k == null) continue;
+        const e = out.get(r.k);
+        if (e) e[field] = Number(r.c);
+      }
+    };
+    apply(props, "properties");
+    apply(units, "units");
+    apply(contracts, "contracts");
+    apply(employees, "employees");
+    apply(landlords, "landlords");
+    apply(tenants, "tenants");
+    return out;
   }
 
   /**
@@ -296,9 +501,37 @@ class AdminController {
    * Customer landlords (role='user' or 'demo') live under /admin/companies.
    * This separation keeps the company team panel decoupled from customer data.
    */
+  /**
+   * "Admin Users" = Dara internal team (super_admin + admin only).
+   * Customer landlords live under /admin/companies.
+   *
+   * The staff test and the tab's search are both SQL now; they were a
+   * `rows.filter()` over every user row in the system followed by a
+   * per-row property count (an N+1). `total` is the database's count.
+   */
   @Get("users")
-  async users() {
-    const rows = await this.db
+  async users(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery, ["search"]);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [inArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[])];
+    if (q.search) {
+      conds.push(or(
+        ilike(usersTable.name, `%${q.search}%`),
+        ilike(usersTable.email, `%${q.search}%`),
+        ilike(companiesTable.name, `%${q.search}%`),
+      ));
+    }
+    if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
+    else if (rawQuery?.isActive === "0" || rawQuery?.isActive === "false") conds.push(eq(usersTable.isActive, false));
+    // The "locked" badge on this tab is `failedLoginAttempts >= 5`; offered as
+    // a filter so the admin can pull up locked accounts without scanning.
+    if (rawQuery?.locked === "1" || rawQuery?.locked === "true") conds.push(gte(usersTable.failedLoginAttempts, 5));
+    const where = and(...conds);
+
+    // Oldest-first is this list's long-standing default; `?order=desc` flips it.
+    const dir = rawQuery?.order === "desc" ? desc : asc;
+    let rowsQ = this.db
       .select({
         id: usersTable.id,
         email: usersTable.email,
@@ -316,31 +549,90 @@ class AdminController {
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
-      .orderBy(usersTable.createdAt);
-    const teamOnly = rows.filter(u => u.roleKey === "super_admin" || u.roleKey === "admin");
-    return Promise.all(teamOnly.map(async (user) => {
-      const [propCount] = await this.db.select({ count: count() }).from(propertiesTable).where(eq(propertiesTable.userId, user.id));
-      return {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.roleKey,
-        isActive: user.isActive,
-        phone: user.phone,
-        company: user.companyName,
-        propertiesCount: Number(propCount?.count ?? 0),
-        loginCount: user.loginCount ?? 0,
-        lastLoginAt: user.lastLoginAt,
-        failedLoginAttempts: user.failedLoginAttempts ?? 0,
-        createdAt: user.createdAt,
-      };
+      .where(where)
+      .orderBy(dir(usersTable.createdAt), dir(usersTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() })
+        .from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+
+    // One grouped query instead of one per row.
+    const ids = rows.map((r) => r.id);
+    const propCounts = new Map<number, number>();
+    if (ids.length) {
+      const grouped = await this.db.select({ k: propertiesTable.userId, c: count() })
+        .from(propertiesTable).where(inArray(propertiesTable.userId, ids)).groupBy(propertiesTable.userId);
+      for (const r of grouped) propCounts.set(r.k, Number(r.c));
+    }
+
+    const data = rows.map((user) => ({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.roleKey,
+      isActive: user.isActive,
+      phone: user.phone,
+      company: user.companyName,
+      propertiesCount: propCounts.get(user.id) ?? 0,
+      loginCount: user.loginCount ?? 0,
+      lastLoginAt: user.lastLoginAt,
+      failedLoginAttempts: user.failedLoginAttempts ?? 0,
+      createdAt: user.createdAt,
     }));
+    if (!paged) return data;
+    return { data, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
+  /**
+   * Login history.
+   *
+   * This endpoint had the exact bug this whole change exists to remove: it
+   * fetched the newest `limit` rows and THEN applied `?status=` to them in
+   * JavaScript. Asking for failed logins returned "the failures among the last
+   * 100 attempts", not "the last 100 failures" - so on a busy day the failures
+   * tab could come back nearly empty precisely when it mattered most. `status`
+   * and `search` are part of the query now, and the three tiles above the table
+   * come back as `stats`, counted by the database, instead of being derived in
+   * the browser from a second unfiltered fetch of the same capped list.
+   *
+   * `limit` still works and still returns a bare array; `page`/`pageSize`/
+   * `paginated` switch to the standard envelope.
+   */
   @Get("login-history")
-  async loginHistory(@Query("limit") limitQ?: string, @Query("status") statusQ?: string) {
-    const limit = Math.min(parseInt(limitQ || "100", 10), 500);
-    const logs = await this.db
+  async loginHistory(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [];
+    const statuses = typeof rawQuery?.status === "string" && rawQuery.status.trim() && rawQuery.status !== "all"
+      ? rawQuery.status.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (q.search) {
+      conds.push(or(
+        ilike(loginLogsTable.email, `%${q.search}%`),
+        ilike(loginLogsTable.ip, `%${q.search}%`),
+        ilike(loginLogsTable.device, `%${q.search}%`),
+        ilike(usersTable.name, `%${q.search}%`),
+      ));
+    }
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(loginLogsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    if (to) conds.push(lte(loginLogsTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
+    // The tiles show all / success / failed side by side, so they must ignore
+    // the status tab - but they DO honour the search box and the date window,
+    // otherwise they would describe a different set from the table below them.
+    const statsWhere = conds.length ? and(...conds) : undefined;
+    if (statuses?.length) conds.push(inArray(loginLogsTable.status, statuses));
+    const where = conds.length ? and(...conds) : undefined;
+
+    const rowsQ = this.db
       .select({
         id: loginLogsTable.id,
         userId: loginLogsTable.userId,
@@ -353,9 +645,41 @@ class AdminController {
       })
       .from(loginLogsTable)
       .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
-      .orderBy(desc(loginLogsTable.createdAt))
-      .limit(limit);
-    return statusQ ? logs.filter(l => l.status === statusQ) : logs;
+      .where(where)
+      // `id` tiebreak - a burst of attempts shares a `created_at`.
+      .orderBy(desc(loginLogsTable.createdAt), desc(loginLogsTable.id))
+      .$dynamic();
+
+    if (!paged) {
+      const limit = Math.min(Math.max(1, parseInt(rawQuery?.limit || "100", 10) || 100), 500);
+      return rowsQ.limit(limit);
+    }
+
+    const [rows, totalRow, statusRows] = await Promise.all([
+      rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize),
+      this.db.select({ total: count() })
+        .from(loginLogsTable)
+        .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
+        .where(where),
+      this.db.select({ status: loginLogsTable.status, cnt: count() })
+        .from(loginLogsTable)
+        .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
+        .where(statsWhere)
+        .groupBy(loginLogsTable.status),
+    ]);
+    const byStatus: Record<string, number> = {};
+    let all = 0;
+    for (const r of statusRows as Array<{ status: string; cnt: number }>) {
+      byStatus[r.status] = Number(r.cnt);
+      all += Number(r.cnt);
+    }
+    return {
+      data: rows,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { all, byStatus },
+    };
   }
 
   @Patch("users/:userId/unlock")
@@ -465,10 +789,43 @@ class AdminController {
     return { success: true };
   }
 
+  /**
+   * Registrations awaiting (or past) approval.
+   *
+   * `status`, `search` and `userType` all resolve in SQL. Both the
+   * `isCustomerAccount` topology test and the status filter used to run over
+   * the fetched array, and the admin tab's search box was a third filter on top
+   * - so "search" meant "search what has already been downloaded".
+   *
+   * Pagination is opt-in; the tab's existing `?status=pending` call still gets
+   * a bare array.
+   */
   @Get("registrations")
-  async registrations(@Query("status") statusQ?: string) {
-    const status = statusQ || "all";
-    let rows = await this.db
+  async registrations(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const status = typeof rawQuery?.status === "string" && rawQuery.status ? rawQuery.status : "all";
+
+    const conds: any[] = [isCustomerAccountSql];
+    if (status !== "all") conds.push(eq(usersTable.accountStatus, status as any));
+    if (q.search) {
+      conds.push(or(
+        ilike(usersTable.name, `%${q.search}%`),
+        ilike(usersTable.email, `%${q.search}%`),
+        ilike(usersTable.phone, `%${q.search}%`),
+        ilike(companiesTable.name, `%${q.search}%`),
+      ));
+    }
+    const userTypes = typeof rawQuery?.userType === "string" && rawQuery.userType.trim()
+      ? rawQuery.userType.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (userTypes?.length) conds.push(inArray(usersTable.userType, userTypes as any));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(usersTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    if (to) conds.push(lte(usersTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
+    const where = and(...conds);
+
+    let rowsQ = this.db
       .select({
         id: usersTable.id,
         name: usersTable.name,
@@ -493,10 +850,23 @@ class AdminController {
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
-      .orderBy(usersTable.createdAt);
-    rows = rows.filter(isCustomerAccount);
-    if (status !== "all") rows = rows.filter(u => u.accountStatus === status);
-    return rows.map(u => ({
+      .where(where)
+      // Oldest registration first (the queue is worked front to back), `id` as
+      // the tiebreak on a non-unique `created_at`.
+      .orderBy(asc(usersTable.createdAt), asc(usersTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() })
+        .from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+
+    const data = rows.map(u => ({
       id: u.id,
       name: u.name,
       email: u.email,
@@ -516,16 +886,25 @@ class AdminController {
       emailVerifiedAt: u.emailVerifiedAt,
       createdAt: u.createdAt,
     }));
+    if (!paged) return data;
+    return { data, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
+  /**
+   * The sidebar's pending-registrations badge, polled every 60 seconds.
+   *
+   * Counted by the database. It used to SELECT every user row in the system,
+   * apply `isCustomerAccount` in JavaScript and return the array length -
+   * a full table scan across the wire, once a minute, per open admin tab.
+   */
   @Get("registrations/pending-count")
   async pendingCount() {
-    const rows = await this.db
-      .select({ accountStatus: usersTable.accountStatus, roleKey: rolesTable.key, ownerUserId: usersTable.ownerUserId })
+    const [row] = await this.db
+      .select({ c: count() })
       .from(usersTable)
-      .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id));
-    const c = rows.filter(u => isCustomerAccount(u) && u.accountStatus === "pending").length;
-    return { count: c };
+      .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+      .where(and(isCustomerAccountSql, eq(usersTable.accountStatus, "pending")));
+    return { count: Number(row?.c ?? 0) };
   }
 
   /**
@@ -683,5 +1062,12 @@ class AdminController {
   }
 }
 
-@Module({ imports: [EjarModule], controllers: [AdminController] })
+/**
+ * `AdminCustomerOverviewController` lives in its own file — this one is
+ * already long enough — but it is the same admin surface, behind the same
+ * `JwtAuthGuard` + `SuperAdminGuard` pair as everything above, and the
+ * account lists here (`GET /admin/companies`, `GET /admin/users`) are what
+ * link into it: both already carry the account's `id` on every row.
+ */
+@Module({ imports: [EjarModule], controllers: [AdminController, AdminCustomerOverviewController] })
 export class AdminModule {}

@@ -14,7 +14,7 @@ let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
  * SSL but allow the self-signed CA chain — `rejectUnauthorized: false` is the
  * standard pattern for DO/Heroku managed Postgres.
  */
-function buildPool(): pg.Pool {
+function buildPool(max = 20, label = "pool"): pg.Pool {
   const url = process.env.DATABASE_URL!;
   const lower = url.toLowerCase();
   const wantsSsl = lower.includes("sslmode=require")
@@ -32,14 +32,14 @@ function buildPool(): pg.Pool {
   ).replace(/\?&/, "?").replace(/\?$/, "");
 
   const safe = sanitizedUrl.replace(/:[^@]*@/, ":***@");
-  console.log(`[db] Connecting pool to ${safe} (ssl=${wantsSsl})`);
+  console.log(`[db] Connecting ${label} to ${safe} (ssl=${wantsSsl}, max=${max})`);
 
   const pool = new Pool({
     connectionString: sanitizedUrl,
     ssl: wantsSsl ? { rejectUnauthorized: false } : undefined,
     // Keep connections warm so requests don't pay a fresh TCP + SSL
     // handshake (hundreds of ms) on every burst of traffic.
-    max: 20,
+    max,
     idleTimeoutMillis: 60_000,
     keepAlive: true,
     connectionTimeoutMillis: 10_000,
@@ -50,6 +50,18 @@ function buildPool(): pg.Pool {
   });
 
   return pool;
+}
+
+/**
+ * A SEPARATE small pool, built the same way.
+ *
+ * For work that holds a connection idle for a long time — an advisory lock kept
+ * across a network call — and so must not draw from the pool the same request
+ * needs to do its actual queries. Sharing one pool there deadlocks: every
+ * connection ends up held by a locker waiting for a connection to work with.
+ */
+export function createAuxPool(max: number, label: string): pg.Pool {
+  return buildPool(max, label);
 }
 
 export function getPool(): pg.Pool {

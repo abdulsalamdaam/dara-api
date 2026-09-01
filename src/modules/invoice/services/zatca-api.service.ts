@@ -29,6 +29,33 @@ export interface ZatcaResponse<T = unknown> {
   json: T | null;
 }
 
+/**
+ * Did ZATCA refuse the CREDENTIALS rather than the document?
+ *
+ * This is the shape a link that has been revoked from the other side takes.
+ * The taxpayer deletes our EGS device in the Fatoora portal — or ZATCA revokes
+ * the CSID — and nothing tells us: our row still holds a certificate, a key
+ * and a secret, so every local check passes and we keep signing invoices into
+ * a void. The only signal is that the gateway stops accepting the Basic auth
+ * built from the binary security token, which it reports as 401 or 403.
+ *
+ * It matters that this is distinguished from a rejected document. A rejected
+ * invoice is a problem with that invoice, it consumed an ICV, and ZATCA has a
+ * record of it. A refused credential means nothing was filed at all, no ICV
+ * should be spent, and no amount of correcting the invoice will help — the
+ * seller has to link again.
+ */
+export function isCredentialRejection(resp: { status: number; json?: unknown }): boolean {
+  if (resp.status !== 401 && resp.status !== 403) return false;
+  // A 403 that carries validation results is ZATCA judging the DOCUMENT, not
+  // the credentials — treating that as a dead link would take a working seller
+  // offline over one bad invoice. 401 is unambiguous; 403 is only a credential
+  // rejection when ZATCA has nothing to say about the content.
+  const errors = (resp.json as any)?.validationResults?.errorMessages;
+  if (resp.status === 403 && Array.isArray(errors) && errors.length > 0) return false;
+  return true;
+}
+
 @Injectable()
 export class ZatcaApiService {
   private readonly logger = new Logger(ZatcaApiService.name);

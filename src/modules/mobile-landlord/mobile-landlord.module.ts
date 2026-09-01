@@ -1,14 +1,15 @@
-import { Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, UseGuards } from "@nestjs/common";
+import { ParseIntPipe, Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, Query, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsOptional, IsString } from "class-validator";
 import { and, eq, isNull, inArray, desc, sql } from "drizzle-orm";
+import type { Response } from "express";
 import { usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable, simpleInvoicesTable, companiesTable, lookupsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { liveStatus } from "../../common/payment-status";
+import { riyadhToday } from "../../common/payment-status";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
 import { UploadsService } from "../uploads/uploads.service";
@@ -36,6 +37,169 @@ class LandlordMobileController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle, private readonly uploads: UploadsService) {}
 
   private num(s: string | null | undefined) { return parseFloat(s || "0") || 0; }
+
+  private round2(n: number) { return Math.round((n + Number.EPSILON) * 100) / 100; }
+
+  /**
+   * Every collection recorded against the given installments.
+   *
+   * `payments.status` is NOT a record of money: a CANCELLED installment can
+   * still hold a real receipt (the contract ended after part of it had been
+   * paid), a `partially_paid` one holds less than its own amount, and
+   * `settled_external` holds nothing at all (it is a pre-onboarding opening
+   * balance, never portal revenue). The collection log is the only truth about
+   * what actually came in, so every "collected" figure in this file is built
+   * from here rather than from the status column.
+   */
+  private async collectionsOf(paymentIds: number[]) {
+    const out: { paymentId: number; amount: number; collectedDate: string | null }[] = [];
+    // Chunked: the id list is every installment in the portfolio, and one
+    // bind parameter per id would hit Postgres' parameter ceiling on a large
+    // account.
+    for (let i = 0; i < paymentIds.length; i += 5000) {
+      const chunk = paymentIds.slice(i, i + 5000);
+      const rows = await this.db.select({
+        paymentId: paymentCollectionsTable.paymentId,
+        amount: paymentCollectionsTable.amount,
+        collectedDate: paymentCollectionsTable.collectedDate,
+      }).from(paymentCollectionsTable).where(inArray(paymentCollectionsTable.paymentId, chunk));
+      for (const r of rows) {
+        if (r.paymentId == null) continue;
+        out.push({ paymentId: r.paymentId, amount: this.num(r.amount), collectedDate: r.collectedDate ?? null });
+      }
+    }
+    return out;
+  }
+
+  /** Collected total per payment id. */
+  /**
+   * Money collected against an INVOICE with no installment behind it — a
+   * collected commission invoice, an advance receipted on its own. Those rows
+   * carry `payment_id = null`, so the installment-keyed log above cannot see
+   * them and every account total that used it was short by exactly their sum.
+   * Scoped through the invoice's own contract when the caller is owner-scoped.
+   */
+  private async invoiceOnlyCollections(uid: number, contractIds: number[] | null) {
+    const rows = await this.db.select({
+      amount: paymentCollectionsTable.amount,
+      collectedDate: paymentCollectionsTable.collectedDate,
+      contractId: simpleInvoicesTable.contractId,
+    })
+      .from(paymentCollectionsTable)
+      .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
+      .where(and(
+        eq(paymentCollectionsTable.userId, uid),
+        isNull(paymentCollectionsTable.paymentId),
+        ...(contractIds ? [inArray(simpleInvoicesTable.contractId, contractIds)] : []),
+      ));
+    return rows.map((r) => ({
+      amount: this.num(r.amount),
+      collectedDate: r.collectedDate ?? null,
+      contractId: r.contractId ?? null,
+    }));
+  }
+
+  private collectedByPayment(cols: { paymentId: number; amount: number }[]) {
+    const map = new Map<number, number>();
+    for (const c of cols) map.set(c.paymentId, this.round2((map.get(c.paymentId) ?? 0) + c.amount));
+    return map;
+  }
+
+  /**
+   * Split a set of installments into money RECEIVED and money still OWED.
+   *
+   * Both used to be read off `payments.status`, which loses a partially
+   * collected installment completely: `partially_paid` counts as settled for
+   * `liveStatus`, so the part that WAS received was counted nowhere and the
+   * part still owed silently dropped out of pending/overdue. Here the
+   * collection log decides what came in, and the remainder (amount − collected)
+   * is what is still owed, bucketed by due date.
+   *
+   * Cancelled installments owe nothing and are not expected, but a receipt
+   * against one is still real money that came in.
+   */
+  private buckets(
+    rows: { id: number; amount: string | null; dueDate: string | null; status: string }[],
+    collected: Map<number, number>,
+  ) {
+    const today = riyadhToday();
+    let collectedTotal = 0, pending = 0, overdue = 0, overdueCount = 0, expected = 0;
+    for (const r of rows) {
+      const amount = this.num(r.amount);
+      collectedTotal += collected.get(r.id) ?? 0;
+      if (r.status === "cancelled") continue;
+      expected += amount;
+      if (r.status === "paid" || r.status === "settled_external") continue;
+      const remaining = this.round2(amount - (collected.get(r.id) ?? 0));
+      if (remaining <= 0.01) continue;
+      if (r.dueDate && String(r.dueDate).slice(0, 10) < today) { overdue += remaining; overdueCount += 1; }
+      else pending += remaining;
+    }
+    return {
+      collected: this.round2(collectedTotal), pending: this.round2(pending),
+      overdue: this.round2(overdue), overdueCount, expected: this.round2(expected),
+    };
+  }
+
+  /**
+   * ONE occupancy definition for the whole module: rented ÷ the property's
+   * DECLARED total units, falling back to the count of created unit rows only
+   * for a property that never declared a total.
+   *
+   * The reports endpoint used to divide the portfolio by the created-unit count
+   * while its own per-property bars — and the home screen — divided by the
+   * declared total: 92% on Reports and 21% on Home for the same portfolio in
+   * the same second, and Reports contradicting itself on one screen.
+   */
+  private occupancyDenom(prop: { totalUnits?: unknown }, createdUnits: number) {
+    const declared = Number((prop as any).totalUnits) || 0;
+    return declared > 0 ? declared : createdUnits;
+  }
+
+  private occupancyRate(rented: number, denom: number) {
+    return denom > 0 ? Math.min(100, Math.round((rented / denom) * 100)) : 0;
+  }
+
+  /**
+   * How many units each contract spans (at least 1).
+   *
+   * `contracts.monthlyRent` is ONE combined figure for every unit on the
+   * contract, so anything reporting a per-unit rent has to divide by this —
+   * otherwise two units sharing an 8,333.33 contract each report 8,333.33 and
+   * the portfolio's rent doubles.
+   */
+  private async contractRentShare(contractIds: number[]) {
+    const map = new Map<number, number>();
+    if (!contractIds.length) return map;
+    const rows = await this.db.select({ contractId: contractUnitsTable.contractId, n: sql<number>`count(*)::int` })
+      .from(contractUnitsTable).where(inArray(contractUnitsTable.contractId, contractIds))
+      .groupBy(contractUnitsTable.contractId);
+    for (const r of rows) map.set(r.contractId, Math.max(1, Number(r.n) || 1));
+    return map;
+  }
+
+  /** Clamp caller-supplied paging to a sane window. */
+  private paging(limitRaw: string | undefined, offsetRaw: string | undefined, def: number, max: number) {
+    const l = parseInt(String(limitRaw ?? ""), 10);
+    const o = parseInt(String(offsetRaw ?? ""), 10);
+    return {
+      limit: Number.isFinite(l) && l > 0 ? Math.min(max, l) : def,
+      offset: Number.isFinite(o) && o > 0 ? o : 0,
+    };
+  }
+
+  /**
+   * Tell the caller how much of a capped list it actually received. The array
+   * body is unchanged (the app consumes it as-is) — the paging lives in
+   * headers, so a truncated list is visible instead of silently short.
+   */
+  private setPagingHeaders(res: Response | undefined, total: number, limit: number, offset: number, returned: number) {
+    if (!res?.setHeader) return;
+    res.setHeader("X-Total-Count", String(total));
+    res.setHeader("X-Limit", String(limit));
+    res.setHeader("X-Offset", String(offset));
+    res.setHeader("X-Has-More", offset + returned < total ? "1" : "0");
+  }
 
   /**
    * For an OWNER (landlord) mobile login the request is narrowed to that single
@@ -154,19 +318,22 @@ class LandlordMobileController {
       .where(and(eq(propertiesTable.userId, uid), isNull(propertiesTable.deletedAt),
         ...(scope.propIds ? [inArray(propertiesTable.id, scope.propIds)] : [])));
     const propIds = props.map((p) => p.id);
-    // Occupancy denominator is the property's declared total units (sum), not
-    // the count of created unit records.
-    const totalUnits = props.reduce((s, p) => s + (Number(p.totalUnits) || 0), 0);
 
     let unitsCount = 0, rentedUnits = 0, availableUnits = 0, maintenanceUnits = 0;
+    let units: { propertyId: number; status: string | null }[] = [];
     if (propIds.length) {
-      const units = await this.db.select({ status: unitsTable.status }).from(unitsTable)
+      units = await this.db.select({ propertyId: unitsTable.propertyId, status: unitsTable.status }).from(unitsTable)
         .where(and(inArray(unitsTable.propertyId, propIds), isNull(unitsTable.deletedAt)));
       unitsCount = units.length;
       rentedUnits = units.filter((u) => u.status === "rented").length;
       availableUnits = units.filter((u) => u.status === "available").length;
       maintenanceUnits = units.filter((u) => u.status === "maintenance").length;
     }
+    // Occupancy denominator is the property's declared total units, falling
+    // back per property to its created unit rows — the same definition the
+    // properties list, the property detail and the reports use.
+    const totalUnits = props.reduce(
+      (s, p) => s + this.occupancyDenom(p, units.filter((u) => u.propertyId === p.id).length), 0);
 
     const contracts = await this.db.select({ id: contractsTable.id, tenantId: contractsTable.tenantId, status: contractsTable.status, monthlyRent: contractsTable.monthlyRent })
       .from(contractsTable).where(and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt),
@@ -174,15 +341,23 @@ class LandlordMobileController {
     const activeContractsCount = contracts.filter((c) => c.status === "active").length;
     const monthlyRecurring = contracts.filter((c) => c.status === "active").reduce((s, c) => s + this.num(c.monthlyRent), 0);
 
-    const payments = await this.db.select({ status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate, dueDate: paymentsTable.dueDate })
+    const payments = await this.db.select({ id: paymentsTable.id, status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate, dueDate: paymentsTable.dueDate })
       .from(paymentsTable).where(and(eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
         ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])));
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const collectedTotal = payments.filter((p) => p.status === "paid").reduce((s, p) => s + this.num(p.amount), 0);
-    const monthlyRevenue = payments.filter((p) => p.status === "paid" && p.paidDate?.startsWith(monthKey)).reduce((s, p) => s + this.num(p.amount), 0);
-    const pendingDue = payments.filter((p) => { const st = liveStatus(p.status as string, p.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, p) => s + this.num(p.amount), 0);
-    const overduePaymentsCount = payments.filter((p) => liveStatus(p.status as string, p.dueDate) === "overdue").length;
+    // Collected money comes from the collection log, never from the status —
+    // and a part-collected installment splits: what came in counts as
+    // collected, what is left still counts as pending/overdue by due date.
+    const cols = await this.collectionsOf(payments.map((p) => p.id));
+    const money = this.buckets(payments.map((p) => ({ ...p, status: p.status as string })), this.collectedByPayment(cols));
+    const monthKey = riyadhToday().slice(0, 7);
+    const invoiceOnly = await this.invoiceOnlyCollections(uid, scope.contractIds ?? null);
+    const collectedTotal = this.round2(money.collected + invoiceOnly.reduce((s, c) => s + c.amount, 0));
+    const monthlyRevenue = this.round2(
+      [...cols, ...invoiceOnly]
+        .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
+        .reduce((s, c) => s + c.amount, 0));
+    const pendingDue = this.round2(money.pending + money.overdue);
+    const overduePaymentsCount = money.overdueCount;
 
     let tenantsCount: number;
     if (scope.contractIds != null) {
@@ -193,12 +368,11 @@ class LandlordMobileController {
         .where(and(eq(tenantsTable.userId, uid), isNull(tenantsTable.deletedAt)))).length;
     }
 
-    const occDenom = totalUnits > 0 ? totalUnits : unitsCount;
     return {
       propertiesCount: propIds.length, unitsCount, totalUnits, rentedUnits, availableUnits, maintenanceUnits,
       activeContractsCount, tenantsCount,
       monthlyRecurring, collectedTotal, monthlyRevenue, pendingDue, overduePaymentsCount,
-      occupancyRate: occDenom > 0 ? Math.min(100, Math.round((rentedUnits / occDenom) * 100)) : 0,
+      occupancyRate: this.occupancyRate(rentedUnits, totalUnits),
     };
   }
 
@@ -266,7 +440,7 @@ class LandlordMobileController {
       // Occupancy is rented ÷ the property's declared total units (fall back to
       // the created-unit count only when totalUnits isn't set).
       const totalUnits = Number((p as any).totalUnits) || 0;
-      const denom = totalUnits > 0 ? totalUnits : us.length;
+      const denom = this.occupancyDenom(p, us.length);
       const imgs = (p as any).images;
       const imgKey = (Array.isArray(imgs) && imgs.length ? imgs[0] : null) ?? (p as any).imageKey ?? null;
       return {
@@ -274,7 +448,7 @@ class LandlordMobileController {
         district: (p as any).district ?? null, street: (p as any).street ?? null, deedNumber: (p as any).deedNumber ?? null,
         typeLookupId: (p as any).typeLookupId ?? null, usageLookupId: (p as any).usageLookupId ?? null, cityLookupId: (p as any).cityLookupId ?? null,
         unitsCount: us.length, totalUnits, rentedUnits: rented,
-        occupancyRate: denom > 0 ? Math.min(100, Math.round((rented / denom) * 100)) : 0,
+        occupancyRate: this.occupancyRate(rented, denom),
         _imgKey: imgKey,
       };
     });
@@ -311,15 +485,25 @@ class LandlordMobileController {
     // Current tenant per unit (via the active contract).
     const unitIds = rows.map((r) => r.id);
     const cu = unitIds.length
-      ? await this.db.select({ unitId: contractUnitsTable.unitId, tenantName: contractsTable.tenantName })
+      ? await this.db.select({ unitId: contractUnitsTable.unitId, contractId: contractUnitsTable.contractId, tenantName: contractsTable.tenantName, monthlyRent: contractsTable.monthlyRent })
           .from(contractUnitsTable)
           .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
           .where(and(inArray(contractUnitsTable.unitId, unitIds), eq(contractsTable.status, "active"), isNull(contractsTable.deletedAt)))
       : [];
     const tenantByUnit = new Map<number, string>();
     for (const r of cu) if (r.tenantName) tenantByUnit.set(r.unitId, r.tenantName);
+    // Rent fallback: a contract's monthlyRent covers EVERY unit it spans, so a
+    // unit without its own listed rent gets its share of the contract, not the
+    // whole figure (the detail screen used to show the full rent on each of two
+    // units sharing one contract, while this list showed nothing at all).
+    const rentShare = await this.contractRentShare([...new Set(cu.map((r) => r.contractId))]);
+    const rentByUnit = new Map<number, number>();
+    for (const r of cu) {
+      const share = rentShare.get(r.contractId);
+      if (share != null) rentByUnit.set(r.unitId, this.round2(this.num(r.monthlyRent) / share));
+    }
     const out = rows.map((r) => ({
-      ...r, rentPrice: r.rentPrice != null ? this.num(r.rentPrice) : null,
+      ...r, rentPrice: r.rentPrice != null ? this.num(r.rentPrice) : (rentByUnit.get(r.id) ?? null),
       tenantName: tenantByUnit.get(r.id) ?? null,
     }));
     await attachLookupLabels(this.db, out as any[], [{ idField: "typeLookupId", out: "type", mode: "labelAr" }]);
@@ -446,9 +630,9 @@ class LandlordMobileController {
 
   /** One landlord's FULL detail + their properties + contracts (read-only). */
   @Get("owners/:id")
-  async owner(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async owner(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const oid = parseInt(id, 10);
+    const oid = id;
     if (user.ownerScopeId != null && oid !== user.ownerScopeId) throw new NotFoundException("Landlord not found");
     const [o] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, oid), eq(ownersTable.userId, uid), isNull(ownersTable.deletedAt)));
@@ -542,28 +726,47 @@ class LandlordMobileController {
         receipts: receiptsByPayment.get(r.id) ?? [],
       };
     });
+    // The summary counts MONEY, not statuses: what was collected (including a
+    // receipt sitting on a cancelled installment) against what is still owed
+    // (including the uncollected remainder of a part-paid one). Bucketing by
+    // status instead dropped a part-paid installment out of every bucket —
+    // recording 1,000 against a 57,500 overdue row took the whole 57,500 out of
+    // "overdue" and added the 1,000 to nothing.
+    const money = this.buckets(rows.map((r) => ({ id: r.id, amount: r.amount, dueDate: r.dueDate, status: r.status as string })), collMap);
     const summary = {
-      paid: data.filter((d) => d.status === "paid").reduce((s, d) => s + d.amount, 0),
-      pending: data.filter((d) => d.status === "pending").reduce((s, d) => s + d.amount, 0),
-      overdue: data.filter((d) => d.status === "overdue").reduce((s, d) => s + d.amount, 0),
-      overdueCount: data.filter((d) => d.status === "overdue").length,
+      paid: money.collected,
+      pending: money.pending,
+      overdue: money.overdue,
+      overdueCount: money.overdueCount,
     };
     return { data, summary };
   }
 
-  /** Issued tax invoices + receipt vouchers for the account (ZATCA-style). */
+  /** Issued tax invoices + receipt vouchers for the account (ZATCA-style).
+   *  Paged with `?limit=&offset=` (default 300); the total and whether more
+   *  remain come back in the X-Total-Count / X-Has-More headers, so a
+   *  truncated list is visible instead of silently short. */
   @Get("invoices")
-  async invoices(@CurrentUser() user: AuthUser) {
+  async invoices(
+    @CurrentUser() user: AuthUser,
+    @Res({ passthrough: true }) res: Response,
+    @Query("limit") limitRaw?: string,
+    @Query("offset") offsetRaw?: string,
+  ) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
-    const rows = await this.db.select().from(simpleInvoicesTable)
-      .where(and(
-        eq(simpleInvoicesTable.userId, uid),
-        eq(simpleInvoicesTable.status, "confirmed"),
-        isNull(simpleInvoicesTable.deletedAt),
-        ...(scope.contractIds ? [inArray(simpleInvoicesTable.contractId, scope.contractIds)] : []),
-      ))
-      .orderBy(desc(simpleInvoicesTable.issueDate), desc(simpleInvoicesTable.id)).limit(300);
+    const { limit, offset } = this.paging(limitRaw, offsetRaw, 300, 500);
+    const where = and(
+      eq(simpleInvoicesTable.userId, uid),
+      eq(simpleInvoicesTable.status, "confirmed"),
+      isNull(simpleInvoicesTable.deletedAt),
+      ...(scope.contractIds ? [inArray(simpleInvoicesTable.contractId, scope.contractIds)] : []),
+    );
+    const [{ total } = { total: 0 }] = await this.db
+      .select({ total: sql<number>`count(*)::int` }).from(simpleInvoicesTable).where(where);
+    const rows = await this.db.select().from(simpleInvoicesTable).where(where)
+      .orderBy(desc(simpleInvoicesTable.issueDate), desc(simpleInvoicesTable.id)).limit(limit).offset(offset);
+    this.setPagingHeaders(res, Number(total) || 0, limit, offset, rows.length);
     if (!rows.length) return [];
 
     const account = await this.accountSeller(uid);
@@ -675,11 +878,11 @@ class LandlordMobileController {
    *  uploads it when the document is approved / the voucher is created; until
    *  then `url` is null and the app shows "not generated yet". */
   @Get("invoices/:id/pdf")
-  async invoicePdf(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async invoicePdf(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
     const [r] = await this.db.select({ id: simpleInvoicesTable.id, pdfKey: simpleInvoicesTable.pdfKey }).from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.id, parseInt(id, 10)), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt),
+      .where(and(eq(simpleInvoicesTable.id, id), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt),
         ...(scope.contractIds ? [inArray(simpleInvoicesTable.contractId, scope.contractIds)] : [])));
     if (!r) throw new NotFoundException("Invoice not found");
     const key = (r as any).pdfKey as string | null;
@@ -692,7 +895,7 @@ class LandlordMobileController {
   async reports(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
-    const props = await this.db.select({ id: propertiesTable.id, name: propertiesTable.name, totalUnits: propertiesTable.totalUnits })
+    const props = await this.db.select({ id: propertiesTable.id, name: propertiesTable.name, totalUnits: propertiesTable.totalUnits, ownerId: propertiesTable.ownerId })
       .from(propertiesTable).where(and(eq(propertiesTable.userId, uid), isNull(propertiesTable.deletedAt),
         ...(scope.propIds ? [inArray(propertiesTable.id, scope.propIds)] : [])));
     const propIds = props.map((p) => p.id);
@@ -700,17 +903,29 @@ class LandlordMobileController {
       ? await this.db.select({ propertyId: unitsTable.propertyId, status: unitsTable.status })
           .from(unitsTable).where(and(inArray(unitsTable.propertyId, propIds), isNull(unitsTable.deletedAt)))
       : [];
-    const unitsCount = units.length;
     const rented = units.filter((u) => u.status === "rented").length;
+    // Same occupancy denominator as the home screen and the per-property bars
+    // below — dividing by the created-unit count here is what put 92% on this
+    // screen while Home said 21% for the same portfolio.
+    const totalDenom = props.reduce(
+      (s, p) => s + this.occupancyDenom(p, units.filter((u) => u.propertyId === p.id).length), 0);
 
-    const contracts = await this.db.select({ status: contractsTable.status, monthlyRent: contractsTable.monthlyRent })
+    const contracts = await this.db.select({
+      id: contractsTable.id, status: contractsTable.status, monthlyRent: contractsTable.monthlyRent,
+      tenantId: contractsTable.tenantId, tenantPhone: contractsTable.tenantPhone,
+      landlordName: contractsTable.landlordName, landlordIdNumber: contractsTable.landlordIdNumber,
+    })
       .from(contractsTable).where(and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt),
         ...(scope.contractIds ? [inArray(contractsTable.id, scope.contractIds)] : [])));
     const monthlyRecurring = contracts.filter((c) => c.status === "active").reduce((s, c) => s + this.num(c.monthlyRent), 0);
 
-    const payments = await this.db.select({ amount: paymentsTable.amount, dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status, contractId: paymentsTable.contractId })
+    const payments = await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status, contractId: paymentsTable.contractId })
       .from(paymentsTable).where(and(eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
         ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])));
+    const cols = await this.collectionsOf(payments.map((p) => p.id));
+    const collectedMap = this.collectedByPayment(cols);
+    const contractByPayment = new Map<number, number>();
+    for (const p of payments) if (p.contractId != null) contractByPayment.set(p.id, p.contractId);
 
     // contract → property
     const cIds = [...new Set(payments.map((p) => p.contractId).filter((x): x is number => !!x))];
@@ -722,6 +937,42 @@ class LandlordMobileController {
       : [];
     const propByContract = new Map<number, number>();
     for (const r of cu) if (!propByContract.has(r.contractId)) propByContract.set(r.contractId, r.propertyId);
+    // `contract_units` rows are HARD-deleted when a contract is terminated or
+    // cancelled (the units are freed), so a past contract has no property left
+    // to attribute its revenue to and its money fell off the per-property bars
+    // entirely — they summed to a fraction of the "collected" card right above
+    // them. Recover the property, in order, from (a) another contract of the
+    // same tenant that still resolves to exactly one property — a terminated
+    // contract is almost always followed by a renewal on the same unit — and
+    // (b) the sole property of the contract's landlord. Both are used only when
+    // unambiguous; anything still unresolved stays unattributed rather than
+    // guessed.
+    const unlinked = contracts.filter((c) => cIds.includes(c.id) && !propByContract.has(c.id));
+    if (unlinked.length) {
+      const propsByTenant = new Map<string, Set<number>>();
+      const tenantKey = (c: { tenantId: number | null; tenantPhone: string | null }) =>
+        c.tenantId != null ? `t:${c.tenantId}` : (c.tenantPhone ? `p:${c.tenantPhone.replace(/\D/g, "").slice(-9)}` : null);
+      for (const c of contracts) {
+        const key = tenantKey(c); const pid = propByContract.get(c.id);
+        if (!key || pid == null) continue;
+        const seen = propsByTenant.get(key) ?? new Set<number>();
+        seen.add(pid); propsByTenant.set(key, seen);
+      }
+      const owners = await this.db.select({ id: ownersTable.id, name: ownersTable.name, idNumber: ownersTable.idNumber })
+        .from(ownersTable).where(and(eq(ownersTable.userId, uid), isNull(ownersTable.deletedAt)));
+      const propsByOwner = new Map<number, number[]>();
+      for (const p of props) if (p.ownerId != null) propsByOwner.set(p.ownerId, [...(propsByOwner.get(p.ownerId) ?? []), p.id]);
+      for (const c of unlinked) {
+        const key = tenantKey(c);
+        const viaTenant = key ? propsByTenant.get(key) : undefined;
+        if (viaTenant?.size === 1) { propByContract.set(c.id, [...viaTenant][0]); continue; }
+        const owner = owners.find((o) =>
+          (c.landlordIdNumber && o.idNumber && String(o.idNumber).trim() === String(c.landlordIdNumber).trim()) ||
+          (c.landlordName && o.name && o.name === c.landlordName));
+        const owned = owner ? propsByOwner.get(owner.id) : undefined;
+        if (owned?.length === 1) propByContract.set(c.id, owned[0]);
+      }
+    }
 
     // 6-month series
     const months: string[] = [];
@@ -730,34 +981,52 @@ class LandlordMobileController {
     const idx = new Map(months.map((m, i) => [m, i]));
     const monthlySeries = months.map((m) => ({ month: m, collected: 0, expected: 0 }));
     for (const p of payments) {
-      const due = (p.dueDate || "").slice(0, 7); const paid = (p.paidDate || "").slice(0, 7);
+      // A cancelled installment was never expected — counting it made the
+      // "expected" bars (and the collection rate) balloon on any contract that
+      // was cancelled and replaced by a renewal.
+      if (p.status === "cancelled") continue;
+      const due = (p.dueDate || "").slice(0, 7);
       if (idx.has(due)) monthlySeries[idx.get(due)!].expected += this.num(p.amount);
-      if (p.status === "paid" && idx.has(paid)) monthlySeries[idx.get(paid)!].collected += this.num(p.amount);
     }
+    // Collected is money, so it is placed by the date it was RECEIVED.
+    for (const c of cols) {
+      const m = (c.collectedDate || "").slice(0, 7);
+      if (idx.has(m)) monthlySeries[idx.get(m)!].collected += c.amount;
+    }
+    for (const s of monthlySeries) { s.collected = this.round2(s.collected); s.expected = this.round2(s.expected); }
 
     const collectedByProp = new Map<number, number>();
-    for (const p of payments) {
-      if (p.status !== "paid" || !p.contractId) continue;
-      const pid = propByContract.get(p.contractId); if (pid == null) continue;
-      collectedByProp.set(pid, (collectedByProp.get(pid) ?? 0) + this.num(p.amount));
+    for (const c of cols) {
+      const contractId = contractByPayment.get(c.paymentId); if (contractId == null) continue;
+      const pid = propByContract.get(contractId); if (pid == null) continue;
+      collectedByProp.set(pid, this.round2((collectedByProp.get(pid) ?? 0) + c.amount));
     }
     const propertyPerformance = props.map((p) => {
       const us = units.filter((u) => u.propertyId === p.id);
-      const denom = Number((p as any).totalUnits) || us.length;
-      const occ = denom > 0 ? Math.min(100, Math.round((us.filter((u) => u.status === "rented").length / denom) * 100)) : 0;
+      const occ = this.occupancyRate(us.filter((u) => u.status === "rented").length, this.occupancyDenom(p, us.length));
       return { name: p.name, collected: Math.round(collectedByProp.get(p.id) ?? 0), occupancy: occ };
     }).sort((a, b) => b.collected - a.collected).slice(0, 8);
 
-    const collectedTotal = payments.filter((p) => p.status === "paid").reduce((s, p) => s + this.num(p.amount), 0);
-    const expectedTotal = payments.reduce((s, p) => s + this.num(p.amount), 0);
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const monthlyRevenue = payments.filter((p) => p.status === "paid" && p.paidDate?.startsWith(monthKey)).reduce((s, p) => s + this.num(p.amount), 0);
+    const money = this.buckets(payments.map((p) => ({ ...p, status: p.status as string })), collectedMap);
+    // Same correction as the summary: money receipted against an invoice with
+    // no installment behind it is still money in, and the installment-keyed
+    // log cannot see it.
+    const invoiceOnly = await this.invoiceOnlyCollections(uid, scope.contractIds ?? null);
+    const collectedTotal = this.round2(money.collected + invoiceOnly.reduce((s, c) => s + c.amount, 0));
+    const expectedTotal = money.expected;
+    const monthKey = riyadhToday().slice(0, 7);
+    const monthlyRevenue = this.round2(
+      [...cols, ...invoiceOnly]
+        .filter((c) => (c.collectedDate ?? "").startsWith(monthKey))
+        .reduce((s, c) => s + c.amount, 0));
 
     return {
-      occupancyRate: unitsCount ? Math.round((rented / unitsCount) * 100) : 0,
+      occupancyRate: this.occupancyRate(rented, totalDenom),
       monthlyRevenue, collectedTotal, expectedTotal,
       avgRent: rented ? Math.round(monthlyRecurring / rented) : 0,
-      collectionRate: expectedTotal > 0 ? Math.round((collectedTotal / expectedTotal) * 100) : 0,
+      // Clamped: receipts against cancelled installments count as collected but
+      // their amounts are not expected, so the raw ratio can exceed 1.
+      collectionRate: expectedTotal > 0 ? Math.min(100, Math.round((collectedTotal / expectedTotal) * 100)) : 0,
       monthlySeries, propertyPerformance,
     };
   }
@@ -782,12 +1051,25 @@ class LandlordMobileController {
     return rows.map((r) => ({ ...r, estimatedCost: r.estimatedCost != null ? this.num(r.estimatedCost) : null }));
   }
 
-  /** Collections (money actually received). */
+  /** Collections (money actually received). Paged with `?limit=&offset=`
+   *  (default 200); X-Total-Count / X-Has-More say whether the list was cut. */
   @Get("collections")
-  async collections(@CurrentUser() user: AuthUser) {
+  async collections(
+    @CurrentUser() user: AuthUser,
+    @Res({ passthrough: true }) res: Response,
+    @Query("limit") limitRaw?: string,
+    @Query("offset") offsetRaw?: string,
+  ) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
-    return this.db
+    const { limit, offset } = this.paging(limitRaw, offsetRaw, 200, 500);
+    const where = and(eq(paymentCollectionsTable.userId, uid),
+      ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : []));
+    const [{ total } = { total: 0 }] = await this.db.select({ total: sql<number>`count(*)::int` })
+      .from(paymentCollectionsTable)
+      .leftJoin(paymentsTable, eq(paymentsTable.id, paymentCollectionsTable.paymentId))
+      .where(where);
+    const rows = await this.db
       .select({
         id: paymentCollectionsTable.id, amount: paymentCollectionsTable.amount,
         collectedDate: paymentCollectionsTable.collectedDate, method: paymentCollectionsTable.method,
@@ -797,17 +1079,18 @@ class LandlordMobileController {
       .from(paymentCollectionsTable)
       .leftJoin(paymentsTable, eq(paymentsTable.id, paymentCollectionsTable.paymentId))
       .leftJoin(contractsTable, eq(contractsTable.id, paymentsTable.contractId))
-      .where(and(eq(paymentCollectionsTable.userId, uid),
-        ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])))
+      .where(where)
       .orderBy(desc(paymentCollectionsTable.collectedDate))
-      .limit(200);
+      .limit(limit).offset(offset);
+    this.setPagingHeaders(res, Number(total) || 0, limit, offset, rows.length);
+    return rows;
   }
 
   /** One property's FULL detail + its units + active contracts. */
   @Get("properties/:id")
-  async property(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async property(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const pid = parseInt(id, 10);
+    const pid = id;
     const [p] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, pid), eq(propertiesTable.userId, uid), isNull(propertiesTable.deletedAt),
         ...(user.ownerScopeId != null ? [eq(propertiesTable.ownerId, user.ownerScopeId)] : [])));
@@ -834,15 +1117,19 @@ class LandlordMobileController {
     // Financial summary across the property's contracts.
     const cIds = contracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
+      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
     // Derived, not stored — nothing ever writes 'overdue', so reading the
-    // stored column reported every property/unit as having none.
+    // stored column reported every property/unit as having none. Collected is
+    // the collection log (a cancelled installment can still hold a receipt);
+    // outstanding is what is left of each installment after it.
+    const money = this.buckets(pays.map((x) => ({ ...x, status: x.status as string })),
+      this.collectedByPayment(await this.collectionsOf(pays.map((x) => x.id))));
     const finance = {
-      collected: pays.filter((x) => x.status === "paid").reduce((s, x) => s + this.num(x.amount), 0),
-      outstanding: pays.filter((x) => { const st = liveStatus(x.status as string, x.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, x) => s + this.num(x.amount), 0),
-      overdue: pays.filter((x) => liveStatus(x.status as string, x.dueDate) === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
+      collected: money.collected,
+      outstanding: this.round2(money.pending + money.overdue),
+      overdue: money.overdue,
     };
     const result: any = {
       ...p,
@@ -851,11 +1138,8 @@ class LandlordMobileController {
       imageUrls: (await Promise.all((Array.isArray((p as any).images) ? (p as any).images : [])
         .map((k: any) => this.sign(typeof k === "string" ? k : k?.key)))).filter(Boolean),
       deed,
-      occupancyRate: (() => {
-        const rented = units.filter((u) => u.status === "rented").length;
-        const denom = Number((p as any).totalUnits) || units.length;
-        return denom > 0 ? Math.min(100, Math.round((rented / denom) * 100)) : 0;
-      })(),
+      occupancyRate: this.occupancyRate(
+        units.filter((u) => u.status === "rented").length, this.occupancyDenom(p, units.length)),
       rentedUnits: units.filter((u) => u.status === "rented").length,
       availableUnits: units.filter((u) => u.status === "available").length,
       units: units.map((u) => ({ ...u, rentPrice: u.rentPrice ? this.num(u.rentPrice) : null, area: u.area ? this.num(u.area) : null })),
@@ -874,9 +1158,9 @@ class LandlordMobileController {
 
   /** One unit's FULL detail + its current active contract/tenant. */
   @Get("units/:id")
-  async unit(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async unit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const unitId = parseInt(id, 10);
+    const unitId = id;
     const [row] = await this.db
       .select({ unit: unitsTable, propertyName: propertiesTable.name, propertyId: propertiesTable.id, propertyUsageLookupId: propertiesTable.usageLookupId })
       .from(unitsTable).innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
@@ -901,15 +1185,19 @@ class LandlordMobileController {
     // Financial summary for this unit (across its contracts).
     const cIds = allContracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
+      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
     // Derived, not stored — nothing ever writes 'overdue', so reading the
-    // stored column reported every property/unit as having none.
+    // stored column reported every property/unit as having none. Collected is
+    // the collection log (a cancelled installment can still hold a receipt);
+    // outstanding is what is left of each installment after it.
+    const money = this.buckets(pays.map((x) => ({ ...x, status: x.status as string })),
+      this.collectedByPayment(await this.collectionsOf(pays.map((x) => x.id))));
     const finance = {
-      collected: pays.filter((x) => x.status === "paid").reduce((s, x) => s + this.num(x.amount), 0),
-      outstanding: pays.filter((x) => { const st = liveStatus(x.status as string, x.dueDate); return st === "pending" || st === "overdue"; }).reduce((s, x) => s + this.num(x.amount), 0),
-      overdue: pays.filter((x) => liveStatus(x.status as string, x.dueDate) === "overdue").reduce((s, x) => s + this.num(x.amount), 0),
+      collected: money.collected,
+      outstanding: this.round2(money.pending + money.overdue),
+      overdue: money.overdue,
     };
     // Sign each attached document.
     const docs = Array.isArray((u as any).documents) ? (u as any).documents : [];
@@ -930,8 +1218,14 @@ class LandlordMobileController {
       contracts: allContracts.map((c) => ({ ...c, monthlyRent: this.num(c.monthlyRent) })),
       finance,
     };
-    // Rent: the unit's own listed rent, falling back to its active contract.
-    if (result.rentPrice == null && cu) result.rentPrice = this.num(cu.monthlyRent);
+    // Rent: the unit's own listed rent, falling back to this unit's SHARE of
+    // its active contract. `monthlyRent` is one combined figure for every unit
+    // the contract spans, so reporting it whole here made two units on one
+    // 8,333.33 contract report 8,333.33 each.
+    if (result.rentPrice == null && cu) {
+      const share = (await this.contractRentShare([cu.id])).get(cu.id) ?? 1;
+      result.rentPrice = this.round2(this.num(cu.monthlyRent) / share);
+    }
     await attachLookupLabels(this.db, [result], [
       { idField: "typeLookupId", out: "type", mode: "labelAr" },
       { idField: "finishingLookupId", out: "finishing", mode: "labelAr" },
@@ -942,10 +1236,10 @@ class LandlordMobileController {
 
   /** One tenant's full detail + their contracts (read-only). */
   @Get("tenants/:id")
-  async tenant(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async tenant(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
-    const tid = parseInt(id, 10);
+    const tid = id;
     const [t] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, uid), isNull(tenantsTable.deletedAt)));
     if (!t) throw new NotFoundException("Tenant not found");
@@ -992,9 +1286,9 @@ class LandlordMobileController {
 
   /** One contract's full detail (read-only). */
   @Get("contracts/:id")
-  async contract(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+  async contract(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
-    const cid = parseInt(id, 10);
+    const cid = id;
     const scope = await this.ownerScope(user);
     const [c] = await this.db.select().from(contractsTable)
       .where(and(eq(contractsTable.id, cid), eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt),

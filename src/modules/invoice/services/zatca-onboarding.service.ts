@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, isNotNull } from "drizzle-orm";
 import {
   zatcaCredentialsTable,
   ZATCA_INITIAL_PIH,
@@ -14,6 +14,7 @@ import { ZatcaApiService, SANDBOX_OTP, type ZatcaEnv } from "./zatca-api.service
 import { encryptString, decryptString } from "../../../common/crypto/encryption";
 import { InvoiceBuilderService } from "./invoice-builder.service";
 import { InvoiceSignerService } from "./invoice-signer.service";
+import { withSellerChainLock } from "./chain-lock";
 
 /** PEM helpers — base64 → PEM block. */
 function wrapPem(b64: string, kind: "CERTIFICATE" | "PUBLIC KEY" | "EC PRIVATE KEY"): string {
@@ -146,6 +147,11 @@ export class ZatcaOnboardingService {
         productionOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "production",
         simulationOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "simulation",
         onboardedAt: c?.sandboxOnboardedAt ?? c?.prodOnboardedAt ?? null,
+        // ZATCA refused these credentials — the device was most likely removed
+        // in Fatoora. The row still holds a certificate, so without this the
+        // landlord would keep reading as perfectly integrated.
+        linkInvalidAt: c?.linkInvalidAt ?? null,
+        linkInvalidReason: c?.linkInvalidReason ?? null,
       };
     });
   }
@@ -256,6 +262,11 @@ export class ZatcaOnboardingService {
     // Point the record at the slot this CSID lands in, so the compliance suite
     // that must run next reads THESE credentials and not an empty slot.
     updates.activeEnvironment = environment;
+    // A fresh CSID is a working link by definition — drop any earlier "ZATCA
+    // stopped accepting this" flag rather than leaving the seller blocked by
+    // the very state they have just fixed.
+    updates.linkInvalidAt = null;
+    updates.linkInvalidReason = null;
     if (environment === "sandbox") {
       updates.sandboxPrivateKeyEnc = encryptString(csr.privateKey);
       updates.sandboxPublicKeyPem = csr.publicKey;
@@ -429,6 +440,145 @@ export class ZatcaOnboardingService {
     return row;
   }
 
+  /* ─── Link health ───────────────────────────────────────────────────── */
+
+  /**
+   * Record that ZATCA has stopped accepting this landlord's credentials.
+   *
+   * The link can be broken from the far side: the taxpayer removes our EGS
+   * device in the Fatoora portal, or ZATCA revokes the CSID. Nothing notifies
+   * us, and our row still looks complete — certificate, key, token, secret all
+   * present — so `isOnboarded()` keeps returning true and every invoice is
+   * signed and posted into a void. Writing the failure down is what turns an
+   * invisible, repeating error into a state the app can reason about: the
+   * readiness gate refuses approval, and the settings tab can say "re-link".
+   *
+   * Deliberately does NOT erase the credentials. They may yet be valid — a 403
+   * can also be a gateway or IP problem — and destroying key material on the
+   * strength of one HTTP status is not a decision to make automatically. This
+   * only flags; `unlink` remains the only thing that deletes.
+   */
+  async markLinkInvalid(userId: number, ownerId: number | null, reason: string): Promise<void> {
+    await this.db
+      .update(zatcaCredentialsTable)
+      .set({ linkInvalidAt: new Date(), linkInvalidReason: reason.slice(0, 500) })
+      .where(this.credsWhere(userId, ownerId));
+  }
+
+  /**
+   * Clear the flag — ZATCA accepted something, so the link works after all.
+   *
+   * Called on every successful submission rather than only on re-onboarding,
+   * because the flag can be raised by a transient 403 (a gateway hiccup, an IP
+   * block) and a seller who is in fact fine should not have to re-onboard to
+   * clear it. One accepted document is proof enough.
+   */
+  async clearLinkInvalid(userId: number, ownerId: number | null): Promise<void> {
+    await this.db
+      .update(zatcaCredentialsTable)
+      .set({ linkInvalidAt: null, linkInvalidReason: null })
+      .where(and(this.credsWhere(userId, ownerId), isNotNull(zatcaCredentialsTable.linkInvalidAt)));
+  }
+
+  /* ─── Unlink ────────────────────────────────────────────────────────── */
+
+  /**
+   * Disconnect a landlord from ZATCA — the reverse of onboarding.
+   *
+   * A seller who linked the wrong VAT number, rehearsed on simulation and
+   * wants a clean production run, moved to another provider, or simply stopped
+   * being VAT-registered has to be able to undo the link from the portal. Until
+   * now there was no way back: onboarding only ever wrote forward.
+   *
+   * What it does — and, just as importantly, what it does NOT:
+   *
+   *  · Every piece of ZATCA-issued material is wiped: both the sandbox and the
+   *    prod/simulation slots lose their private key, public key, CSR,
+   *    certificate, binary security token, shared secret, compliance request id
+   *    and onboarding timestamp. The encrypted key material is genuinely gone
+   *    from our database, not merely hidden behind a flag — soft-deleting the
+   *    row would leave the seller's private key sitting on disk.
+   *  · `activeEnvironment` goes back to the `sandbox` default, so nothing
+   *    SELECTS a slot that no longer holds a certificate. (That mismatch is the
+   *    exact failure §2b of DARA-NOTES describes: a pointer naming an empty
+   *    slot blocks every invoice while a valid certificate sits unused in the
+   *    next column.)
+   *  · The ICV counter and the PIH chain head are KEPT. They are not
+   *    credentials; they are the position this landlord has reached in a
+   *    sequence ZATCA requires to be monotonic, and `invoices` enforces the
+   *    same thing locally with a unique index on
+   *    (user, owner, environment, icv) that has no `deleted_at` predicate.
+   *    Zeroing them would make the very first invoice after a re-link collide
+   *    with one already submitted.
+   *  · `prodSlotEnv` is KEPT too, which looks odd next to an emptied slot but
+   *    is deliberate: it is the only record of WHICH chain the retained
+   *    `prodIcv`/`prodPih` belong to, since simulation and production share
+   *    those two columns. Erase it and nobody — code or human — can ever tell
+   *    afterwards whether that counter came from a rehearsal or from real
+   *    filings. It is safe to leave: every reader of it (`listLandlordStatus`,
+   *    `switchEnvironment`, the compliance-check guard in `InvoiceService`)
+   *    gates on `prodCertPem` or `activeEnvironment` first, and this method
+   *    clears both.
+   *  · The row itself SURVIVES (no `deletedAt`), for the counters above and
+   *    because `upsertProfile` updates an existing row but inserts when it
+   *    finds none — and the insert would hit the (user, owner) unique index,
+   *    which has no `deleted_at` predicate. Keeping the row is what makes
+   *    re-linking work at all.
+   *  · Invoices already submitted to ZATCA are untouched. They are filed legal
+   *    documents; the seller party is snapshotted on each one, so they keep
+   *    printing correctly with no credentials row to join against.
+   *
+   * After this the landlord reads as "profile saved, not integrated" — exactly
+   * the state they were in between saving a profile and issuing a CSID — so the
+   * settings tab offers "Onboard" again and nothing special has to be taught to
+   * the rest of the app. Invoice readiness starts reporting the ZATCA blocker
+   * again, which means drafts for this landlord can still be written but not
+   * approved until they link again. Submission degrades to `not_onboarded`
+   * rather than throwing.
+   *
+   * We do NOT tell ZATCA. There is no revoke call in its API, so the CSID stays
+   * valid on their side; this is a local disconnection, and a seller who wants
+   * the device gone from Fatoora has to remove it there.
+   */
+  async unlink(userId: number, ownerId: number | null = null): Promise<ZatcaCredentials> {
+    const creds = await this.getCredentials(userId, ownerId);
+    if (!creds) throw new NotFoundException("لا يوجد ربط مع هيئة الزكاة والضريبة لهذا المؤجر");
+    // `getCredentials` falls back to the account-level row (ownerId null) only
+    // when asked for it, but be explicit: unlinking landlord X must never wipe
+    // the account-level seller that X happens to have been inheriting.
+    if ((creds.ownerId ?? null) !== ownerId) {
+      throw new NotFoundException("لا يوجد ربط مع هيئة الزكاة والضريبة لهذا المؤجر");
+    }
+    const [row] = await this.db
+      .update(zatcaCredentialsTable)
+      .set({
+        activeEnvironment: "sandbox",
+        // The flag described credentials that no longer exist — left set, it is
+        // a stale complaint about a link the user has now deliberately removed.
+        linkInvalidAt: null,
+        linkInvalidReason: null,
+        sandboxPrivateKeyEnc: null,
+        sandboxPublicKeyPem: null,
+        sandboxCsrPem: null,
+        sandboxBinarySecurityToken: null,
+        sandboxSecretEnc: null,
+        sandboxCertPem: null,
+        sandboxComplianceRequestId: null,
+        sandboxOnboardedAt: null,
+        prodPrivateKeyEnc: null,
+        prodPublicKeyPem: null,
+        prodCsrPem: null,
+        prodBinarySecurityToken: null,
+        prodSecretEnc: null,
+        prodCertPem: null,
+        prodComplianceRequestId: null,
+        prodOnboardedAt: null,
+      })
+      .where(eq(zatcaCredentialsTable.id, creds.id))
+      .returning();
+    return row;
+  }
+
   /* ─── Active credentials access (for invoice submission) ───────────── */
 
   /**
@@ -480,8 +630,19 @@ export class ZatcaOnboardingService {
     await this.db.update(zatcaCredentialsTable).set(updates).where(eq(zatcaCredentialsTable.id, creds.id));
   }
 
-  /** Reset PIH chain back to the initial seed. Use only when starting fresh. */
+  /**
+   * Reset PIH chain back to the initial seed. Use only when starting fresh.
+   *
+   * Under the seller's chain lock, because this is the other writer of the same
+   * counter: a reset landing mid-submission is overwritten moments later when
+   * that submission commits its own ICV, leaving the chain head pointing past
+   * invoices this call has just soft-deleted.
+   */
   async resetChain(userId: number, env: ZatcaEnv, ownerId: number | null = null) {
+    return withSellerChainLock(userId, ownerId, () => this.resetChainUnderLock(userId, env, ownerId));
+  }
+
+  private async resetChainUnderLock(userId: number, env: ZatcaEnv, ownerId: number | null) {
     const creds = await this.getCredentials(userId, ownerId);
     if (!creds) return;
     const updates: Partial<ZatcaCredentials> =

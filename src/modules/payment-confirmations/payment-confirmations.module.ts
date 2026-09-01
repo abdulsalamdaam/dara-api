@@ -6,7 +6,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiTags, ApiBearerAuth, ApiConsumes } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
-import { and, desc, eq, inArray, isNull, ne, or, ilike, count } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, ilike, count } from "drizzle-orm";
 import {
   paymentConfirmationsTable, paymentsTable, contractsTable, contractUnitsTable,
   tenantsTable, unitsTable, propertiesTable, notificationsTable, simpleInvoicesTable,
@@ -22,6 +22,9 @@ import { notifyTenant } from "../../common/notify";
 import { TenantAuthGuard, type TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { CurrentTenant } from "../../common/decorators/current-tenant.decorator";
 import { UploadsService } from "../uploads/uploads.service";
+import {
+  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+} from "../../common/pagination";
 
 const METHODS = ["bank_transfer", "cash", "cheque", "other"] as const;
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -45,10 +48,24 @@ export class TenantPaymentConfirmationsController {
     private readonly uploads: UploadsService,
   ) {}
 
-  /** Tenant lists their own payment-confirmation requests. */
+  /**
+   * Tenant lists their own payment-confirmation requests.
+   *
+   * `status` filters in SQL; pagination is opt-in via `page`/`pageSize`/
+   * `paginated` so the mobile app, which reads a bare array, is unaffected.
+   */
   @Get()
-  async list(@CurrentTenant() tenant: TenantPayload) {
-    const rows = await this.db
+  async list(@CurrentTenant() tenant: TenantPayload, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const statuses = parseEnumList(rawQuery?.status, ["pending", "approved", "rejected"] as const);
+    const where = and(
+      eq(paymentConfirmationsTable.tenantId, tenant.id),
+      isNull(paymentConfirmationsTable.deletedAt),
+      ...(statuses ? [inArray(paymentConfirmationsTable.status, statuses)] : []),
+    );
+
+    let rowsQ = this.db
       .select({
         id: paymentConfirmationsTable.id,
         paymentId: paymentConfirmationsTable.paymentId,
@@ -68,12 +85,22 @@ export class TenantPaymentConfirmationsController {
       .from(paymentConfirmationsTable)
       .leftJoin(paymentsTable, eq(paymentConfirmationsTable.paymentId, paymentsTable.id))
       .leftJoin(contractsTable, eq(paymentConfirmationsTable.contractId, contractsTable.id))
-      .where(and(
-        eq(paymentConfirmationsTable.tenantId, tenant.id),
-        isNull(paymentConfirmationsTable.deletedAt),
-      ))
-      .orderBy(desc(paymentConfirmationsTable.createdAt));
-    return rows;
+      .where(where)
+      // `id` tiebreak on a non-unique `created_at`.
+      .orderBy(
+        (q.order === "asc" ? asc : desc)(paymentConfirmationsTable.createdAt),
+        (q.order === "asc" ? asc : desc)(paymentConfirmationsTable.id),
+      )
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(paymentConfirmationsTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   /** Tenant submits "I paid this installment" with an optional proof file. */
@@ -165,17 +192,29 @@ export class PaymentConfirmationsController {
     private readonly uploads: UploadsService,
   ) {}
 
-  /** Landlord lists incoming confirmation requests — paginated + searchable. */
+  /**
+   * Landlord lists incoming confirmation requests - paginated + searchable.
+   *
+   * Page size now comes from the shared list schema (default 25, cap 200)
+   * rather than a local default of 10 with a cap of 100, so this list behaves
+   * like every other one. Filters resolved in SQL: `search` (tenant name /
+   * contract number / reference / receipt), `status`, `contractId`,
+   * `paymentId`, `method`, and a `from`/`to` window on when the request was
+   * submitted.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const q = listQuerySchema.parse(rawQuery ?? {});
     const status: string | undefined =
       typeof rawQuery?.status === "string" && ["pending", "approved", "rejected"].includes(rawQuery.status)
         ? rawQuery.status : undefined;
-    const search = typeof rawQuery?.search === "string" ? rawQuery.search.trim() : "";
-    const page = Math.max(1, parseInt(rawQuery?.page, 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(rawQuery?.pageSize, 10) || 10));
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null || status != null);
+    const search = q.search ?? "";
+    const page = q.page;
+    const pageSize = q.pageSize;
+    // `status` stays a pagination trigger here: it always has been, and the
+    // status tabs are this tab's primary navigation.
+    const usePaginated = wantsPagination(rawQuery, ["search", "status"]);
 
     const baseWhere = and(
       eq(paymentConfirmationsTable.userId, scopeId(user)),
@@ -187,8 +226,19 @@ export class PaymentConfirmationsController {
       conds.push(or(
         ilike(tenantsTable.name, `%${search}%`),
         ilike(contractsTable.contractNumber, `%${search}%`),
+        ilike(paymentConfirmationsTable.reference, `%${search}%`),
       ));
     }
+    const filterContractIds = parseIdList(rawQuery?.contractId) ?? parseIdList(rawQuery?.contractIds);
+    if (filterContractIds) conds.push(inArray(paymentConfirmationsTable.contractId, filterContractIds));
+    const paymentIds = parseIdList(rawQuery?.paymentId) ?? parseIdList(rawQuery?.paymentIds);
+    if (paymentIds) conds.push(inArray(paymentConfirmationsTable.paymentId, paymentIds));
+    const methods = parseEnumList(rawQuery?.method, METHODS);
+    if (methods) conds.push(inArray(paymentConfirmationsTable.method, methods));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(paymentConfirmationsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    if (to) conds.push(lte(paymentConfirmationsTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
     const where = and(...conds);
 
     let rowsQ = this.db
@@ -216,7 +266,9 @@ export class PaymentConfirmationsController {
       .leftJoin(contractsTable, eq(paymentConfirmationsTable.contractId, contractsTable.id))
       .leftJoin(tenantsTable, eq(paymentConfirmationsTable.tenantId, tenantsTable.id))
       .where(where)
-      .orderBy(desc(paymentConfirmationsTable.createdAt))
+      // `id` tiebreak - several confirmations can be submitted in the same
+      // instant, and paging on `created_at` alone would shuffle them.
+      .orderBy(desc(paymentConfirmationsTable.createdAt), desc(paymentConfirmationsTable.id))
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(pageSize).offset((page - 1) * pageSize);
 

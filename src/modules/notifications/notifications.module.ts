@@ -1,9 +1,9 @@
 import {
   BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException,
-  Param, Patch, Post, UseGuards,
+  Param, Patch, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, isNotNull, isNull, or } from "drizzle-orm";
 import { notificationsTable, tenantsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -15,6 +15,7 @@ import { scopeId } from "../../common/scope";
 import { TenantAuthGuard, type TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { CurrentTenant } from "../../common/decorators/current-tenant.decorator";
 import { sendExpoPush } from "../../common/push";
+import { listQuerySchema, parseIdList, wantsPagination } from "../../common/pagination";
 import { IsInt, IsString, IsNotEmpty, IsOptional } from "class-validator";
 import { Type } from "class-transformer";
 
@@ -27,10 +28,37 @@ import { Type } from "class-transformer";
 export class TenantNotificationsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
-  /** The tenant's notification inbox, newest first. */
+  /**
+   * The tenant's notification inbox, newest first.
+   *
+   * `unread=1` and `type` filter in SQL. Pagination is opt-in
+   * (`page`/`pageSize`/`paginated`) so the mobile app, which reads this as a
+   * bare array, keeps working unchanged.
+   */
   @Get()
-  async list(@CurrentTenant() tenant: TenantPayload) {
-    return this.db
+  async list(@CurrentTenant() tenant: TenantPayload, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [eq(notificationsTable.tenantId, tenant.id), isNull(notificationsTable.deletedAt)];
+    if (rawQuery?.unread === "1" || rawQuery?.unread === "true") conds.push(isNull(notificationsTable.readAt));
+    else if (rawQuery?.unread === "0" || rawQuery?.unread === "false") conds.push(isNotNull(notificationsTable.readAt));
+    const types = typeof rawQuery?.type === "string" && rawQuery.type.trim()
+      ? rawQuery.type.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (types?.length) conds.push(inArray(notificationsTable.type, types));
+    if (q.search) {
+      conds.push(or(
+        ilike(notificationsTable.title, `%${q.search}%`),
+        ilike(notificationsTable.body, `%${q.search}%`),
+      ));
+    }
+    const where = and(...conds);
+
+    // `id` tiebreak: two notifications sent in the same batch share a
+    // `created_at` to the microsecond, and an unstable order across pages
+    // shows one twice while hiding another.
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db
       .select({
         id: notificationsTable.id,
         title: notificationsTable.title,
@@ -40,11 +68,17 @@ export class TenantNotificationsController {
         createdAt: notificationsTable.createdAt,
       })
       .from(notificationsTable)
-      .where(and(
-        eq(notificationsTable.tenantId, tenant.id),
-        isNull(notificationsTable.deletedAt),
-      ))
-      .orderBy(desc(notificationsTable.createdAt));
+      .where(where)
+      .orderBy(dir(notificationsTable.createdAt), dir(notificationsTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(notificationsTable).where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   /** Mark one notification as read. */
@@ -103,11 +137,39 @@ class SendNotificationDto {
 export class NotificationsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
-  /** Notifications the landlord has sent (newest first). */
+  /**
+   * Notifications the landlord has sent (newest first).
+   *
+   * Filters resolved in SQL: `search` (title / body / recipient name),
+   * `tenantId` (one or a comma-separated set), `type`, and `unread`.
+   * Pagination is opt-in via `page`/`pageSize`/`paginated`; without them the
+   * legacy bare array is returned, filtered.
+   */
   @Get()
   @RequirePermissions(PERMISSIONS.TENANTS_VIEW)
-  async list(@CurrentUser() user: AuthUser) {
-    return this.db
+  async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [eq(notificationsTable.userId, scopeId(user)), isNull(notificationsTable.deletedAt)];
+    const tenantIds = parseIdList(rawQuery?.tenantId) ?? parseIdList(rawQuery?.tenantIds);
+    if (tenantIds?.length) conds.push(inArray(notificationsTable.tenantId, tenantIds));
+    const types = typeof rawQuery?.type === "string" && rawQuery.type.trim()
+      ? rawQuery.type.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (types?.length) conds.push(inArray(notificationsTable.type, types));
+    if (rawQuery?.unread === "1" || rawQuery?.unread === "true") conds.push(isNull(notificationsTable.readAt));
+    else if (rawQuery?.unread === "0" || rawQuery?.unread === "false") conds.push(isNotNull(notificationsTable.readAt));
+    if (q.search) {
+      conds.push(or(
+        ilike(notificationsTable.title, `%${q.search}%`),
+        ilike(notificationsTable.body, `%${q.search}%`),
+        ilike(tenantsTable.name, `%${q.search}%`),
+      ));
+    }
+    const where = and(...conds);
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db
       .select({
         id: notificationsTable.id,
         tenantId: notificationsTable.tenantId,
@@ -120,11 +182,21 @@ export class NotificationsController {
       })
       .from(notificationsTable)
       .leftJoin(tenantsTable, eq(notificationsTable.tenantId, tenantsTable.id))
-      .where(and(
-        eq(notificationsTable.userId, scopeId(user)),
-        isNull(notificationsTable.deletedAt),
-      ))
-      .orderBy(desc(notificationsTable.createdAt));
+      .where(where)
+      .orderBy(dir(notificationsTable.createdAt), dir(notificationsTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      // The count repeats the tenants join because `search` reaches into it —
+      // counting the bare table would report a total the filter never returns.
+      paged ? this.db.select({ total: count() }).from(notificationsTable)
+        .leftJoin(tenantsTable, eq(notificationsTable.tenantId, tenantsTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   /** Send a notification to one of the landlord's tenants. */

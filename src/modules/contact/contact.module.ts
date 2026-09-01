@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, HttpCode, Inject, Module, N
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { IsEmail, IsIn, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
 import type { Request } from "express";
 import { contactSubmissionsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -12,6 +12,9 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { OtpThrottlerGuard } from "../../common/throttler";
 import { EmailService } from "../email/email.service";
+import {
+  listQuerySchema, parseDateBound, wantsPagination,
+} from "../../common/pagination";
 
 class CreateContactDto {
   @IsOptional()
@@ -116,27 +119,74 @@ class PublicContactController {
 class AdminContactController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
+  /**
+   * Contact submissions from the landing page.
+   *
+   * `status` was already applied in SQL; `search` and the `from`/`to` window
+   * are now too, and pagination is opt-in via `page`/`pageSize`/`paginated`.
+   * Without them the bare array the admin tab reads is returned as before.
+   */
   @Get()
-  async list(@Query("status") status?: string) {
-    if (status && status !== "all") {
-      return this.db.select().from(contactSubmissionsTable)
-        .where(eq(contactSubmissionsTable.status, status as any))
-        .orderBy(desc(contactSubmissionsTable.createdAt));
+  async list(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [];
+    const status = typeof rawQuery?.status === "string" ? rawQuery.status : undefined;
+    if (status && status !== "all") conds.push(eq(contactSubmissionsTable.status, status as any));
+    if (q.search) {
+      conds.push(or(
+        ilike(contactSubmissionsTable.name, `%${q.search}%`),
+        ilike(contactSubmissionsTable.email, `%${q.search}%`),
+        ilike(contactSubmissionsTable.phone, `%${q.search}%`),
+        ilike(contactSubmissionsTable.description, `%${q.search}%`),
+      ));
     }
-    return this.db.select().from(contactSubmissionsTable).orderBy(desc(contactSubmissionsTable.createdAt));
+    const from = parseDateBound(rawQuery?.from);
+    const to = parseDateBound(rawQuery?.to);
+    if (from) conds.push(gte(contactSubmissionsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
+    if (to) conds.push(lte(contactSubmissionsTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
+    const where = conds.length ? and(...conds) : undefined;
+
+    const dir = q.order === "asc" ? asc : desc;
+    let rowsQ = this.db.select().from(contactSubmissionsTable)
+      .where(where)
+      // `id` tiebreak: two submissions can share a `created_at`, and paging on
+      // it alone would repeat one and drop another.
+      .orderBy(dir(contactSubmissionsTable.createdAt), dir(contactSubmissionsTable.id))
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(contactSubmissionsTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
+  /**
+   * Per-status badge counts.
+   *
+   * One grouped query. This used to SELECT every submission and run six
+   * `.filter().length` passes over the result - the whole table fetched to
+   * produce six integers. `total` is included so the "all" badge stops being a
+   * client-side sum of the others (which silently omitted any status the
+   * hard-coded list did not name).
+   */
   @Get("counts")
   async counts() {
-    const all = await this.db.select().from(contactSubmissionsTable);
-    return {
-      total: all.length,
-      new: all.filter(r => r.status === "new").length,
-      read: all.filter(r => r.status === "read").length,
-      in_progress: all.filter(r => r.status === "in_progress").length,
-      resolved: all.filter(r => r.status === "resolved").length,
-      spam: all.filter(r => r.status === "spam").length,
-    };
+    const rows = await this.db
+      .select({ status: contactSubmissionsTable.status, cnt: count() })
+      .from(contactSubmissionsTable)
+      .groupBy(contactSubmissionsTable.status);
+    const out = { total: 0, new: 0, read: 0, in_progress: 0, resolved: 0, spam: 0 } as Record<string, number>;
+    for (const r of rows as Array<{ status: string; cnt: number }>) {
+      out[r.status] = Number(r.cnt);
+      out.total += Number(r.cnt);
+    }
+    return out;
   }
 
   @Patch(":id")

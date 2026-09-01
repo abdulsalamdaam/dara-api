@@ -38,6 +38,18 @@ export type SellerSnapshot = {
 export type BuyerSnapshot = {
   name: string; nameAr?: string | null;
   vat?: string | null;
+  /**
+   * The buyer's own identifier — CR for a company, national ID / iqama for an
+   * individual. ZATCA's BT-46, and the counterpart of the seller's `crn`.
+   *
+   * Emitted as the buyer `PartyIdentification` on a STANDARD (B2B) invoice
+   * only. A simplified invoice is issued to a walk-in consumer who has no
+   * identifier to state, and adding an empty or invented one to a B2C document
+   * is worse than omitting it.
+   */
+  id?: string | null;
+  /** BT-46-1 scheme for `id`: CRN | MOM | MLS | SAG | OTH | 700 (NAT/IQA are NOT valid). */
+  idScheme?: string | null;
   street?: string | null; buildingNo?: string | null; district?: string | null;
   city?: string | null; postalZone?: string | null; additionalNo?: string | null;
 };

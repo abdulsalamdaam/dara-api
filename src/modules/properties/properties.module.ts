@@ -4,14 +4,19 @@ import {
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, notInArray, inArray, sql, or, ilike, count, asc, desc } from "drizzle-orm";
-import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable } from "@dara/database";
+import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable, contractsTable, contractUnitsTable } from "@dara/database";
+import {
+  BOUNDS, LIMITS, applyBoolNonNull, applyForeignKey, applyFourDigitCode, applyInt,
+  applyIntNonNull, applyOneOfNonNull, applyPercent, applyPostalCode, applyRequiredText,
+  applyText, foreignKeyId, requiredForeignKeyId,
+} from "../../common/validation";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 
@@ -36,6 +41,68 @@ function scopeId(user: AuthUser): number {
   return user.ownerUserId ?? user.id;
 }
 
+const PROPERTY_STATUSES = ["active", "inactive", "maintenance"] as const;
+
+/** Contract statuses that mean the contract is over — see units.module.ts. */
+const ENDED_CONTRACT_STATUSES = ["terminated", "cancelled"] as const;
+
+/**
+ * Shape, length and range checks for every property field a request may set.
+ *
+ * Shared by create and PATCH: the update path copied its allowlist straight
+ * into `set()`, so `floors: "abc"` (a NaN insert) and a
+ * `managementFeePercent` of `999999999999` (a numeric(5,2) overflow) both
+ * surfaced as 500s, and a 1-digit postal code was stored happily even though
+ * the create path's national-address check demands 5.
+ */
+function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): void {
+  applyRequiredText(v, "name", "اسم العقار", LIMITS.name);
+  applyOneOfNonNull(v, "status", PROPERTY_STATUSES, "حالة العقار");
+  applyText(v, "district", "الحي");
+  applyText(v, "street", "الشارع");
+  applyText(v, "deedNumber", "رقم الصك", LIMITS.code);
+  applyIntNonNull(v, "totalUnits", "عدد الوحدات", BOUNDS.totalUnits);
+  applyInt(v, "floors", "عدد الأدوار");
+  applyInt(v, "elevators", "عدد المصاعد");
+  applyInt(v, "parkings", "عدد المواقف");
+  applyText(v, "buildingType", "نوع المبنى");
+  applyInt(v, "yearBuilt", "سنة البناء", BOUNDS.year);
+  applyPercent(v, "managementFeePercent", "نسبة رسوم الإدارة");
+  // The national-address codes are exact formats, and a draft is explicitly
+  // incomplete — the same exemption `assertNationalAddress` already makes, so
+  // "save as draft" keeps working with half-typed values.
+  if (!isDraft) {
+    applyPostalCode(v, "postalCode");
+    applyFourDigitCode(v, "buildingNumber", "رقم المبنى");
+    applyFourDigitCode(v, "additionalNumber", "الرقم الإضافي");
+  } else {
+    applyText(v, "postalCode", "الرمز البريدي", LIMITS.identifier);
+    applyText(v, "buildingNumber", "رقم المبنى", LIMITS.identifier);
+    applyText(v, "additionalNumber", "الرقم الإضافي", LIMITS.identifier);
+  }
+  applyText(v, "mapUrl", "رابط الموقع", LIMITS.address);
+  applyText(v, "amenitiesData", "تفاصيل المرافق", LIMITS.blob);
+  applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "imageKey", "صورة العقار", LIMITS.address);
+  applyBoolNonNull(v, "isDraft", "مسودة");
+  applyForeignKey(v, "typeLookupId", "نوع العقار");
+  applyForeignKey(v, "usageLookupId", "استخدام العقار");
+  applyForeignKey(v, "regionLookupId", "المنطقة");
+  applyForeignKey(v, "cityLookupId", "المدينة");
+}
+
+/**
+ * The property columns a request may set. Shared by the PATCH allowlist and by
+ * the draft-finalise re-check, so the two can never disagree about which
+ * fields make up a property.
+ */
+const PROPERTY_FIELDS = [
+  "name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators",
+  "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber",
+  "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft",
+  "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId",
+] as const;
+
 @ApiTags("properties")
 @ApiBearerAuth("user-jwt")
 @Controller("properties")
@@ -43,25 +110,97 @@ function scopeId(user: AuthUser): number {
 class PropertiesController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
+  /**
+   * The landlord a property is filed under must belong to the caller.
+   *
+   * Nothing checked it: `ownerId` was taken off the body and written straight
+   * to the column, so a property could be created (or moved) pointing at
+   * another account's landlord. Reads are scoped by `user_id`, so it is not a
+   * disclosure — it is worse in a quieter way: the property belongs to an
+   * `owner_id` this account cannot resolve, so it vanishes from every
+   * landlord-facing view while still counting against the quota. Same shape as
+   * the deed check below.
+   */
+  private async assertOwnerInScope(ownerId: number, userId: number): Promise<void> {
+    const [owner] = await this.db.select({ id: ownersTable.id })
+      .from(ownersTable)
+      .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)));
+    if (!owner) throw new BadRequestException("المؤجر المختار غير موجود · Selected landlord not found");
+  }
+
+  /**
+   * Properties, paginated and filtered by the database.
+   *
+   * Query parameters, all applied in SQL: `search` (name / district / deed
+   * number, including the linked deed's own number), `status`,
+   * `typeLookupId`, `regionLookupId`, `cityLookupId`, `ownerId`, `deedId`,
+   * `hasDeed` and `isDraft`. The type / region / city pickers on the
+   * Properties tab are lookup-backed, so they filter by the lookup id rather
+   * than by the resolved Arabic label - matching on the label would break the
+   * moment a label is edited.
+   *
+   * Backwards compat: legacy callers send no query params and expect a bare
+   * Property[]. When `page`, `pageSize`, `paginated` or `search` is present we
+   * switch to `{ data, page, pageSize, total }`. Filters apply either way, so
+   * an unpaginated caller gets a filtered list rather than a filtered slice.
+   */
+  /**
+   * Resolve a comma-separated list of lookup keys or Arabic labels to ids, for
+   * filters that arrive spelled the way the UI holds them. Returns null when
+   * nothing was asked for, so a caller can `??` it against the id form; an
+   * unmatched value yields an empty list, which correctly matches no rows
+   * rather than silently ignoring the filter.
+   */
+  private async lookupIds(category: string, raw: unknown): Promise<number[] | null> {
+    if (raw == null || raw === "" || raw === "all") return null;
+    const values = String(raw).split(",").map((v) => v.trim()).filter(Boolean);
+    if (values.length === 0) return null;
+    const ids = await Promise.all(values.map((v) => resolveLookupId(this.db, category, v)));
+    return ids.filter((id): id is number => id != null);
+  }
+
   @Get()
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    // Backwards compat: legacy callers send no query params and expect a
-    // bare Property[]. When `page` or `pageSize` is present (or `search`),
-    // we switch to the paginated shape { data, page, pageSize, total }.
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null);
+    const usePaginated = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
 
-    const baseWhere = and(eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt));
-    const where = q.search
-      ? and(baseWhere, or(
-          ilike(propertiesTable.name, `%${q.search}%`),
-          ilike(propertiesTable.district, `%${q.search}%`),
-          ilike(propertiesTable.deedNumber, `%${q.search}%`),
-          ilike(deedsTable.deedNumber, `%${q.search}%`),
-        ))
-      : baseWhere;
+    const conds: any[] = [eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)];
+    if (q.search) {
+      conds.push(or(
+        ilike(propertiesTable.name, `%${q.search}%`),
+        ilike(propertiesTable.district, `%${q.search}%`),
+        ilike(propertiesTable.street, `%${q.search}%`),
+        ilike(propertiesTable.deedNumber, `%${q.search}%`),
+        ilike(deedsTable.deedNumber, `%${q.search}%`),
+      ));
+    }
+    const statuses = parseEnumList(rawQuery?.status, ["active", "inactive", "maintenance"] as const);
+    if (statuses) conds.push(inArray(propertiesTable.status, statuses));
+    // Two spellings on purpose. The portal's filter chips carry the lookup KEY
+    // ("residential"), because that is what the chip list is built from and a
+    // key is stable where a label is editable; integrations tend to hold the
+    // id. `resolveLookupId` already accepts a key or an Arabic label, so both
+    // land on the same column and neither caller has to translate first.
+    const typeIds = parseIdList(rawQuery?.typeLookupId)
+      ?? await this.lookupIds("property_type", rawQuery?.type);
+    if (typeIds) conds.push(inArray(propertiesTable.typeLookupId, typeIds));
+    const regionIds = parseIdList(rawQuery?.regionLookupId)
+      ?? await this.lookupIds("region", rawQuery?.region);
+    if (regionIds) conds.push(inArray(propertiesTable.regionLookupId, regionIds));
+    const cityIds = parseIdList(rawQuery?.cityLookupId)
+      ?? await this.lookupIds("city", rawQuery?.city);
+    if (cityIds) conds.push(inArray(propertiesTable.cityLookupId, cityIds));
+    const ownerIds = parseIdList(rawQuery?.ownerId) ?? parseIdList(rawQuery?.ownerIds);
+    if (ownerIds) conds.push(inArray(propertiesTable.ownerId, ownerIds));
+    const deedIds = parseIdList(rawQuery?.deedId);
+    if (deedIds) conds.push(inArray(propertiesTable.deedId, deedIds));
+    if (rawQuery?.hasDeed === "1" || rawQuery?.hasDeed === "true") conds.push(sql`${propertiesTable.deedId} IS NOT NULL`);
+    else if (rawQuery?.hasDeed === "0" || rawQuery?.hasDeed === "false") conds.push(isNull(propertiesTable.deedId));
+    if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(propertiesTable.isDraft, true));
+    else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(propertiesTable.isDraft, false));
+    const where = and(...conds);
 
     // Total respects the same WHERE so pagination headers are correct.
     const totalP = usePaginated
@@ -82,7 +221,10 @@ class PropertiesController {
       .from(propertiesTable)
       .leftJoin(deedsTable, and(eq(propertiesTable.deedId, deedsTable.id), isNull(deedsTable.deletedAt)))
       .where(where)
-      .orderBy(sortFn(propertiesTable.createdAt))
+      // `id` tiebreak - `created_at` is not unique (a bulk import writes a
+      // whole portfolio in one instant) and a non-deterministic order across
+      // pages repeats one property while dropping another.
+      .orderBy(sortFn(propertiesTable.createdAt), sortFn(propertiesTable.id))
       .$dynamic();
     if (usePaginated) {
       rowsQuery = rowsQuery.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
@@ -129,7 +271,9 @@ class PropertiesController {
    */
   @Get("available-deeds")
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
-  async availableDeeds(@CurrentUser() user: AuthUser) {
+  async availableDeeds(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
     const owner = scopeId(user);
     // Sub-query of deed_ids already in use by a non-deleted property.
     const linkedDeedIds = this.db
@@ -141,19 +285,40 @@ class PropertiesController {
         sql`${propertiesTable.deedId} IS NOT NULL`,
       ));
 
-    return this.db.select({
+    const where = and(
+      eq(deedsTable.userId, owner),
+      isNull(deedsTable.deletedAt),
+      // Either not linked anywhere yet …
+      sql`${deedsTable.id} NOT IN ${linkedDeedIds}`,
+      // … and matching what the user has typed into the picker. Searching in
+      // SQL is what lets this dropdown be paged at all: an account with a few
+      // thousand unlinked deeds should send 25 rows and a search term, not the
+      // whole set for the browser to filter.
+      ...(q.search ? [or(
+        ilike(deedsTable.deedNumber, `%${q.search}%`),
+        ilike(deedsTable.issuingAuthority, `%${q.search}%`),
+      )] : []),
+    );
+
+    let rowsQ = this.db.select({
       id: deedsTable.id,
       deedNumber: deedsTable.deedNumber,
       deedType: deedsTable.deedType,
     })
     .from(deedsTable)
-    .where(and(
-      eq(deedsTable.userId, owner),
-      isNull(deedsTable.deletedAt),
-      // Either not linked anywhere yet …
-      sql`${deedsTable.id} NOT IN ${linkedDeedIds}`,
-    ))
-    .orderBy(deedsTable.createdAt);
+    .where(where)
+    // `id` tiebreak on a non-unique `created_at`, so this can be paged safely.
+    .orderBy(asc(deedsTable.createdAt), asc(deedsTable.id))
+    .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(deedsTable).where(where)
+            : Promise.resolve([{ total: 0 }]),
+    ]);
+    if (!paged) return rows;
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   @Post()
@@ -172,7 +337,7 @@ class PropertiesController {
     const owner = scopeId(user);
     // Enforce the subscription package's property quota.
     await assertWithinQuota(this.db, owner, "properties");
-    const deedId = body.deedId == null ? null : (typeof body.deedId === "number" ? body.deedId : parseInt(String(body.deedId), 10));
+    const deedId = foreignKeyId(body.deedId, "الصك");
 
     // Validate the deed belongs to this scope and isn't already linked to
     // another property (1:1 enforcement at the API layer for nice errors;
@@ -192,7 +357,8 @@ class PropertiesController {
     // Resolve the landlord when the form sends none:
     //   1. Use the account's flagged default landlord, if any.
     //   2. Otherwise, individual-owner accounts auto-link their sole landlord.
-    let ownerId: number | null = body.ownerId != null ? Number(body.ownerId) : null;
+    let ownerId: number | null = foreignKeyId(body.ownerId, "المؤجر");
+    if (ownerId != null) await this.assertOwnerInScope(ownerId, owner);
     if (ownerId == null) {
       const [def] = await this.db.select({ id: ownersTable.id })
         .from(ownersTable)
@@ -220,7 +386,9 @@ class PropertiesController {
     const typeLookupId = body.typeLookupId ?? await resolveLookupId(this.db, "property_type", type);
     const typeOther = typeLookupId == null && type ? String(type).trim() || null : null;
 
-    const [prop] = await this.db.insert(propertiesTable).values({
+    // Built as a plain object so the SAME sanitiser the PATCH path uses can
+    // check it — `parseInt("abc")` used to reach the insert as NaN.
+    const values: Record<string, unknown> = {
       userId: owner,
       ownerId,
       name,
@@ -229,13 +397,12 @@ class PropertiesController {
       deedNumber: body.deedNumber ?? null,
       deedId,
       totalUnits: body.totalUnits ?? 0,
-      floors: body.floors ? parseInt(body.floors) : null,
-      elevators: body.elevators ? parseInt(body.elevators) : null,
-      parkings: body.parkings ? parseInt(body.parkings) : null,
+      floors: body.floors ?? null,
+      elevators: body.elevators ?? null,
+      parkings: body.parkings ?? null,
       buildingType: body.buildingType ?? null,
-      yearBuilt: body.yearBuilt ? parseInt(body.yearBuilt) : null,
-      managementFeePercent: body.managementFeePercent != null && body.managementFeePercent !== ""
-        ? String(body.managementFeePercent) : null,
+      yearBuilt: body.yearBuilt ?? null,
+      managementFeePercent: body.managementFeePercent ?? null,
       typeLookupId,
       typeOther,
       usageLookupId: body.usageLookupId ?? await resolveLookupId(this.db, "property_usage", body.usageType),
@@ -251,7 +418,10 @@ class PropertiesController {
       images: Array.isArray(body.images) ? body.images : null,
       isDraft: Boolean(body.isDraft ?? false),
       isDemo: false,
-    }).returning();
+    };
+    sanitizePropertyFields(values, isDraft);
+    if (values.totalUnits == null) values.totalUnits = 0; // NOT NULL, default 0
+    const [prop] = await this.db.insert(propertiesTable).values(values as any).returning();
 
     const [withLabels] = overlayTypeOther(await attachLookupLabels(this.db, [{ ...prop }], PROPERTY_LOOKUP_SPEC));
     return { ...withLabels, occupancyRate: 0, rentedUnits: 0 };
@@ -260,7 +430,7 @@ class PropertiesController {
   @Get(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
   async getOne(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const [prop] = await this.db.select().from(propertiesTable)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)));
     if (!prop) throw new NotFoundException("Property not found");
@@ -284,14 +454,43 @@ class PropertiesController {
   @Patch(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string, @Body() body: any) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
     const owner = scopeId(user);
+    // Needed to know whether this record is still a draft — drafts are exempt
+    // from the exact national-address formats, exactly as on create.
+    // The WHOLE prior row, not just the draft flag: finalising re-checks the
+    // stored values as well as the incoming ones (below).
+    const [priorProp] = await this.db.select()
+      .from(propertiesTable)
+      .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)));
+    if (!priorProp) throw new NotFoundException("Property not found");
+    const isDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(priorProp.isDraft);
     const updateData: Record<string, unknown> = {};
-    const fields = ["name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators", "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber", "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft", "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId"];
-    for (const field of fields) if (body[field] !== undefined) updateData[field] = body[field];
-    if (body.managementFeePercent !== undefined) {
-      updateData.managementFeePercent = body.managementFeePercent == null || body.managementFeePercent === ""
-        ? null : String(body.managementFeePercent);
+    for (const field of PROPERTY_FIELDS) if (body[field] !== undefined) updateData[field] = body[field];
+    if (body.managementFeePercent !== undefined) updateData.managementFeePercent = body.managementFeePercent;
+    // The edit path enforces exactly what the create path does — it used to
+    // copy the body straight into `set()`.
+    sanitizePropertyFields(updateData, isDraft);
+
+    // Finalising a draft re-checks the row AS IT WILL BE — the stored values
+    // merged with this request. A draft is exempt from the exact
+    // national-address formats while it is a draft; nothing re-applied them
+    // when it stopped being one, so a half-typed postal code went live simply
+    // by not being re-sent. Normalised values are carried back so the fix
+    // reaches the column, not just the response.
+    if (priorProp.isDraft && !isDraft) {
+      const merged: Record<string, unknown> = {};
+      for (const f of PROPERTY_FIELDS) {
+        merged[f] = f in updateData ? updateData[f] : (priorProp as Record<string, any>)[f];
+      }
+      if ("managementFeePercent" in updateData) merged.managementFeePercent = updateData.managementFeePercent;
+      else merged.managementFeePercent = (priorProp as Record<string, any>).managementFeePercent;
+      sanitizePropertyFields(merged, false);
+      for (const f of [...PROPERTY_FIELDS, "managementFeePercent"] as const) {
+        if (f in updateData) continue;
+        if (!(f in merged)) continue;
+        if (merged[f] !== (priorProp as Record<string, any>)[f]) updateData[f] = merged[f];
+      }
     }
     // Keep the lookup FKs in sync when the matching text field changes.
     if (body.type !== undefined) {
@@ -304,11 +503,13 @@ class PropertiesController {
     if (body.region !== undefined) updateData.regionLookupId = body.regionLookupId ?? await resolveLookupId(this.db, "region", body.region);
     if (body.city !== undefined) updateData.cityLookupId = body.cityLookupId ?? await resolveLookupId(this.db, "city", body.city);
     if (body.ownerId !== undefined) {
-      updateData["ownerId"] = body.ownerId === null ? null : (typeof body.ownerId === "number" ? body.ownerId : parseInt(String(body.ownerId), 10));
+      const nextOwnerId = foreignKeyId(body.ownerId, "المؤجر");
+      if (nextOwnerId != null) await this.assertOwnerInScope(nextOwnerId, owner);
+      updateData["ownerId"] = nextOwnerId;
     }
     // Handle deedId change: re-validate ownership + 1:1 freshness.
     if (body.deedId !== undefined) {
-      const nextDeedId = body.deedId === null ? null : (typeof body.deedId === "number" ? body.deedId : parseInt(String(body.deedId), 10));
+      const nextDeedId = foreignKeyId(body.deedId, "الصك");
       if (nextDeedId != null) {
         const [deed] = await this.db.select({ id: deedsTable.id })
           .from(deedsTable)
@@ -325,6 +526,7 @@ class PropertiesController {
       }
       updateData["deedId"] = nextDeedId;
     }
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [prop] = await this.db.update(propertiesTable)
       .set(updateData as any)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)))
@@ -336,7 +538,32 @@ class PropertiesController {
   @Delete(":propertyId")
   @RequirePermissions(PERMISSIONS.PROPERTIES_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("propertyId") propertyId: string) {
-    const id = parseInt(propertyId, 10);
+    const id = requiredForeignKeyId(propertyId, "رقم العقار");
+    // Deleting a property cascades to its units — and used to leave every
+    // contract on those units `active`, still billing pending installments
+    // against a unit and a property that no longer exist. Refuse while any
+    // live contract is attached, the way `deeds.module.ts` refuses to delete a
+    // deed that still backs a property. Draft contracts don't count: a draft
+    // occupies nothing and generates no installments.
+    const live = await this.db
+      .select({ contractNumber: contractsTable.contractNumber })
+      .from(contractUnitsTable)
+      .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+      .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+      .where(and(
+        eq(unitsTable.propertyId, id),
+        isNull(unitsTable.deletedAt),
+        isNull(contractsTable.deletedAt),
+        eq(contractsTable.isDraft, false),
+        notInArray(contractsTable.status, ENDED_CONTRACT_STATUSES as any),
+      ))
+      .limit(5);
+    if (live.length > 0) {
+      const numbers = live.map((c) => c.contractNumber).join("، ");
+      throw new ConflictException(
+        `لا يمكن حذف العقار لوجود عقود سارية على وحداته (${numbers}). أنهِ العقود أولاً ثم احذف العقار · Cannot delete: the property has units under an active contract`,
+      );
+    }
     // Soft delete: mark deleted_at instead of removing the row.
     const now = new Date();
     const [prop] = await this.db.update(propertiesTable)

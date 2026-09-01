@@ -7,18 +7,36 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import bcrypt from "bcryptjs";
-import { eq, and, asc, isNotNull, isNull, or } from "drizzle-orm";
+import { eq, and, asc, count, desc, ilike, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { rolesTable, usersTable, type User } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EmailService } from "../email/email.service";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage, UNLIMITED } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
+import { listQuerySchema, wantsPagination } from "../../common/pagination";
 
-type Public = Omit<User, "passwordHash">;
+/**
+ * What a team endpoint may hand back about a user row. Beyond the password
+ * hash, the row also carries the email-verification token hash + its expiry
+ * (whoever holds the hash's plaintext can activate the account) and
+ * `tokenVersion` (the session-invalidation counter). None of those are the
+ * caller's business, and they were being returned verbatim by createEmployee
+ * and the update endpoints.
+ */
+type Public = Omit<
+  User,
+  "passwordHash" | "emailVerifyTokenHash" | "emailVerifyExpiresAt" | "tokenVersion"
+>;
 
 function strip(u: User): Public {
-  const { passwordHash: _ph, ...rest } = u;
+  const {
+    passwordHash: _ph,
+    emailVerifyTokenHash: _evth,
+    emailVerifyExpiresAt: _eve,
+    tokenVersion: _tv,
+    ...rest
+  } = u;
   return rest;
 }
 
@@ -50,8 +68,16 @@ export class TeamService {
     }
   }
 
-  private async resolveRoleId(presetKey: string | undefined | null, fallbackKey = "user"): Promise<number | null> {
+  /**
+   * An employee's role must be stated, never inferred. The fallback used to be
+   * "user" — the account-owner role, 40 permissions including deletes and
+   * subscription management — so an omitted or misspelled `preset` field was
+   * silently whitelisted away and handed the new employee owner-level rights.
+   * Callers that legitimately have no preset now get null and refuse.
+   */
+  private async resolveRoleId(presetKey: string | undefined | null, fallbackKey?: string): Promise<number | null> {
     const key = presetKey?.trim() || fallbackKey;
+    if (!key) return null;
     const [r] = await this.db
       .select({ id: rolesTable.id })
       .from(rolesTable)
@@ -60,14 +86,53 @@ export class TeamService {
     return r?.id ?? null;
   }
 
-  async listEmployees(actorId: number) {
+  /**
+   * The account's team: the owner plus every employee under them.
+   *
+   * `search` (name / email / phone) and `role` (one or a comma-separated set of
+   * role keys) and `isActive` are applied in SQL. The settings screen filtered
+   * both in the browser over the whole team, which is fine for five people and
+   * wrong for a managing office with two hundred - and it made the "active"
+   * tile count only the employees that had been fetched.
+   *
+   * Pagination is opt-in via `page`/`pageSize`/`paginated`; without them the
+   * bare array the settings screen already reads is returned unchanged.
+   */
+  async listEmployees(actorId: number, rawQuery?: any) {
     const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [
+      // The account holder is part of the team, not outside it: on a company
+      // account they ARE the General Manager, and a team screen that omitted
+      // them showed an org with no one at the top. Flagged as `isOwner` below
+      // so the UI can render them without the remove/downgrade actions - the
+      // service refuses those anyway, since an owner has no ownerUserId to
+      // match.
+      or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+      isNull(usersTable.deletedAt),
+    ];
+    if (q.search) {
+      conds.push(or(
+        ilike(usersTable.name, `%${q.search}%`),
+        ilike(usersTable.email, `%${q.search}%`),
+        ilike(usersTable.phone, `%${q.search}%`),
+      ));
+    }
+    const roleKeys = typeof rawQuery?.role === "string" && rawQuery.role.trim() && rawQuery.role !== "all"
+      ? rawQuery.role.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
+    if (roleKeys?.length) conds.push(inArray(rolesTable.key, roleKeys));
+    if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
+    else if (rawQuery?.isActive === "0" || rawQuery?.isActive === "false") conds.push(eq(usersTable.isActive, false));
+    const where = and(...conds);
+
     // Join the role so the UI gets the live role key, label and the
     // effective permission list (permissions live on the role row).
-    const rows = await this.db
+    let rowsQ = this.db
       .select({
         id: usersTable.id,
         email: usersTable.email,
@@ -87,22 +152,51 @@ export class TeamService {
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      // The account holder is part of the team, not outside it: on a company
-      // account they ARE the General Manager, and a team screen that omitted
-      // them showed an org with no one at the top. Flagged as `isOwner` so the
-      // UI can render them without the remove/downgrade actions — the service
-      // refuses those anyway, since an owner has no ownerUserId to match.
-      .where(and(
-        or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
-        isNull(usersTable.deletedAt),
-      ))
-      .orderBy(asc(usersTable.createdAt));
+      .where(where)
+      // Owner first, then oldest employee first. This was a JS sort after the
+      // fetch - which cannot survive paging, since page 2 would have sorted its
+      // own slice and put a second "owner" at its top. Expressed in SQL as a
+      // leading boolean key instead: `owner_user_id IS NULL` is TRUE for the
+      // account holder, and DESC puts TRUE first. `id` is the final tiebreak on
+      // a non-unique `created_at`.
+      .orderBy(
+        desc(sql`${usersTable.ownerUserId} is null`),
+        asc(usersTable.createdAt),
+        asc(usersTable.id),
+      )
+      .$dynamic();
+    if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    // Owner first. Not done in SQL because the owner's ownerUserId is NULL and
-    // Postgres sorts NULLs last in ASC, which would bury them at the bottom.
-    return rows
-      .map((r) => ({ ...r, isOwner: r.ownerUserId == null }))
-      .sort((a, b) => Number(b.isOwner) - Number(a.isOwner));
+    const [rows, totalRow, activeRow] = await Promise.all([
+      rowsQ,
+      paged ? this.db.select({ total: count() }).from(usersTable)
+        .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+        .where(where) : Promise.resolve([{ total: 0 }]),
+      // "Active members" counted by the database over the same team, minus the
+      // isActive filter itself so the tile keeps its number while the list is
+      // narrowed to one state.
+      paged ? this.db.select({ isActive: usersTable.isActive, cnt: count() }).from(usersTable)
+        .where(and(
+          or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+          isNull(usersTable.deletedAt),
+        ))
+        .groupBy(usersTable.isActive) : Promise.resolve([]),
+    ]);
+
+    const data = rows.map((r) => ({ ...r, isOwner: r.ownerUserId == null }));
+    if (!paged) return data;
+    let active = 0;
+    let inactive = 0;
+    for (const r of activeRow as Array<{ isActive: boolean; cnt: number }>) {
+      if (r.isActive) active = Number(r.cnt); else inactive = Number(r.cnt);
+    }
+    return {
+      data,
+      page: q.page,
+      pageSize: q.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
+      stats: { active, inactive },
+    };
   }
 
   async createEmployee(
@@ -178,8 +272,9 @@ export class TeamService {
     const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
-    if (!emp || emp.ownerUserId !== actorId || emp.deletedAt) throw new NotFoundException("Employee not found");
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
+    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
     if (emp.emailVerified) return { success: true, alreadyVerified: true };
     const verify = newEmailVerifyToken();
     await this.db.update(usersTable)
@@ -198,7 +293,10 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    // Soft-deleted rows are gone as far as the API is concerned — matching
+    // deleteEmployee, which already 404s on them instead of touching them.
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const updates: Partial<typeof usersTable.$inferInsert> = {};
@@ -231,7 +329,8 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const clean = Array.from(new Set((permissions || []).filter((p) => typeof p === "string" && p.trim())));
@@ -271,7 +370,8 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const [emp] = await this.db.select().from(usersTable).where(eq(usersTable.id, employeeId));
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
     if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
 
     const passwordHash = await bcrypt.hash(newPassword, 10);

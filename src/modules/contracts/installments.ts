@@ -26,6 +26,33 @@ export const VAT_RATE = 0.15;
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /**
+ * Put the rounding remainder of a run of installments onto its LAST row, so
+ * the schedule sums to exactly what was contracted.
+ *
+ * Every period used to be rounded on its own and nothing reconciled the
+ * result: a 10,000 annual rent paid monthly is 833.333… a month, which stores
+ * as 12 × 833.33 = 9,999.96 — four halalas that were never billed, on every
+ * contract whose rent does not divide cleanly by its cycle. The same applies to
+ * a recurring fee split across its cycle, and to VAT-inclusive rows, where the
+ * ×1.15 makes an exact division inexact.
+ *
+ * `exactTotal` is the sum of the UNROUNDED per-period amounts — i.e. the
+ * contracted figure for this run — and the last row absorbs the difference.
+ * The adjustment is only ever a few halalas, so it lands on the final period
+ * rather than being smeared across the schedule, which keeps every other
+ * installment on the round figure the landlord and tenant agreed.
+ */
+function reconcileToTotal(rows: InstallmentRow[], from: number, exactTotal: number): void {
+  if (rows.length <= from) return;
+  let sum = 0;
+  for (let i = from; i < rows.length; i++) sum = round2(sum + Number(rows[i]!.amount));
+  const diff = round2(round2(exactTotal) - sum);
+  if (diff === 0) return;
+  const last = rows[rows.length - 1]!;
+  last.amount = round2(Number(last.amount) + diff).toFixed(2);
+}
+
+/**
  * Add `n` months to `base`, anchored to the base day-of-month and clamped to
  * the target month's length — UTC-based to match `new Date("YYYY-MM-DD")`.
  * Plain `Date.setMonth(+n)` overflows (e.g. Jan 31 + 1 month → Mar 2), which
@@ -66,10 +93,12 @@ export function buildInstallments(
   // additional fees are still applied below via a shared exit.
   if (paymentFrequency === "custom" && customSchedule && customSchedule.length > 0) {
     const rentStart = rows.length;
+    let exactTotal = 0;
     for (const e of customSchedule) {
       const base = Number(e.amount) || 0;
       if (!e.dueDate || base <= 0) continue;
       const amount = vatEnabled ? base * (1 + VAT_RATE) : base;
+      exactTotal += amount;
       rows.push({
         contractId, userId,
         amount: round2(amount).toFixed(2),
@@ -80,6 +109,9 @@ export function buildInstallments(
         isDemo: false,
       });
     }
+    // The hand-entered amounts ARE the contracted figures — with VAT on top
+    // they stop dividing cleanly, so the run still has to reconcile.
+    reconcileToTotal(rows, rentStart, exactTotal);
     applyPrepaid(rows, rentStart, prepaidRent);
     appendFees(rows, contractId, userId, start, end, additionalFees);
     return sortRows(rows);
@@ -107,6 +139,9 @@ export function buildInstallments(
   const rentStart = rows.length;
   let period = 0;
   let cursor = addMonthsUTC(start, 0);
+  // Running sum of the UNROUNDED period amounts — the contracted total this
+  // schedule has to add up to once every row is rounded to halalas.
+  let exactRentTotal = 0;
   while (cursor <= end) {
     // Contract-year index (0-based) → escalation / per-year overrides.
     const monthsSince = period * stepMonths;
@@ -117,6 +152,7 @@ export function buildInstallments(
       : baseAnnual * Math.pow(1 + escRate, year) + escAmountAnnual * year;
     let amount = annualForYear * periodFrac;
     if (vatEnabled) amount = amount * (1 + VAT_RATE);
+    exactRentTotal += amount;
     rows.push({
       contractId, userId,
       amount: round2(amount).toFixed(2),
@@ -130,6 +166,9 @@ export function buildInstallments(
     cursor = addMonthsUTC(start, period * stepMonths);
   }
 
+  // Reconcile BEFORE the prepaid deduction: the remainder belongs to the rent
+  // schedule, not to whatever is left after an advance has eaten into it.
+  reconcileToTotal(rows, rentStart, exactRentTotal);
   applyPrepaid(rows, rentStart, prepaidRent);
   appendFees(rows, contractId, userId, start, end, additionalFees);
   return sortRows(rows);
@@ -198,7 +237,10 @@ function appendFees(
     // e.g. 1000 quarterly → 250 each (×4 = 1000/yr); 1000 monthly → 83.33 each.
     const step = fee.recurrence === "annual" ? 12 : fee.recurrence === "semi_annual" ? 6 : fee.recurrence === "quarterly" ? 3 : 1;
     const perPeriod = feeAnnual * (step / 12) * feeVat;
+    const feeStart = rows.length;
+    let feeExactTotal = 0;
     for (let i = 0, d = addMonthsUTC(start, 0); d <= end; i++, d = addMonthsUTC(start, i * step)) {
+      feeExactTotal += perPeriod;
       rows.push({
         contractId, userId,
         amount: round2(perPeriod).toFixed(2),
@@ -209,6 +251,9 @@ function appendFees(
         isDemo: false,
       });
     }
+    // Same reconciliation as rent: 1,000 a year billed monthly is 83.33 a
+    // month, which is 999.96 unless the last occurrence carries the remainder.
+    reconcileToTotal(rows, feeStart, feeExactTotal);
   }
 }
 

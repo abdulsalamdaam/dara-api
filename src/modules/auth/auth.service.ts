@@ -2,7 +2,7 @@ import { Injectable, Inject, BadRequestException, NotFoundException, Unauthorize
 import { JwtService } from "@nestjs/jwt";
 import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
-import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { companiesTable, emailOtpTokensTable, loginLogsTable, ownersTable, rolesTable, tenantsTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -18,10 +18,19 @@ import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERI
 const MAX_FAILED = 5;
 
 /**
- * Saudi mobile numbers are stored inconsistently (+966502907100, 966502907100,
- * 0502907100, 502907100). To match regardless of format, reduce any input to its
- * 9-digit core (5XXXXXXXX) and return every common stored variant for an IN()
- * lookup. Fixes "+966… vs 05…" not matching.
+ * The canonical stored form of a Saudi mobile is the bare 9-digit core,
+ * `5XXXXXXXX` — see `saudiPhone()` in `common/validation.ts`, which every
+ * controller write path funnels through, and the one-off backfill in
+ * `db/sql/2026_08_phone_bare_9_digits.sql`.
+ *
+ * Historical rows are NOT all in that form (+966502907100, 966502907100,
+ * 0502907100), and a caller can type any of them. To match regardless, reduce
+ * the input to its 9-digit core and return every stored variant for an IN()
+ * lookup. **`core` itself is in the set** — that is what makes a row stored in
+ * the new canonical form findable when the user types `0502907100` or
+ * `+966502907100`. Do not drop it: tenant OTP login (`tenantRequestOtp` /
+ * `tenantVerifyOtp`), landlord phone-OTP login (`userPhone*Otp`,
+ * `findOwnerByLoginPhone`) and password reset all depend on this one set.
  */
 function phoneCore(raw: string): string {
   let d = (raw || "").replace(/\D/g, "");
@@ -31,8 +40,21 @@ function phoneCore(raw: string): string {
 }
 function phoneVariants(raw: string): string[] {
   const core = phoneCore(raw);
-  const set = new Set<string>([`+966${core}`, `966${core}`, `0${core}`, core, (raw || "").trim()]);
+  // Canonical form first, then the three legacy ones, then the untouched input
+  // (which covers a number that is not a Saudi mobile at all).
+  const set = new Set<string>([core, `+966${core}`, `966${core}`, `0${core}`, (raw || "").trim()]);
   return [...set].filter(Boolean);
+}
+/**
+ * The canonical stored form of a phone, or the value untouched when it is not a
+ * Saudi mobile. Mirrors `saudiPhone()` in `common/validation.ts` but never
+ * throws — registration has always accepted whatever it was given.
+ */
+function canonicalPhone(raw: string | null | undefined): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  const core = phoneCore(trimmed);
+  return /^5\d{8}$/.test(core) ? core : trimmed;
 }
 /** Email-OTP code lifetime — drives the DB expiry, the email text, and the
  *  expiresInMinutes returned to the client (the login screen's timer). */
@@ -498,7 +520,11 @@ export class AuthService {
       name,
       isActive: false,
       accountStatus: "pending",
-      phone: phone ?? null,
+      // Store the canonical 9-digit form (`saudiPhone()` in common/validation.ts)
+      // so a registered landlord's number joins and matches like every other
+      // phone in the DB. Registration has never rejected a malformed number and
+      // still does not: anything that is not a Saudi mobile is kept verbatim.
+      phone: canonicalPhone(phone),
       roleId: fallbackRoleRow?.id ?? null,
       companyId,
       userType,
@@ -510,6 +536,27 @@ export class AuthService {
     }).returning();
 
     void this.email.sendVerifyOtp(user!.email, user!.name, otp.code, EMAIL_VERIFY_OTP_TTL_MIN, false);
+
+    // The row above is the moment a registration becomes pending — the only
+    // place in the API that writes accountStatus: "pending". Employees added
+    // by a landlord are created active in team.service.ts and never reach
+    // here, and there is no auto-approve path: an account only leaves
+    // "pending" through the admin's own approve/reject endpoints.
+    //
+    // Fire-and-forget, exactly like the OTP above: the sign-up response must
+    // not wait on Resend, and a notification that fails must not fail the
+    // registration. sendAdminNewRegistration resolves its own recipients and
+    // swallows every failure, so this can never reject.
+    void this.email.sendAdminNewRegistration({
+      id: user!.id,
+      name: user!.name,
+      email: user!.email,
+      phone: user!.phone,
+      userType: user!.userType,
+      desiredPackagePlan: user!.desiredPackagePlan,
+      desiredBillingCycle: user!.desiredBillingCycle,
+      createdAt: user!.createdAt,
+    });
 
     return {
       pending: true,
@@ -696,7 +743,12 @@ export class AuthService {
 
     const [user] = isEmail
       ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, id.toLowerCase()), isNull(usersTable.deletedAt)))
-      : await this.db.select().from(usersTable).where(and(eq(usersTable.phone, id), isNull(usersTable.deletedAt)));
+      // Phone lookup goes through the variant set, not an equality test: the
+      // stored form is now the bare 9 digits and the user types 05…/+966….
+      : await this.db.select().from(usersTable)
+          .where(and(inArray(usersTable.phone, phoneVariants(id)), isNull(usersTable.deletedAt)))
+          .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+          .limit(1);
 
     // Always respond the same way to avoid leaking which accounts exist.
     if (!user) {
@@ -722,7 +774,13 @@ export class AuthService {
 
     const [user] = isEmail
       ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, identifier.toLowerCase()), isNull(usersTable.deletedAt)))
-      : await this.db.select().from(usersTable).where(and(eq(usersTable.phone, identifier), isNull(usersTable.deletedAt)));
+      // Same variant lookup as forgotPassword, with the same deterministic
+      // ordering — duplicate phone numbers exist, so request and verify must
+      // agree on which identity they picked.
+      : await this.db.select().from(usersTable)
+          .where(and(inArray(usersTable.phone, phoneVariants(identifier)), isNull(usersTable.deletedAt)))
+          .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+          .limit(1);
     if (!user) throw new BadRequestException("بيانات غير صحيحة");
 
     const target = isEmail ? user.email : (user.phone || identifier);
@@ -752,11 +810,36 @@ export class AuthService {
    * forgets to flip it back, which is exactly what happened before.
    */
 
+  /**
+   * Resolve the ONE tenant a phone number logs in as.
+   *
+   * A phone number is not unique across tenants — nothing in the schema stops
+   * two rows carrying the same number, and canonicalising every stored number
+   * to the bare 9 digits made collisions strictly MORE likely: numbers that
+   * used to differ only by format (`0551234567` vs `+966551234567`) are now
+   * byte-identical. Without an ORDER BY, `[tenant]` was whatever Postgres
+   * happened to return first, so six consecutive verify calls on one number
+   * alternated between two different tenants — and request/verify could
+   * disagree about who was logging in.
+   *
+   * Same tie-break as the `usersTable` lookups below: an active row wins, ties
+   * break on the oldest id. Soft-deleted rows are excluded outright — a
+   * deleted tenant must not be able to log in, and `usersTable` has always
+   * filtered `deleted_at` here.
+   */
+  private async findTenantByLoginPhone(raw: string) {
+    const [tenant] = await this.db.select().from(tenantsTable)
+      .where(and(inArray(tenantsTable.phone, phoneVariants(raw)), isNull(tenantsTable.deletedAt)))
+      .orderBy(desc(sql`${tenantsTable.status} = 'active'`), asc(tenantsTable.id))
+      .limit(1);
+    return tenant;
+  }
+
   async tenantRequestOtp(input: { phone: string; channel?: "sms" | "call" | "whatsapp" }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
     const phone = this.phoneOtp.normalizePhone(raw);
-    const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
+    const tenant = await this.findTenantByLoginPhone(raw);
     // Answer honestly instead of the old generic "if the number is registered
     // we sent a code". That reply hid the truth from the only people it
     // mattered to: the app pushed every caller to the code screen, no SMS ever
@@ -788,7 +871,7 @@ export class AuthService {
     if (!raw || !code) throw new BadRequestException("رقم الجوال والرمز مطلوبان");
     const phone = this.phoneOtp.normalizePhone(raw);
 
-    const [tenant] = await this.db.select().from(tenantsTable).where(inArray(tenantsTable.phone, phoneVariants(raw)));
+    const tenant = await this.findTenantByLoginPhone(raw);
     if (!tenant || tenant.status !== "active") {
       await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("بيانات غير صحيحة");
@@ -830,7 +913,7 @@ export class AuthService {
    *   isRepresentative === false → owners.phone
    *   isRepresentative === true  → owners.originalOwnerPhone (the actual owner;
    *                                the main phone then belongs to the agent/وكيل)
-   * Returns the first match or undefined.
+   * Returns the single deterministically-chosen match, or undefined.
    */
   private async findOwnerByLoginPhone(raw: string) {
     const variants = phoneVariants(raw);
@@ -841,7 +924,15 @@ export class AuthService {
       ),
       eq(ownersTable.status, "active"),
       isNull(ownersTable.deletedAt),
-    ));
+    ))
+      // Duplicate landlord phone numbers exist too (an agent/وكيل row and the
+      // owner row can carry the same number), so "the first match" has to be
+      // defined rather than left to the planner: the oldest id wins. Status is
+      // already pinned to active by the WHERE, so id alone settles it. Without
+      // this, `userPhoneRequestOtp` and `userPhoneVerifyOtp` could resolve the
+      // same number to two different owners — different scopes, different data.
+      .orderBy(asc(ownersTable.id))
+      .limit(1);
     return owner;
   }
 
@@ -853,8 +944,14 @@ export class AuthService {
   async userPhoneRequestOtp(input: { phone: string }, ctx?: { ip: string; ua?: string }) {
     const raw = (input.phone || "").trim();
     if (!raw) throw new BadRequestException("رقم الجوال مطلوب");
+    // A phone number is NOT unique across users (registration allows a
+    // duplicate), so an unordered `[user]` picked an arbitrary identity — and
+    // request/verify could disagree about who is logging in. Prefer an active
+    // row, then the oldest id, so the choice is stable and matches verify.
     const [user] = await this.db.select({ id: usersTable.id, isActive: usersTable.isActive })
-      .from(usersTable).where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)));
+      .from(usersTable).where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)))
+      .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+      .limit(1);
     const owner = user && user.isActive ? null : await this.findOwnerByLoginPhone(raw);
     if (!user && !owner) {
       throw new NotFoundException({
@@ -890,7 +987,14 @@ export class AuthService {
         roleKey: rolesTable.key,
       })
       .from(usersTable).leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      .where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)));
+      .where(and(inArray(usersTable.phone, phoneVariants(raw)), isNull(usersTable.deletedAt)))
+      // Duplicate phone numbers exist, so this lookup must be deterministic:
+      // an active row wins, ties break on the oldest id. Without the ORDER BY
+      // the DB could hand back an inactive duplicate, and the fall-through
+      // below would then log the caller in as a *different* identity (an
+      // owner/landlord with a different scope).
+      .orderBy(desc(usersTable.isActive), asc(usersTable.id))
+      .limit(1);
     if (!user || !user.isActive) {
       // No matching user — fall back to an owner (landlord) login by phone.
       const owner = await this.findOwnerByLoginPhone(raw);

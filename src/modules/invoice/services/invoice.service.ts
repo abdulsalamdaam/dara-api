@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Logger } from "@nestjs/common";
 import { eq, and, isNull, desc, ilike, count } from "drizzle-orm";
 import {
   invoicesTable,
@@ -14,8 +14,10 @@ import {
 import { DRIZZLE, type Drizzle } from "../../../database/database.module";
 import { InvoiceBuilderService, type InvoiceLineInput, todayIsoDate, todayIsoTime } from "./invoice-builder.service";
 import { InvoiceSignerService } from "./invoice-signer.service";
-import { ZatcaApiService } from "./zatca-api.service";
+import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
+import { withSellerChainLock } from "./chain-lock";
+import { resolveStandaloneSellerId } from "../../../common/invoice-readiness";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -46,6 +48,8 @@ export interface IssueResult {
 
 @Injectable()
 export class InvoiceService {
+  private readonly logger = new Logger(InvoiceService.name);
+
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly builder: InvoiceBuilderService,
@@ -67,8 +71,27 @@ export class InvoiceService {
    *
    * Failures at step 4 still write a row with status="error" so the caller
    * can retry submission later via `resubmit()`.
+   *
+   * Serialized per seller — see `withSellerChainLock`. Steps 1 and 6 are a
+   * read-modify-write of a counter that ZATCA requires to be strictly
+   * sequential, with a network round trip in between, so two concurrent
+   * issues for one seller must not interleave.
    */
   async issue(userId: number, dto: CreateInvoiceDto): Promise<IssueResult> {
+    // Resolve the seller HERE, before the lock, for two reasons. The lock is
+    // keyed by seller, so a key computed from a different id than the chain the
+    // body ends up touching would protect nothing. And the readiness gate
+    // resolves it this way too — leaving `issue()` on a bare `dto.ownerId`
+    // meant an account whose only credentials are per-landlord passed a gate
+    // that had checked the account holder's link, then failed here with
+    // "Seller profile not configured" about the account-level row nothing can
+    // create.
+    const ownerId = dto.ownerId ?? (await resolveStandaloneSellerId(this.db, userId));
+    return withSellerChainLock(userId, ownerId, () =>
+      this.issueUnderChainLock(userId, { ...dto, ownerId }));
+  }
+
+  private async issueUnderChainLock(userId: number, dto: CreateInvoiceDto): Promise<IssueResult> {
     if (!dto.lines?.length) throw new BadRequestException("invoice must have at least one line");
     if (!dto.invoiceNumber) throw new BadRequestException("invoiceNumber required");
 
@@ -174,6 +197,37 @@ export class InvoiceService {
       resp = { status: 0, raw: (e as Error).message, json: null, headers: {} };
     }
 
+    // ZATCA refused the CREDENTIALS, not the document — the EGS device has been
+    // removed in Fatoora, or the CSID was revoked. Bail out HERE, before the
+    // `invoices` row is written and before `commitInvoiceState` below, because
+    // everything past this point is irreversible in a way this case does not
+    // deserve:
+    //
+    //   · the ICV is consumed unconditionally (see the comment further down),
+    //     and `invoices_user_owner_env_icv_uniq` has no `deleted_at` predicate,
+    //     so a burned counter cannot be reclaimed by deleting the row;
+    //   · the row itself would make `simple_invoices.zatca_invoice_id` non-null,
+    //     which `isSubmittedToZatca` reads as "this document reached ZATCA" and
+    //     uses to block a contract rebuild — permanently, for a document ZATCA
+    //     never saw.
+    //
+    // Nothing was filed, so nothing should be recorded as filed. The seller has
+    // to link again; correcting the invoice cannot help.
+    if (isCredentialRejection(resp)) {
+      await this.onboarding.markLinkInvalid(
+        userId, ownerId,
+        `ZATCA رفضت بيانات الربط (${resp.status}) — يجب إعادة الربط مع هيئة الزكاة والضريبة`,
+      );
+      throw new ConflictException({
+        error: "zatca_link_invalid",
+        message:
+          "انقطع الربط مع هيئة الزكاة والضريبة — لم تعد الشهادة مقبولة لدى الهيئة. أعد الربط من الإعدادات ثم أعد إرسال الفاتورة.",
+        // ZATCA's status, not this response's — naming it `httpStatus` next to a
+        // 409 invited exactly the confusion it sounds like.
+        zatcaHttpStatus: resp.status,
+      });
+    }
+
     const status = this.deriveStatus(resp);
     const clearedXml =
       submitTo === "clearance" && (resp.json as any)?.clearedInvoice
@@ -251,6 +305,16 @@ export class InvoiceService {
       ownerId,
     );
 
+    // ZATCA accepted a document, so the link works — retire any earlier "ZATCA
+    // stopped accepting this" flag. Proving it with an accepted document rather
+    // than only with a fresh CSID matters because the flag can be raised by a
+    // transient 403, and a seller who is in fact fine should not have to
+    // re-onboard to clear it.
+    if (status === "cleared" || status === "reported" || status === "submitted") {
+      try { await this.onboarding.clearLinkInvalid(userId, ownerId); }
+      catch { /* the invoice is filed; a stale flag must not fail the call */ }
+    }
+
     return { invoice, lines: linesRows };
   }
 
@@ -284,14 +348,44 @@ export class InvoiceService {
     // let those bubble. Everything else is wrapped so a tooling/signing failure
     // becomes a readable verdict, never a 500.
     const { creds, decrypted } = await this.onboarding.getActiveCredentials(userId, ownerId);
+    /* Say what happened.
+     *
+     * This check deliberately persists nothing, which also meant it left no
+     * trace anywhere: no row, no log line above debug, and the proxy keeps no
+     * access log. Someone pressing "فحص" on production and asking afterwards
+     * what ZATCA said could not be answered from the server at all — the
+     * verdict existed only in the browser that received it. A support tool you
+     * cannot support from is not much of one.
+     */
+    const who = `owner=${ownerId ?? "self"} user=${userId} env=${decrypted.environment}`;
     try {
       const r = await this.submitComplianceDoc(
         decrypted, this.sellerSnapshotFrom(creds),
         { profile: "standard", docType: "invoice" }, decrypted.icv + 1, decrypted.pih,
       );
+      const detail = `${who} http=${r.httpStatus} status=${r.status}`;
+      if (r.ok) this.logger.log(`compliance-check PASS ${detail} warnings=${r.warnings.length}`);
+      else this.logger.warn(`compliance-check FAIL ${detail} errors=${JSON.stringify(r.errors).slice(0, 400)}`);
+      // This is the way OUT of a link flagged invalid, and it has to be, because
+      // the flag blocks approvals and approvals were the only other thing that
+      // could clear it — a seller knocked offline by one transient 403 would
+      // otherwise have no route back except a fresh Fatoora OTP. "فحص" submits a
+      // throwaway document under the real credentials, so a pass is exactly the
+      // proof needed; a credential rejection here is equally good evidence the
+      // other way.
+      try {
+        if (r.ok) await this.onboarding.clearLinkInvalid(userId, ownerId);
+        else if (r.httpStatus === 401 || r.httpStatus === 403) {
+          await this.onboarding.markLinkInvalid(
+            userId, ownerId,
+            `ZATCA رفضت بيانات الربط (${r.httpStatus}) — يجب إعادة الربط مع هيئة الزكاة والضريبة`,
+          );
+        }
+      } catch { /* the verdict is what the caller asked for — never fail on the flag */ }
       return { ok: r.ok, httpStatus: r.httpStatus, status: r.status, warnings: r.warnings, errors: r.errors };
     } catch (e) {
       const msg = (e as Error)?.message || String(e);
+      this.logger.warn(`compliance-check ERROR ${who} ${msg.slice(0, 400)}`);
       return { ok: false, httpStatus: 0, status: "ERROR", warnings: [], errors: [msg.slice(0, 500)] };
     }
   }
@@ -519,7 +613,12 @@ export class InvoiceService {
     if (!invoice.signedXml || !invoice.invoiceHash) {
       throw new BadRequestException("Invoice has no signed XML to resubmit");
     }
-    const { decrypted } = await this.onboarding.getActiveCredentials(userId);
+    // Under the invoice's OWN seller. This read the account-level credentials
+    // regardless of which landlord signed the document, which silently
+    // resubmitted landlord X's signed XML under a different seller's Basic auth
+    // — and now that a free invoice carries the account holder's owner_id, it
+    // would simply 404 for any account with no account-level row.
+    const { decrypted } = await this.onboarding.getActiveCredentials(userId, invoice.ownerId ?? null);
     const submitTo = (invoice.submittedTo ?? "compliance") as "compliance" | "clearance" | "reporting";
     const submission =
       submitTo === "clearance"

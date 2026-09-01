@@ -90,3 +90,15 @@ two configuration traps that make the validator lie instead of fail.
 
 Validate again when the invoice shape changes, not only when the signer does —
 a new discount, advance payment or VAT category produces XML nobody has checked.
+# Rule: test messages go to the account holder only
+
+Never send a test email, SMS or push to anyone but **abdulsalam@daam.sa** (and,
+for push, that account's own devices). Not a tenant, not a landlord, not a
+staging row that happens to carry a real address — staging is a copy of
+production data, so most addresses in it belong to real people.
+
+That means: never test by triggering a product flow that emails somebody
+(approving a registration, filing a maintenance request, replying to a ticket).
+Call the template directly with the account holder's address, or stub the
+sender and inspect the output. If a test cannot be done without a message
+reaching a third party, stop and ask rather than sending it.
