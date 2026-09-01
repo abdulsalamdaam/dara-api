@@ -9,6 +9,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { ZatcaOnboardingService, type SellerProfileInput } from "./services/zatca-onboarding.service";
+import { isOnboarded } from "../../common/invoice-readiness";
 import { InvoiceService } from "./services/invoice.service";
 import type { ZatcaEnv } from "./services/zatca-api.service";
 
@@ -106,7 +107,10 @@ export class ZatcaOnboardingController {
         complianceRequestId: c.sandboxComplianceRequestId,
       },
       production: {
-        onboarded: !!c.prodCertPem,
+        // A certificate alone is not onboarding: the slot may be holding the
+        // COMPLIANCE one. Same definition the gate uses, so this endpoint
+        // cannot disagree with what actually decides whether invoices go out.
+        onboarded: isOnboarded(c) && c.activeEnvironment !== "sandbox",
         onboardedAt: c.prodOnboardedAt,
         icv: c.prodIcv,
         complianceRequestId: c.prodComplianceRequestId,
@@ -170,7 +174,9 @@ export class ZatcaOnboardingController {
   @RequirePermissions(PERMISSIONS.ZATCA_ONBOARD)
   async issueProductionCsid(
     @CurrentUser() user: AuthUser,
-    @Body() body: { source?: "sandbox" | "production"; ownerId?: number; dryRun?: boolean },
+    // `source` widened to ZatcaEnv so a SIMULATION seller can be promoted at
+    // all; `dryRun` reports the suite without spending the compliance CSID.
+    @Body() body: { source?: ZatcaEnv; ownerId?: number; dryRun?: boolean },
   ) {
     const uid = scopeId(user);
     const ownerId = this.oid(body.ownerId);

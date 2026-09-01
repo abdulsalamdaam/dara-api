@@ -17,7 +17,7 @@ import { InvoiceSignerService } from "./invoice-signer.service";
 import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
 import { withSellerChainLock } from "./chain-lock";
-import { resolveStandaloneSellerId } from "../../../common/invoice-readiness";
+import { isOnboarded, resolveStandaloneSellerId } from "../../../common/invoice-readiness";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -112,6 +112,26 @@ export class InvoiceService {
 
     const ownerId = dto.ownerId ?? null;
     const { creds, decrypted } = await this.onboarding.getActiveCredentials(userId, ownerId);
+
+    // The last gate, and the only one every caller must pass.
+    //
+    // Callers were the gate before, and one of them had a hole: credit and
+    // debit notes are exempt at the controller — rightly, since a note corrects
+    // an invoice that already went out — but that exemption could not tell a
+    // link revoked AFTER the original was filed from a seller who was never
+    // linked at all. A seller stuck at step 2 of onboarding could therefore
+    // sign a real note with a COMPLIANCE certificate and post it to /core.
+    //
+    // `getActiveCredentials` above deliberately still serves a compliance slot,
+    // because the compliance suite has to sign with it. So the distinction has
+    // to be drawn here, on the path that mints a real document.
+    if (!isOnboarded(creds)) {
+      throw new ConflictException({
+        error: "zatca_not_onboarded",
+        message:
+          "لا يمكن توقيع فاتورة حقيقية — لم يكتمل ربط المؤجر بهيئة الزكاة والضريبة (الشهادة الحالية للفحص فقط). أكمل الربط من الإعدادات.",
+      });
+    }
     const nextIcv = decrypted.icv + 1;
     const issueDate = todayIsoDate();
     const issueTime = todayIsoTime();

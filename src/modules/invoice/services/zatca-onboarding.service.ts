@@ -82,8 +82,16 @@ export interface DecryptedCreds {
  * thing ZATCA will actually issue against. `…|3-264` → `…|3-264-2` → `-3`.
  */
 export function nextEgsSerial(current: string): string {
-  const m = /^(.*\|3-.*?)(?:-(\d+))?$/.exec(current.trim());
-  if (!m) return `${current.trim()}-2`;
+  const v = (current ?? "").trim();
+  if (!v) throw new BadRequestException("EGS serial is empty — cannot derive the next generation");
+  // Anchored to the serial WE mint: `1-…|2-…|3-<digits>`, with an optional
+  // `-<digits>` generation after it. A looser match renumbered the DEVICE
+  // instead of versioning it — `3-BR-01` became `3-BR-2`, a different unit a
+  // second branch would then collide with. ZATCA allows free text in that third
+  // segment, so anything outside our shape gets a plain suffix rather than a
+  // reinterpreted one.
+  const m = /^(.*\|3-\d+)(?:-(\d+))?$/.exec(v);
+  if (!m) return `${v}-2`;
   const gen = m[2] ? Number(m[2]) + 1 : 2;
   return `${m[1]}-${gen}`;
 }
@@ -368,7 +376,14 @@ export class ZatcaOnboardingService {
    */
   async issueProductionCsid(
     userId: number,
-    environment: "sandbox" | "production" = "production",
+    // Widened from "sandbox" | "production": a seller sitting on a SIMULATION
+    // compliance CSID had no way to ask for the promotion it needs. Asking for
+    // "production" presented the simulation token to the live /core gateway and,
+    // on success, marked the seller live; asking for "sandbox" promoted the
+    // developer-portal CSID into the prod slot instead. Neither is the
+    // simulation lifecycle, and before the compliance-slot fix it appeared to
+    // work only because the compliance CSID itself read as onboarded.
+    environment: ZatcaEnv = "production",
     ownerId: number | null = null,
   ): Promise<{ binarySecurityToken: string; httpStatus: number }> {
     const creds = await this.getCredentials(userId, ownerId);
@@ -382,17 +397,33 @@ export class ZatcaOnboardingService {
     const token = (creds as any)[tokenCol] as string | null;
     const secretEnc = (creds as any)[secretCol] as string | null;
     const reqId = (creds as any)[reqIdCol] as string | null;
-    if (!token || !secretEnc || !reqId) {
-      throw new BadRequestException(`Run compliance onboarding for "${environment}" first`);
+
+    /* Already promoted? Say so instead of asking ZATCA again — a production
+     * CSID is issued once per compliance CSID, and asking twice returns
+     * "Already-Generated", which read as a failure on an onboarding that had
+     * finished.
+     *
+     * The proof of promotion is the ABSENCE of a compliance request id: only
+     * `issueComplianceCsid` writes it, and the promotion below clears it. That
+     * matters because the obvious test — slot, certificate and onboardedAt —
+     * is byte-for-byte what the OLD compliance step used to write, so it would
+     * hand a green "promoted" to precisely the half-onboarded rows that need
+     * this endpoint to repair them, without calling ZATCA at all.
+     *
+     * Placed before the token/secret checks so a promoted row, whose reqId is
+     * now null, short-circuits rather than being told to run onboarding again. */
+    const promotedSlot = environment === "production" ? "production"
+      : environment === "simulation" ? "simulation"
+      : "sandbox";
+    if (creds.prodSlotEnv === promotedSlot && creds.prodCertPem && creds.prodOnboardedAt && !reqId) {
+      if (!creds.prodBinarySecurityToken) {
+        throw new ConflictException("سجل الربط غير مكتمل — أعد الربط مع هيئة الزكاة والضريبة");
+      }
+      return { binarySecurityToken: creds.prodBinarySecurityToken, httpStatus: 200 };
     }
 
-    // Already promoted? Say so instead of asking ZATCA again. A production CSID
-    // is issued ONCE per compliance CSID; asking twice returns
-    // "Already-Generated", which read as a failure and sent the user round the
-    // loop again on an onboarding that had actually finished.
-    const promotedSlot = environment === "production" ? "production" : "simulation";
-    if (creds.prodSlotEnv === promotedSlot && creds.prodCertPem && creds.prodOnboardedAt) {
-      return { binarySecurityToken: creds.prodBinarySecurityToken!, httpStatus: 200 };
+    if (!token || !secretEnc || !reqId) {
+      throw new BadRequestException(`Run compliance onboarding for "${environment}" first`);
     }
 
     const resp = await this.api.getProductionCsid({
@@ -434,9 +465,12 @@ export class ZatcaOnboardingService {
         prodSecretEnc: encryptString(resp.json.secret),
         prodCertPem: certPem,
         prodOnboardedAt: new Date(),
+        // Spent. Its absence is what distinguishes a promoted slot from one the
+        // compliance step merely filled — see the short-circuit above.
+        prodComplianceRequestId: null,
         // A real production CSID now occupies the slot, whichever compliance
         // certificate it was promoted from.
-        prodSlotEnv: environment === "production" ? "production" : "simulation",
+        prodSlotEnv: promotedSlot,
         // ...and the record has to POINT at that slot.
         //
         // `saveProfile` creates every row with activeEnvironment "sandbox" and
@@ -506,7 +540,16 @@ export class ZatcaOnboardingService {
           status: invoicesTable.status,
         })
         .from(invoicesTable)
-        .where(and(eq(invoicesTable.userId, userId), eq(invoicesTable.environment, "production")));
+        // Scoped to this landlord. Filtering on the account alone meant one
+        // landlord's completed test cycle satisfied the gate for every other
+        // landlord on the account — including ones that had never submitted
+        // anything.
+        .where(and(
+          eq(invoicesTable.userId, userId),
+          ownerId == null ? isNull(invoicesTable.ownerId) : eq(invoicesTable.ownerId, ownerId),
+          eq(invoicesTable.environment, "production"),
+          isNull(invoicesTable.deletedAt),
+        ));
       const ok = (cond: (r: typeof tested[number]) => boolean) =>
         tested.some((r) => cond(r) && (r.status === "cleared" || r.status === "reported"));
       const missing: string[] = [];
@@ -642,6 +685,21 @@ export class ZatcaOnboardingService {
       .update(zatcaCredentialsTable)
       .set({
         activeEnvironment: "sandbox",
+        // Retire the EGS serial along with the credentials.
+        //
+        // Unlinking is local — the docstring above says so: ZATCA has no revoke
+        // call, so the device stays registered there holding its production
+        // CSID. Our certificate columns go empty, and those are exactly what
+        // `issueComplianceCsid` reads to decide whether a re-link presents a NEW
+        // unit — so without this, unlink → re-link handed ZATCA the same serial
+        // it already refuses to issue against, and the generation never fired on
+        // the one path the product offers as the remedy.
+        //
+        // Bumped here, while we still know a device was presented, rather than
+        // inferred later from columns this statement is about to clear.
+        serialNumber: (creds.prodCertPem || creds.sandboxCertPem)
+          ? nextEgsSerial(creds.serialNumber)
+          : creds.serialNumber,
         // The flag described credentials that no longer exist — left set, it is
         // a stale complaint about a link the user has now deliberately removed.
         linkInvalidAt: null,

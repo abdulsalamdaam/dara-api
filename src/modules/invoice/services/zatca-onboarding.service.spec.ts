@@ -143,7 +143,10 @@ test("unlink keeps the row and the seller profile, so re-linking is an update", 
     const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
     assert.equal(row!.deletedAt, null, "a soft-deleted row still occupies the (user, owner) unique slot");
     assert.equal(row!.sellerVatNumber, "300000000000003");
-    assert.equal(row!.serialNumber, "1-Dara|2-Test|3-0001");
+    // The serial is RETIRED, not kept. ZATCA has no revoke call, so the device
+    // this row described is still registered there holding its CSID — coming
+    // back with the same serial is what made a re-link impossible.
+    assert.equal(row!.serialNumber, "1-Dara|2-Test|3-0001-2");
     // getCredentials is what upsertProfile consults before choosing insert vs
     // update — it must still find this row.
     const found = await svc(tx).getCredentials(userId, ownerId);
@@ -280,11 +283,17 @@ test("a slot holding a compliance certificate does not read as onboarded", { ski
 
 test("promotion is not re-asked once the slot holds a real production CSID", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   await withLinkedLandlord(async ({ tx, ownerId }) => {
-    // LIVE_CREDS is already prodSlotEnv "production" with a cert and an
-    // onboardedAt, i.e. a finished promotion. Asking ZATCA again is what
-    // returned "Already-Generated" and read to the user as a failure — so this
-    // must short-circuit rather than make the call at all. The api collaborator
-    // is null here, so any network attempt would throw instead.
+    // A FINISHED promotion: prodSlotEnv "production", a certificate, an
+    // onboardedAt — and no compliance request id, which is the part that proves
+    // it. `issueProductionCsid` spends that id and clears it, so its absence is
+    // the only thing distinguishing a promoted slot from one the compliance
+    // step merely filled (those look identical in every other column). Asking
+    // ZATCA again is what returned "Already-Generated" and read as a failure,
+    // so this must short-circuit without calling out at all — the api
+    // collaborator is null here, so any network attempt would throw.
+    await tx.update(zatcaCredentialsTable)
+      .set({ prodComplianceRequestId: null })
+      .where(eq(zatcaCredentialsTable.ownerId, ownerId));
     const r = await svc(tx).issueProductionCsid(userId, "production", ownerId);
     assert.equal(r.httpStatus, 200);
     assert.equal(r.binarySecurityToken, "TOKEN");
@@ -307,9 +316,33 @@ test("re-onboarding presents a new EGS generation", { skip: false }, () => {
   assert.equal(nextEgsSerial("  1-Dara|2-PMS|3-7  "), "1-Dara|2-PMS|3-7-2");
 });
 
+test("a device id that is not ours is suffixed, never renumbered", { skip: false }, () => {
+  // ZATCA allows free text in the third segment (its own sample is a UUID), and
+  // POST /zatca/profile accepts one. A looser match versioned the DEVICE rather
+  // than the generation — `3-BR-01` became `3-BR-2`, a different unit that a
+  // second branch would then collide with. Anything outside our shape gets a
+  // plain suffix instead.
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-BR-01"), "1-Dara|2-PMS|3-BR-01-2");
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-9f1c-4b2a"), "1-Dara|2-PMS|3-9f1c-4b2a-2");
+  // An empty serial is a bug upstream, not something to paper over with "-2".
+  assert.throws(() => nextEgsSerial("   "), /empty/);
+});
+
 test("a landlord id containing digits is not mistaken for a generation", { skip: false }, () => {
   // "3-264" is the id segment; only a suffix AFTER it is a generation. Getting
   // this wrong would silently renumber the landlord rather than the device.
   assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024"), "1-Dara|2-PMS|3-1024-2");
   assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024-2"), "1-Dara|2-PMS|3-1024-3");
+});
+
+test("a half-onboarded row is NOT mistaken for a promoted one", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId }) => {
+    // Exactly the shape the OLD compliance step left behind: production slot,
+    // a certificate, an onboardedAt — and a compliance request id still unspent.
+    // Short-circuiting here would hand a green "promoted" to the very rows that
+    // need this endpoint to repair them, without ever calling ZATCA. It must
+    // fall through instead; with a null api collaborator that means it throws
+    // rather than returning success.
+    await assert.rejects(() => svc(tx).issueProductionCsid(userId, "production", ownerId));
+  });
 });
