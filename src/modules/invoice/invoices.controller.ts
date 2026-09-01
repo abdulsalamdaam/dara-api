@@ -13,10 +13,54 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage } from "../../common/invoice-readiness";
+import {
+  checkInvoiceReadiness, checkSellerLink, draftBlockersOf, eInvoiceBuyerBlockers,
+  readinessMessage, resolveStandaloneSellerId,
+  type InvoiceBlocker, type InvoiceReadiness,
+} from "../../common/invoice-readiness";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
+
+/**
+ * The values the invoice columns can actually hold.
+ *
+ * `CreateInvoiceDto` is a TypeScript interface, so the global
+ * `ValidationPipe({ whitelist: true })` resolves its metatype to `Object` and
+ * passes the body through untouched — every field below is raw client input at
+ * runtime. Left unchecked, a bad `profile` is caught by the `pgEnum` on INSERT,
+ * which is to say after the document has been built, signed, submitted to ZATCA
+ * and an ICV consumed: the one place where a rejection costs something
+ * irreversible.
+ */
+const PROFILES = ["standard", "simplified"] as const;
+const DOC_TYPES = ["invoice", "credit", "debit"] as const;
+const SUBMIT_TARGETS = ["compliance", "clearance", "reporting"] as const;
+
+/** Name what arrived — a caller sending garbage needs to see its own value. */
+function assertOneOf<T extends string>(field: string, value: unknown, allowed: readonly T[]): T {
+  if (typeof value === "string" && (allowed as readonly string[]).includes(value)) return value as T;
+  throw new BadRequestException(
+    `${field} must be one of ${allowed.join(" | ")} — received ${JSON.stringify(value)}`,
+  );
+}
+
+/**
+ * Dress a single blocker as the readiness envelope the contract path returns,
+ * so a client renders one "here is what to fix" panel whatever the path was.
+ */
+function readinessOf(blockers: InvoiceBlocker[], ownerId: number | null): InvoiceReadiness {
+  const draftBlockers = draftBlockersOf(blockers);
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    draftBlockers,
+    draftOk: draftBlockers.length === 0,
+    confirmations: [],
+    tenantId: null,
+    ownerId,
+  };
+}
 
 @ApiTags("invoices")
 @ApiBearerAuth("user-jwt")
@@ -82,13 +126,46 @@ export class InvoicesController {
     if (!body.profile) throw new BadRequestException("profile required");
     if (!Array.isArray(body.lines) || body.lines.length === 0)
       throw new BadRequestException("at least one line required");
+
+    // Presence was the only thing ever asked of these — see PROFILES above for
+    // why that is not enough.
+    const profile = assertOneOf("profile", body.profile, PROFILES);
+    if (body.docType != null) assertOneOf("docType", body.docType, DOC_TYPES);
+    const submitTo = body.submitTo == null
+      ? null
+      : assertOneOf("submitTo", body.submitTo, SUBMIT_TARGETS);
+    // Same reasoning, one field further: an unchecked ownerId reaches the driver
+    // as a query parameter and comes back as `invalid input syntax for type
+    // integer` — a 500 on what is plainly a bad request.
+    if (body.ownerId != null && !Number.isInteger(body.ownerId)) {
+      throw new BadRequestException(`ownerId must be an integer — received ${JSON.stringify(body.ownerId)}`);
+    }
+    // The compliance endpoint is the ONBOARDING one. The service already routes
+    // there by itself for sandbox and simulation, so a client never needs to ask
+    // — and a live seller asking would spend a real ICV on a document ZATCA
+    // files nowhere.
+    if (submitTo === "compliance") {
+      throw new BadRequestException("submitTo=compliance is chosen automatically during onboarding and cannot be requested");
+    }
+
+    // `submitTo` overrides the profile→endpoint derivation in the service, so a
+    // client could file a simplified document at clearance (or a standard one
+    // at reporting) and leave the stored profile describing a document that
+    // went somewhere else. Clearance is for B2B and reporting for B2C; the two
+    // are not interchangeable, and the row must keep saying where it went.
+    if (submitTo === "clearance" && profile === "simplified")
+      throw new BadRequestException("submitTo=clearance is for standard (B2B) invoices — a simplified invoice is reported, not cleared");
+    if (submitTo === "reporting" && profile === "standard")
+      throw new BadRequestException("submitTo=reporting is for simplified (B2C) invoices — a standard invoice must be cleared");
+
     // Same guard as the approval path on the plain billing side — a
     // contract-linked e-invoice must have complete tenant/landlord data and an
     // onboarded landlord, otherwise ZATCA rejects it after we have already
     // burned an ICV. Nothing is saved as a draft here, so refusing costs the
     // caller no work.
+    const scoped = scopeId(user);
     if (body.contractId) {
-      const readiness = await checkInvoiceReadiness(this.db, scopeId(user), body.contractId);
+      const readiness = await checkInvoiceReadiness(this.db, scoped, body.contractId);
       if (!readiness.ok) {
         throw new BadRequestException({
           error: "invoice_not_ready",
@@ -96,6 +173,43 @@ export class InvoicesController {
           readiness,
         });
       }
+    } else {
+      // No contract is not "no parties". The seller still has to be linked to
+      // ZATCA before anything can be signed on their behalf, and this used to
+      // be skipped entirely: `if (body.contractId)` around the whole gate meant
+      // a contract-less call was checked for nothing at all.
+      const sellerId = body.ownerId ?? await resolveStandaloneSellerId(this.db, scoped);
+      const sellerBlocker = await checkSellerLink(this.db, scoped, sellerId);
+      if (sellerBlocker) {
+        const readiness = readinessOf([sellerBlocker], sellerId);
+        throw new BadRequestException({
+          error: "invoice_not_ready",
+          message: `لا يمكن إصدار الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
+          readiness,
+        });
+      }
+    }
+
+    // The buyer, on every path. `assertAddressComplete` inside the service
+    // covers the address and only for standard, which leaves a standard invoice
+    // with no buyer VAT number to be built with an empty PartyTaxScheme, signed,
+    // and POSTed to clearance — a document we already knew ZATCA would reject,
+    // for an ICV that cannot be reclaimed. So it is refused here, before
+    // `issue()` touches anything.
+    const buyerMissing = eInvoiceBuyerBlockers(body.buyer, profile);
+    if (buyerMissing.length) {
+      const readiness = readinessOf(
+        [{
+          entity: "buyer", id: null, name: body.buyer?.name ?? null,
+          missing: buyerMissing, action: "edit_document",
+        }],
+        body.ownerId ?? null,
+      );
+      throw new BadRequestException({
+        error: "invoice_not_ready",
+        message: `لا يمكن إصدار الفاتورة — بيانات المشتري ناقصة: ${buyerMissing.join("، ")}`,
+        readiness,
+      });
     }
     return this.invoices.issue(scopeId(user), body);
   }

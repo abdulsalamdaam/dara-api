@@ -14,7 +14,9 @@ import {
   db, getPool, usersTable, ownersTable, tenantsTable, propertiesTable, unitsTable,
   contractsTable, contractUnitsTable, zatcaCredentialsTable,
 } from "@dara/database";
-import { checkInvoiceReadiness } from "./invoice-readiness";
+import {
+  checkInvoiceReadiness, checkSellerLink, eInvoiceBuyerBlockers, resolveStandaloneSellerId,
+} from "./invoice-readiness";
 
 const HAS_DB = !!process.env.DATABASE_URL;
 class Rollback extends Error {}
@@ -436,4 +438,108 @@ test("a VAT-registered INDIVIDUAL buyer is asked for the national address too", 
     assert.ok(missing.includes(f), `${f} is required once the buyer is VAT-registered`);
   }
   assert.ok(!missing.includes("vatNumber"), "they have one — only a company is asked to HAVE one");
+});
+
+/* ── The e-invoice buyer (POST /invoices) ───────────────────────────────────
+ * A different question from the one `buyerBlockers` answers. That one is about
+ * OUR record of a customer — e-mail and phone so an invoice can be delivered
+ * and a person reached. This is about the DOCUMENT: only what ZATCA reads off
+ * the XML, and the DTO carries no e-mail or phone at all.
+ *
+ * These need no database, but stay gated with the rest of the file so the suite
+ * has one answer to "was there a DB?" instead of two.
+ */
+
+/** A standard-profile buyer with nothing missing, so a test can remove one thing. */
+const FULL_EINVOICE_BUYER = {
+  name: "منشأة المشتري",
+  vat: "311111111100003",
+  id: "4030000001",
+  idScheme: "CRN",
+  street: "طريق الملك فهد",
+  buildingNo: "1234",
+  district: "العليا",
+  city: "الرياض",
+  postalZone: "12211",
+};
+
+test("a complete standard buyer passes", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  assert.deepEqual(eInvoiceBuyerBlockers(FULL_EINVOICE_BUYER, "standard"), []);
+});
+
+test("a standard invoice with no buyer VAT number is blocked", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  const { vat: _vat, ...noVat } = FULL_EINVOICE_BUYER;
+  const missing = eInvoiceBuyerBlockers(noVat, "standard");
+  // It used to reach ZATCA: the builder emits an empty PartyTaxScheme, the
+  // document is signed, an ICV is consumed, and /clearance/single refuses it.
+  assert.deepEqual(missing, ["vat"]);
+});
+
+test("a standard buyer with a VAT number but a partial address names the missing parts", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  const missing = eInvoiceBuyerBlockers(
+    { ...FULL_EINVOICE_BUYER, district: "", city: null, postalZone: "   " },
+    "standard",
+  );
+  // Named one by one — "the address is incomplete" is not something a user can
+  // act on without opening every field to find out which.
+  assert.deepEqual(missing, ["district", "city", "postalZone"]);
+  assert.ok(!missing.includes("street"), "the parts that ARE there are not reported");
+});
+
+test("a standard buyer with an id but no scheme is blocked", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  const missing = eInvoiceBuyerBlockers({ ...FULL_EINVOICE_BUYER, idScheme: null }, "standard");
+  // The builder emits PartyIdentification only when it holds both, so an id
+  // without a scheme does not half-identify the buyer — it drops the
+  // identifier entirely, on the one document that must carry it.
+  assert.deepEqual(missing, ["idScheme"]);
+  assert.deepEqual(
+    eInvoiceBuyerBlockers({ ...FULL_EINVOICE_BUYER, id: null, idScheme: null }, "standard"),
+    ["id", "idScheme"],
+  );
+});
+
+test("a simplified invoice asks the buyer for a name and nothing else", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  // A walk-in consumer has no VAT number, no CR and no address to state, and
+  // inventing one for a B2C document is worse than omitting it.
+  assert.deepEqual(eInvoiceBuyerBlockers({ name: "عميل نقدي" }, "simplified"), []);
+  assert.deepEqual(eInvoiceBuyerBlockers({}, "simplified"), ["name"]);
+  assert.deepEqual(eInvoiceBuyerBlockers(null, "simplified"), ["name"]);
+});
+
+test("a missing buyer blocks a standard invoice on everything", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
+  assert.deepEqual(
+    eInvoiceBuyerBlockers(undefined, "standard"),
+    ["name", "vat", "street", "buildingNo", "district", "city", "postalZone", "id", "idScheme"],
+  );
+});
+
+/* ── The seller link, asked on its own ──────────────────────────────────── */
+
+test("an unlinked VAT-registered seller is a blocker", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withAccountHolder({ zatca: "none" }, async (_r, tx) => {
+    const sellerId = await resolveStandaloneSellerId(tx, userId);
+    const b = await checkSellerLink(tx, userId, sellerId);
+    assert.ok(b, "a contract-less invoice still has a seller, and it must be linked");
+    assert.equal(b!.entity, "zatca");
+    assert.deepEqual(b!.missing, ["zatcaNotConfigured"]);
+    assert.equal(b!.action, "zatca_settings");
+    assert.equal(b!.id, sellerId, "so the UI can send the user to that landlord's settings");
+  });
+});
+
+test("a linked seller is not a blocker", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withAccountHolder({ zatca: "onboarded" }, async (_r, tx) => {
+    const sellerId = await resolveStandaloneSellerId(tx, userId);
+    assert.equal(await checkSellerLink(tx, userId, sellerId), null);
+  });
+});
+
+test("a seller with no VAT number is never asked to link", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withAccountHolder({ zatca: "none", holderVat: null }, async (_r, tx) => {
+    const sellerId = await resolveStandaloneSellerId(tx, userId);
+    // Same rule the whole file applies: e-invoicing is an obligation of
+    // VAT-registered sellers. Blocking a residential-only manager on a link
+    // they do not owe would brick every contract-less invoice they issue.
+    assert.equal(await checkSellerLink(tx, userId, sellerId), null);
+  });
 });

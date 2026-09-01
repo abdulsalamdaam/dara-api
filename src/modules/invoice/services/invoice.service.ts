@@ -16,6 +16,8 @@ import { InvoiceBuilderService, type InvoiceLineInput, todayIsoDate, todayIsoTim
 import { InvoiceSignerService } from "./invoice-signer.service";
 import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
+import { withSellerChainLock } from "./chain-lock";
+import { resolveStandaloneSellerId } from "../../../common/invoice-readiness";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -69,8 +71,27 @@ export class InvoiceService {
    *
    * Failures at step 4 still write a row with status="error" so the caller
    * can retry submission later via `resubmit()`.
+   *
+   * Serialized per seller — see `withSellerChainLock`. Steps 1 and 6 are a
+   * read-modify-write of a counter that ZATCA requires to be strictly
+   * sequential, with a network round trip in between, so two concurrent
+   * issues for one seller must not interleave.
    */
   async issue(userId: number, dto: CreateInvoiceDto): Promise<IssueResult> {
+    // Resolve the seller HERE, before the lock, for two reasons. The lock is
+    // keyed by seller, so a key computed from a different id than the chain the
+    // body ends up touching would protect nothing. And the readiness gate
+    // resolves it this way too — leaving `issue()` on a bare `dto.ownerId`
+    // meant an account whose only credentials are per-landlord passed a gate
+    // that had checked the account holder's link, then failed here with
+    // "Seller profile not configured" about the account-level row nothing can
+    // create.
+    const ownerId = dto.ownerId ?? (await resolveStandaloneSellerId(this.db, userId));
+    return withSellerChainLock(userId, ownerId, () =>
+      this.issueUnderChainLock(userId, { ...dto, ownerId }));
+  }
+
+  private async issueUnderChainLock(userId: number, dto: CreateInvoiceDto): Promise<IssueResult> {
     if (!dto.lines?.length) throw new BadRequestException("invoice must have at least one line");
     if (!dto.invoiceNumber) throw new BadRequestException("invoiceNumber required");
 

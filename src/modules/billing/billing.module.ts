@@ -28,6 +28,7 @@ import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
+import { CHAIN_BUSY } from "../invoice/services/chain-lock";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
@@ -48,7 +49,7 @@ type ZatcaSubmitOutcome =
        * CREDENTIALS, so nothing was filed, no ICV was spent, and no amount of
        * correcting the document will help — the seller has to link again.
        */
-      code: "not_linked" | "not_onboarded" | "link_invalid" | "no_items" | "skipped" | "not_required" | "error";
+      code: "not_linked" | "not_onboarded" | "link_invalid" | "chain_busy" | "no_items" | "skipped" | "not_required" | "error";
       reason: string;
     };
 
@@ -1411,7 +1412,7 @@ class SimpleInvoicesController {
         // document, so it must stay re-submittable and must NOT block a
         // contract rebuild.
         status = o.code === "error" ? "failed"
-          : (o.code === "not_linked" || o.code === "not_onboarded" || o.code === "link_invalid") ? "pending"
+          : (o.code === "not_linked" || o.code === "not_onboarded" || o.code === "link_invalid" || o.code === "chain_busy") ? "pending"
           : "skipped";
         error = o.reason ?? null;
       }
@@ -1577,6 +1578,14 @@ class SimpleInvoicesController {
       // writes an invoices row or advances the ICV — so this document has not
       // travelled and must not be recorded as though it had.
       const body = e?.response ?? (typeof e?.getResponse === "function" ? e.getResponse() : null);
+      // The seller's chain was busy for longer than we were willing to queue.
+      // Nothing was sent and no ICV moved, so this belongs with the other
+      // "not sent" outcomes and must stay retryable — calling it a failure
+      // would also let it block a contract rebuild.
+      if (body && typeof body === "object" && (body as any).error === CHAIN_BUSY) {
+        this.logger.warn(`ZATCA: ${doc?.number} not sent — the seller's chain was busy`);
+        return { submitted: false, code: "chain_busy", reason: String((body as any).message ?? "Seller chain busy") };
+      }
       if (body && typeof body === "object" && (body as any).error === "zatca_link_invalid") {
         const b = body as any;
         this.logger.warn(`ZATCA: ${doc?.number} not sent — ZATCA refused the credentials (HTTP ${b.httpStatus ?? "?"})`);

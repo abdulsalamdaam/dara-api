@@ -554,3 +554,72 @@ export function readinessMessage(
     .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.join("، ")}`)
     .join(" | ");
 }
+
+/**
+ * Is this seller linked to ZATCA, asked on its own?
+ *
+ * The full gate above answers a question about a whole document. A caller that
+ * only holds a seller — the contract-less e-invoice path, which has no contract
+ * to read parties from — needs just this half, and must reach it through the
+ * same code the gate uses so the two can never disagree about what "linked"
+ * means.
+ *
+ * The VAT registration comes first for the same reason it does everywhere else
+ * here: e-invoicing is an obligation of VAT-registered sellers, so an account
+ * with no VAT number is not owed a link and must not be blocked on one.
+ */
+export async function checkSellerLink(
+  db: Drizzle,
+  userId: number,
+  ownerId: number | null,
+): Promise<InvoiceBlocker | null> {
+  if (!(await sellerIsVatRegistered(db, userId, ownerId))) return null;
+  return sellerZatcaBlocker(db, userId, ownerId, null);
+}
+
+/**
+ * What the buyer of a ZATCA e-invoice must carry for the profile it is being
+ * filed under.
+ *
+ * Deliberately NOT `buyerBlockers` above: that one governs OUR record of a
+ * customer (e-mail and phone included, so an invoice can actually be delivered
+ * and a person contacted), and those are not fields of a `BuyerSnapshot` at
+ * all. This one governs the DOCUMENT — only what ZATCA reads off the XML.
+ *
+ * The split by profile is the split between the two document types. A
+ * simplified (B2C) invoice is issued to a walk-in consumer: it is merely
+ * reported, and states nothing about the buyer beyond a name. A standard (B2B)
+ * invoice goes to clearance, where the buyer is a taxable person who must be
+ * identified in full — VAT number, national address, and an identifier.
+ *
+ * `id` and `idScheme` are demanded together because the builder emits the buyer
+ * `PartyIdentification` only when it holds both, and rightly so: an identifier
+ * with no scheme is not something UBL can express. Accepting one without the
+ * other therefore does not produce a partially-identified buyer, it produces an
+ * unidentified one — silently, on the document that most needs the identifier.
+ */
+export function eInvoiceBuyerBlockers(
+  buyer: {
+    name?: unknown; vat?: unknown; id?: unknown; idScheme?: unknown;
+    street?: unknown; buildingNo?: unknown; district?: unknown;
+    city?: unknown; postalZone?: unknown;
+  } | null | undefined,
+  profile: "standard" | "simplified",
+): string[] {
+  const b = buyer ?? {};
+  const missing: string[] = [];
+  if (blank(b.name)) missing.push("name");
+  if (profile !== "standard") return missing;
+  if (blank(b.vat)) missing.push("vat");
+  // The snapshot's own field names, not `ADDRESS_REQUIRED`'s: these keys travel
+  // back to a form that is bound to the document, not to a tenant record.
+  for (const [key, v] of [
+    ["street", b.street], ["buildingNo", b.buildingNo], ["district", b.district],
+    ["city", b.city], ["postalZone", b.postalZone],
+  ] as const) {
+    if (blank(v)) missing.push(key);
+  }
+  if (blank(b.id)) missing.push("id");
+  if (blank(b.idScheme)) missing.push("idScheme");
+  return missing;
+}

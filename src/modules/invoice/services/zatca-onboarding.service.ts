@@ -14,6 +14,7 @@ import { ZatcaApiService, SANDBOX_OTP, type ZatcaEnv } from "./zatca-api.service
 import { encryptString, decryptString } from "../../../common/crypto/encryption";
 import { InvoiceBuilderService } from "./invoice-builder.service";
 import { InvoiceSignerService } from "./invoice-signer.service";
+import { withSellerChainLock } from "./chain-lock";
 
 /** PEM helpers — base64 → PEM block. */
 function wrapPem(b64: string, kind: "CERTIFICATE" | "PUBLIC KEY" | "EC PRIVATE KEY"): string {
@@ -629,8 +630,19 @@ export class ZatcaOnboardingService {
     await this.db.update(zatcaCredentialsTable).set(updates).where(eq(zatcaCredentialsTable.id, creds.id));
   }
 
-  /** Reset PIH chain back to the initial seed. Use only when starting fresh. */
+  /**
+   * Reset PIH chain back to the initial seed. Use only when starting fresh.
+   *
+   * Under the seller's chain lock, because this is the other writer of the same
+   * counter: a reset landing mid-submission is overwritten moments later when
+   * that submission commits its own ICV, leaving the chain head pointing past
+   * invoices this call has just soft-deleted.
+   */
   async resetChain(userId: number, env: ZatcaEnv, ownerId: number | null = null) {
+    return withSellerChainLock(userId, ownerId, () => this.resetChainUnderLock(userId, env, ownerId));
+  }
+
+  private async resetChainUnderLock(userId: number, env: ZatcaEnv, ownerId: number | null) {
     const creds = await this.getCredentials(userId, ownerId);
     if (!creds) return;
     const updates: Partial<ZatcaCredentials> =

@@ -442,6 +442,59 @@ for `cleared`/`reported`.
 
 ---
 
+### 2b-iv. The ZATCA chain is serial, and `POST /invoices` is a gate too
+
+**One seller, one submission at a time** — `services/chain-lock.ts`. A ZATCA
+chain is genuinely sequential: invoice N+1 carries ICV N+1 and a PIH that is the
+hash of invoice N. `issue()` read the counter, spent up to 30s at ZATCA, then
+wrote it back, so two approvals for one landlord arriving together computed the
+same ICV — colliding on `invoices_user_owner_env_icv_uniq` *after* the document
+was signed and submitted. `withSellerChainLock(userId, ownerId, fn)` now spans
+the whole submission.
+
+Three things about it that are not obvious and were each a bug first:
+
+- **A waiter must hold no connection.** The blocking `pg_advisory_lock` parks the
+  waiter on a connection; a queue on one busy landlord then eats the pool. Hence
+  `pg_try_advisory_lock` in a jittered retry loop, releasing between attempts.
+- **The holder must not draw on the REQUEST pool.** It holds a connection idle
+  across the ZATCA call while its own work needs one. With `max: 20` and 24
+  unrelated landlords approving at once, every connection is held by a holder
+  and each holder waits for a connection only another holder can free — a
+  deadlock that appears only above the pool size, and never in a small test.
+  Hence `createAuxPool` and a dedicated pool of 6.
+- **A failed unlock must not pool the connection.** A session-scoped lock lives
+  on the connection, so returning it would wedge that seller for the life of the
+  connection with nothing to explain it — `client.release(true)` destroys it
+  instead. And the unlock must never replace the body's error: `fn` throwing is
+  routine, and losing "ZATCA rejected this" to a driver message hides the only
+  useful fact.
+
+A chain that stays busy past the deadline throws `zatca_chain_busy`, which maps
+to `zatca_status = "pending"` — nothing was sent and no counter moved, so it must
+stay retryable and must not block a contract rebuild. `resetChain` takes the same
+lock; it is the only other writer of the counter.
+
+**`POST /invoices` no longer skips its gate.** The readiness check sat inside
+`if (body.contractId)`, so a contract-less call was checked for nothing at all.
+It now validates the seller's link and, on every path, the buyer — before
+anything is signed, because a refusal after signing has already spent an ICV that
+cannot be reclaimed. `eInvoiceBuyerBlockers` is deliberately NOT `buyerBlockers`:
+that one governs our RECORD of a customer (e-mail, phone, so an invoice can be
+delivered), this one governs the DOCUMENT — only what ZATCA reads off the XML,
+which for a standard invoice is a VAT number, the national address, and `id`
+**with** `idScheme` (the builder emits the identification only when it has both).
+
+`CreateInvoiceDto` is a TS *interface*, so `ValidationPipe({whitelist:true})`
+resolves its metatype to `Object` and validates nothing: `profile`, `docType`,
+`submitTo` and `ownerId` are raw client input at runtime. They are checked
+explicitly now. `submitTo` may not contradict the profile (clearance is B2B,
+reporting is B2C) and `compliance` cannot be requested at all — the service
+chooses it for sandbox and simulation, and a live seller asking for it would
+spend a real ICV on a document ZATCA files nowhere.
+
+---
+
 ## 3. Packages, roles and account classification
 
 - Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,
