@@ -155,6 +155,12 @@ export function isOnboarded(creds: typeof zatcaCredentialsTable.$inferSelect | u
   // linked, and the difference is invisible from our side until a submission
   // comes back 401.
   if (creds.linkInvalidAt) return false;
+  // The prod slot is holding a COMPLIANCE certificate — onboarding reached step
+  // 2 of 4 and stopped. Every column below is filled, which is exactly why this
+  // has to be asked first: a compliance certificate signs perfectly well and is
+  // refused by /core, so treating the row as onboarded means real invoices go
+  // out signed with something ZATCA will not accept.
+  if (creds.prodSlotEnv?.startsWith("compliance") && creds.activeEnvironment !== "sandbox") return false;
   const sandbox = creds.activeEnvironment === "sandbox";
   const cert = sandbox ? creds.sandboxCertPem : creds.prodCertPem;
   const key = sandbox ? creds.sandboxPrivateKeyEnc : creds.prodPrivateKeyEnc;
