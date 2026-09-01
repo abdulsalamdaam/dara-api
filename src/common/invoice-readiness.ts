@@ -161,6 +161,12 @@ export function isOnboarded(creds: typeof zatcaCredentialsTable.$inferSelect | u
   // refused by /core, so treating the row as onboarded means real invoices go
   // out signed with something ZATCA will not accept.
   if (creds.prodSlotEnv?.startsWith("compliance") && creds.activeEnvironment !== "sandbox") return false;
+  // The prod slot is holding a SANDBOX certificate. `issueProductionCsid` reads
+  // whichever slot `source` names but always writes the prod columns, so a
+  // sandbox promotion parks a developer-portal certificate there. Nothing else
+  // notices — and one ungated switchEnvironment("simulation") would then read
+  // the row as onboarded over a certificate the simulation gateway refuses.
+  if (creds.prodSlotEnv === "sandbox" && creds.activeEnvironment !== "sandbox") return false;
   const sandbox = creds.activeEnvironment === "sandbox";
   const cert = sandbox ? creds.sandboxCertPem : creds.prodCertPem;
   const key = sandbox ? creds.sandboxPrivateKeyEnc : creds.prodPrivateKeyEnc;
