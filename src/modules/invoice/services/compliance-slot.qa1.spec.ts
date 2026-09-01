@@ -473,17 +473,20 @@ test("QA1-C1 a step-2 seller cannot issue an INVOICE — refused before issue()"
  * linked — so the refusal moved to where every caller must pass it, inside
  * `InvoiceService.issue()`, immediately after `getActiveCredentials`.
  *
- * Two tests, because the fix has two halves and either alone would be a lie:
- * the controller still FORWARDS a note (the exemption survives), and `issue()`
- * REFUSES it (the document is never signed).
+ * The note exemption is gone. It was written on the premise that a note
+ * corrects an invoice that already went out, so it must stay issuable even
+ * after the link is revoked — but with a revoked link there is no certificate
+ * ZATCA accepts, so such a note could never be filed. Both doors close now.
  * ─────────────────────────────────────────────────────────────────────────
  */
 for (const docType of ["credit", "debit"] as const) {
-  test(`QA1-C2 the controller still forwards a ${docType} note — the exemption survives`, { skip }, async () => {
+  test(`QA1-C2 a ${docType} note from an un-onboarded seller is refused at the door`, { skip }, async () => {
     await withCommittedRow(STEP_TWO, async (ownerId) => {
       const { controller, calls } = harness();
-      await controller.create(user, body({ ownerId, docType, billingReferenceId: "INV-1" }) as never);
-      assert.equal(calls.length, 1, "notes must stay issuable for a link revoked after the original was filed");
+      await assert.rejects(
+        () => controller.create(user, body({ ownerId, docType, billingReferenceId: "INV-1" }) as never),
+      );
+      assert.equal(calls.length, 0, "nothing may reach the signer");
     });
   });
 }
@@ -562,14 +565,17 @@ test("QA1-C2c baseline — a promoted seller gets PAST that gate", { skip }, asy
  * not what the comment says the code does. Pinned so the decision is explicit.
  * ─────────────────────────────────────────────────────────────────────────
  */
-test("QA1-C5 a note under a REVOKED link is refused too — the exemption is now dead", { skip }, async () => {
+test("QA1-C5 a note under a REVOKED link is refused, at both doors", { skip }, async () => {
   const revoked = { ...PROMOTED, linkInvalidAt: new Date(), linkInvalidReason: "ZATCA 401" };
   await withCommittedRow(revoked, async (ownerId) => {
-    // The controller still lets it through…
+    // The controller refuses it now — the exemption that used to wave notes
+    // through is gone, because a revoked link cannot sign anything ZATCA takes.
     const { controller, calls } = harness();
-    await controller.create(user, body({ ownerId, docType: "credit", billingReferenceId: "INV-1" }) as never);
-    assert.equal(calls.length, 1);
-    // …and issue() refuses it anyway.
+    await assert.rejects(
+      () => controller.create(user, body({ ownerId, docType: "credit", billingReferenceId: "INV-1" }) as never),
+    );
+    assert.equal(calls.length, 0);
+    // And issue() would refuse it too, so no other caller can be the gap.
     await assert.rejects(
       () => realInvoiceService().issue(userId, issueDto(ownerId, { docType: "credit", billingReferenceId: "INV-1" }) as never),
       (e: unknown) => {
@@ -887,7 +893,7 @@ test("QA1-E4 a simulation seller promotes on the simulation gateway and reads on
   });
 });
 
-test("QA1-E5 source='sandbox' promotes the developer-portal CSID and labels the slot 'sandbox'", { skip }, async () => {
+test("QA1-E5 a sandbox promotion is labelled 'sandbox' and never reads as onboarded", { skip }, async () => {
   // No longer mislabelled "simulation". The asymmetry remains, though: the
   // SANDBOX compliance material is read and the result is written to the PROD
   // columns — see the report. Pinned here so a later change to that is visible.
@@ -902,10 +908,13 @@ test("QA1-E5 source='sandbox' promotes the developer-portal CSID and labels the 
         .where(eq(zatcaCredentialsTable.id, credsId));
       assert.equal(row!.prodSlotEnv, "sandbox");
       assert.equal(row!.activeEnvironment, "sandbox", "a sandbox promotion must not move the pointer");
+      // And it stays un-onboarded even if the pointer is moved onto it. The
+      // certificate in the prod columns came from the DEVELOPER PORTAL, so the
+      // simulation gateway will refuse it — `isOnboarded` now says so rather
+      // than letting one ungated switchEnvironment make the row look live.
       assert.equal(
-        isOnboarded({ ...row!, activeEnvironment: "simulation" } as never), true,
-        "REMAINING: a developer-portal certificate in the prod slot still reads as onboarded " +
-        "once the ungated switchEnvironment('simulation') moves the pointer onto it",
+        isOnboarded({ ...row!, activeEnvironment: "simulation" } as never), false,
+        "a sandbox certificate in the prod slot must never read as onboarded",
       );
     },
   );
