@@ -40,10 +40,29 @@ before(async () => {
   );
   QA_USER = rows[0].id;
   user = { id: QA_USER, email: "invoices-gate-qa@dara.local", role: "user" };
+  // A linked account-level seller. Issuing a tax invoice requires one
+  // unconditionally, so without this every case below would be refused at the
+  // seller gate and the "refused for THIS reason" assertions would all pass
+  // vacuously.
+  await getPool().query(
+    `insert into zatca_credentials
+       (user_id, owner_id, active_environment, seller_name, seller_vat_number,
+        seller_street, seller_building_no, seller_district, seller_city, seller_postal_zone,
+        serial_number, organization_identifier, organization_unit_name,
+        location_address, industry_category, common_name,
+        sandbox_cert_pem, sandbox_private_key_enc, sandbox_binary_security_token, sandbox_secret_enc)
+     values ($1, null, 'sandbox', 'QA Seller', '300000000000003',
+             'S', '1', 'D', 'Riyadh', '12211',
+             '1-Dara|2-QA|3-0001', '300000000000003', 'QA Unit',
+             'Riyadh', 'Real Estate', 'QA',
+             'CERT', 'KEY', 'TOKEN', 'SECRET')`,
+    [QA_USER],
+  );
 });
 
 after(async () => {
   if (!HAS_DB) return;
+  await getPool().query("delete from zatca_credentials where user_id = $1", [QA_USER]);
   await getPool().query("delete from users where id = $1", [QA_USER]);
   await getPool().end();
 });

@@ -179,7 +179,13 @@ export class InvoicesController {
       // be skipped entirely: `if (body.contractId)` around the whole gate meant
       // a contract-less call was checked for nothing at all.
       const sellerId = body.ownerId ?? await resolveStandaloneSellerId(this.db, scoped);
-      const sellerBlocker = await checkSellerLink(this.db, scoped, sellerId);
+      // A credit or debit note corrects an invoice that has ALREADY gone out.
+      // The billing side exempts notes from this gate for exactly that reason
+      // ("it must stay issuable"), and the two doors have to give the same
+      // answer — otherwise a link revoked after the original was filed would
+      // leave the correction issuable on one endpoint and refused on the other.
+      const isNote = body.docType === "credit" || body.docType === "debit";
+      const sellerBlocker = isNote ? null : await checkSellerLink(this.db, scoped, sellerId);
       if (sellerBlocker) {
         const readiness = readinessOf([sellerBlocker], sellerId);
         throw new BadRequestException({

@@ -207,10 +207,13 @@ request a production CSID with an OTP the taxpayer generates in the Fatoora
 portal. That OTP cannot be automated — it belongs to the taxpayer, per VAT
 number. Only then does `activeEnvironment` move to `production`.
 
-Also: e-invoicing only applies to VAT-registered sellers, and the billing
-module deliberately skips documents whose lines are all exempt/out-of-scope
+Also: ZATCA only *wants* documents from VAT-registered sellers, and the billing
+module deliberately skips ones whose lines are all exempt/out-of-scope
 (residential rent) — a skipped submission there is correct behaviour, not a
-broken integration. In production 12 of 19 VAT-registered landlords have no
+broken integration. Note this is no longer the same thing as who may ISSUE:
+since 01 Sep 2026 the gate requires every seller of a tax invoice to be linked,
+registered or not (§2b-iii), so a seller can be obliged to link for documents
+ZATCA will then decline to receive. In production 12 of 19 VAT-registered landlords have no
 credentials row at all, so their invoices skip with `not_linked`.
 
 ### 2b-i. ZATCA onboarding flow, the B2C signing wall, and how to test it
@@ -389,6 +392,36 @@ needs. `BuyerSnapshot` gained `id`/`idScheme` and the builder now emits
 `<cac:PartyIdentification>` inside `AccountingCustomerParty` — **standard
 invoices only**: a B2C buyer has no identifier to state and ZATCA does not ask
 for one. Valid schemes are CRN, MOM, MLS, SAG, OTH, 700 — never NAT or IQA.
+
+**No tax invoice is issued by an unlinked seller — unconditionally.** The gate
+first demanded the ZATCA link only of a VAT-registered seller, on the reasoning
+that e-invoicing is an obligation of registered sellers and an unregistered one
+should not be blocked on a link they do not owe. The product rule is stricter:
+issuing a tax invoice requires the seller to be linked, whatever their
+registration says. Applied identically on the contract path, the free path and
+`checkSellerLink` (which `POST /invoices` uses) — except for credit and debit
+notes, which the billing side has always exempted because they correct an
+invoice that already went out, and which `POST /invoices` now exempts too.
+
+**The link implies a VAT number, so the gate names both.** Onboarding cannot
+proceed without one: `POST /zatca/profile` requires it, the settings tab
+replaces the Onboard button with "N/A" without it, and ZATCA keys the CSR to it.
+Telling an unregistered seller only "link with ZATCA" therefore sent them to a
+screen offering them nothing — a dead end with no way out. `sellerVatBlocker`
+names the missing VAT number alongside the link, so the route is add-then-link.
+The VAT half refuses the SAVE (it is a field on a record) and the link half only
+the approval (it is an account errand), which is the same split as everywhere.
+
+**The cost is large and deliberate.** Measured on staging, 01 Sep 2026: 52
+landlords, of which 22 are VAT-registered and **7 actually onboarded**; 5 of 19
+accounts hold any ZATCA link at all. So 45 of 52 landlords cannot approve
+anything until they onboard. Drafts are unaffected — this is the one blocker
+excluded from `draftBlockers` — so bookkeeping continues and only issuance
+waits. Note also that a document whose lines are all exempt (residential rent)
+still needs the link even though `runZatcaSubmission` would skip it as
+`not_required`: the seller must be linked to issue, regardless of whether that
+particular document is ever submitted. If that combination needs relaxing, the
+condition to restore is the VAT check on `sellerZatcaBlocker`'s three call sites.
 
 **Who signs a free invoice.** `resolveStandaloneSellerId`: the account-level
 credentials row (`owner_id IS NULL`) when one exists, otherwise the
@@ -821,14 +854,16 @@ makes that claim true rather than aspirational.
   legacy `*.oqudk.com` routers live in
   `/data/coolify/proxy/dynamic/dara-rebrand.yaml`, which Coolify does not manage.
 
-- **A landlord with no VAT number cannot save a tax invoice at all.** The
-  create-time gate requires `owner.taxNumber`, so a non-VAT-registered landlord
-  (most residential-only ones — residential rent is exempt) is refused at SAVE,
-  not just at approve. This is the pre-rebuild behaviour restored deliberately:
-  a document whose seller has no VAT number is not a tax invoice. But it is a
-  real dead end for that population, and the honest fix is a non-tax document
-  type for them rather than a gate that lets a tax invoice through. Decide
-  before anyone in that group tries to bill.
+- **A landlord with no VAT number cannot save a tax invoice, and no landlord can
+  approve one without a ZATCA link.** The create-time gate requires
+  `owner.taxNumber`, so a non-VAT-registered landlord (most residential-only
+  ones — residential rent is exempt) is refused at SAVE; and since 01 Sep 2026
+  the approval gate demands the ZATCA link of every seller unconditionally, so
+  45 of 52 landlords on staging cannot approve at all until they onboard. Both
+  are deliberate product decisions, and both are dead ends for that population.
+  The honest fix remains a non-tax document type for sellers outside
+  e-invoicing, rather than a gate that lets a tax invoice through. Decide before
+  anyone in that group tries to bill.
 
 - **`prod_icv` / `prod_pih` survive a simulation rehearsal into production.**
   Neither `issueComplianceCsid` nor `issueProductionCsid` resets them, and

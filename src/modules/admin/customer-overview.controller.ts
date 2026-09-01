@@ -398,12 +398,16 @@ export class AdminCustomerOverviewController {
   /**
    * ZATCA footprint, or `null` when the customer has none at all.
    *
-   * `null` means e-invoicing does not apply to this account (no
-   * VAT-registered landlord, no credentials, nothing ever filed) — a real
-   * answer, and different from an account that is registered but has
-   * submitted nothing.
+   * `null` means the account has no landlords, no credentials and nothing ever
+   * filed — a real answer, and different from an account that has landlords but
+   * has submitted nothing.
    *
-   *  - `landlordsTotal` — landlords the rules apply to: VAT-registered ones.
+   *  - `landlordsTotal` — EVERY landlord, not only the VAT-registered ones.
+   *    Since a tax invoice may only be issued by a linked seller, an unlinked
+   *    landlord is blocked whatever their registration says — so counting only
+   *    the registered ones made this read "5 of 5, green" for an account with
+   *    47 more landlords that could not approve anything. The denominator has
+   *    to be the population the rule applies to, and that is all of them.
    *  - `landlordsOnboarded` — landlords whose CURRENT environment actually
    *    holds complete CSID material. This is `isOnboarded()` from
    *    `common/invoice-readiness.ts` expressed in SQL, and it is deliberately
@@ -435,10 +439,13 @@ export class AdminCustomerOverviewController {
         credentials: sql<number>`(select count(*)::int from zatca_credentials z
           where z.user_id = ${acct} and z.deleted_at is null)`,
         landlordsTotal: sql<number>`(select count(*)::int from owners o
-          where o.user_id = ${acct} and o.deleted_at is null
-            and nullif(btrim(o.tax_number), '') is not null)`,
+          where o.user_id = ${acct} and o.deleted_at is null)`,
+        // Landlord rows only: the account-level seller (owner_id null) is not a
+        // landlord, and counting it here let the numerator exceed the
+        // denominator.
         landlordsOnboarded: sql<number>`(select count(*)::int from zatca_credentials z
-          where z.user_id = ${acct} and z.deleted_at is null and ${onboardedSql})`,
+          where z.user_id = ${acct} and z.owner_id is not null
+            and z.deleted_at is null and ${onboardedSql})`,
         environments: sql<string[] | null>`(select array_agg(distinct z.active_environment::text)
           from zatca_credentials z
           where z.user_id = ${acct} and z.deleted_at is null)`,

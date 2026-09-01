@@ -142,7 +142,7 @@ test("(a) missing tenant email blocks and names the tenant", { skip: !HAS_DB && 
   });
 });
 
-test("(b) missing landlord VAT blocks — and does not demand ZATCA", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+test("(b) missing landlord VAT blocks, and ZATCA is demanded regardless", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   await withScenario({ ownerVat: null, zatca: "none" }, async () => {}, (r, ctx) => {
     assert.equal(r.ok, false);
     const b = blockerFor(r, "landlord");
@@ -150,9 +150,11 @@ test("(b) missing landlord VAT blocks — and does not demand ZATCA", { skip: !H
     assert.deepEqual(b!.missing, ["vatNumber"]);
     assert.equal(b!.id, ctx.ownerId);
     assert.equal(b!.action, "edit_landlord");
-    // No VAT number means no e-invoicing obligation yet, so onboarding is not
-    // demanded on top — that would be two contradictory instructions at once.
-    assert.equal(blockerFor(r, "zatca"), undefined);
+    // The link is owed by every seller of a tax invoice, not only by a
+    // registered one. This used to be conditional on the VAT number so as not
+    // to give an unregistered landlord two contradictory instructions at once;
+    // the product's rule is that nothing is issued from an unlinked seller.
+    assert.ok(blockerFor(r, "zatca"), "an unlinked seller cannot issue, VAT number or not");
   });
 });
 
@@ -411,14 +413,26 @@ test("a link ZATCA has revoked reads as unlinked, and says so distinctly", { ski
   });
 });
 
-test("an account that is not VAT-registered is not asked to link ZATCA", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+test("an account with no VAT number is asked to link ZATCA all the same", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   await withAccountHolder({ zatca: "none", holderVat: null }, (r) => {
-    // E-invoicing applies to VAT-registered sellers. Demanding the link of an
-    // account that has no VAT number would brick every free invoice for a
-    // residential-only manager whose supplies are exempt — permanently, over an
-    // obligation they do not have. Same rule the contract path already applies.
-    assert.equal(r.ok, true, `expected issuable, got ${JSON.stringify(r.blockers)}`);
-    assert.equal(r.blockers.find((b) => b.entity === "zatca"), undefined);
+    // The rule is about issuing, not about registration: a tax invoice comes
+    // from a linked seller or it does not come at all. The cost is real and
+    // deliberate — most landlords have not onboarded, and none of them can
+    // approve until they do — so it is pinned here rather than left implicit.
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.blockers.find((b) => b.entity === "zatca")?.missing, ["zatcaNotConfigured"]);
+    // And the VAT number is named alongside it, because the link cannot be
+    // obtained without one — onboarding requires it, the settings tab hides the
+    // button without it, and ZATCA keys the CSR to it. Saying only "link with
+    // ZATCA" would send this user to a screen offering them nothing.
+    assert.deepEqual(r.blockers.find((b) => b.entity === "landlord")?.missing, ["vatNumber"]);
+    // The two halves land where they belong. The VAT number is a field on a
+    // record the user can edit, so it refuses the SAVE — the same treatment the
+    // contract path has always given a landlord's missing VAT number. The link
+    // is an account errand, so it refuses only the approval.
+    assert.equal(r.draftOk, false);
+    assert.deepEqual(r.draftBlockers.map((b) => b.entity), ["landlord"]);
+    assert.ok(r.blockers.some((b) => b.entity === "zatca"), "the link is approval-side only");
   });
 });
 
@@ -534,12 +548,15 @@ test("a linked seller is not a blocker", { skip: !HAS_DB && "DATABASE_URL not se
   });
 });
 
-test("a seller with no VAT number is never asked to link", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+test("a seller with no VAT number is still asked to link", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
   await withAccountHolder({ zatca: "none", holderVat: null }, async (_r, tx) => {
     const sellerId = await resolveStandaloneSellerId(tx, userId);
-    // Same rule the whole file applies: e-invoicing is an obligation of
-    // VAT-registered sellers. Blocking a residential-only manager on a link
-    // they do not owe would brick every contract-less invoice they issue.
-    assert.equal(await checkSellerLink(tx, userId, sellerId), null);
+    // `checkSellerLink` is what POST /invoices asks, and it has to give the
+    // same answer as the gate — an unlinked seller issues nothing, registered
+    // or not. The two disagreeing is how a document passes one door and fails
+    // the next.
+    const b = await checkSellerLink(tx, userId, sellerId);
+    assert.ok(b, "an unlinked seller must be refused here too");
+    assert.equal(b!.action, "zatca_settings");
   });
 });

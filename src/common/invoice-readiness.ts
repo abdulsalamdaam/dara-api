@@ -146,7 +146,7 @@ async function resolveOwnerId(db: Drizzle, contractId: number): Promise<number |
  * operating in? A row alone is not enough — onboarding only completes once the
  * CSID material for that environment exists.
  */
-function isOnboarded(creds: typeof zatcaCredentialsTable.$inferSelect | undefined): boolean {
+export function isOnboarded(creds: typeof zatcaCredentialsTable.$inferSelect | undefined | null): boolean {
   if (!creds) return false;
   // ZATCA has stopped accepting these credentials — the device was removed in
   // Fatoora, or the CSID was revoked. Everything below still passes (the
@@ -203,32 +203,48 @@ export async function resolveStandaloneSellerId(db: Drizzle, userId: number): Pr
 }
 
 /**
- * Is the seller of a contract-less document VAT-registered, and therefore
- * obliged to e-invoice at all?
+ * The seller's VAT number, which the link now depends on.
  *
- * Read from the landlord record when there is one, and otherwise from the
- * account-level seller profile — which is the only place an account-level
- * seller states a VAT number.
+ * "Every seller must be linked" implies "every seller must be VAT-registered",
+ * because a VAT number is the one thing onboarding cannot proceed without:
+ * `POST /zatca/profile` requires it, the settings tab replaces the Onboard
+ * button with "N/A" without it, and ZATCA keys the CSR to it as the
+ * organization identifier.
+ *
+ * So an unregistered seller told only "link with ZATCA" is sent to a screen
+ * that offers them nothing — a dead end with no sequence of actions out of it.
+ * Naming the missing VAT number alongside the link turns that into a route:
+ * add the number, then onboard. The contract path has always done this (its
+ * landlord blocker demands `vatNumber`); this is the free path catching up.
  */
-async function sellerIsVatRegistered(db: Drizzle, userId: number, ownerId: number | null): Promise<boolean> {
-  if (ownerId != null) {
-    const [owner] = await db
-      .select({ taxNumber: ownersTable.taxNumber })
-      .from(ownersTable)
-      .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)))
+async function sellerVatBlocker(
+  db: Drizzle,
+  userId: number,
+  ownerId: number | null,
+): Promise<InvoiceBlocker | null> {
+  if (ownerId == null) {
+    // The account-level seller states its VAT number on the profile itself.
+    const [creds] = await db
+      .select({ vat: zatcaCredentialsTable.sellerVatNumber })
+      .from(zatcaCredentialsTable)
+      .where(and(
+        eq(zatcaCredentialsTable.userId, userId),
+        isNull(zatcaCredentialsTable.ownerId),
+        isNull(zatcaCredentialsTable.deletedAt),
+      ))
       .limit(1);
-    return !blank(owner?.taxNumber);
+    // No row at all is reported by the ZATCA blocker, not twice over here.
+    return creds && blank(creds.vat)
+      ? { entity: "landlord", id: null, name: null, missing: ["vatNumber"], action: "zatca_settings" }
+      : null;
   }
-  const [creds] = await db
-    .select({ vat: zatcaCredentialsTable.sellerVatNumber })
-    .from(zatcaCredentialsTable)
-    .where(and(
-      eq(zatcaCredentialsTable.userId, userId),
-      isNull(zatcaCredentialsTable.ownerId),
-      isNull(zatcaCredentialsTable.deletedAt),
-    ))
+  const [owner] = await db
+    .select({ id: ownersTable.id, name: ownersTable.name, taxNumber: ownersTable.taxNumber })
+    .from(ownersTable)
+    .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt)))
     .limit(1);
-  return !blank(creds?.vat);
+  if (!owner || !blank(owner.taxNumber)) return null;
+  return { entity: "landlord", id: owner.id, name: owner.name, missing: ["vatNumber"], action: "edit_landlord" };
 }
 
 /** Load the seller's credentials row and report it as a blocker if unusable. */
@@ -387,17 +403,14 @@ async function standaloneReadiness(
   }
 
   // The seller. A free invoice is still a tax invoice, so the account has to be
-  // linked to ZATCA before it can be issued — and, exactly as on the contract
-  // path, the VAT number is what triggers that. Demanding the link
-  // unconditionally would permanently block every free invoice for an account
-  // that is not VAT-registered at all (a residential-only manager, whose
-  // supplies are exempt and whose documents ZATCA does not want), which is the
-  // opposite of the point.
+  // linked to ZATCA before it can be issued — the same unconditional rule the
+  // contract path applies to its landlord. The VAT number rides with it because
+  // the link cannot be obtained without one; see `sellerVatBlocker`.
   const sellerId = await resolveStandaloneSellerId(db, userId);
-  if (await sellerIsVatRegistered(db, userId, sellerId)) {
-    const sellerBlocker = await sellerZatcaBlocker(db, userId, sellerId, null);
-    if (sellerBlocker) blockers.push(sellerBlocker);
-  }
+  const vatBlocker = await sellerVatBlocker(db, userId, sellerId);
+  if (vatBlocker) blockers.push(vatBlocker);
+  const sellerBlocker = await sellerZatcaBlocker(db, userId, sellerId, null);
+  if (sellerBlocker) blockers.push(sellerBlocker);
 
   return readinessOf(blockers, { confirmations, tenantId, ownerId: sellerId });
 }
@@ -517,16 +530,20 @@ export async function checkInvoiceReadiness(
     }
 
     /* ── ZATCA ──
-     * Having a VAT number is the trigger: the moment a landlord is
-     * VAT-registered, their invoices are e-invoices and must be signed with
-     * that landlord's own CSID. A VAT number with no completed onboarding is
-     * the single most common way to produce an invoice ZATCA rejects, so it
-     * blocks and points at Settings.
+     * No tax invoice is issued by an unlinked seller. This used to trigger only
+     * on a VAT number — the reasoning being that e-invoicing is an obligation
+     * of registered sellers, so an unregistered landlord was not owed a link
+     * and should not be blocked on one. The product's rule is stricter: issuing
+     * a tax invoice at all requires the seller to be linked to ZATCA, whatever
+     * their registration says.
      *
-     * This is the ONLY blocker excluded from `draftBlockers`: it is an account
-     * errand (certificate + a Fatoora OTP), not a field on the invoice, so it
-     * is demanded at approval rather than at save. */
-    if (!blank(owner.taxNumber)) {
+     * The practical consequence is worth stating plainly, because it is large:
+     * a landlord who has not onboarded cannot approve anything, and most have
+     * not. Drafts are unaffected — this is the ONE blocker excluded from
+     * `draftBlockers`, since linking is an account errand (a certificate and a
+     * Fatoora OTP) rather than a field on the invoice, so bookkeeping continues
+     * and only issuance waits. */
+    {
       const b = await sellerZatcaBlocker(db, userId, owner.id, owner.name);
       if (b) blockers.push(b);
     }
@@ -564,16 +581,14 @@ export function readinessMessage(
  * same code the gate uses so the two can never disagree about what "linked"
  * means.
  *
- * The VAT registration comes first for the same reason it does everywhere else
- * here: e-invoicing is an obligation of VAT-registered sellers, so an account
- * with no VAT number is not owed a link and must not be blocked on one.
+ * Unconditional, like the gate: a seller issues tax invoices only once linked,
+ * whatever their VAT registration says.
  */
 export async function checkSellerLink(
   db: Drizzle,
   userId: number,
   ownerId: number | null,
 ): Promise<InvoiceBlocker | null> {
-  if (!(await sellerIsVatRegistered(db, userId, ownerId))) return null;
   return sellerZatcaBlocker(db, userId, ownerId, null);
 }
 

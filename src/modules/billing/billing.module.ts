@@ -23,7 +23,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -1450,8 +1450,14 @@ class SimpleInvoicesController {
       const creds = await this.zatcaOnboarding.getCredentials(uid, ownerId);
       if (!creds) { this.logger.debug(`ZATCA: ${doc.number} skipped — seller not configured (ownerId=${ownerId})`); return { submitted: false, code: "not_linked", reason: "Landlord is not linked to ZATCA" }; }
       const env = creds.activeEnvironment;
-      const onboarded = env === "sandbox" ? !!creds.sandboxCertPem : !!creds.prodCertPem;
-      if (!onboarded) { this.logger.debug(`ZATCA: ${doc.number} skipped — landlord not onboarded for ${env}`); return { submitted: false, code: "not_onboarded", reason: `Landlord not onboarded for ${env}` }; }
+      // The SAME definition the gate uses, not a looser local one. This tested
+      // the certificate alone, so it disagreed with `isOnboarded` about a row
+      // holding a cert but no key, and about a link ZATCA has revoked — and the
+      // documents that skip the gate (credit/debit notes, tax-exempt kinds)
+      // reach here directly, so the difference was reachable: a note under a
+      // revoked link was submitted, 401'd, and recorded as a failure rather
+      // than as the dead link it was.
+      if (!isOnboarded(creds)) { this.logger.debug(`ZATCA: ${doc.number} skipped — landlord not onboarded for ${env}`); return { submitted: false, code: "not_onboarded", reason: `Landlord not onboarded for ${env}` }; }
 
       const contract = doc.contractId
         ? (await this.db.select().from(contractsTable)
