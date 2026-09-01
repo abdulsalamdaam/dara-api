@@ -460,6 +460,29 @@ on ZATCA's side or given a new serial. Promotion also short-circuits when the
 slot already holds a real production CSID, so a second click reports the
 onboarding that already finished instead of a red error.
 
+**The certificate's SAN is Latin-1, and it fails silently.** `utf8 = yes` sits in
+`[ req ]` and governs `distinguished_name` only. The
+`subjectAltName = dirName:alt_names` path is parsed with `MBSTRING_ASC`
+whatever the config says, so Arabic there is double-encoded — the same bug the
+subject was fixed for, still live in the other half. Worse, past roughly forty
+doubled bytes openssl abandons the attribute, **drops it and every attribute
+after it, and exits 0**: a real Riyadh address produced a CSR with no
+`registeredAddress` and no `businessCategory`, both ZATCA-mandated, with nothing
+raised anywhere. `csrField` now refuses non-ASCII in the five SAN fields
+(`serialNumber`, `organizationIdentifier`, `invoiceType`, `locationAddress`,
+`industryCategory`) and the onboarding screen sends the numeric parts of the
+national address instead. Arabic stays where it works: the subject, and the
+invoice XML's PostalAddress.
+
+**CSR fields are openssl CONFIG, not string literals.** They were substituted
+into the `.cnf` unescaped, so a newline started a new directive — enough to
+rewrite the `subjectAltName` that identifies the EGS unit — and `$ENV::NAME` was
+expanded by openssl, writing this process's secrets (`APP_ENCRYPTION_KEY`,
+`DATABASE_URL`) into a certificate subject the onboarding endpoint hands back and
+every invoice signature then carries. `csrField` refuses `\r`, `\n`, `$`
+anywhere, empty values and anything over 64 code points, at the single point all
+callers pass through.
+
 **Losing the link from ZATCA's side.** The taxpayer can delete our EGS device in
 the Fatoora portal, or ZATCA can revoke the CSID, and nothing tells us: the row
 still holds a certificate, a key and a secret, so every local check passes and

@@ -137,8 +137,13 @@ describe("CsrService — Arabic in the certificate subject", { skip: !shouldRun 
       organizationName: arabicName,
       countryName: "SA",
       invoiceType: "1100",
-      locationAddress: "الرياض",
-      industryCategory: "العقارات",
+      // ASCII, because these two land in the subjectAltName rather than the
+      // subject. `utf8 = yes` does not reach that section — openssl parses it
+      // as Latin-1 regardless — so Arabic there is double-encoded and then
+      // silently truncated away along with every attribute after it. The
+      // subject fields above are the ones this test is actually about.
+      locationAddress: "6802 32272 SA",
+      industryCategory: "Real estate",
     });
 
     const { execFileSync } = await import("node:child_process");
