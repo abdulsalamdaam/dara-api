@@ -15,7 +15,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { db, getPool, usersTable, ownersTable, zatcaCredentialsTable, ZATCA_INITIAL_PIH } from "@dara/database";
-import { ZatcaOnboardingService } from "./zatca-onboarding.service";
+import { ZatcaOnboardingService, nextEgsSerial } from "./zatca-onboarding.service";
 import { checkInvoiceReadiness } from "../../../common/invoice-readiness";
 
 const HAS_DB = !!process.env.DATABASE_URL;
@@ -289,4 +289,27 @@ test("promotion is not re-asked once the slot holds a real production CSID", { s
     assert.equal(r.httpStatus, 200);
     assert.equal(r.binarySecurityToken, "TOKEN");
   });
+});
+
+/* ── The EGS serial is what ZATCA calls a device ───────────────────────────
+ * Deleting the unit in the Fatoora portal does not change the serial in our
+ * CSR, so a re-onboard presented ZATCA the same device — the one it had
+ * already issued a production CSID for and would never issue another against.
+ */
+
+test("re-onboarding presents a new EGS generation", { skip: false }, () => {
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264"), "1-Dara|2-PMS|3-264-2");
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264-2"), "1-Dara|2-PMS|3-264-3");
+  // Two digits, not a string sort: the ninth re-link must not become "-91".
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264-9"), "1-Dara|2-PMS|3-264-10");
+  // Whitespace on a stored value must not produce a serial ZATCA reads
+  // differently from the one we recorded.
+  assert.equal(nextEgsSerial("  1-Dara|2-PMS|3-7  "), "1-Dara|2-PMS|3-7-2");
+});
+
+test("a landlord id containing digits is not mistaken for a generation", { skip: false }, () => {
+  // "3-264" is the id segment; only a suffix AFTER it is a generation. Getting
+  // this wrong would silently renumber the landlord rather than the device.
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024"), "1-Dara|2-PMS|3-1024-2");
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024-2"), "1-Dara|2-PMS|3-1024-3");
 });

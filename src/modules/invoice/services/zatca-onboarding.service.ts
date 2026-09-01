@@ -68,6 +68,26 @@ export interface DecryptedCreds {
   environment: ZatcaEnv;
 }
 
+/**
+ * The next generation of an EGS serial.
+ *
+ * ZATCA identifies a device by the serial in its CSR, and ours was fixed per
+ * landlord (`1-Dara|2-PMS|3-<ownerId>`). So a seller who deleted their device in
+ * the Fatoora portal and came back to re-link presented ZATCA the SAME unit —
+ * and ZATCA, which issues one production CSID per unit and does not hand the
+ * existing one back, answered "Already-Generated" forever. From the portal the
+ * device looked gone; from the CSR it never was.
+ *
+ * Appending a generation makes a re-onboard a genuinely new unit, which is the
+ * thing ZATCA will actually issue against. `…|3-264` → `…|3-264-2` → `-3`.
+ */
+export function nextEgsSerial(current: string): string {
+  const m = /^(.*\|3-.*?)(?:-(\d+))?$/.exec(current.trim());
+  if (!m) return `${current.trim()}-2`;
+  const gen = m[2] ? Number(m[2]) + 1 : 2;
+  return `${m[1]}-${gen}`;
+}
+
 @Injectable()
 export class ZatcaOnboardingService {
   constructor(
@@ -233,10 +253,26 @@ export class ZatcaOnboardingService {
     const creds = await this.getCredentials(userId, ownerId);
     if (!creds) throw new NotFoundException("Seller profile not configured");
 
+    /* Is this a RE-onboarding? Then present ZATCA a new EGS unit.
+     *
+     * The serial is what ZATCA identifies a device by, and ours was fixed per
+     * landlord — so a seller who deleted their device in Fatoora and came back
+     * handed ZATCA the same unit, which already had a production CSID and could
+     * never be issued another. Bumping the generation is what makes the second
+     * attempt a device ZATCA has not seen.
+     *
+     * Only when material for this slot already exists: a first onboarding, and
+     * a retry of one that never got as far as a certificate, keep the clean
+     * serial. */
+    const slotHasMaterial = environment === "sandbox"
+      ? !!creds.sandboxCertPem
+      : !!creds.prodCertPem;
+    const serialNumber = slotHasMaterial ? nextEgsSerial(creds.serialNumber) : creds.serialNumber;
+
     const csr = await this.csr.generateCsr({
       environment,
       commonName: creds.commonName,
-      serialNumber: creds.serialNumber,
+      serialNumber,
       organizationIdentifier: creds.organizationIdentifier,
       organizationUnitName: creds.organizationUnitName,
       organizationName: creds.sellerName,
@@ -267,6 +303,10 @@ export class ZatcaOnboardingService {
     // the very state they have just fixed.
     updates.linkInvalidAt = null;
     updates.linkInvalidReason = null;
+    // Store the serial we actually put in the CSR. Leaving the old one would
+    // make the row describe a device ZATCA does not have, and the next
+    // re-onboard would bump from the wrong generation.
+    updates.serialNumber = serialNumber;
     if (environment === "sandbox") {
       updates.sandboxPrivateKeyEnc = encryptString(csr.privateKey);
       updates.sandboxPublicKeyPem = csr.publicKey;
