@@ -68,6 +68,26 @@ export interface DecryptedCreds {
   environment: ZatcaEnv;
 }
 
+/**
+ * The next generation of an EGS serial.
+ *
+ * ZATCA identifies a device by the serial in its CSR, and ours was fixed per
+ * landlord (`1-Dara|2-PMS|3-<ownerId>`). So a seller who deleted their device in
+ * the Fatoora portal and came back to re-link presented ZATCA the SAME unit —
+ * and ZATCA, which issues one production CSID per unit and does not hand the
+ * existing one back, answered "Already-Generated" forever. From the portal the
+ * device looked gone; from the CSR it never was.
+ *
+ * Appending a generation makes a re-onboard a genuinely new unit, which is the
+ * thing ZATCA will actually issue against. `…|3-264` → `…|3-264-2` → `-3`.
+ */
+export function nextEgsSerial(current: string): string {
+  const m = /^(.*\|3-.*?)(?:-(\d+))?$/.exec(current.trim());
+  if (!m) return `${current.trim()}-2`;
+  const gen = m[2] ? Number(m[2]) + 1 : 2;
+  return `${m[1]}-${gen}`;
+}
+
 @Injectable()
 export class ZatcaOnboardingService {
   constructor(
@@ -233,10 +253,26 @@ export class ZatcaOnboardingService {
     const creds = await this.getCredentials(userId, ownerId);
     if (!creds) throw new NotFoundException("Seller profile not configured");
 
+    /* Is this a RE-onboarding? Then present ZATCA a new EGS unit.
+     *
+     * The serial is what ZATCA identifies a device by, and ours was fixed per
+     * landlord — so a seller who deleted their device in Fatoora and came back
+     * handed ZATCA the same unit, which already had a production CSID and could
+     * never be issued another. Bumping the generation is what makes the second
+     * attempt a device ZATCA has not seen.
+     *
+     * Only when material for this slot already exists: a first onboarding, and
+     * a retry of one that never got as far as a certificate, keep the clean
+     * serial. */
+    const slotHasMaterial = environment === "sandbox"
+      ? !!creds.sandboxCertPem
+      : !!creds.prodCertPem;
+    const serialNumber = slotHasMaterial ? nextEgsSerial(creds.serialNumber) : creds.serialNumber;
+
     const csr = await this.csr.generateCsr({
       environment,
       commonName: creds.commonName,
-      serialNumber: creds.serialNumber,
+      serialNumber,
       organizationIdentifier: creds.organizationIdentifier,
       organizationUnitName: creds.organizationUnitName,
       organizationName: creds.sellerName,
@@ -267,6 +303,10 @@ export class ZatcaOnboardingService {
     // the very state they have just fixed.
     updates.linkInvalidAt = null;
     updates.linkInvalidReason = null;
+    // Store the serial we actually put in the CSR. Leaving the old one would
+    // make the row describe a device ZATCA does not have, and the next
+    // re-onboard would bump from the wrong generation.
+    updates.serialNumber = serialNumber;
     if (environment === "sandbox") {
       updates.sandboxPrivateKeyEnc = encryptString(csr.privateKey);
       updates.sandboxPublicKeyPem = csr.publicKey;
@@ -279,7 +319,17 @@ export class ZatcaOnboardingService {
     } else if (environment === "simulation") {
       // Simulation also lives on the production columns — same lifecycle, same
       // gateway prefix swap — so the slot records which of the two it holds.
-      updates.prodSlotEnv = "simulation";
+      //
+      // "compliance-*" because that is what this certificate IS. Marking the
+      // slot with the final environment here made a row that had only completed
+      // step 2 of 4 indistinguishable from a fully-onboarded seller: same
+      // columns filled, same prodSlotEnv, same prodOnboardedAt. When
+      // issueProductionCsid then failed — "Already-Generated", say — the seller
+      // was left reading as LIVE while holding a compliance certificate, and
+      // every real invoice they issued was signed with it and refused by /core
+      // with a 401 that named nothing. `issueProductionCsid` is what earns the
+      // final value.
+      updates.prodSlotEnv = "compliance-simulation";
       updates.prodPrivateKeyEnc = encryptString(csr.privateKey);
       updates.prodPublicKeyPem = csr.publicKey;
       updates.prodCsrPem = csr.csr;
@@ -289,7 +339,9 @@ export class ZatcaOnboardingService {
       updates.prodComplianceRequestId = j.requestID ?? null;
       updates.prodOnboardedAt = new Date();
     } else {
-      updates.prodSlotEnv = "production";
+      // See above: a compliance CSID is not a production one, and the record
+      // must not claim otherwise until it has been promoted.
+      updates.prodSlotEnv = "compliance-production";
       updates.prodPrivateKeyEnc = encryptString(csr.privateKey);
       updates.prodPublicKeyPem = csr.publicKey;
       updates.prodCsrPem = csr.csr;
@@ -334,6 +386,15 @@ export class ZatcaOnboardingService {
       throw new BadRequestException(`Run compliance onboarding for "${environment}" first`);
     }
 
+    // Already promoted? Say so instead of asking ZATCA again. A production CSID
+    // is issued ONCE per compliance CSID; asking twice returns
+    // "Already-Generated", which read as a failure and sent the user round the
+    // loop again on an onboarding that had actually finished.
+    const promotedSlot = environment === "production" ? "production" : "simulation";
+    if (creds.prodSlotEnv === promotedSlot && creds.prodCertPem && creds.prodOnboardedAt) {
+      return { binarySecurityToken: creds.prodBinarySecurityToken!, httpStatus: 200 };
+    }
+
     const resp = await this.api.getProductionCsid({
       binarySecurityToken: token,
       secret: decryptString(secretEnc),
@@ -341,6 +402,27 @@ export class ZatcaOnboardingService {
       environment,
     });
     if (resp.status >= 300 || !resp.json?.binarySecurityToken) {
+      // "Already-Generated" without a certificate in the reply is the one
+      // refusal that must never be softened into success. ZATCA is saying it
+      // has issued a production CSID for this EGS and will not issue another —
+      // and it does NOT hand the existing one back. We are therefore still
+      // holding the compliance certificate, and calling that "live" is how a
+      // seller ends up signing real invoices with it.
+      //
+      // The device has to be released on ZATCA's side, or the seller onboarded
+      // as a NEW EGS unit — the serial is what ZATCA recognises, and ours is
+      // fixed per landlord (`1-Dara|2-PMS|3-<ownerId>`), so re-onboarding after
+      // deleting the device in Fatoora presents the same unit again.
+      if (/already[- ]generated/i.test(resp.raw ?? "")) {
+        throw new ConflictException({
+          error: "zatca_production_csid_exists",
+          message:
+            "هيئة الزكاة أصدرت شهادة إنتاج لهذا الجهاز مسبقاً ولا تُصدرها مرة أخرى، ولم تُعِد الشهادة الحالية. "
+            + "الربط لم يكتمل — ما زال لدينا شهادة فحص التوافق فقط. "
+            + "احذف الجهاز (EGS) من بوابة فاتورة نهائياً ثم أعد الربط برمز تحقق جديد، أو تواصل مع دعم الهيئة لتحرير الجهاز.",
+          zatcaRaw: (resp.raw ?? "").slice(0, 300),
+        });
+      }
       throw new BadRequestException(`ZATCA /production/csids returned ${resp.status}: ${resp.raw}`);
     }
     const certPem = tokenToCertPem(resp.json.binarySecurityToken);
@@ -404,6 +486,13 @@ export class ZatcaOnboardingService {
       // had only rehearsed could be switched "live" holding a simulation
       // certificate — every real invoice would then be signed with a
       // certificate the /core gateway does not accept.
+      // A compliance certificate is not a live one either — same trap, one step
+      // earlier in the sequence.
+      if (creds.prodSlotEnv?.startsWith("compliance")) {
+        throw new ConflictException(
+          "لم يكتمل الربط بعد — الشهادة الحالية للفحص فقط. أكمل إصدار شهادة الإنتاج قبل التفعيل.",
+        );
+      }
       if (creds.prodSlotEnv === "simulation") {
         throw new ConflictException(
           "هذه الشهادة خاصة ببيئة المحاكاة (Simulation). أعد الربط باختيار بيئة الإنتاج للحصول على شهادة إنتاج حقيقية.",

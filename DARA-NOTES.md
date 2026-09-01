@@ -520,6 +520,34 @@ link the user had no way to make. The readiness gate and `resolveOwnerId` call
 the same resolver, so the seller the gate checks is the seller the submission
 uses.
 
+**A compliance certificate is not a production one, and `prod_slot_env` now
+says which it is.** Onboarding is four steps; step 2 returns a COMPLIANCE CSID
+into the very same `prod_*` columns. That step used to stamp the slot with the
+FINAL environment (`production`) plus `prod_onboarded_at`, so a row that had
+reached step 2 and stopped was byte-for-byte indistinguishable from a finished
+one. When step 4 then failed — `Already-Generated`, most often — the seller read
+as LIVE while holding a certificate `/core` refuses, and every invoice came back
+401 with nothing naming the cause. Owner 264 sat in exactly that state on
+01 Sep 2026, with no device visible in Fatoora because no production CSID had
+ever been issued.
+
+`prod_slot_env` therefore takes four values: `compliance-production`,
+`compliance-simulation` (written by `issueComplianceCsid`) and `production`,
+`simulation` (written only by a successful `issueProductionCsid`). `isOnboarded`
+and its SQL twin in the admin view both refuse a `compliance%` slot outside
+sandbox, and `switchEnvironment` refuses it too.
+
+**`Already-Generated` must never be softened into success.** ZATCA issues a
+production CSID once per EGS and does NOT hand the existing one back, so a
+"success" there cements the compliance certificate as live — the exact bug
+above. It is now its own refusal (`zatca_production_csid_exists`) that says the
+link did not complete and what to do. Note the EGS serial is fixed per landlord
+(`1-Dara|2-PMS|3-<ownerId>`), so deleting the device in Fatoora and re-onboarding
+presents ZATCA the same unit; if it keeps refusing, the unit has to be released
+on ZATCA's side or given a new serial. Promotion also short-circuits when the
+slot already holds a real production CSID, so a second click reports the
+onboarding that already finished instead of a red error.
+
 **Losing the link from ZATCA's side.** The taxpayer can delete our EGS device in
 the Fatoora portal, or ZATCA can revoke the CSID, and nothing tells us: the row
 still holds a certificate, a key and a secret, so every local check passes and

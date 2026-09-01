@@ -15,7 +15,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { db, getPool, usersTable, ownersTable, zatcaCredentialsTable, ZATCA_INITIAL_PIH } from "@dara/database";
-import { ZatcaOnboardingService } from "./zatca-onboarding.service";
+import { ZatcaOnboardingService, nextEgsSerial } from "./zatca-onboarding.service";
+import { checkInvoiceReadiness } from "../../../common/invoice-readiness";
 
 const HAS_DB = !!process.env.DATABASE_URL;
 class Rollback extends Error {}
@@ -238,4 +239,77 @@ test("the flag is scoped like everything else — one account cannot flag anothe
     const [row] = await tx.select().from(zatcaCredentialsTable).where(eq(zatcaCredentialsTable.id, credsId));
     assert.equal(row!.linkInvalidAt, null);
   });
+});
+
+/* ── A compliance certificate is not a production one ──────────────────────
+ * Onboarding is four steps and step 2 hands back a COMPLIANCE CSID. Marking
+ * the slot with the final environment there made a half-finished row
+ * indistinguishable from a live one — same columns, same prodOnboardedAt —
+ * so when step 4 failed the seller read as live while holding a certificate
+ * /core refuses. That is how a real landlord ended up with a 401 on every
+ * invoice and no device in Fatoora.
+ */
+
+test("a slot holding a compliance certificate does not read as onboarded", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  try {
+    await db.transaction(async (tx) => {
+      const [owner] = await tx.insert(ownersTable).values({
+        userId, name: "مؤجر قيد الربط", type: "individual", idNumber: "1000000011",
+        phone: "+966500000011", email: "midway@test.local",
+        taxNumber: "300000000000003", status: "active",
+      }).returning();
+      // Exactly what issueComplianceCsid leaves behind for env=production.
+      await tx.insert(zatcaCredentialsTable).values({
+        userId, ownerId: owner!.id, ...LIVE_CREDS,
+        activeEnvironment: "production", prodSlotEnv: "compliance-production",
+      } as never);
+      const r = await checkInvoiceReadiness(tx as never, userId, null, {
+        client: { name: "ع", email: "b@t.local", phone: "+966500000012", idNumber: "1000000013", type: "individual" },
+      });
+      // Not merely "incomplete" — this is the state that used to pass.
+      assert.ok(
+        r.blockers.some((b) => b.entity === "zatca"),
+        "a compliance certificate must never satisfy the ZATCA gate",
+      );
+      throw new Rollback();
+    });
+  } catch (e) {
+    if (!(e instanceof Rollback)) throw e;
+  }
+});
+
+test("promotion is not re-asked once the slot holds a real production CSID", { skip: !HAS_DB && "DATABASE_URL not set" }, async () => {
+  await withLinkedLandlord(async ({ tx, ownerId }) => {
+    // LIVE_CREDS is already prodSlotEnv "production" with a cert and an
+    // onboardedAt, i.e. a finished promotion. Asking ZATCA again is what
+    // returned "Already-Generated" and read to the user as a failure — so this
+    // must short-circuit rather than make the call at all. The api collaborator
+    // is null here, so any network attempt would throw instead.
+    const r = await svc(tx).issueProductionCsid(userId, "production", ownerId);
+    assert.equal(r.httpStatus, 200);
+    assert.equal(r.binarySecurityToken, "TOKEN");
+  });
+});
+
+/* ── The EGS serial is what ZATCA calls a device ───────────────────────────
+ * Deleting the unit in the Fatoora portal does not change the serial in our
+ * CSR, so a re-onboard presented ZATCA the same device — the one it had
+ * already issued a production CSID for and would never issue another against.
+ */
+
+test("re-onboarding presents a new EGS generation", { skip: false }, () => {
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264"), "1-Dara|2-PMS|3-264-2");
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264-2"), "1-Dara|2-PMS|3-264-3");
+  // Two digits, not a string sort: the ninth re-link must not become "-91".
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-264-9"), "1-Dara|2-PMS|3-264-10");
+  // Whitespace on a stored value must not produce a serial ZATCA reads
+  // differently from the one we recorded.
+  assert.equal(nextEgsSerial("  1-Dara|2-PMS|3-7  "), "1-Dara|2-PMS|3-7-2");
+});
+
+test("a landlord id containing digits is not mistaken for a generation", { skip: false }, () => {
+  // "3-264" is the id segment; only a suffix AFTER it is a generation. Getting
+  // this wrong would silently renumber the landlord rather than the device.
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024"), "1-Dara|2-PMS|3-1024-2");
+  assert.equal(nextEgsSerial("1-Dara|2-PMS|3-1024-2"), "1-Dara|2-PMS|3-1024-3");
 });
