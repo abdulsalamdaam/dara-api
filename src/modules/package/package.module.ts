@@ -77,7 +77,7 @@ class PackageController {
     const daysRemaining = endsAt ? Math.ceil((new Date(endsAt).getTime() - Date.now()) / 86_400_000) : null;
 
     const cycle = (owner?.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
-    const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: endsAt });
+    const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: endsAt, isTrial: owner?.subscriptionIsTrial });
     const trial = trialView(!!owner?.subscriptionIsTrial, endsAt);
     const amountDue = planPrice(owner?.packagePlan, cycle);
     return {
