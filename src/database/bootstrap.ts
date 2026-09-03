@@ -126,6 +126,18 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure zatca_credentials.link_invalid_at/link_invalid_reason failed: ${err?.message || err}`);
     }
 
+    // The subscription tax invoice we issue when a customer pays. All four are
+    // nullable and stamped at activation, so every historical row simply has no
+    // invoice — which is correct: none was ever issued for it.
+    try {
+      await client.query(`alter table subscription_payments add column if not exists invoice_number text`);
+      await client.query(`alter table subscription_payments add column if not exists invoice_issued_at timestamptz`);
+      await client.query(`alter table subscription_payments add column if not exists period_start timestamptz`);
+      await client.query(`alter table subscription_payments add column if not exists period_end timestamptz`);
+    } catch (err: any) {
+      log.warn(`ensure subscription_payments invoice columns failed: ${err?.message || err}`);
+    }
+
     // Unit-level usage override. NULL keeps the historical behaviour of
     // inheriting the property's usage; only mixed-use properties set it.
     try {
