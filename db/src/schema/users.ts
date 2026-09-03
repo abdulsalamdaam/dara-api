@@ -83,6 +83,18 @@ export const usersTable = pgTable("users", {
    * Cleared when a real payment activates the account.
    */
   subscriptionIsTrial: boolean("subscription_is_trial").notNull().default(false),
+  /**
+   * When this account used up its one free trial — the only durable record
+   * that it ever had one.
+   *
+   * `subscription_is_trial` describes the CURRENT window and is cleared the
+   * moment a payment lands, so after any payment, package change or refund
+   * nothing on the row remembers a trial was granted. Without this column an
+   * account could be handed a fresh free window on every approval or plan
+   * change, forever. It is history, not state: never cleared, and deliberately
+   * untouched by the payment path.
+   */
+  trialConsumedAt: timestamp("trial_consumed_at", { withTimezone: true }),
   /** The plan the user picked on the landing page, shown to the admin before approval. */
   desiredPackagePlan: text("desired_package_plan"),
   /** The billing cycle the user picked on the landing page. */

@@ -126,6 +126,18 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure zatca_credentials.link_invalid_at/link_invalid_reason failed: ${err?.message || err}`);
     }
 
+    // "This account has already had its free trial." `subscription_is_trial`
+    // is cleared by the first payment, so without this column nothing on the
+    // row remembers a trial was ever granted and an account could be given a
+    // fresh one on every approval or package change. Nullable, so every
+    // existing row reads as "no trial consumed" — correct for accounts that
+    // predate the automatic grant.
+    try {
+      await client.query(`alter table users add column if not exists trial_consumed_at timestamptz`);
+    } catch (err: any) {
+      log.warn(`ensure users.trial_consumed_at failed: ${err?.message || err}`);
+    }
+
     // Unit-level usage override. NULL keeps the historical behaviour of
     // inheriting the property's usage; only mixed-use properties set it.
     try {
