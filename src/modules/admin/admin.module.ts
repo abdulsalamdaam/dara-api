@@ -20,6 +20,8 @@ import { EjarModule } from "../ejar/ejar.module";
 import { AdminCustomerOverviewController } from "./customer-overview.controller";
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 import { TaqnyatService } from "../sms/taqnyat.service";
+import { TrialSettingsService } from "./trial-settings.service";
+import { normalizeTrialDays } from "../../common/trial";
 
 /**
  * Subscription window: starts now; ends after `trialDays`, or at the given
@@ -40,16 +42,6 @@ function subscriptionWindow(opts?: { endsAtIso?: string; trialDays?: number }): 
     endsAt = new Date(new Date().setFullYear(startedAt.getFullYear() + 1));
   }
   return { startedAt, endsAt };
-}
-
-/** Trial length in whole days, or null when none was asked for. */
-function normalizeTrialDays(raw: unknown): number | null {
-  if (raw == null || raw === "") return null;
-  const n = Math.floor(Number(raw));
-  if (!Number.isFinite(n) || n <= 0) return null;
-  // A year of "trial" is a free subscription; anything past that is a typo.
-  if (n > 365) throw new BadRequestException("مدة التجربة يجب أن تكون بين 1 و 365 يوماً");
-  return n;
 }
 
 /**
@@ -102,6 +94,7 @@ class AdminController {
     private readonly email: EmailService,
     private readonly ejarPolicy: EjarPolicyService,
     private readonly sms: TaqnyatService,
+    private readonly trialSettings: TrialSettingsService,
   ) {}
 
   /**
@@ -123,6 +116,38 @@ class AdminController {
     }
     await this.ejarPolicy.setOverride(v);
     return this.ejarPolicy.getPolicy();
+  }
+
+  /**
+   * The free trial every package ships with: how many days it runs, and
+   * whether it is offered at all. Platform-wide — a trial is a property of the
+   * offer, not of a customer — and read on every registration approval.
+   */
+  @Get("settings/trial")
+  async getTrialSettings() {
+    return this.trialSettings.getTrialSettings();
+  }
+
+  @Patch("settings/trial")
+  async setTrialSettings(@Body() body: { days?: number; enabled?: boolean } | undefined) {
+    const current = await this.trialSettings.getTrialSettings();
+    let days = current.days;
+    if (body?.days !== undefined) {
+      // `normalizeTrialDays` reads absent/empty/non-positive as "no trial
+      // asked for", which is a valid answer on an approval but not here —
+      // this endpoint sets the length, so there is nothing to fall back to.
+      const asked = normalizeTrialDays(body.days);
+      if (asked == null) throw new BadRequestException("مدة التجربة يجب أن تكون بين 1 و 365 يوماً");
+      days = asked;
+    }
+    let enabled = current.enabled;
+    if (body?.enabled !== undefined) {
+      if (typeof body.enabled !== "boolean") {
+        throw new BadRequestException("قيمة تفعيل التجربة المجانية يجب أن تكون صحيحة أو خاطئة");
+      }
+      enabled = body.enabled;
+    }
+    return this.trialSettings.setTrialSettings({ days, enabled });
   }
 
   /** Re-run the Ejar connectivity probe now instead of waiting for the hour. */
@@ -930,14 +955,27 @@ class AdminController {
   /**
    * Approve a registration, on a package the admin picks.
    *
-   * Two outcomes:
-   *  - default → account is active but the subscription is `pending_payment`;
-   *    the user lands on the pay screen and the package they PAY for wins.
-   *  - `trialDays` / `grantWithoutPayment` / `subscriptionEndsAt` → the admin
-   *    grants the window outright: the chosen package is live immediately, no
-   *    payment required, and the pay screen is skipped.
+   * Every package now ships with a free trial, so approval GRANTS by default
+   * rather than sending the account straight to the paywall — the length comes
+   * from the platform trial policy (14 days out of the box, editable at
+   * `PATCH /admin/settings/trial`).
    *
-   * When the window is granted, the user's own landing-page selection is
+   * Three outcomes, in precedence order:
+   *  - `trialDays` / `grantWithoutPayment` / `subscriptionEndsAt` → the admin
+   *    overrides the policy and grants the window himself. These keep winning:
+   *    an explicit decision must never be silently replaced by the default.
+   *  - trial enabled and never consumed → the configured trial is granted:
+   *    active, `subscription_is_trial`, and `trial_consumed_at` stamped.
+   *  - trial already consumed, or the offer switched off → the pre-trial
+   *    behaviour: active account, `pending_payment` subscription, no window.
+   *    The account lands on the pay screen and the package it PAYS for wins.
+   *
+   * `trial_consumed_at` is what makes the second case a one-time offer. The
+   * `subscription_is_trial` flag is cleared by the first payment, so without a
+   * separate stamp a customer who paid, then had his package changed, then was
+   * re-approved would collect a new free window every time.
+   *
+   * When a window is granted, the user's own landing-page selection is
    * cleared. Leaving it set meant the pay screen (and any later "continue
    * payment" nudge) still advertised the plan they asked for rather than the
    * one the admin actually gave them.
@@ -945,7 +983,10 @@ class AdminController {
   @Patch("registrations/:id/approve")
   async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean; trialDays?: number } | undefined) {
     const uid = parseInt(id, 10);
-    const [existing] = await this.db.select({ desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle, userType: usersTable.userType })
+    const [existing] = await this.db.select({
+      desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle,
+      userType: usersTable.userType, trialConsumedAt: usersTable.trialConsumedAt,
+    })
       .from(usersTable).where(eq(usersTable.id, uid));
     if (!existing) throw new NotFoundException("User not found");
     const plan = resolveAdminPlan(body?.packagePlan, existing.desiredPlan);
@@ -956,16 +997,29 @@ class AdminController {
     }
     const cycle = existing.desiredCycle === "yearly" ? "yearly" : "monthly";
 
-    const trialDays = normalizeTrialDays(body?.trialDays);
+    const askedTrialDays = normalizeTrialDays(body?.trialDays);
+    // An explicit instruction from the admin — any of the three — turns the
+    // automatic trial off. He is stating the window himself.
+    const explicitOverride = askedTrialDays != null || !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
+    const policy = await this.trialSettings.getTrialSettings();
+    const autoTrialDays = !explicitOverride && policy.enabled && existing.trialConsumedAt == null
+      ? policy.days
+      : null;
+    const trialDays = askedTrialDays ?? autoTrialDays;
     const manualGrant = trialDays != null || !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
     const win = manualGrant ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined }) : null;
+    const isTrial = trialDays != null;
     const [user] = await this.db.update(usersTable)
       .set({
         accountStatus: "active", isActive: true, packagePlan: plan, billingCycle: cycle,
         subscriptionStatus: manualGrant ? "active" : "pending_payment",
         subscriptionStartedAt: manualGrant ? win!.startedAt : null,
         subscriptionEndsAt: manualGrant ? win!.endsAt : null,
-        subscriptionIsTrial: manualGrant && trialDays != null,
+        subscriptionIsTrial: isTrial,
+        // Burn the one free trial. The first stamp is kept if there already is
+        // one: this column is the date the account's trial was used, and an
+        // admin re-granting one by hand does not rewrite that history.
+        trialConsumedAt: isTrial ? (existing.trialConsumedAt ?? win!.startedAt) : existing.trialConsumedAt,
         // A granted window is the decision — don't leave a stale "wanted plan"
         // behind to reappear on the billing screen.
         desiredPackagePlan: manualGrant ? null : existing.desiredPlan,
@@ -979,7 +1033,7 @@ class AdminController {
     return {
       success: true, id: user.id, accountStatus: user.accountStatus, packagePlan: plan,
       subscriptionStatus: user.subscriptionStatus, subscriptionEndsAt: user.subscriptionEndsAt,
-      trialDays: trialDays ?? null, granted: manualGrant,
+      trialDays: trialDays ?? null, granted: manualGrant, isTrial,
     };
   }
 
@@ -989,11 +1043,21 @@ class AdminController {
    * subscription — an admin granting a package by hand is granting access, so
    * leaving the account on `pending_payment` would hand it the paywall
    * instead of the package.
+   *
+   * Unlike approval, this never grants a trial on its own. The automatic trial
+   * is a one-time welcome, and a package change is something that happens to
+   * an account repeatedly — auto-granting here would hand out an unlimited
+   * supply of free windows to anyone whose plan is adjusted. An explicit
+   * `trialDays` is still honoured (the admin is deciding), and it burns the
+   * trial the same way approval does.
    */
   @Patch("users/:userId/package")
   async changePackage(@Param("userId") userId: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; trialDays?: number }) {
     const id = parseInt(userId, 10);
-    const [target] = await this.db.select({ userType: usersTable.userType, desiredPlan: usersTable.desiredPackagePlan })
+    const [target] = await this.db.select({
+      userType: usersTable.userType, desiredPlan: usersTable.desiredPackagePlan,
+      trialConsumedAt: usersTable.trialConsumedAt,
+    })
       .from(usersTable).where(eq(usersTable.id, id));
     if (!target) throw new NotFoundException("User not found");
     const plan = resolveAdminPlan(body?.packagePlan, target.desiredPlan);
@@ -1009,6 +1073,8 @@ class AdminController {
         subscriptionStartedAt: win.startedAt,
         subscriptionEndsAt: win.endsAt,
         subscriptionIsTrial: trialDays != null,
+        // Same one-time stamp as approval: an explicitly granted trial counts.
+        trialConsumedAt: trialDays != null ? (target.trialConsumedAt ?? win.startedAt) : target.trialConsumedAt,
         desiredPackagePlan: null,
         desiredBillingCycle: null,
       })
@@ -1069,5 +1135,10 @@ class AdminController {
  * account lists here (`GET /admin/companies`, `GET /admin/users`) are what
  * link into it: both already carry the account's `id` on every row.
  */
-@Module({ imports: [EjarModule], controllers: [AdminController, AdminCustomerOverviewController] })
+@Module({
+  imports: [EjarModule],
+  controllers: [AdminController, AdminCustomerOverviewController],
+  providers: [TrialSettingsService],
+  exports: [TrialSettingsService],
+})
 export class AdminModule {}

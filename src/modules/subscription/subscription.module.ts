@@ -9,6 +9,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription } from "../../common/subscription";
+import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
@@ -54,6 +55,8 @@ async function activateFromPaidRow(
     subscriptionStartedAt: now,
     subscriptionEndsAt: nextEndDate(cycle, now),
     // Paid — whatever free/trial window it replaces, this one is not a trial.
+    // `trialConsumedAt` is deliberately NOT touched: it records that the
+    // account had its one free trial, which paying does not undo.
     subscriptionIsTrial: false,
   }).where(eq(usersTable.id, row.userId));
 
@@ -84,6 +87,7 @@ class SubscriptionController {
     const [owner] = await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
     const cycle = (owner?.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
     const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: owner?.subscriptionEndsAt });
+    const trial = trialView(!!owner?.subscriptionIsTrial, owner?.subscriptionEndsAt);
     const payments = await this.db.select().from(subscriptionPaymentsTable)
       .where(eq(subscriptionPaymentsTable.userId, ownerId))
       .orderBy(desc(subscriptionPaymentsTable.createdAt));
@@ -101,6 +105,9 @@ class SubscriptionController {
         : null,
       status: sub.status,
       isTrial: !!owner?.subscriptionIsTrial,
+      // Null unless a trial is running — see `trialView`.
+      trialEndsAt: trial.trialEndsAt,
+      trialDaysRemaining: trial.trialDaysRemaining,
       needsPayment: sub.needsPayment,
       locked: sub.locked,
       graceUntil: sub.graceUntil,

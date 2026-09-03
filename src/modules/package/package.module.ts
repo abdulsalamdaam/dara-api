@@ -10,6 +10,7 @@ import { scopeId } from "../../common/scope";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, type BillingCycle } from "../../common/packages";
 import { packageUsage } from "../../common/quota";
 import { deriveSubscription } from "../../common/subscription";
+import { trialView } from "../../common/trial";
 
 /** The caller's subscription package — its limits, mode and current usage. */
 @ApiTags("package")
@@ -77,6 +78,7 @@ class PackageController {
 
     const cycle = (owner?.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
     const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: endsAt });
+    const trial = trialView(!!owner?.subscriptionIsTrial, endsAt);
     const amountDue = planPrice(owner?.packagePlan, cycle);
     return {
       plan,
@@ -105,6 +107,10 @@ class PackageController {
         // A free window granted by an admin — the app labels it as a trial
         // instead of implying the account has paid.
         isTrial: !!owner?.subscriptionIsTrial,
+        // Null unless a trial is running: a paid window also has an end date,
+        // and calling it `trialEndsAt` would put a countdown on paid accounts.
+        trialEndsAt: trial.trialEndsAt,
+        trialDaysRemaining: trial.trialDaysRemaining,
       },
     };
   }
