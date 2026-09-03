@@ -32,7 +32,10 @@ export function daraSeller(): DaraSellerIdentity {
     .map((v) => (v || "").trim())
     .filter(Boolean);
   return {
-    name: process.env.DARA_SELLER_NAME || "شركة دام التقنية",
+    // The BRAND, deliberately — not a guessed legal entity name. An invoice
+    // naming the wrong company is worse than one naming the product, and
+    // DARA_SELLER_NAME is where the registered name belongs.
+    name: process.env.DARA_SELLER_NAME || "دارا · Dara",
     vatNumber: process.env.DARA_SELLER_VAT || null,
     crn: process.env.DARA_SELLER_CRN || null,
     addressLines: addr.length ? addr : ["الرياض، المملكة العربية السعودية"],
