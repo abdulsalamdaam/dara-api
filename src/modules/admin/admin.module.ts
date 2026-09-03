@@ -966,9 +966,16 @@ class AdminController {
    *    an explicit decision must never be silently replaced by the default.
    *  - trial enabled and never consumed → the configured trial is granted:
    *    active, `subscription_is_trial`, and `trial_consumed_at` stamped.
-   *  - trial already consumed, or the offer switched off → the pre-trial
-   *    behaviour: active account, `pending_payment` subscription, no window.
-   *    The account lands on the pay screen and the package it PAYS for wins.
+   *  - `noTrial: true`, trial already consumed, the offer switched off, or the
+   *    account was not actually pending → the pre-trial behaviour: active
+   *    account, `pending_payment` subscription, no window. The account lands
+   *    on the pay screen and the package it PAYS for wins.
+   *
+   * `noTrial` exists because "no trial" was otherwise unsayable. Absent, empty
+   * and zero all normalise to null, which is how the admin says nothing — so
+   * without a distinct token, an admin who deliberately picked "no trial" sent
+   * a body indistinguishable from one who expressed no opinion, and got the
+   * 14-day default plus a burnt `trial_consumed_at` for his trouble.
    *
    * `trial_consumed_at` is what makes the second case a one-time offer. The
    * `subscription_is_trial` flag is cleared by the first payment, so without a
@@ -981,11 +988,12 @@ class AdminController {
    * one the admin actually gave them.
    */
   @Patch("registrations/:id/approve")
-  async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean; trialDays?: number } | undefined) {
+  async approve(@Param("id") id: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; grantWithoutPayment?: boolean; trialDays?: number; noTrial?: boolean } | undefined) {
     const uid = parseInt(id, 10);
     const [existing] = await this.db.select({
       desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle,
       userType: usersTable.userType, trialConsumedAt: usersTable.trialConsumedAt,
+      accountStatus: usersTable.accountStatus,
     })
       .from(usersTable).where(eq(usersTable.id, uid));
     if (!existing) throw new NotFoundException("User not found");
@@ -1002,9 +1010,15 @@ class AdminController {
     // automatic trial off. He is stating the window himself.
     const explicitOverride = askedTrialDays != null || !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
     const policy = await this.trialSettings.getTrialSettings();
-    const autoTrialDays = !explicitOverride && policy.enabled && existing.trialConsumedAt == null
-      ? policy.days
-      : null;
+    // Only a registration coming out of the queue gets the welcome trial.
+    // Re-approving an account that is already live must never overwrite its
+    // window — paid or otherwise — with a fresh 14 free days.
+    const isPendingRegistration = existing.accountStatus === "pending";
+    const autoTrialDays =
+      !explicitOverride && !body?.noTrial && policy.enabled
+      && isPendingRegistration && existing.trialConsumedAt == null
+        ? policy.days
+        : null;
     const trialDays = askedTrialDays ?? autoTrialDays;
     const manualGrant = trialDays != null || !!body?.subscriptionEndsAt || !!body?.grantWithoutPayment;
     const win = manualGrant ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined }) : null;
@@ -1050,6 +1064,19 @@ class AdminController {
    * supply of free windows to anyone whose plan is adjusted. An explicit
    * `trialDays` is still honoured (the admin is deciding), and it burns the
    * trial the same way approval does.
+   *
+   * It also LEAVES AN EXISTING WINDOW ALONE. This used to rebuild the window
+   * unconditionally — `now → now + 1 year`, active, `is_trial = false` — on
+   * every call, so changing the plan of a customer who was mid-trial cleared
+   * the trial and handed him a free year, and changing the plan of a customer
+   * who had PAID replaced his paid window with an unpaid one and destroyed his
+   * renewal date. Neither was ever intended: the endpoint is called "change
+   * package", and a plan change is not a billing decision.
+   *
+   * So the window is now touched in exactly two cases: the admin stated it
+   * (`trialDays` / `subscriptionEndsAt`), or there is no window to keep — the
+   * `pending_payment` account the fallback was written for, which would
+   * otherwise be handed the paywall instead of the package it was just given.
    */
   @Patch("users/:userId/package")
   async changePackage(@Param("userId") userId: string, @Body() body: { packagePlan?: string; subscriptionEndsAt?: string; trialDays?: number }) {
@@ -1057,6 +1084,8 @@ class AdminController {
     const [target] = await this.db.select({
       userType: usersTable.userType, desiredPlan: usersTable.desiredPackagePlan,
       trialConsumedAt: usersTable.trialConsumedAt,
+      subscriptionStatus: usersTable.subscriptionStatus,
+      subscriptionEndsAt: usersTable.subscriptionEndsAt,
     })
       .from(usersTable).where(eq(usersTable.id, id));
     if (!target) throw new NotFoundException("User not found");
@@ -1065,23 +1094,40 @@ class AdminController {
       throw new BadRequestException(planUserTypeError(plan));
     }
     const trialDays = normalizeTrialDays(body?.trialDays);
-    const win = subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined });
+    const stated = trialDays != null || !!body?.subscriptionEndsAt;
+    // "Nothing to keep" is a window that does not exist, not one that expired:
+    // an expired window is still the customer's billing history, and silently
+    // replacing it with a fresh free year is the bug this guards against.
+    const hasWindow = target.subscriptionStatus !== "pending_payment" && target.subscriptionEndsAt != null;
+    const win = stated || !hasWindow
+      ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined })
+      : null;
     const [user] = await this.db.update(usersTable)
       .set({
         packagePlan: plan,
-        subscriptionStatus: "active",
-        subscriptionStartedAt: win.startedAt,
-        subscriptionEndsAt: win.endsAt,
-        subscriptionIsTrial: trialDays != null,
-        // Same one-time stamp as approval: an explicitly granted trial counts.
-        trialConsumedAt: trialDays != null ? (target.trialConsumedAt ?? win.startedAt) : target.trialConsumedAt,
+        ...(win
+          ? {
+              subscriptionStatus: "active" as const,
+              subscriptionStartedAt: win.startedAt,
+              subscriptionEndsAt: win.endsAt,
+              subscriptionIsTrial: trialDays != null,
+              // Same one-time stamp as approval: an explicit trial counts.
+              trialConsumedAt: trialDays != null ? (target.trialConsumedAt ?? win.startedAt) : target.trialConsumedAt,
+            }
+          : {}),
         desiredPackagePlan: null,
         desiredBillingCycle: null,
       })
       .where(eq(usersTable.id, id))
       .returning();
     if (!user) throw new NotFoundException("User not found");
-    return { success: true, id: user.id, packagePlan: plan, subscriptionEndsAt: win.endsAt, trialDays: trialDays ?? null };
+    return {
+      success: true, id: user.id, packagePlan: plan,
+      subscriptionEndsAt: user.subscriptionEndsAt,
+      trialDays: trialDays ?? null,
+      isTrial: user.subscriptionIsTrial,
+      windowChanged: win != null,
+    };
   }
 
   /** Re-send the email-verification link to a pending registrant. */
@@ -1129,6 +1175,30 @@ class AdminController {
 }
 
 /**
+ * The trial policy, readable without a token.
+ *
+ * The landing page advertises the trial to people who by definition have no
+ * account, and the length is now an admin setting rather than a constant. With
+ * no public read the marketing copy could only hard-code a number, so an admin
+ * moving the trial to 7 days would leave the public site promising 14 — the
+ * product quietly lying about its own offer.
+ *
+ * Nothing here is sensitive: it is the same claim printed on the pricing page.
+ * `enabled` is included so the copy can drop the trial line entirely rather
+ * than advertise an offer that approval will not grant.
+ */
+@ApiTags("public")
+@Controller("public/trial")
+class PublicTrialController {
+  constructor(private readonly trialSettings: TrialSettingsService) {}
+
+  @Get()
+  async get() {
+    return this.trialSettings.getTrialSettings();
+  }
+}
+
+/**
  * `AdminCustomerOverviewController` lives in its own file — this one is
  * already long enough — but it is the same admin surface, behind the same
  * `JwtAuthGuard` + `SuperAdminGuard` pair as everything above, and the
@@ -1137,7 +1207,7 @@ class AdminController {
  */
 @Module({
   imports: [EjarModule],
-  controllers: [AdminController, AdminCustomerOverviewController],
+  controllers: [AdminController, AdminCustomerOverviewController, PublicTrialController],
   providers: [TrialSettingsService],
   exports: [TrialSettingsService],
 })

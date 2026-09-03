@@ -86,7 +86,7 @@ class SubscriptionController {
     const ownerId = scopeId(user);
     const [owner] = await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
     const cycle = (owner?.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
-    const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: owner?.subscriptionEndsAt });
+    const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: owner?.subscriptionEndsAt, isTrial: owner?.subscriptionIsTrial });
     const trial = trialView(!!owner?.subscriptionIsTrial, owner?.subscriptionEndsAt);
     const payments = await this.db.select().from(subscriptionPaymentsTable)
       .where(eq(subscriptionPaymentsTable.userId, ownerId))
