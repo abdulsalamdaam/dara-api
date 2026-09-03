@@ -138,6 +138,28 @@ counter that is not serialized.
 
 ---
 
+## 4b. The subscription window is not enforced on the server
+
+Raised 04 Sep 2026, when the 14-day trial made it matter.
+
+`deriveSubscription` has exactly two callers, both GET handlers
+(`subscription.module.ts`, `package.module.ts`). `src/common/guards/` holds
+only `jwt-auth`, `roles` and `tenant-auth`, and the single `APP_GUARD` in
+`app.module.ts` is `OtpThrottlerGuard`. So `locked` is **advisory**: the
+restriction is one `setActiveTab("settings")` in `DashboardPage.tsx`. The same
+JWT still succeeds against `POST /api/properties`, `/api/contracts` and
+everything else.
+
+This is pre-existing — but it used to catch only lapsed payers, of whom there
+were none. Now that every account starts on a free trial, it is the
+monetisation boundary for the entire platform: when a trial expires, nothing
+server-side stops the account from carrying on through the API.
+
+Fix is a guard that reads the same derivation and refuses writes on a locked
+account, with settings/usage/pay exempted. The care needed is in the exemption
+list — too broad and it does nothing, too narrow and it locks a paying customer
+out of paying.
+
 ## 5. Smaller, known, not urgent
 
 - **`POST /invoices` skips the gate when there is no `contractId`** — fixed for
