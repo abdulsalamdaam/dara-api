@@ -21,6 +21,17 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   moyasarPaymentId: text("moyasar_payment_id"),
   paymentUrl: text("payment_url"),
   paidAt: timestamp("paid_at", { withTimezone: true }),
+  /**
+   * The tax invoice Dara issues for this payment. Stamped once, when the row is
+   * first activated, and never recomputed — the number and the period a
+   * customer holds a PDF of must keep resolving to the same document even after
+   * the subscription is renewed or the plan changed.
+   */
+  invoiceNumber: text("invoice_number"),
+  invoiceIssuedAt: timestamp("invoice_issued_at", { withTimezone: true }),
+  /** The subscription window this payment bought. */
+  periodStart: timestamp("period_start", { withTimezone: true }),
+  periodEnd: timestamp("period_end", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

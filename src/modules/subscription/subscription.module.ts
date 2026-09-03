@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, Module, Post, Req, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, desc, eq } from "drizzle-orm";
 import { usersTable, subscriptionPaymentsTable } from "@dara/database";
@@ -10,6 +10,9 @@ import { scopeId } from "../../common/scope";
 import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription } from "../../common/subscription";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
+import { InvoiceModule } from "../invoice/invoice.module";
+import { SubscriptionInvoiceService } from "./subscription-invoice.service";
+import type { Response } from "express";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.net").replace(/\/$/, "");
 
@@ -29,7 +32,12 @@ type SubscriptionPaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
  * user re-clicks Pay after an already-paid invoice whose webhook was missed).
  * No-op if the row is already paid.
  */
-async function activateFromPaidRow(db: Drizzle, row: SubscriptionPaymentRow, moyasarPaymentId?: string | null): Promise<void> {
+async function activateFromPaidRow(
+  db: Drizzle,
+  row: SubscriptionPaymentRow,
+  moyasarPaymentId?: string | null,
+  invoices?: SubscriptionInvoiceService,
+): Promise<void> {
   if (row.status === "paid") return;
   await db.update(subscriptionPaymentsTable)
     .set({ status: "paid", paidAt: new Date(), moyasarPaymentId: moyasarPaymentId ?? row.moyasarPaymentId ?? null })
@@ -48,6 +56,15 @@ async function activateFromPaidRow(db: Drizzle, row: SubscriptionPaymentRow, moy
     // Paid — whatever free/trial window it replaces, this one is not a trial.
     subscriptionIsTrial: false,
   }).where(eq(usersTable.id, row.userId));
+
+  // Issue the tax invoice and email it. Deliberately NOT awaited: this spawns
+  // headless Chrome, and the caller is either a Moyasar webhook — which retries
+  // the whole delivery if we are slow to answer, and would then re-run this
+  // path — or a user waiting on a redirect. The subscription is already active
+  // by the time this starts, and every failure inside is logged and swallowed.
+  if (invoices) {
+    void invoices.issueAndEmail(db, row.id, { start: now, end: nextEndDate(cycle, now) });
+  }
 }
 
 @ApiTags("subscription")
@@ -55,7 +72,10 @@ async function activateFromPaidRow(db: Drizzle, row: SubscriptionPaymentRow, moy
 @Controller("me/subscription")
 @UseGuards(JwtAuthGuard)
 class SubscriptionController {
-  constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  constructor(
+    @Inject(DRIZZLE) private readonly db: Drizzle,
+    private readonly invoices: SubscriptionInvoiceService,
+  ) {}
 
   /** Subscription status + payment history for the current account. */
   @Get()
@@ -89,6 +109,35 @@ class SubscriptionController {
       subscriptionEndsAt: owner?.subscriptionEndsAt ?? null,
       payments,
     };
+  }
+
+  /**
+   * The tax invoice for one subscription payment, as a PDF.
+   *
+   * Rendered on demand rather than served from storage: the document is a pure
+   * function of the payment row plus the buyer's registration details, so a
+   * re-render always reproduces the file that was emailed. Scoped to the
+   * caller's own account — the row id alone must never be enough to read
+   * somebody else's invoice.
+   */
+  @Get("payments/:id/invoice.pdf")
+  async paymentInvoicePdf(@CurrentUser() user: AuthUser, @Param("id") id: string, @Res() res: Response) {
+    const ownerId = scopeId(user);
+    const rowId = Number(id);
+    if (!Number.isInteger(rowId) || rowId <= 0) throw new BadRequestException("رقم الدفعة غير صالح");
+
+    const [row] = await this.db.select().from(subscriptionPaymentsTable)
+      .where(and(eq(subscriptionPaymentsTable.id, rowId), eq(subscriptionPaymentsTable.userId, ownerId)));
+    if (!row) throw new NotFoundException("الدفعة غير موجودة");
+    if (row.status !== "paid") throw new BadRequestException("لا تصدر فاتورة إلا بعد تأكيد الدفع");
+
+    const buyer = await this.invoices.loadBuyer(this.db, ownerId);
+    const pdf = await this.invoices.renderPdf(row, buyer);
+    const name = row.invoiceNumber || `SUB-${String(row.id).padStart(6, "0")}`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}.pdf"`);
+    res.setHeader("Content-Length", String(pdf.length));
+    res.end(pdf);
   }
 
   /**
@@ -146,7 +195,7 @@ class SubscriptionController {
         : "";
       if (invStatus === "paid") {
         // Already paid but the webhook hasn't landed — activate now and return.
-        await activateFromPaidRow(this.db, p);
+        await activateFromPaidRow(this.db, p, null, this.invoices);
         return { paymentId: p.id, url: p.paymentUrl, invoiceId: p.moyasarInvoiceId, alreadyPaid: true };
       }
       const sameSelection = p.plan === plan && p.billingCycle === cycle && Number(p.amount) === amount;
@@ -199,7 +248,10 @@ class SubscriptionController {
 @ApiTags("subscription")
 @Controller("subscription")
 class SubscriptionWebhookController {
-  constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  constructor(
+    @Inject(DRIZZLE) private readonly db: Drizzle,
+    private readonly invoices: SubscriptionInvoiceService,
+  ) {}
 
   @Post("webhook")
   async webhook(@Body() body: any, @Req() _req: any) {
@@ -309,11 +361,16 @@ class SubscriptionWebhookController {
     if (row.status === "paid") return { ok: true, already: true };
 
     // Mark paid + activate/renew (start now, end one cycle later, clear pending).
-    await activateFromPaidRow(this.db, row, paymentId ?? null);
+    await activateFromPaidRow(this.db, row, paymentId ?? null, this.invoices);
 
     return { ok: true, activated: true };
   }
 }
 
-@Module({ controllers: [SubscriptionController, SubscriptionWebhookController] })
+@Module({
+  // InvoiceModule for PdfService (headless Chrome); EmailService is global.
+  imports: [InvoiceModule],
+  controllers: [SubscriptionController, SubscriptionWebhookController],
+  providers: [SubscriptionInvoiceService],
+})
 export class SubscriptionModule {}
