@@ -18,13 +18,17 @@ import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-
  *  · Colours must be explicit. A PDF has one ground; nothing here reacts to a
  *    viewer theme.
  *
- * One deliberate omission: the document carries the buyer's NAME and ADDRESS
- * and no registration numbers — no buyer VAT, no seller VAT, no CR, and no
- * seller block at all. That is the reference design, and it is a decision
- * rather than an oversight, so do not "fix" it by adding the fields back. A
- * KSA tax invoice normally states the seller's VAT number; if this document
- * ever has to satisfy that, it is a design change to raise, not a field to
- * slip in.
+ * Deliberately, the document names NEITHER party. There is no "invoice to"
+ * block and no seller block: no customer name, no address, no VAT number for
+ * either side, no CR. It carries the invoice number, the date, what was bought
+ * and what it cost, and identifies Dara only through the lockup at the top and
+ * the contact line at the bottom.
+ *
+ * That is the design as specified, and it is a decision rather than an
+ * oversight — do not "fix" it by adding the parties back. It does mean the
+ * document is a receipt rather than a compliant KSA tax invoice despite its
+ * heading; making it compliant is a design change to raise, not a field to
+ * slip in. A test asserts the omission.
  */
 
 /** Everything the document states. Assembled by the caller — this only renders. */
@@ -44,15 +48,6 @@ export interface SubscriptionInvoiceData {
     email: string | null;
     phone: string | null;
     website: string | null;
-  };
-  /**
-   * The account being billed — name and address, and nothing further. The
-   * registration numbers a tax document would normally carry are deliberately
-   * absent; see the note on this file's header.
-   */
-  buyer: {
-    name: string;
-    addressLines: string[];
   };
   lines: Array<{
     description: string;
@@ -163,15 +158,9 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   }
   .pill .v { font-weight: 600; }
 
-  /* ── Parties ──────────────────────────────────────────────────────── */
-  .parties { display: flex; justify-content: flex-start; margin-top: 8mm; }
-  .party { max-width: 90mm; }
-  .party .lbl { color: #6B7A90; font-size: 11px; margin-bottom: 1mm; }
-  .party .nm { font-weight: 800; font-size: 13.5px; color: #15192E; }
-  .party .ln { color: #46566B; }
 
   /* ── Items ────────────────────────────────────────────────────────── */
-  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12mm; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 14mm; }
   thead th {
     background: #2B378C; color: #FFFFFF; font-weight: 700; font-size: 12px;
     padding: 3.4mm 4mm; text-align: center;
@@ -233,14 +222,6 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
       <div class="pill">
         <span>رقم الفاتورة: <span class="v">${esc(d.invoiceNumber)}</span></span>
         <span>التاريخ: <span class="v">${esc(d.issueDate)}</span></span>
-      </div>
-    </div>
-
-    <div class="parties">
-      <div class="party">
-        <div class="lbl">فاتورة إلى</div>
-        <div class="nm">${esc(d.buyer.name)}</div>
-        ${d.buyer.addressLines.filter(Boolean).map((l) => `<div class="ln">${esc(l)}</div>`).join("")}
       </div>
     </div>
 

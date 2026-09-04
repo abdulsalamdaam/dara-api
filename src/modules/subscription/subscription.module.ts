@@ -138,8 +138,9 @@ class SubscriptionController {
     if (!row) throw new NotFoundException("الدفعة غير موجودة");
     if (row.status !== "paid") throw new BadRequestException("لا تصدر فاتورة إلا بعد تأكيد الدفع");
 
-    const buyer = await this.invoices.loadBuyer(this.db, ownerId);
-    const pdf = await this.invoices.renderPdf(row, buyer);
+    // No buyer lookup: the document names nobody. Ownership is already
+    // enforced by the `userId` predicate on the row above.
+    const pdf = await this.invoices.renderPdf(row);
     const name = row.invoiceNumber || `SUB-${String(row.id).padStart(6, "0")}`;
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${name}.pdf"`);
