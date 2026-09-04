@@ -6,6 +6,7 @@ import { PdfService } from "../invoice/services/pdf.service";
 import { EmailService } from "../email/email.service";
 import { resolvePackage, type BillingCycle } from "../../common/packages";
 import { daraSeller, SUBSCRIPTION_VAT_RATE } from "../../common/dara-seller";
+import { invoiceQrSvg } from "../../common/zatca-qr";
 import { renderSubscriptionInvoiceHtml, type SubscriptionInvoiceData } from "./subscription-invoice-template";
 
 type PaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
@@ -80,6 +81,27 @@ export class SubscriptionInvoiceService {
     const buyerAddress = [structured || (company?.address || "").trim(), cityLine]
       .map((v) => v.trim()).filter(Boolean);
 
+    // ZATCA Phase-1 QR: seller name, VAT number, ISO-8601 timestamp, total
+    // with VAT, VAT total. Emitted only when the VAT number is configured —
+    // a QR that scans to an empty registration is worse than none, because it
+    // looks official and certifies nothing.
+    const issuedAt = row.invoiceIssuedAt ?? row.paidAt ?? row.createdAt ?? new Date();
+    const qr = seller.vatNumber
+      ? invoiceQrSvg({
+          sellerName: seller.name,
+          vatNumber: seller.vatNumber,
+          issueDate: issuedAt,
+          totalWithVat: total,
+          vatTotal: vatAmount,
+          sizePx: 220,
+        })
+      : null;
+    if (!qr) {
+      this.log.warn(
+        `invoice ${row.invoiceNumber ?? row.id}: no ZATCA QR — DARA_SELLER_VAT is not set`,
+      );
+    }
+
     return {
       invoiceNumber: row.invoiceNumber || subscriptionInvoiceNumber(row.id),
       issueDate: printDate(row.invoiceIssuedAt ?? row.paidAt ?? row.createdAt),
@@ -104,6 +126,7 @@ export class SubscriptionInvoiceService {
       vatAmount,
       total,
       currencyLabel: row.currency === "SAR" ? "ر.س" : (row.currency || "ر.س"),
+      qrSvg: qr,
     };
   }
 

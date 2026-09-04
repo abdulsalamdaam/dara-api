@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { SubscriptionInvoiceService, subscriptionInvoiceNumber } from "./subscription-invoice.service";
 import { renderSubscriptionInvoiceHtml } from "./subscription-invoice-template";
+import { buildPhase1Tlv } from "../../common/zatca-qr";
 
 /** The service only needs its two collaborators when it renders or emails. */
 const svc = new SubscriptionInvoiceService(null as any, null as any);
@@ -148,5 +149,87 @@ describe("renderSubscriptionInvoiceHtml — no registration numbers, either side
     });
     assert.ok(!h.includes("<script>x</script>"));
     assert.ok(h.includes("&lt;script&gt;"));
+  });
+});
+
+/**
+ * Decode a Phase-1 TLV payload back into its five tags, so a test can assert
+ * what a scanner would actually read rather than just that a QR was drawn.
+ */
+function decodeTlv(b64: string): Record<number, string> {
+  const buf = Buffer.from(b64, "base64");
+  const out: Record<number, string> = {};
+  let i = 0;
+  while (i < buf.length) {
+    const tag = buf[i];
+    const len = buf[i + 1];
+    out[tag] = buf.subarray(i + 2, i + 2 + len).toString("utf8");
+    i += 2 + len;
+  }
+  return out;
+}
+
+describe("the ZATCA Phase-1 QR", () => {
+  const SELLER = { name: "شركة دام التقنية", vat: "300000000000003" };
+
+  const withVat = (fn: () => void) => {
+    const prevName = process.env.DARA_SELLER_NAME;
+    const prevVat = process.env.DARA_SELLER_VAT;
+    process.env.DARA_SELLER_NAME = SELLER.name;
+    process.env.DARA_SELLER_VAT = SELLER.vat;
+    try { fn(); } finally {
+      if (prevName === undefined) delete process.env.DARA_SELLER_NAME; else process.env.DARA_SELLER_NAME = prevName;
+      if (prevVat === undefined) delete process.env.DARA_SELLER_VAT; else process.env.DARA_SELLER_VAT = prevVat;
+    }
+  };
+
+  it("is drawn on the document when the VAT number is configured", () => {
+    withVat(() => {
+      const d = svc.buildData(paidRow(), buyer());
+      assert.ok(d.qrSvg, "a QR must be produced");
+      assert.ok(renderSubscriptionInvoiceHtml(d).includes("<svg"), "and reach the page");
+    });
+  });
+
+  /**
+   * The five mandatory tags, decoded the way ZATCA's own app decodes them.
+   * Tag 4 must equal the amount actually charged and tag 5 the VAT inside it —
+   * a QR disagreeing with the printed totals is a failed audit, not a cosmetic
+   * bug.
+   */
+  it("encodes the five mandatory tags, and they agree with the printed totals", () => {
+    withVat(() => {
+      const d = svc.buildData(paidRow({ amount: "4830.00" }), buyer());
+      const tags = decodeTlv(buildPhase1Tlv({
+        sellerName: SELLER.name, vatNumber: SELLER.vat,
+        timestamp: new Date(paidRow().paidAt).toISOString(),
+        totalWithVat: d.total.toFixed(2), vatTotal: d.vatAmount.toFixed(2),
+      }));
+      assert.equal(tags[1], SELLER.name);
+      assert.equal(tags[2], SELLER.vat);
+      assert.ok(/^\d{4}-\d{2}-\d{2}T/.test(tags[3]), `tag 3 must be ISO-8601, got ${tags[3]}`);
+      assert.equal(tags[4], "4830.00");
+      assert.equal(tags[5], "630.00");
+      assert.equal(Number(tags[4]), d.total);
+      assert.equal(Number(tags[5]), d.vatAmount);
+    });
+  });
+
+  /**
+   * A QR scanning to an empty VAT registration looks official and certifies
+   * nothing, so an unconfigured seller must produce NO code rather than a
+   * hollow one.
+   */
+  it("is omitted entirely when the VAT number is not configured", () => {
+    const prev = process.env.DARA_SELLER_VAT;
+    delete process.env.DARA_SELLER_VAT;
+    try {
+      const d = svc.buildData(paidRow(), buyer());
+      assert.equal(d.qrSvg, null);
+      // The container stays (it anchors the totals to the left) but is empty.
+      assert.ok(renderSubscriptionInvoiceHtml(d).includes('<div class="qr"></div>'), "the QR slot must be empty");
+    } finally {
+      if (prev !== undefined) process.env.DARA_SELLER_VAT = prev;
+    }
   });
 });

@@ -31,6 +31,12 @@ import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-
  * heading; making it compliant is a design change to raise, not a field to
  * slip in. Tests assert both the name being present and the numbers being
  * absent.
+ *
+ * The one place the seller's VAT number does appear is inside the ZATCA
+ * Phase-1 QR, which mandates it (tag 2) along with the seller name (tag 1).
+ * That is encoded, not printed, and no QR is emitted at all when the number is
+ * unconfigured — a QR scanning to an empty VAT number looks official and
+ * certifies nothing.
  */
 
 /** Everything the document states. Assembled by the caller — this only renders. */
@@ -75,6 +81,11 @@ export interface SubscriptionInvoiceData {
   vatAmount: number;
   total: number;
   currencyLabel: string;
+  /**
+   * The ZATCA Phase-1 QR, already rendered as inline SVG. Empty or absent when
+   * the seller's VAT number is not configured — see `daraSeller()`.
+   */
+  qrSvg?: string | null;
   /** Stamped across the document when this is not a paid invoice. */
   watermark?: string | null;
 }
@@ -197,7 +208,13 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
 
   /* ── Totals ───────────────────────────────────────────────────────── */
   /* flex-end is the LEFT edge in RTL, which is where the reference puts them. */
-  .totals { display: flex; justify-content: flex-end; width: 152mm; margin: 8mm auto 0; }
+  .summary {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    width: 152mm; margin: 8mm auto 0;
+  }
+  .qr { width: 27mm; flex: none; }
+  .qr svg { width: 100%; height: auto; display: block; }
+  .totals { display: flex; justify-content: flex-end; }
   .totals table { width: 72mm; margin: 0; }
   .totals td { border: 0; padding: 1.5mm 0; }
   .totals .k { color: #2B7FC4; font-size: 11px; font-weight: 700; text-align: start; }
@@ -268,12 +285,17 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
       <tbody>${rows}</tbody>
     </table>
 
-    <div class="totals">
+    <div class="summary">
+      <!-- Right (RTL start): the QR. Kept in the DOM even when empty so the
+           totals stay pinned to the left edge either way. -->
+      <div class="qr">${d.qrSvg || ""}</div>
+      <div class="totals">
       <table>
         <tr><td class="k">المجموع:</td><td class="v">${money(d.subtotal)}</td></tr>
         <tr><td class="k">ضريبة القيمة المضافة (${esc(d.vatRate)}%):</td><td class="v">${money(d.vatAmount)}</td></tr>
         <tr class="grand"><td class="k">الإجمالي:</td><td class="v">${money(d.total)} ${esc(d.currencyLabel)}</td></tr>
       </table>
+      </div>
     </div>
 
     <div class="note">
