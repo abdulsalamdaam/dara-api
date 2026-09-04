@@ -50,8 +50,6 @@ import { PdfService } from "./services/pdf.service";
     ZatcaOnboardingService,
     PdfService,
   ],
-  // PdfService is exported for the subscription invoice, which renders its own
-  // template through the same headless-Chrome pipeline.
-  exports: [InvoiceService, ZatcaOnboardingService, PdfA3Service, PdfService],
+  exports: [InvoiceService, ZatcaOnboardingService, PdfA3Service],
 })
 export class InvoiceModule {}

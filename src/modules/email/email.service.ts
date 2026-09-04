@@ -63,12 +63,6 @@ export interface SendEmailInput {
   marketing?: boolean;
   /** Resend tag for categorising the send (e.g. "otp", "welcome"). */
   category?: string;
-  /**
-   * Files to attach. Resend takes base64 in the JSON body, so keep these small
-   * — a subscription invoice PDF is ~50-200 KB, which is fine; anything in the
-   * megabytes belongs behind a download link instead.
-   */
-  attachments?: Array<{ filename: string; content: Buffer; contentType?: string }>;
 }
 
 export interface MaintenanceEmailPayload {
@@ -184,13 +178,6 @@ export class EmailService {
           text: input.text,
           reply_to: input.replyTo || this.replyTo,
           headers: customHeaders,
-          attachments: input.attachments?.length
-            ? input.attachments.map((a) => ({
-                filename: a.filename,
-                content: a.content.toString("base64"),
-                content_type: a.contentType,
-              }))
-            : undefined,
           tags: [{ name: "category", value: input.category || (input.marketing ? "marketing" : "transactional") }],
         }),
       });
@@ -457,64 +444,6 @@ export class EmailService {
       subject: `تحديث طلب الصيانة #${payload.id} — ${newLabel}`,
       html,
       text: `تم تحديث طلب الصيانة #${payload.id} إلى: ${newLabel}.`,
-    });
-  }
-
-  /**
-   * The tax invoice for a subscription payment, with the PDF attached.
-   *
-   * Sent once, from the activation path, right after the payment is confirmed.
-   * Transactional — never `marketing`, or Gmail files a receipt in Promotions.
-   */
-  async sendSubscriptionInvoice(
-    to: string,
-    name: string,
-    payload: {
-      invoiceNumber: string;
-      planLabel: string;
-      cycle: "monthly" | "yearly";
-      amount: number;
-      currencyLabel: string;
-      periodEnd: Date;
-    },
-    pdf: Buffer,
-  ): Promise<boolean> {
-    if (!to) return false;
-    const safeName = escapeHtml(name || "");
-    const number = escapeHtml(payload.invoiceNumber);
-    const plan = escapeHtml(payload.planLabel);
-    const cycleLabel = payload.cycle === "yearly" ? "سنوي" : "شهري";
-    const amount = `${payload.amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${escapeHtml(payload.currencyLabel)}`;
-    const until = payload.periodEnd.toLocaleDateString("en-GB").replace(/\//g, "/");
-    const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">فاتورة اشتراكك 🧾</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        مرحباً ${safeName}،<br/>
-        تم استلام دفعة اشتراكك في <strong>دارا · Dara</strong> بنجاح. تجد الفاتورة الضريبية مرفقة بهذه الرسالة بصيغة PDF.
-      </p>
-      <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;color:#334155;">
-        <tr><td style="padding:8px 0;color:#64748b;">رقم الفاتورة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${number}</td></tr>
-        <tr><td style="padding:8px 0;color:#64748b;">الباقة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${plan} — ${cycleLabel}</td></tr>
-        <tr><td style="padding:8px 0;color:#64748b;">المبلغ المدفوع</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${amount}</td></tr>
-        <tr><td style="padding:8px 0;color:#64748b;">الاشتراك ساري حتى</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${until}</td></tr>
-      </table>
-      <div style="margin:24px 0;text-align:center;">
-        <a href="${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
-          فتح لوحة التحكم
-        </a>
-      </div>
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        يمكنك تنزيل هذه الفاتورة وأي فاتورة سابقة في أي وقت من الإعدادات ← الاشتراك والفواتير.
-        لأي استفسار عن الفوترة راسلنا على ${SUPPORT_EMAIL}.
-      </p>
-    `);
-    return this.send({
-      to,
-      subject: `فاتورة اشتراك دارا · ${payload.invoiceNumber}`,
-      html,
-      text: `تم استلام دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة الضريبية مرفقة بصيغة PDF.`,
-      category: "subscription-invoice",
-      attachments: [{ filename: `${payload.invoiceNumber}.pdf`, content: pdf, contentType: "application/pdf" }],
     });
   }
 
