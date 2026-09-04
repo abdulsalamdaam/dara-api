@@ -1,0 +1,129 @@
+# The gate that was missing: until this existed, `deploy.yml` was the ONLY
+# workflow in the repo, so a push that did not compile — and 251 tests that had
+# never once run in CI — shipped straight to Coolify.
+#
+# It deliberately does NOT touch a database, send anything, or talk to ZATCA.
+# The suite is written to stand up without those; see the skip gate below for
+# how we keep "stands up without them" from decaying into "checks nothing".
+#
+# Node is pinned to 22 to match `engines` and both Dockerfile stages
+# (node:22-slim); pnpm to 10.33.2, the version `corepack prepare` activates in
+# the image, so CI resolves the lockfile exactly the way a deploy does.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # openssl is already on ubuntu-latest; xmllint (libxml2-utils) and
+      # xsltproc are NOT, and the ZATCA signing suite SKIPS ITSELF when any of
+      # the three is missing rather than failing. That is the quiet failure this
+      # job exists to prevent — the runner image is not a contract, so install
+      # them explicitly instead of trusting what happens to be there. Same three
+      # packages the runtime image installs (see Dockerfile).
+      - name: Install the XML tooling the ZATCA signing tests shell out to
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssl xsltproc libxml2-utils
+          openssl version && xmllint --version && xsltproc --version
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 10.33.2 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Test — and hold the skip and pass counts to their baselines
+        run: |
+          set -euo pipefail
+
+          # 94 of the 345 tests self-skip: they need DATABASE_URL, which CI
+          # deliberately never sets (staging is a copy of production). A skip is
+          # not a failure, so `pnpm test` reports green whether 94 suites are
+          # skipped or 300 are — and a suite that quietly stops running is
+          # exactly as useless as one that was never written.
+          #
+          # Two numbers pin that down. Both may only move in the good direction;
+          # if you make a suite runnable in CI, or add tests, update them in the
+          # same commit.
+          BASELINE_SKIPPED=94   # may go DOWN
+          BASELINE_PASS=251     # may go UP
+
+          # tee, so the full run is in the log whichever way this goes. With
+          # `set -o pipefail` a failing suite fails the step here, before any
+          # count is read.
+          pnpm test 2>&1 | tee test-output.log
+
+          # Reading the skip count is not as simple as the summary line, and
+          # this cost a real experiment to find out: a skipped DESCRIBE is
+          # reported as one `# SKIP` suite and its children are not counted at
+          # all. Break xmllint and the ZATCA signing suite goes from 6 passing
+          # tests to 0 while `# skipped` stays at exactly 94 — the summary alone
+          # would have missed the very failure this step exists to catch.
+          #
+          # So take whichever is larger: the TAP `# SKIP` markers (which include
+          # suite-level skips; CI is never a TTY, so node uses the TAP reporter)
+          # and the summary count (the fallback when someone runs this under the
+          # spec reporter locally, where there are no markers).
+          summary_skipped=$(grep -Eo '(^|[^[:alnum:]_])skipped[[:space:]]+[0-9]+[[:space:]]*$' test-output.log \
+                            | grep -Eo '[0-9]+' | tail -n1 || true)
+          marker_skipped=$(grep -cE '# SKIP' test-output.log || true)
+
+          # An unreadable summary must not pass as zero. If the reporter format
+          # changes, this check has stopped checking and should say so loudly.
+          if [ -z "${summary_skipped:-}" ]; then
+            echo "::error::Could not read a skipped count out of the test output — fix the parser in ci.yml, do not delete it."
+            exit 1
+          fi
+          skipped=$(( marker_skipped > summary_skipped ? marker_skipped : summary_skipped ))
+
+          passed=$(grep -Eo '(^|[^[:alnum:]_])pass[[:space:]]+[0-9]+[[:space:]]*$' test-output.log \
+                   | grep -Eo '[0-9]+' | tail -n1 || true)
+          if [ -z "${passed:-}" ]; then
+            echo "::error::Could not read a pass count out of the test output — fix the parser in ci.yml, do not delete it."
+            exit 1
+          fi
+
+          echo "skipped=$skipped (baseline $BASELINE_SKIPPED, of which $marker_skipped are TAP SKIP markers)"
+          echo "passed=$passed (baseline $BASELINE_PASS)"
+
+          if [ "$skipped" -gt "$BASELINE_SKIPPED" ]; then
+            echo "::error::$skipped tests/suites skipped, baseline is $BASELINE_SKIPPED. Something that used to run no longer does — most likely a missing tool (openssl/xmllint/xsltproc) or a new suite gated on an env var CI does not set."
+            exit 1
+          fi
+          if [ "$passed" -lt "$BASELINE_PASS" ]; then
+            echo "::error::$passed tests passed, baseline is $BASELINE_PASS. Tests disappeared without failing — a spec file no longer matched by the glob, or a suite skipped whole. If you deleted them on purpose, lower BASELINE_PASS in the same commit and say why."
+            exit 1
+          fi
+          if [ "$skipped" -lt "$BASELINE_SKIPPED" ]; then
+            echo "::notice::Only $skipped skipped — lower BASELINE_SKIPPED in .github/workflows/ci.yml to $skipped."
+          fi
+          if [ "$passed" -gt "$BASELINE_PASS" ]; then
+            echo "::notice::$passed passing now — raise BASELINE_PASS in .github/workflows/ci.yml to $passed."
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-output
+          path: test-output.log
+          if-no-files-found: ignore
