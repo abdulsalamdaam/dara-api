@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get,
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
-import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable } from "@dara/database";
+import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable, appLogsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
@@ -63,6 +63,23 @@ function resolveAdminPlan(requested: unknown, desired: string | null | undefined
   }
   if (isPackagePlan(desired)) return desired;
   return "basic";
+}
+
+/**
+ * A `from` / `to` bound for the log list.
+ *
+ * `parseDateBound` accepts only `YYYY-MM-DD`, which is right for a login
+ * history and too coarse here — the interesting window when chasing an
+ * incident is minutes wide, not a day. So a full ISO timestamp is accepted
+ * too, and a bare date still widens to the whole day in UTC the way every
+ * other list does.
+ */
+function parseLogBound(raw: unknown, edge: "start" | "end"): Date | undefined {
+  const day = parseDateBound(raw);
+  if (day) return new Date(`${day}T${edge === "start" ? "00:00:00.000Z" : "23:59:59.999Z"}`);
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  const d = new Date(raw.trim());
+  return isNaN(d.getTime()) ? undefined : d;
 }
 
 /**
@@ -704,6 +721,105 @@ class AdminController {
       pageSize: q.pageSize,
       total: Number(totalRow[0]?.total ?? 0),
       stats: { all, byStatus },
+    };
+  }
+
+  /**
+   * `GET /admin/logs` — the application log, after the fact.
+   *
+   * This is the point of `app_logs`: an unhandled 500 used to print a stack to
+   * the container's stdout and die with the container, so by the time a
+   * customer reported the problem there was nothing left to read. Every row
+   * here carries the request id the client was handed back in `x-request-id`,
+   * so a screenshot of a failed request is enough to find the exact stack.
+   *
+   * Same wire shape as `login-history` and every other list: `limit` returns a
+   * bare array, `page`/`pageSize`/`paginated` return
+   * `{ data, page, pageSize, total }`, and `total` is the database's count for
+   * the same WHERE rather than the size of the page.
+   *
+   * Filters compose: `?level=error&from=2026-09-01` and
+   * `?requestId=<uuid>` are the two that actually get used — the first to see
+   * what broke today, the second to reconstruct one request end to end.
+   */
+  @Get("logs")
+  async logs(@Query() rawQuery: any) {
+    const paged = wantsPagination(rawQuery, ["q"]);
+    const query = listQuerySchema.parse(rawQuery ?? {});
+
+    const conds: any[] = [];
+
+    const levels = parseEnumList(rawQuery?.level, ["error", "warn", "log", "debug", "verbose"] as const);
+    if (levels?.length) conds.push(inArray(appLogsTable.level, levels as string[]));
+
+    const event = typeof rawQuery?.event === "string" ? rawQuery.event.trim() : "";
+    if (event) conds.push(eq(appLogsTable.event, event));
+
+    const requestId = typeof rawQuery?.requestId === "string" ? rawQuery.requestId.trim() : "";
+    if (requestId) conds.push(eq(appLogsTable.requestId, requestId));
+
+    // Bounded to int4 for the same reason `parseIdList` is: an id past 2^31
+    // reaches the driver and comes back as a 500 rather than an empty page.
+    const userIdRaw = String(rawQuery?.userId ?? "").trim();
+    if (/^[0-9]+$/.test(userIdRaw)) {
+      const uid = Number(userIdRaw);
+      if (uid > 0 && uid <= 2147483647) conds.push(eq(appLogsTable.userId, uid));
+    }
+
+    // A prefix match, not an exact one: the useful question is "everything
+    // under /api/simple-invoices", not one exact path with its ids in it.
+    const path = typeof rawQuery?.path === "string" ? rawQuery.path.trim() : "";
+    if (path) conds.push(ilike(appLogsTable.path, `${path}%`));
+
+    const statusRaw = String(rawQuery?.status ?? "").trim();
+    if (/^[0-9]{3}$/.test(statusRaw)) conds.push(eq(appLogsTable.status, Number(statusRaw)));
+    // `status=5xx` — the class, which is what anyone actually wants.
+    else if (/^[1-5]xx$/i.test(statusRaw)) {
+      const lo = Number(statusRaw[0]) * 100;
+      conds.push(and(gte(appLogsTable.status, lo), lte(appLogsTable.status, lo + 99)));
+    }
+
+    const from = parseLogBound(rawQuery?.from, "start");
+    const to = parseLogBound(rawQuery?.to, "end");
+    if (from) conds.push(gte(appLogsTable.createdAt, from));
+    if (to) conds.push(lte(appLogsTable.createdAt, to));
+
+    const q = (typeof rawQuery?.q === "string" ? rawQuery.q : query.search ?? "").trim();
+    if (q) {
+      conds.push(or(
+        ilike(appLogsTable.message, `%${q}%`),
+        ilike(appLogsTable.error, `%${q}%`),
+        ilike(appLogsTable.path, `%${q}%`),
+        ilike(appLogsTable.event, `%${q}%`),
+      ));
+    }
+
+    const where = conds.length ? and(...conds) : undefined;
+
+    const rowsQ = this.db
+      .select()
+      .from(appLogsTable)
+      // `id` tiebreak — a burst of rows from one request shares a
+      // `created_at` to the millisecond, and without it they shuffle between
+      // page requests.
+      .orderBy(desc(appLogsTable.createdAt), desc(appLogsTable.id))
+      .where(where)
+      .$dynamic();
+
+    if (!paged) {
+      const limit = Math.min(Math.max(1, parseInt(rawQuery?.limit || "100", 10) || 100), 500);
+      return rowsQ.limit(limit);
+    }
+
+    const [rows, totalRow] = await Promise.all([
+      rowsQ.limit(query.pageSize).offset((query.page - 1) * query.pageSize),
+      this.db.select({ total: count() }).from(appLogsTable).where(where),
+    ]);
+    return {
+      data: rows,
+      page: query.page,
+      pageSize: query.pageSize,
+      total: Number(totalRow[0]?.total ?? 0),
     };
   }
 

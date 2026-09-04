@@ -57,7 +57,13 @@ EXPOSE 4000
 # signal and routed to the container the moment it started — before Nest was
 # listening. That is the ~5s window at every deploy where requests (login
 # included) came back 502/503. start-period covers ensureSchema + the module
-# graph; the endpoint itself is a pure liveness probe with no DB dependency.
+# graph.
+#
+# The endpoint is no longer a pure liveness probe: it runs a `select 1` with a
+# 2s timeout and answers 503 when the pool is unreachable. It used to return a
+# hardcoded `{status:"ok"}`, so a container serving 500s off a dead database
+# reported healthy and the proxy kept sending it traffic. start-period still
+# covers a database that is slow to accept connections at boot.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.API_PORT||4000)+'/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 

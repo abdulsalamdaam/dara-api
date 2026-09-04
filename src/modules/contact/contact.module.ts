@@ -11,6 +11,7 @@ import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { OtpThrottlerGuard } from "../../common/throttler";
+import { clientIp, clientUserAgent } from "../../common/client-ip";
 import { EmailService } from "../email/email.service";
 import {
   listQuerySchema, parseDateBound, wantsPagination,
@@ -74,10 +75,11 @@ class PublicContactController {
       throw new BadRequestException("الرجاء إدخال البريد الإلكتروني أو رقم الجوال للتواصل");
     }
 
-    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
-      || req.socket?.remoteAddress
-      || "unknown";
-    const userAgent = (req.headers["user-agent"] as string)?.slice(0, 400) || null;
+    // One definition of "who is calling", shared with the throttler and the
+    // auth controller — `common/client-ip`. Reading `x-forwarded-for[0]` here
+    // meant every contact submission recorded Cloudflare's edge IP.
+    const ip = clientIp(req);
+    const userAgent = clientUserAgent(req);
 
     const [row] = await this.db.insert(contactSubmissionsTable).values({
       name: body.name?.trim() || null,

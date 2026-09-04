@@ -89,21 +89,40 @@ None is flagged by ZATCA. None is correct.
 These cost six queries and a day of guessing on the owner-264 question. Each is
 small.
 
-### 3.1 Record the real client IP
+**Most of this section shipped on `master` (05 Sep 2026).** There is now a
+structured stdout log carrying a request id, an `app_logs` table that outlives
+the container, a catch-all exception filter, a real health check, and
+`GET /admin/logs` to read it back. What each item below still owes is noted on
+it. See `src/common/logging/` and `src/common/client-ip.ts`.
+
+### 3.1 Record the real client IP — DONE
 `clientCtx` (`auth.controller.ts:25`) and `common/throttler.ts` read the first
 entry of `x-forwarded-for`, which behind Cloudflare is **Cloudflare's own edge**.
 Every IP in `login_logs` and `phone_otp_tokens` is `172.69.x.x`. Read
 `cf-connecting-ip` first, fall back to XFF. This also weakens per-IP rate
 limiting today, since many users share one edge address.
 
-### 3.2 Keep the user agent on OTP requests
+Fixed: `src/common/client-ip.ts` is the single definition
+(`cf-connecting-ip` → `x-real-ip` → XFF[0] → socket), validated with
+`net.isIP` so a forged header cannot become a rate-limit bucket key, and all
+three duplicate call sites now import it. **Rows written before this still
+hold the edge address** — nothing backfills them.
+
+### 3.2 Keep the user agent on OTP requests — still open
 `clientCtx` captures `ua` and then throws it away — `phoneOtp.start` takes only
 the IP. `login_logs` keeps a coarse `device` string and nothing else.
 
-### 3.3 Log a refused approval
+Partly covered: the user agent is now on every `app_logs` row, so an OTP
+request has one somewhere. `phone_otp_tokens` still does not carry it.
+
+### 3.3 Log a refused approval — DONE
 A readiness-gate refusal leaves **no trace anywhere**. From the database it is
 indistinguishable from the user never having tried, which is precisely the
 ambiguity we could not resolve for owner 264.
+
+Fixed: both refusals on `POST /simple-invoices/:id/approve` now write an
+`invoice_approval_refused` row naming the document and which blockers fired.
+Read it with `GET /admin/logs?event=invoice_approval_refused`.
 
 ### 3.4 Log onboarding on production
 `issueComplianceCsid` / `issueProductionCsid` write nothing. Owner 264's

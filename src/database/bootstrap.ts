@@ -410,6 +410,51 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure ejar_source/ejar_api_logs failed: ${err?.message || err}`);
     }
 
+    // Phase 1.5c: app_logs — the request/error log that outlives the container.
+    //
+    // Additive and idempotent like everything else here; there is no migration
+    // file for it. Its writer (`common/logging/app-log.service.ts`) is
+    // fire-and-forget and mutes itself after repeated failures, so a container
+    // that boots before this ALTER succeeds degrades to stdout-only logging
+    // rather than 500ing anything.
+    //
+    // No foreign keys on user_id / owner_user_id on purpose: a log row must be
+    // insertable after the user it describes has been deleted.
+    try {
+      await client.query(`
+        create table if not exists app_logs (
+          id serial primary key,
+          created_at timestamptz not null default now(),
+          level text not null,
+          event text,
+          request_id text,
+          method text,
+          path text,
+          status integer,
+          duration_ms integer,
+          user_id integer,
+          owner_user_id integer,
+          ip text,
+          user_agent text,
+          message text,
+          context text,
+          error text,
+          stack text,
+          meta jsonb
+        )
+      `);
+      // `created_at desc` because every read of this table is "the most recent
+      // N", and the retention sweep deletes from the old end of the same
+      // index. The rest are the four columns the admin view filters on.
+      await client.query(`create index if not exists app_logs_created_idx on app_logs (created_at desc)`);
+      await client.query(`create index if not exists app_logs_level_idx on app_logs (level)`);
+      await client.query(`create index if not exists app_logs_request_idx on app_logs (request_id)`);
+      await client.query(`create index if not exists app_logs_user_idx on app_logs (user_id)`);
+      await client.query(`create index if not exists app_logs_event_idx on app_logs (event)`);
+    } catch (err: any) {
+      log.warn(`ensure app_logs failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

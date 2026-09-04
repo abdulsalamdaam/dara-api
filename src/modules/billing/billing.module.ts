@@ -24,6 +24,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { AppLogService } from "../../common/logging/app-log.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -157,6 +158,7 @@ class SimpleInvoicesController {
     private readonly zatcaOnboarding: ZatcaOnboardingService,
     private readonly pdfa3: PdfA3Service,
     private readonly uploads: UploadsService,
+    private readonly appLog: AppLogService,
   ) {}
 
   /**
@@ -1250,6 +1252,31 @@ class SimpleInvoicesController {
         client: (doc.client as any) ?? null,
       });
       if (!readiness.ok) {
+        // A refused approval used to leave NO trace anywhere. From the
+        // database it was indistinguishable from the landlord never having
+        // tried — which is exactly the ambiguity that cost a day on owner 264:
+        // we could not tell "he never pressed the button" from "he pressed it
+        // and the gate refused him". `TODO.md` §3.3.
+        //
+        // Logged as a first-class event rather than left to the exception
+        // filter's generic 400 row, because the interesting part is WHICH
+        // blockers fired, and because 400s are otherwise not persisted at all.
+        this.appLog.record({
+          level: "warn",
+          event: "invoice_approval_refused",
+          status: 400,
+          message: `approval refused for document ${doc.id}: ${readinessMessage(readiness)}`,
+          context: "BillingZatca",
+          meta: {
+            documentId: doc.id,
+            docType: doc.type,
+            kind: doc.kind,
+            contractId: doc.contractId ?? null,
+            ownerId: (doc.client as any)?.ownerId ?? null,
+            tenantId: doc.tenantId ?? null,
+            blockers: readiness.blockers,
+          },
+        });
         throw new BadRequestException({
           error: "invoice_not_ready",
           message: `لا يمكن اعتماد الفاتورة — بيانات ناقصة: ${readinessMessage(readiness)}`,
@@ -1266,6 +1293,21 @@ class SimpleInvoicesController {
       const acked = (body as any)?.confirmations ?? {};
       const unacknowledged = readiness.confirmations.filter((c) => acked[c.key] !== true);
       if (unacknowledged.length > 0) {
+        // Same reasoning as the blocker refusal above: an unacknowledged
+        // confirmation is still a refused approval, and it looks identical
+        // from the database to a landlord who never tried.
+        this.appLog.record({
+          level: "warn",
+          event: "invoice_approval_refused",
+          status: 400,
+          message: `approval refused for document ${doc.id}: unacknowledged confirmations`,
+          context: "BillingZatca",
+          meta: {
+            documentId: doc.id,
+            reason: "needs_confirmation",
+            confirmations: unacknowledged.map((c) => c.key),
+          },
+        });
         throw new BadRequestException({
           error: "invoice_needs_confirmation",
           message: "يلزم تأكيد إصدار الفاتورة قبل الاعتماد",
