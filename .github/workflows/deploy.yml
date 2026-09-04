@@ -3,6 +3,9 @@
 #   main   -> production   (dara-sa.net / api.dara-sa.net)
 #   master -> staging      (staging.dara-sa.net / api-staging.dara-sa.net)
 # COOLIFY_TOKEN is a repository secret.
+# NOT gated on ci.yml yet — deliberately: nobody has seen that job green, and a
+# red CI must not be the first thing that ever blocks a deploy. Gate it once it
+# has run clean for a while; that is a follow-up, not an oversight.
 name: Deploy to Coolify
 
 on:
