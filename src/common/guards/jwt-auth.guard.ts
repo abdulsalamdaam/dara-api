@@ -111,6 +111,20 @@ export class JwtAuthGuard implements CanActivate {
       ownerUserId: row.ownerUserId ?? null,
       companyId: row.companyId ?? null,
       roleId: row.roleId ?? null,
+      /**
+       * Pinned, not merged. `ownerScopeId` narrows a request to ONE landlord
+       * inside the account and is only ever legitimate on an owner-kind token,
+       * where the branch above reads it from the `owners` row rather than from
+       * the token. Here it would have come from `...decoded` — i.e. from a
+       * claim the client presented.
+       *
+       * Nothing currently signs a user token carrying that claim, so this is
+       * not a live hole; it is the assumption that makes it not one, written
+       * down and enforced. Every reader of `ownerScopeId` treats it as
+       * server-derived, so the day some other code path adds a claim to a user
+       * token, that must not silently become a scope.
+       */
+      ownerScopeId: null,
     };
     return true;
   }

@@ -116,9 +116,28 @@ export const ROLE_PRESETS: Record<"super_admin" | "admin" | "user" | "demo", Per
   demo: VIEW_ONLY,
 };
 
+/**
+ * Resolve the permissions a principal actually holds.
+ *
+ * A custom array is a SUBSET of the role's preset, never an extension of it.
+ * This used to return the custom array verbatim, so whatever wrote it decided
+ * the ceiling — and the docstring three definitions below already claimed
+ * `ROLE_PRESETS.user` was the upper bound for employees while nothing enforced
+ * it. A custom array carrying `admin.users` or `zatca.promote-production`
+ * would have been honoured in full.
+ *
+ * Intersecting is the enforcement. Widening what a role may hold is then a
+ * deliberate edit to `ROLE_PRESETS`, which is reviewable, rather than a value
+ * that arrived in a column.
+ */
 export function effectivePermissions(role: keyof typeof ROLE_PRESETS, custom?: string[] | null): Permission[] {
-  if (custom && Array.isArray(custom)) return custom as Permission[];
-  return ROLE_PRESETS[role] || [];
+  const preset = ROLE_PRESETS[role] || [];
+  if (!custom || !Array.isArray(custom)) return preset;
+  const granted = new Set<string>(custom);
+  // Iterating the PRESET (not the stored array) is what makes this a clamp:
+  // anything in `custom` that the preset does not contain cannot appear in the
+  // output at all, and the result is de-duplicated and stably ordered for free.
+  return preset.filter((p) => granted.has(p));
 }
 
 export function hasPermission(perms: string[] | undefined | null, key: Permission): boolean {
@@ -131,6 +150,20 @@ export function hasPermission(perms: string[] | undefined | null, key: Permissio
  * are *labels*, not role-enum values — the underlying user.role stays "user"
  * (so `ROLE_PRESETS.user` is the upper bound) and we copy these permissions
  * into user.permissions JSONB. Owners can then trim/extend per individual.
+ *
+ * **Two of them exceed that upper bound today.** `general` and
+ * `customerService` grant `support.respond`, which `ROLE_PRESETS.user`
+ * (= `FULL_TENANT_ADMIN`) does not contain — it answers a customer's own
+ * support tickets, which a General Manager and a customer-service employee
+ * legitimately do. Nothing is broken by it right now: permissions are read
+ * from `roles.permissions` at request time (`JwtAuthGuard`), these presets are
+ * seeded into `roles` rows by `bootstrap.ts`, and `effectivePermissions` has
+ * no caller. But it means the clamp above and this comment disagree, so before
+ * wiring `effectivePermissions` into the employee path, `SUPPORT_RESPOND` has
+ * to be added to `FULL_TENANT_ADMIN` deliberately (which also grants it to
+ * every landlord account) or these two presets have to give it up.
+ * `permissions.spec.ts` pins the discrepancy so a THIRD one cannot appear
+ * unnoticed.
  */
 export const EMPLOYEE_PRESETS: Record<string, { labelAr: string; labelEn: string; permissions: Permission[] }> = {
   // 1) المدير العام — highest authority: everything the owner can do.

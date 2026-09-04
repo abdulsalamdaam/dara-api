@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 94 of the 345 tests self-skip: they need DATABASE_URL, which CI
+          # 94 of the 389 tests self-skip: they need DATABASE_URL, which CI
           # deliberately never sets (staging is a copy of production). A skip is
           # not a failure, so `pnpm test` reports green whether 94 suites are
           # skipped or 300 are — and a suite that quietly stops running is
@@ -66,7 +66,7 @@ jobs:
           # if you make a suite runnable in CI, or add tests, update them in the
           # same commit.
           BASELINE_SKIPPED=94   # may go DOWN
-          BASELINE_PASS=251     # may go UP
+          BASELINE_PASS=295     # may go UP
 
           # tee, so the full run is in the log whichever way this goes. With
           # `set -o pipefail` a failing suite fails the step here, before any

@@ -3,6 +3,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, Head
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
+import { sanitizeFolder, scopedFolder } from "./key-scope";
 
 export interface UploadResult {
   key: string;
@@ -19,6 +20,14 @@ export interface UploadOptions {
   filename?: string;
   /** Tag the object with simple metadata (small ASCII values only). */
   metadata?: Record<string, string>;
+  /**
+   * Account scope (`common/scope.ts`'s `scopeId`) the object belongs to. When
+   * given, the key is namespaced `acct/<scopeId>/…` so it can be authorized
+   * later from the key alone — see `key-scope.ts`. Every new call site should
+   * pass it; it is optional only because the pre-existing ones cannot all be
+   * given a scope (a tenant uploading a payment proof passes the LANDLORD's).
+   */
+  scopeId?: number;
 }
 
 const DEFAULT_TTL = 60 * 15; // 15 minutes
@@ -70,13 +79,23 @@ export class UploadsService {
     return this._client;
   }
 
-  /** Build an object key under an optional folder. Always lowercased extension, slash-safe. */
+  /**
+   * Build an object key under an optional folder. Always lowercased extension,
+   * slash-safe, and — when `opts.scopeId` is given — namespaced under
+   * `acct/<scopeId>/`, which is what makes the key self-authorizing.
+   *
+   * The folder is sanitized rather than merely trimmed of slashes: it is
+   * caller-supplied, and `../..` in it would otherwise reshape the account
+   * prefix it is appended to.
+   */
   buildKey(originalName: string, opts: UploadOptions = {}): string {
     const ext = extname(originalName).toLowerCase().replace(/[^a-z0-9.]/g, "");
     const base = opts.filename
       ? opts.filename.replace(/[^a-zA-Z0-9._-]/g, "_")
       : `${Date.now()}-${randomUUID()}${ext}`;
-    const folder = (opts.folder || "").replace(/^\/+|\/+$/g, "");
+    const folder = opts.scopeId != null
+      ? scopedFolder(opts.scopeId, opts.folder)
+      : sanitizeFolder(opts.folder);
     return folder ? `${folder}/${base}` : base;
   }
 

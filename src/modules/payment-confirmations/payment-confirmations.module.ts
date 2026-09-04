@@ -155,7 +155,14 @@ export class TenantPaymentConfirmationsController {
     if (file) {
       const okType = /^(application\/pdf|image\/(png|jpe?g|webp|heic))$/i.test(file.mimetype);
       if (!okType) throw new BadRequestException("المرفق يجب أن يكون PDF أو صورة");
-      const result = await this.uploads.upload(file, { folder: `payment-confirmations/${payment.contractId}` });
+      // Scoped to the LANDLORD's account (`payment.userId`), not the tenant:
+      // the tenant has no account scope, and the landlord is who reads the
+      // proof back. Without the prefix the key would be a legacy one from the
+      // day it was written, and `/uploads/sign` would have to attribute it.
+      const result = await this.uploads.upload(file, {
+        folder: `payment-confirmations/${payment.contractId}`,
+        scopeId: payment.userId,
+      });
       proofKey = result.key;
       proofName = file.originalname;
     }

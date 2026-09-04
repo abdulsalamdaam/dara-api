@@ -53,17 +53,44 @@ import { ReportsModule } from "./modules/reports/reports.module";
      * Global per-IP rate limit. Per-route limits (esp. OTP) are layered on top
      * via @Throttle() and the OtpThrottlerGuard with a per-(IP+target) tracker.
      */
-    ThrottlerModule.forRoot([
-      // Every per-route `@Throttle({ default: ... })` was a no-op: the guard
-      // looks the override up by bucket name and there was no bucket called
-      // "default", so register/reset-password/OTP-verify fell back to the
-      // loose global limits. Sized to match `long`, so nothing undecorated
-      // gets newly restricted.
-      { name: "default", ttl: 3600_000, limit: 2000 },
-      { name: "short",  ttl: 1000,    limit: 20  },     // burst: 20 req/sec
-      { name: "medium", ttl: 60_000,  limit: 120 },     // sustained: 120 req/min
-      { name: "long",   ttl: 3600_000, limit: 2000 },   // 2000 req/hour
-    ]),
+    ThrottlerModule.forRoot({
+      /**
+       * `setHeaders: false` suppresses the `X-RateLimit-Limit-*`,
+       * `-Remaining-*` and `-Reset-*` triple that every response carried.
+       * Those headers published the exact state of each bucket to anyone
+       * watching, which is precisely the feedback a credential-stuffing or
+       * OTP-brute run needs to pace itself under the limit rather than
+       * discovering it by being refused.
+       *
+       * It is off for EVERY response, not just unauthenticated ones. This
+       * guard is an APP_GUARD and so runs before any route guard: at that
+       * point "is this caller authenticated" can only be answered by looking
+       * for an `Authorization` header, which the attacker also controls — a
+       * bogus `Bearer x` would have bought the headers straight back. A
+       * condition that the attacker can satisfy is not a condition.
+       *
+       * Note this is the OBJECT form of `forRoot`. The array form leaves the
+       * guard's `commonOptions` empty (`throttler.guard.js` `onModuleInit`),
+       * so a top-level `setHeaders` there would be silently ignored.
+       *
+       * `Retry-After` is not lost: `OtpThrottlerGuard` sets it on the 429
+       * itself, under its standard un-suffixed name. It only ever reaches a
+       * caller who has already been refused, and a client that backs off
+       * correctly is the one thing here worth keeping.
+       */
+      setHeaders: false,
+      throttlers: [
+        // Every per-route `@Throttle({ default: ... })` was a no-op: the guard
+        // looks the override up by bucket name and there was no bucket called
+        // "default", so register/reset-password/OTP-verify fell back to the
+        // loose global limits. Sized to match `long`, so nothing undecorated
+        // gets newly restricted.
+        { name: "default", ttl: 3600_000, limit: 2000 },
+        { name: "short",  ttl: 1000,    limit: 20  },     // burst: 20 req/sec
+        { name: "medium", ttl: 60_000,  limit: 120 },     // sustained: 120 req/min
+        { name: "long",   ttl: 3600_000, limit: 2000 },   // 2000 req/hour
+      ],
+    }),
     DatabaseModule,
     // Global, and imported early: the exception filter, the request middleware
     // and every service that wants to record something all resolve

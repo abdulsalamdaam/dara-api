@@ -13,6 +13,7 @@ import {
 import type { InvoiceLineInput } from "../invoice/services/invoice-builder.service";
 import { PdfA3Service } from "../invoice/services/pdfa3.service";
 import { UploadsService } from "../uploads/uploads.service";
+import { classifyKey } from "../uploads/key-scope";
 import { UploadsModule } from "../uploads/uploads.module";
 import { listQuerySchema, wantsPagination, pageBounds, parseIdList} from "../../common/pagination";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
@@ -1187,6 +1188,25 @@ class SimpleInvoicesController {
     const uid = scopeId(user);
     const key = typeof body?.key === "string" ? body.key.trim() : "";
     if (!key) throw new BadRequestException("key is required");
+    // The key must be one this account minted. Two things go wrong otherwise,
+    // and the second is the reason this check is here at all:
+    //
+    //   · `:id/pdfa3` below reads the stored key with `uploads.getObject`, so
+    //     an arbitrary key written here is a server-side read of any object in
+    //     the bucket, returned to the caller wrapped in a PDF/A-3.
+    //   · `UploadKeyAccessService` attributes a legacy key by asking whether a
+    //     row the caller OWNS references it. An endpoint that lets a caller
+    //     write any key onto their own row is a way to manufacture exactly
+    //     that reference — the attribution would then be answering a question
+    //     the attacker had planted.
+    //
+    // The web uploads the PDF through `POST /uploads` and passes back the key
+    // it was handed, which since the scoping change is always `acct/<scope>/…`,
+    // so nothing legitimate is refused. Older documents keep their unprefixed
+    // key; this governs writes only.
+    if (classifyKey(key, uid).kind !== "own") {
+      throw new BadRequestException("مفتاح الملف غير صالح");
+    }
     const [updated] = await this.db.update(simpleInvoicesTable).set({ pdfKey: key } as any)
       .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)))
       .returning({ id: simpleInvoicesTable.id });
