@@ -6,6 +6,7 @@ import { AuthService } from "./auth.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { TenantAuthGuard } from "../../common/guards/tenant-auth.guard";
 import { OtpThrottlerGuard } from "../../common/throttler";
+import { clientIp, clientUserAgent } from "../../common/client-ip";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { CurrentTenant } from "../../common/decorators/current-tenant.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -22,12 +23,17 @@ import {
   EmailOtpVerifyDto,
 } from "./auth.dto";
 
-function clientCtx(req: Request) {
-  const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
-    || req.socket?.remoteAddress
-    || "unknown";
-  const ua = req.headers["user-agent"] as string | undefined;
-  return { ip, ua };
+/**
+ * The caller's identity for a login attempt, as `AuthService` wants it.
+ *
+ * The IP extraction used to live here, read `x-forwarded-for[0]`, and was
+ * therefore recording Cloudflare's edge address for every login in
+ * `login_logs`. It now comes from `common/client-ip`, which is the single
+ * definition — the same one the throttler keys its buckets on. The return
+ * shape is unchanged so no caller had to move.
+ */
+function clientCtx(req: Request): { ip: string; ua: string | undefined } {
+  return { ip: clientIp(req), ua: clientUserAgent(req) ?? undefined };
 }
 
 @ApiTags("auth")

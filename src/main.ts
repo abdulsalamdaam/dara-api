@@ -4,7 +4,17 @@ import { ValidationPipe, Logger } from "@nestjs/common";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module";
 import { ZodExceptionFilter } from "./common/zod-exception.filter";
+import { StructuredLogger } from "./common/logging/logger";
 import { ensureSchema } from "./database/bootstrap";
+
+/**
+ * Installed before anything else so `ensureSchema`'s own warnings come out in
+ * the same shape as everything after them. Nest's `Logger` static methods
+ * buffer until a logger is registered, so the assignment here also governs the
+ * lines above `NestFactory.create`.
+ */
+const appLogger = new StructuredLogger();
+Logger.overrideLogger(appLogger);
 
 async function bootstrap() {
   // Run schema initializer BEFORE the Nest factory builds providers — many
@@ -27,7 +37,12 @@ async function bootstrap() {
     );
   }
 
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { logger: appLogger });
+
+  // One JSON object per line on stdout, carrying the request id, the user and
+  // the path — see `common/logging/logger.ts`. Every existing `new
+  // Logger(...)` call site is untouched; only the sink changed.
+  app.useLogger(appLogger);
 
   app.setGlobalPrefix("api");
   app.enableCors({ origin: true, credentials: true });

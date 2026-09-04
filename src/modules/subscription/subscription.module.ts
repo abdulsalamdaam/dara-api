@@ -13,6 +13,7 @@ import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
+import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.net").replace(/\/$/, "");
@@ -258,6 +259,7 @@ class SubscriptionWebhookController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly invoices: SubscriptionInvoiceService,
+    private readonly appLog: AppLogService,
   ) {}
 
   @Post("webhook")
@@ -310,10 +312,25 @@ class SubscriptionWebhookController {
         const inv = await fetchMoyasarInvoice(invoiceId);
         paid = String(inv.status).toLowerCase() === "paid";
         verified = true;
-      } catch {
+      } catch (err) {
         // A transient Moyasar failure must not become an unverified
         // activation. Moyasar retries; answering "not verified" is the safe
         // half of that trade.
+        //
+        // But it must not be SILENT. This is the money path: swallowing the
+        // error here is indistinguishable, from outside, from a webhook that
+        // was never delivered — and the symptom (a user who paid, closed the
+        // tab and was never activated) surfaces days later as a support
+        // ticket with nothing to look at. Moyasar's dashboard is no help
+        // either: it records the 2xx as "delivered successfully".
+        this.appLog.record({
+          level: "error",
+          event: "moyasar_webhook_verify_failed",
+          message: "could not verify a Moyasar invoice — refusing to activate on the payload alone",
+          context: "MoyasarWebhook",
+          error: err,
+          meta: { invoiceId, eventPaymentId, metaPaymentId },
+        });
       }
     }
     if (!verified) {
@@ -323,6 +340,21 @@ class SubscriptionWebhookController {
       } else {
         console.error("[moyasar] webhook REFUSED: payload could not be verified", {
           hasInvoiceId: !!invoiceId, moyasarConfigured: isMoyasarConfigured(),
+        });
+        this.appLog.record({
+          level: "error",
+          event: "moyasar_webhook_refused",
+          message: "webhook refused: payload could not be verified",
+          context: "MoyasarWebhook",
+          // No `secret_token` and no payload body: the redactor would strip
+          // the token anyway, and there is nothing in the body worth the risk.
+          meta: {
+            reason: "unverified",
+            hasInvoiceId: !!invoiceId,
+            moyasarConfigured: isMoyasarConfigured(),
+            secretConfigured: !!expected,
+            metaPaymentId: metaPaymentId ?? null,
+          },
         });
         return { ok: false, error: "unverified" };
       }

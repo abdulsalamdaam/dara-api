@@ -1,8 +1,11 @@
-import { Module } from "@nestjs/common";
+import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule } from "@nestjs/throttler";
 import { OtpThrottlerGuard } from "./common/throttler";
+import { LoggingModule } from "./common/logging/app-log.service";
+import { AllExceptionsFilter } from "./common/logging/all-exceptions.filter";
+import { RequestLogMiddleware } from "./common/logging/request-log.middleware";
 
 import { DatabaseModule } from "./database/database.module";
 import { TwilioModule } from "./modules/twilio/twilio.module";
@@ -62,6 +65,10 @@ import { ReportsModule } from "./modules/reports/reports.module";
       { name: "long",   ttl: 3600_000, limit: 2000 },   // 2000 req/hour
     ]),
     DatabaseModule,
+    // Global, and imported early: the exception filter, the request middleware
+    // and every service that wants to record something all resolve
+    // AppLogService from here.
+    LoggingModule,
     TwilioModule,
     SmsModule,
     EmailModule,
@@ -107,6 +114,21 @@ import { ReportsModule } from "./modules/reports/reports.module";
     // superset for non-OTP routes (falls back to IP-only tracking when no
     // identifier is in the body).
     { provide: APP_GUARD, useClass: OtpThrottlerGuard },
+    // Catch-all. Deliberately does NOT change any existing status or body — it
+    // replies through BaseExceptionFilter and delegates a ZodError to the same
+    // builder ZodExceptionFilter uses. What it adds is the request context and
+    // a row in `app_logs` that outlives the container.
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  /**
+   * One access log line per request, on every route — including the ones that
+   * never reach a controller, which is exactly where a 404 or a rejected body
+   * used to disappear without trace. It also opens the AsyncLocalStorage
+   * context, so it must run before anything that might want to log.
+   */
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(RequestLogMiddleware).forRoutes("*");
+  }
+}
