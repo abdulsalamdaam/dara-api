@@ -81,6 +81,8 @@ export class SubscriptionInvoiceService {
     const cityLine = [company?.city, company?.postalCode].map((v) => (v || "").trim()).filter(Boolean).join(" ");
     const buyerAddress = [structured || (company?.address || "").trim(), cityLine]
       .map((v) => v.trim()).filter(Boolean);
+    // Name and address only — the document states no registration numbers for
+    // either party. See the note at the top of the template.
 
     return {
       invoiceNumber: row.invoiceNumber || subscriptionInvoiceNumber(row.id),
@@ -88,9 +90,7 @@ export class SubscriptionInvoiceService {
       seller,
       buyer: {
         name: company?.name || owner?.name || "—",
-        vatNumber: company?.vatNumber || company?.taxNumber || null,
         addressLines: buyerAddress,
-        email: owner?.email || null,
       },
       lines: [{
         description: `اشتراك باقة «${pkg.labelAr}» — ${cycleLabel}${period}`,

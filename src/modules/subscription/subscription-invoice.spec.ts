@@ -58,21 +58,35 @@ describe("buildData — VAT is extracted from the charged amount", () => {
 });
 
 describe("buildData — buyer identity", () => {
-  it("prints the company's legal name and VAT when there is a company", () => {
+  it("prints the company's legal name and address when there is a company", () => {
     const d = svc.buildData(paidRow(), buyer({
       user: { id: 1, name: "ابراهيم", email: "a@example.com", companyId: 9 },
       company: { id: 9, name: "شركة العقيل", vatNumber: "310404305800003", district: "الفيصلية", city: "الدمام", postalCode: "32272" },
     }));
     assert.equal(d.buyer.name, "شركة العقيل");
-    assert.equal(d.buyer.vatNumber, "310404305800003");
     assert.deepEqual(d.buyer.addressLines, ["الفيصلية", "الدمام 32272"]);
   });
 
   it("falls back to the account name for an individual with no company", () => {
     const d = svc.buildData(paidRow(), buyer());
     assert.equal(d.buyer.name, "عبدالسلام");
-    assert.equal(d.buyer.vatNumber, null);
     assert.deepEqual(d.buyer.addressLines, []);
+  });
+
+  /**
+   * The document states a name and an address, and no registration numbers
+   * for either party. That is the reference design, so it is asserted rather
+   * than left to be quietly undone by someone restoring a "missing" field.
+   */
+  it("states no registration number for either party, even when we hold one", () => {
+    const html = renderSubscriptionInvoiceHtml(svc.buildData(paidRow(), buyer({
+      user: { id: 1, name: "ابراهيم", email: "a@example.com", companyId: 9 },
+      company: { id: 9, name: "شركة العقيل", vatNumber: "310404305800003", taxNumber: "310404305800003" },
+    })));
+    assert.ok(!html.includes("310404305800003"), "the buyer's VAT number must not be printed");
+    assert.ok(!html.includes("الرقم الضريبي"), "no VAT label belongs on this document");
+    assert.ok(!html.includes("السجل التجاري"), "no CR label belongs on this document");
+    assert.ok(!html.includes("صادرة من"), "there is no seller block");
   });
 });
 

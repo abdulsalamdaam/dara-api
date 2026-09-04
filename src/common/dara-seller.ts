@@ -1,23 +1,19 @@
 /**
- * Dara's own identity as the SELLER on the invoices we issue for subscriptions.
+ * How Dara appears in the FOOTER of a subscription invoice.
  *
  * Everywhere else in this codebase the seller is the landlord and the details
  * come from `zatca_credentials` / `owners`. A subscription invoice runs the
- * other way round — we are the seller — and until now nothing in the API knew
- * who "we" are. These are the company's registration details, so they belong in
- * the environment rather than a literal: a change of address or a new CR should
- * not need a release.
+ * other way round — we are the seller — and nothing in the API knew who "we"
+ * are. Contact details change without a release, so they live in the
+ * environment rather than in a literal.
  *
- * Defaults are the values on file today, so an unconfigured environment still
- * issues a correct document rather than one with blank statutory fields.
+ * No registration numbers here on purpose: the document states none, for
+ * either party. See the note at the top of `subscription-invoice-template.ts`.
  */
 
 const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.net";
 
 export interface DaraSellerIdentity {
-  name: string;
-  vatNumber: string | null;
-  crn: string | null;
   addressLines: string[];
   email: string | null;
   phone: string | null;
@@ -32,12 +28,6 @@ export function daraSeller(): DaraSellerIdentity {
     .map((v) => (v || "").trim())
     .filter(Boolean);
   return {
-    // The BRAND, deliberately — not a guessed legal entity name. An invoice
-    // naming the wrong company is worse than one naming the product, and
-    // DARA_SELLER_NAME is where the registered name belongs.
-    name: process.env.DARA_SELLER_NAME || "دارا · Dara",
-    vatNumber: process.env.DARA_SELLER_VAT || null,
-    crn: process.env.DARA_SELLER_CRN || null,
     addressLines: addr.length ? addr : ["الرياض، المملكة العربية السعودية"],
     email: process.env.DARA_BILLING_EMAIL || process.env.SUPPORT_EMAIL || `hello@${SITE_DOMAIN}`,
     phone: process.env.DARA_SELLER_PHONE || null,

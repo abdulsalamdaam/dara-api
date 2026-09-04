@@ -17,6 +17,14 @@ import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-
  *    silently fall back to boxes for the Arabic.
  *  · Colours must be explicit. A PDF has one ground; nothing here reacts to a
  *    viewer theme.
+ *
+ * One deliberate omission: the document carries the buyer's NAME and ADDRESS
+ * and no registration numbers — no buyer VAT, no seller VAT, no CR, and no
+ * seller block at all. That is the reference design, and it is a decision
+ * rather than an oversight, so do not "fix" it by adding the fields back. A
+ * KSA tax invoice normally states the seller's VAT number; if this document
+ * ever has to satisfy that, it is a design change to raise, not a field to
+ * slip in.
  */
 
 /** Everything the document states. Assembled by the caller — this only renders. */
@@ -25,20 +33,26 @@ export interface SubscriptionInvoiceData {
   invoiceNumber: string;
   /** Issue date, already formatted for print (`YYYY/M/D`). */
   issueDate: string;
+  /**
+   * Dara, as it appears in the footer — the contact row and the website bar.
+   * There is no seller BLOCK on this document: the reference design carries
+   * one party only, and everything the reader needs to identify us is the
+   * lockup at the top and the contact line at the bottom.
+   */
   seller: {
-    name: string;
-    vatNumber: string | null;
-    crn: string | null;
     addressLines: string[];
     email: string | null;
     phone: string | null;
     website: string | null;
   };
+  /**
+   * The account being billed — name and address, and nothing further. The
+   * registration numbers a tax document would normally carry are deliberately
+   * absent; see the note on this file's header.
+   */
   buyer: {
     name: string;
-    vatNumber: string | null;
     addressLines: string[];
-    email: string | null;
   };
   lines: Array<{
     description: string;
@@ -150,13 +164,11 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .pill .v { font-weight: 600; }
 
   /* ── Parties ──────────────────────────────────────────────────────── */
-  .parties { display: flex; justify-content: space-between; gap: 12mm; margin-top: 8mm; }
-  .party { max-width: 82mm; }
+  .parties { display: flex; justify-content: flex-start; margin-top: 8mm; }
+  .party { max-width: 90mm; }
   .party .lbl { color: #6B7A90; font-size: 11px; margin-bottom: 1mm; }
   .party .nm { font-weight: 800; font-size: 13.5px; color: #15192E; }
   .party .ln { color: #46566B; }
-  .party .tax { margin-top: 1.5mm; color: #46566B; }
-  .party .tax b { color: #15192E; font-weight: 700; }
 
   /* ── Items ────────────────────────────────────────────────────────── */
   table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12mm; }
@@ -229,15 +241,6 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
         <div class="lbl">فاتورة إلى</div>
         <div class="nm">${esc(d.buyer.name)}</div>
         ${d.buyer.addressLines.filter(Boolean).map((l) => `<div class="ln">${esc(l)}</div>`).join("")}
-        ${d.buyer.email ? `<div class="ln" dir="ltr">${esc(d.buyer.email)}</div>` : ""}
-        ${d.buyer.vatNumber ? `<div class="tax">الرقم الضريبي: <b dir="ltr">${esc(d.buyer.vatNumber)}</b></div>` : ""}
-      </div>
-      <div class="party">
-        <div class="lbl">صادرة من</div>
-        <div class="nm">${esc(d.seller.name)}</div>
-        ${d.seller.addressLines.filter(Boolean).map((l) => `<div class="ln">${esc(l)}</div>`).join("")}
-        ${d.seller.vatNumber ? `<div class="tax">الرقم الضريبي: <b dir="ltr">${esc(d.seller.vatNumber)}</b></div>` : ""}
-        ${d.seller.crn ? `<div class="tax">السجل التجاري: <b dir="ltr">${esc(d.seller.crn)}</b></div>` : ""}
       </div>
     </div>
 
