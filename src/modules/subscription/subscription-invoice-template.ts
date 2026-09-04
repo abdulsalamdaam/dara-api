@@ -179,7 +179,10 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .party .ln { color: #46566B; }
 
   /* ── Items ────────────────────────────────────────────────────────── */
-  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12mm; }
+  /* Inset from the text column, as on the reference. Full width left the
+     description cell holding all the leftover space, which made a one-line
+     item look lost in it. */
+  table { width: 152mm; margin: 12mm auto 0; border-collapse: separate; border-spacing: 0; }
   thead th {
     background: #2B378C; color: #FFFFFF; font-weight: 700; font-size: 12px;
     padding: 3.4mm 4mm; text-align: center;
@@ -188,13 +191,13 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   thead th:last-child  { border-start-end-radius: 6mm;   border-end-end-radius: 6mm; }
   tbody td { padding: 4mm; border-bottom: 1px solid #C9D2DE; text-align: center; vertical-align: middle; }
   tbody tr:first-child td { padding-top: 5mm; }
-  tbody td.desc { text-align: start; color: #2B3648; }
+  tbody td.desc { text-align: center; color: #2B3648; }
   tbody td.qty { width: 16mm; color: #46566B; }
   tbody td.num { width: 30mm; font-variant-numeric: tabular-nums; direction: ltr; color: #2B3648; }
 
   /* ── Totals ───────────────────────────────────────────────────────── */
   /* flex-end is the LEFT edge in RTL, which is where the reference puts them. */
-  .totals { display: flex; justify-content: flex-end; margin-top: 8mm; }
+  .totals { display: flex; justify-content: flex-end; width: 152mm; margin: 8mm auto 0; }
   .totals table { width: 72mm; margin: 0; }
   .totals td { border: 0; padding: 1.5mm 0; }
   .totals .k { color: #2B7FC4; font-size: 11px; font-weight: 700; text-align: start; }
