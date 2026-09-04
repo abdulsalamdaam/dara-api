@@ -59,7 +59,8 @@ export class SubscriptionInvoiceService {
    * therefore extracted from the amount rather than added on top — inventing a
    * larger total would state that we charged more than we did.
    */
-  buildData(row: PaymentRow): SubscriptionInvoiceData {
+  buildData(row: PaymentRow, buyer: SubscriptionBuyer): SubscriptionInvoiceData {
+    const { user: owner, company } = buyer;
     const seller = daraSeller();
     const pkg = resolvePackage(row.plan);
     const cycle = (row.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
@@ -70,10 +71,25 @@ export class SubscriptionInvoiceService {
     const subtotal = Math.round((total / (1 + rate / 100)) * 100) / 100;
     const vatAmount = Math.round((total - subtotal) * 100) / 100;
 
+    // The address is optional — most accounts have never filled one in, and an
+    // absent one simply does not print. Prefer the structured national
+    // address; fall back to the free-text one.
+    const structured = [company?.district, company?.street, company?.buildingNumber]
+      .map((v) => (v || "").trim()).filter(Boolean).join("، ");
+    const cityLine = [company?.city, company?.postalCode].map((v) => (v || "").trim()).filter(Boolean).join(" ");
+    const buyerAddress = [structured || (company?.address || "").trim(), cityLine]
+      .map((v) => v.trim()).filter(Boolean);
+
     return {
       invoiceNumber: row.invoiceNumber || subscriptionInvoiceNumber(row.id),
       issueDate: printDate(row.invoiceIssuedAt ?? row.paidAt ?? row.createdAt),
       seller,
+      buyer: {
+        // A company account is billed under its registered name; an individual
+        // under their own. Never blank — the block would read as broken.
+        name: company?.name || owner?.name || "—",
+        addressLines: buyerAddress,
+      },
       lines: [{
         // The package and its cycle — no dates. The line is meant to read at a
         // glance, and the period it covers is already implied by the issue
@@ -92,13 +108,14 @@ export class SubscriptionInvoiceService {
   }
 
   /** Render the PDF for a payment row. Throws if no headless browser exists. */
-  async renderPdf(row: PaymentRow): Promise<Buffer> {
-    return this.pdf.htmlToPdf(renderSubscriptionInvoiceHtml(this.buildData(row)));
+  async renderPdf(row: PaymentRow, buyer: SubscriptionBuyer): Promise<Buffer> {
+    return this.pdf.htmlToPdf(renderSubscriptionInvoiceHtml(this.buildData(row, buyer)));
   }
 
   /**
-   * Who to email. The document itself names nobody — this is the recipient,
-   * not something that reaches the page.
+   * The account being billed: who to address the invoice to, and who to email
+   * it to. An individual account has no `companies` row at all, so every field
+   * on it is optional.
    */
   async loadBuyer(db: Drizzle, userId: number): Promise<SubscriptionBuyer> {
     const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
@@ -135,7 +152,7 @@ export class SubscriptionInvoiceService {
         return;
       }
 
-      const pdf = await this.renderPdf(row);
+      const pdf = await this.renderPdf(row, buyer);
       const pkg = resolvePackage(row.plan);
       await this.email.sendSubscriptionInvoice(
         to,

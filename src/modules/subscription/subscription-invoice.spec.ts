@@ -17,6 +17,11 @@ const paidRow = (over: Record<string, any> = {}) => ({
   updatedAt: new Date(), ...over,
 }) as any;
 
+const buyer = (over: Record<string, any> = {}) => ({
+  user: { id: 1, name: "عبدالسلام", email: "a@example.com", companyId: null },
+  company: undefined, ...over,
+}) as any;
+
 describe("subscriptionInvoiceNumber", () => {
   it("is stable, unique and zero-padded", () => {
     assert.equal(subscriptionInvoiceNumber(7), "SUB-000007");
@@ -35,7 +40,7 @@ describe("subscriptionInvoiceNumber", () => {
 describe("buildData — VAT is extracted from the charged amount", () => {
   it("never states a total other than the amount charged", () => {
     for (const amount of ["4830.00", "1.00", "250.00", "0.01", "3570.00"]) {
-      const d = svc.buildData(paidRow({ amount }));
+      const d = svc.buildData(paidRow({ amount }), buyer());
       assert.equal(d.total, Number(amount), amount);
       assert.ok(
         Math.abs(d.subtotal + d.vatAmount - d.total) < 0.005,
@@ -46,7 +51,7 @@ describe("buildData — VAT is extracted from the charged amount", () => {
   });
 
   it("splits a 15%-inclusive amount the way ZATCA expects", () => {
-    const d = svc.buildData(paidRow({ amount: "4830.00" }));
+    const d = svc.buildData(paidRow({ amount: "4830.00" }), buyer());
     assert.equal(d.subtotal, 4200);
     assert.equal(d.vatAmount, 630);
     assert.equal(d.vatRate, 15);
@@ -56,17 +61,17 @@ describe("buildData — VAT is extracted from the charged amount", () => {
 /** The line reads at a glance: the package and its cycle, and no dates. */
 describe("buildData — the line describes the package, not the period", () => {
   it("names the package and the cycle", () => {
-    const d = svc.buildData(paidRow());
+    const d = svc.buildData(paidRow(), buyer());
     assert.match(d.lines[0].description, /باقة/);
     assert.match(d.lines[0].description, /سنوي/);
   });
 
   it("says شهري for a monthly cycle", () => {
-    assert.match(svc.buildData(paidRow({ billingCycle: "monthly" })).lines[0].description, /شهري/);
+    assert.match(svc.buildData(paidRow({ billingCycle: "monthly" }), buyer()).lines[0].description, /شهري/);
   });
 
   it("states no period, even when the row carries one", () => {
-    const d = svc.buildData(paidRow());
+    const d = svc.buildData(paidRow(), buyer());
     assert.doesNotMatch(d.lines[0].description, /\d{4}\/\d{2}\/\d{2}/, "no dates belong in the line");
     assert.doesNotMatch(d.lines[0].description, /إلى/);
   });
@@ -78,12 +83,38 @@ describe("buildData — the line describes the package, not the period", () => {
  * rather than left to be quietly undone by someone restoring a "missing"
  * field.
  */
-describe("renderSubscriptionInvoiceHtml — the document names nobody", () => {
-  const html = () => renderSubscriptionInvoiceHtml(svc.buildData(paidRow()));
-
-  it("carries no recipient block", () => {
-    assert.ok(!html().includes("فاتورة إلى"), "there is no \"invoice to\" block");
+describe("buildData — who the invoice is addressed to", () => {
+  it("uses the company's registered name when the account has one", () => {
+    const d = svc.buildData(paidRow(), buyer({
+      user: { id: 1, name: "ابراهيم", email: "a@example.com", companyId: 9 },
+      company: { id: 9, name: "شركة العقيل للاستثمار العقاري", district: "الفيصلية", city: "الدمام", postalCode: "32272" },
+    }));
+    assert.equal(d.buyer.name, "شركة العقيل للاستثمار العقاري");
+    assert.deepEqual(d.buyer.addressLines, ["الفيصلية", "الدمام 32272"]);
   });
+
+  it("uses the person's own name for an individual with no company", () => {
+    assert.equal(svc.buildData(paidRow(), buyer()).buyer.name, "عبدالسلام");
+  });
+
+  /** The address is optional; an account without one must simply not print it. */
+  it("leaves the address out entirely when there is none", () => {
+    const d = svc.buildData(paidRow(), buyer());
+    assert.deepEqual(d.buyer.addressLines, []);
+    const h = renderSubscriptionInvoiceHtml(d);
+    assert.ok(h.includes("فاتورة إلى"), "the block still names the customer");
+    assert.ok(h.includes("عبدالسلام"));
+    assert.ok(!h.includes('class="ln"'), "no empty address line is emitted");
+  });
+
+  it("never leaves the name blank", () => {
+    const d = svc.buildData(paidRow(), buyer({ user: { id: 1, name: null, email: null, companyId: null } }));
+    assert.ok(d.buyer.name.trim().length > 0);
+  });
+});
+
+describe("renderSubscriptionInvoiceHtml — no registration numbers, either side", () => {
+  const html = () => renderSubscriptionInvoiceHtml(svc.buildData(paidRow(), buyer()));
 
   it("carries no seller block and no registration numbers", () => {
     const h = html();
@@ -112,7 +143,7 @@ describe("renderSubscriptionInvoiceHtml — the document names nobody", () => {
 
   it("escapes a package label that contains markup", () => {
     const h = renderSubscriptionInvoiceHtml({
-      ...svc.buildData(paidRow()),
+      ...svc.buildData(paidRow(), buyer()),
       lines: [{ description: "<script>x</script>", quantity: 1, unitPrice: 1, amount: 1 }],
     });
     assert.ok(!h.includes("<script>x</script>"));

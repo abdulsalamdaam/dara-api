@@ -18,17 +18,19 @@ import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-
  *  · Colours must be explicit. A PDF has one ground; nothing here reacts to a
  *    viewer theme.
  *
- * Deliberately, the document names NEITHER party. There is no "invoice to"
- * block and no seller block: no customer name, no address, no VAT number for
- * either side, no CR. It carries the invoice number, the date, what was bought
- * and what it cost, and identifies Dara only through the lockup at the top and
+ * The document addresses the customer BY NAME and nothing more. There is an
+ * "invoice to" block carrying the company's registered name (or the person's)
+ * and, when the account has one, an address — and that is all either party
+ * gets. No seller block, and no registration numbers for anybody: no buyer
+ * VAT, no seller VAT, no CR. Dara is identified by the lockup at the top and
  * the contact line at the bottom.
  *
- * That is the design as specified, and it is a decision rather than an
- * oversight — do not "fix" it by adding the parties back. It does mean the
+ * That is the design as specified, and the omissions are decisions rather than
+ * oversights — do not "fix" them by adding fields back. It does mean the
  * document is a receipt rather than a compliant KSA tax invoice despite its
  * heading; making it compliant is a design change to raise, not a field to
- * slip in. A test asserts the omission.
+ * slip in. Tests assert both the name being present and the numbers being
+ * absent.
  */
 
 /** Everything the document states. Assembled by the caller — this only renders. */
@@ -43,6 +45,16 @@ export interface SubscriptionInvoiceData {
    * one party only, and everything the reader needs to identify us is the
    * lockup at the top and the contact line at the bottom.
    */
+  /**
+   * Who the invoice is addressed to — the company's registered name, or the
+   * person's, and optionally an address. `addressLines` may be empty: plenty
+   * of accounts have never filled one in, and an empty address must simply not
+   * print rather than leave a gap or a placeholder.
+   */
+  buyer: {
+    name: string;
+    addressLines: string[];
+  };
   seller: {
     addressLines: string[];
     email: string | null;
@@ -159,8 +171,15 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .pill .v { font-weight: 600; }
 
 
+  /* ── Recipient ────────────────────────────────────────────────────── */
+  .parties { display: flex; justify-content: flex-start; margin-top: 8mm; }
+  .party { max-width: 90mm; }
+  .party .lbl { color: #6B7A90; font-size: 11px; margin-bottom: 1mm; }
+  .party .nm { font-weight: 800; font-size: 13.5px; color: #15192E; }
+  .party .ln { color: #46566B; }
+
   /* ── Items ────────────────────────────────────────────────────────── */
-  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 14mm; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: 12mm; }
   thead th {
     background: #2B378C; color: #FFFFFF; font-weight: 700; font-size: 12px;
     padding: 3.4mm 4mm; text-align: center;
@@ -174,7 +193,8 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   tbody td.num { width: 30mm; font-variant-numeric: tabular-nums; direction: ltr; color: #2B3648; }
 
   /* ── Totals ───────────────────────────────────────────────────────── */
-  .totals { display: flex; justify-content: flex-start; margin-top: 8mm; }
+  /* flex-end is the LEFT edge in RTL, which is where the reference puts them. */
+  .totals { display: flex; justify-content: flex-end; margin-top: 8mm; }
   .totals table { width: 72mm; margin: 0; }
   .totals td { border: 0; padding: 1.5mm 0; }
   .totals .k { color: #2B7FC4; font-size: 11px; font-weight: 700; text-align: start; }
@@ -222,6 +242,14 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
       <div class="pill">
         <span>رقم الفاتورة: <span class="v">${esc(d.invoiceNumber)}</span></span>
         <span>التاريخ: <span class="v">${esc(d.issueDate)}</span></span>
+      </div>
+    </div>
+
+    <div class="parties">
+      <div class="party">
+        <div class="lbl">فاتورة إلى</div>
+        <div class="nm">${esc(d.buyer.name)}</div>
+        ${d.buyer.addressLines.filter(Boolean).map((l) => `<div class="ln">${esc(l)}</div>`).join("")}
       </div>
     </div>
 
