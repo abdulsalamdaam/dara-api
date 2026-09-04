@@ -90,12 +90,27 @@ test("every ZATCA-mandated SAN attribute survives a real seller", async () => {
   const f = path.join(os.tmpdir(), `zatca-csr-spec-${process.pid}.csr`);
   fs.writeFileSync(f, r.csr);
   try {
-    const text = execFileSync("openssl", ["req", "-in", f, "-noout", "-text"]).toString();
+    // `-nameopt utf8` is not decoration. OpenSSL 3.0 — which is what the
+    // production image runs — escapes non-ASCII in the subject by default
+    // (`O = \D8\A7\D8\A8...`), while 3.6 on a dev machine prints it as
+    // UTF-8. Reading the DEFAULT rendering therefore passes locally and fails
+    // in CI on a certificate that is byte-identical and perfectly correct.
+    // Ask for the rendering we mean.
+    const text = execFileSync("openssl", ["req", "-in", f, "-noout", "-text", "-nameopt", "utf8"]).toString();
     for (const attr of ["SN=", "UID=", "title=", "registeredAddress=", "businessCategory="]) {
       assert.ok(text.includes(attr), `${attr} missing from the SAN — openssl dropped it`);
     }
-    // And the subject keeps its Arabic single-encoded, not as "Ø§Ø¨Ø±Ø§Ù‡ÙŠÙ…".
     assert.ok(text.includes("ابراهيم العقيل"), "the seller name was re-encoded");
+
+    // Belt and braces, and the assertion that actually matters: check the
+    // BYTES rather than any rendering of them. No openssl version can disagree
+    // about what is in the DER, so this cannot drift with the toolchain the
+    // way the text above just did.
+    const der = Buffer.from(r.csr.replace(/-----[^-]+-----|\s/g, ""), "base64");
+    const single = Buffer.from("ابراهيم العقيل", "utf8");
+    const doubled = Buffer.from(Buffer.from("ابراهيم العقيل", "utf8").toString("latin1"), "utf8");
+    assert.ok(der.includes(single), "the seller name is not single-encoded UTF-8 in the DER");
+    assert.ok(!der.includes(doubled), "the seller name was double-encoded into the DER");
   } finally {
     fs.unlinkSync(f);
   }
