@@ -77,6 +77,22 @@ export class OtpThrottlerGuard extends ThrottlerGuard {
     } catch {
       /* Logging must never change what the caller is told. */
     }
+
+    // The bucket-state headers are suppressed globally (see `app.module.ts`),
+    // and `Retry-After` went with them because the library gates all four on
+    // one flag — and would have named it `Retry-After-short`, which no client
+    // reads. Restore the standard header on the one response where it is not a
+    // disclosure: this caller has already been refused and knows they are
+    // limited. `timeToBlockExpire` is already SECONDS — `ThrottlerStorageService
+    // .getBlockExpirationTime` divides by 1000 — so it goes in as-is.
+    try {
+      const res = context.switchToHttp().getResponse<{ header?: (n: string, v: string) => void }>();
+      const seconds = throttlerLimitDetail?.timeToBlockExpire ?? throttlerLimitDetail?.timeToExpire ?? 0;
+      res?.header?.("Retry-After", String(Math.max(1, Math.ceil(seconds))));
+    } catch {
+      /* A missing header must not replace the 429 with a 500. */
+    }
+
     return super.throwThrottlingException(context, throttlerLimitDetail);
   }
 }

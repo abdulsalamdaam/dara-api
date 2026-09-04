@@ -61,18 +61,31 @@ async function bootstrap() {
    *   - "tenant-jwt" → tenant portal endpoints (TenantAuthGuard)
    * Controllers tag the right one via @ApiBearerAuth("user-jwt") or
    * @ApiBearerAuth("tenant-jwt").
+   *
+   * OFF unless ENABLE_API_DOCS=true. It was mounted unauthenticated on
+   * `api.dara-sa.net`, which published a complete map of every route, every
+   * parameter and every DTO to anyone who asked — the single most useful
+   * document an attacker can be handed, and one that no customer of this
+   * product has any reason to read. Staging turns it on in Coolify; production
+   * does not. Defaulting to OFF rather than "off in production" is deliberate:
+   * nothing in the environment reliably distinguishes the two (DARA-NOTES §4b
+   * — `APP_ENV` is `staging` on the production containers), so an inferred
+   * default would have inferred it wrong.
    */
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle("Dara API")
-    .setDescription("Property-management API for landlords, tenants, and admins.")
-    .setVersion("1.0")
-    .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" }, "user-jwt")
-    .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" }, "tenant-jwt")
-    .build();
-  const swaggerDoc = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("api/docs", app, swaggerDoc, {
-    swaggerOptions: { persistAuthorization: true },
-  });
+  const docsEnabled = process.env.ENABLE_API_DOCS === "true";
+  if (docsEnabled) {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle("Dara API")
+      .setDescription("Property-management API for landlords, tenants, and admins.")
+      .setVersion("1.0")
+      .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" }, "user-jwt")
+      .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT" }, "tenant-jwt")
+      .build();
+    const swaggerDoc = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup("api/docs", app, swaggerDoc, {
+      swaggerOptions: { persistAuthorization: true },
+    });
+  }
 
   // Close on SIGTERM instead of ignoring it. Docker sends SIGTERM, waits out
   // its 30s grace period, then SIGKILLs — so every deploy spent ~34s in
@@ -97,7 +110,12 @@ async function bootstrap() {
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   await app.listen(port);
   Logger.log(`API listening on http://localhost:${port}`, "Bootstrap");
-  Logger.log(`Swagger UI    on http://localhost:${port}/api/docs`, "Bootstrap");
+  Logger.log(
+    docsEnabled
+      ? `Swagger UI    on http://localhost:${port}/api/docs`
+      : `Swagger UI    disabled (set ENABLE_API_DOCS=true to serve /api/docs)`,
+    "Bootstrap",
+  );
 }
 
 // A rejected bootstrap() used to surface only as an unhandled rejection and a
