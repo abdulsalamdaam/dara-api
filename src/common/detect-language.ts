@@ -44,8 +44,18 @@ const MIN_LETTERS = 2;
 const CURRENCY_CODES =
   /(?<![\p{L}\p{M}])(?:SAR|SR|USD|AED|EUR|GBP|KWD|QAR|BHD|OMR|JOD|EGP|TRY|CHF|CAD|AUD|JPY|CNY|INR)(?![\p{L}\p{M}])/giu;
 
-/** The Arabic riyal symbol written as letters: `ر.س`, `ر.س.`, `ر س`. */
-const ARABIC_CURRENCY_SYMBOL = /ر\s*\.?\s*س\s*\.?/gu;
+/**
+ * The Arabic riyal symbol written as letters: `ر.س`, `ر.س.`, `﷼`.
+ *
+ * The boundary guards and the REQUIRED dot are both load-bearing. Without
+ * them this pattern is just "a ر, then optional space, then a س", which
+ * matches inside perfectly ordinary words: it ate two letters out of «مارس»
+ * (March), turned «درس» into a single letter, and cut «رسوم» down to «وم».
+ * Text that then sat beside a Latin word was counted as English and sent to
+ * be translated *out of* a language it was never in.
+ */
+const ARABIC_CURRENCY_SYMBOL =
+  /(?<![\p{L}\p{M}])(?:ر\s*\.\s*س\s*\.?|﷼)(?![\p{L}\p{M}])/gu;
 
 /** Any letter, in any script. Excludes digits, marks, punctuation, symbols, emoji. */
 const IS_LETTER = /\p{L}/u;
@@ -58,6 +68,18 @@ const IS_LATIN = /\p{Script=Latin}/u;
  * them would read as Arabic prose. It carries no sound and no meaning.
  */
 const TATWEEL = "ـ";
+
+/**
+ * Share of letters that must be Arabic before a mixed string counts as Arabic.
+ *
+ * Deliberately low, and deliberately asymmetric with the Latin side. A Latin
+ * fragment inside Arabic — a brand, a unit code, «برج Rafal» — is ordinary
+ * here; Arabic inside an otherwise English sentence is not. So a minority of
+ * Arabic letters still carries the verdict, while a lone Arabic word beside a
+ * long Latin name («شقة Riverside Residences Compound») does not make the
+ * string English either: it makes it mixed, and mixed text is left alone.
+ */
+const ARABIC_SHARE = 0.30;
 
 /**
  * The language of `text`, or `null` when there is nothing worth translating.
@@ -96,8 +118,23 @@ export function detectLanguage(text: unknown): DetectedLanguage | null {
     // scope and must not be guessed at.
   }
 
-  const winner: DetectedLanguage = arabic >= latin ? "ar" : "en";
-  const letters = Math.max(arabic, latin);
+  // A plain majority was the wrong rule. One Arabic word beside a long Latin
+  // brand — «شقة Riverside Residences Compound», «دار Property Management
+  // Services» — loses the vote, and the text is then translated in the wrong
+  // direction: an Arabic reader is shown a machine round-trip of Arabic while
+  // the English reader gets the untouched Arabic. That is worse than leaving
+  // it alone.
+  //
+  // So a verdict now requires DOMINANCE, not a majority. Genuinely mixed text
+  // returns null and is never sent anywhere: it is the case machine
+  // translation handles worst, and the case where being wrong is least
+  // visible to whoever typed it.
+  const letters = arabic + latin;
   if (letters < MIN_LETTERS) return null;
-  return winner;
+  if (arabic > 0 && arabic / letters >= ARABIC_SHARE) return "ar";
+  // No Arabic at all: plain Latin text, safe to call English.
+  if (arabic === 0) return "en";
+  // Some Arabic, but too little to call the string Arabic — and its presence
+  // means we cannot call it English either. Mixed: translate nothing.
+  return null;
 }

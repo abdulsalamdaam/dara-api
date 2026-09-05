@@ -134,11 +134,28 @@ describe("detectLanguage — Arabic text carrying Latin digits and codes", () =>
 });
 
 describe("detectLanguage — mixed script", () => {
-  it("gives it to the script with more letters", () => {
-    // 12 Arabic letters against 7 Latin: an Arabic sentence naming a product.
+  it("keeps Arabic that carries a Latin fragment", () => {
+    // A brand or a unit code sitting inside an Arabic line is ordinary here,
+    // and must not cost the string its language: calling this English would
+    // translate it OUT of a language it was never in, and show the Arabic
+    // reader a machine round-trip of their own text.
     assert.equal(detectLanguage("صيانة مكيف Samsung"), "ar");
-    // 20 Latin letters against 6 Arabic: an English sentence naming a place.
-    assert.equal(detectLanguage("Rent for the villa in الرياض"), "en");
+    assert.equal(detectLanguage("إيجار شقة في برج Rafal"), "ar");
+    assert.equal(detectLanguage("وحدة A"), "ar");
+  });
+
+  it("refuses to guess when the two scripts are genuinely mixed", () => {
+    // «Rent for the villa in الرياض» is English with an Arabic place name;
+    // «شقة Riverside Residences Compound» is Arabic with a Latin property
+    // name. The first has MORE Arabic than the second, so no ratio can tell
+    // them apart — only meaning can, and this function does not have any.
+    //
+    // So neither is guessed. The cost is a missed translation on a mixed
+    // line; the cost of guessing wrong is a confident translation in the
+    // wrong direction, which is the failure nobody notices.
+    assert.equal(detectLanguage("Rent for the villa in الرياض"), null);
+    assert.equal(detectLanguage("شقة Riverside Residences Compound"), null);
+    assert.equal(detectLanguage("Unit ب"), null);
   });
 
   it("gives an exact tie to Arabic", () => {
@@ -148,9 +165,16 @@ describe("detectLanguage — mixed script", () => {
     assert.equal(detectLanguage("تأمين Depos"), "ar");
   });
 
-  it("counts a lone foreign letter as not enough to flip the verdict", () => {
-    assert.equal(detectLanguage("وحدة A"), "ar");
-    assert.equal(detectLanguage("Unit ب"), "en");
+  it("never mistakes an ordinary Arabic word for a currency amount", () => {
+    // `ر.س` used to be matched as "a ر, optional space, a س", which ate two
+    // letters out of «مارس», reduced «درس» to one letter, and left «رسوم» as
+    // «وم». Beside a Latin word the remains then counted as English.
+    for (const word of ["مارس", "درس", "رسوم", "أجر سنوي"]) {
+      assert.equal(detectLanguage(word), "ar", word);
+    }
+    // The symbol itself, with its dot, is still stripped.
+    assert.equal(detectLanguage("500 ر.س"), null);
+    assert.equal(detectLanguage("1200 ريال"), "ar");
   });
 });
 
