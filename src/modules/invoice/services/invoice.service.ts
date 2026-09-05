@@ -61,27 +61,6 @@ export class InvoiceService {
   ) {}
 
   /**
-   * Store the other language of an e-invoice's free text.
-   *
-   * `invoice_lines.name` is what a tenant actually reads on the document, and
-   * it exists in exactly one language — whichever the landlord typed. The
-   * invoice's own `notes` and the `instructionNote` on a credit/debit note are
-   * the siblings on the same path.
-   *
-   * **Returns immediately.** This runs after a document has already been signed
-   * and filed with ZATCA; nothing about it may delay or endanger that.
-   */
-  private queueTranslations(invoice: Invoice, lines: InvoiceLine[]): void {
-    this.translations.queue("invoices", invoice.id, {
-      notes: invoice.notes,
-      instructionNote: (invoice as any).instructionNote,
-    });
-    for (const line of lines) {
-      this.translations.queue("invoice_lines", line.id, { name: line.name });
-    }
-  }
-
-  /**
    * Issue (build → sign → submit → store) a new invoice for the given user.
    *
    * Wraps the entire flow:
@@ -358,8 +337,15 @@ export class InvoiceService {
       catch { /* the invoice is filed; a stale flag must not fail the call */ }
     }
 
-    this.queueTranslations(invoice, linesRows);
-
+    // NOTHING is queued for translation here, deliberately. Issuing an
+    // e-invoice used to send `notes`, `instructionNote` and every line's `name`
+    // to the model; no screen has ever read any of them back (the portal calls
+    // `pickText` only for `simple_invoices`), so it was a model call per line of
+    // every ZATCA document in exchange for nothing. `invoice_lines.name_ar` is
+    // the sharper version of the same point: the seller's own Arabic is already
+    // on the row and is what the PDF prints, so a machine translation would be
+    // paying to make the PDF and the screen disagree. `getOneWithLines` builds
+    // the pair from the columns instead.
     return { invoice, lines: linesRows };
   }
 
@@ -626,15 +612,18 @@ export class InvoiceService {
    * it — in the shape the web consumes:
    *
    *     "translations": {
-   *       "invoices:7:notes":        { "sourceLang": "ar", "ar": "…", "en": "…" },
+   *       "invoices:7:notes":        { "sourceLang": "ar", "ar": "…", "en": null },
    *       "invoices:7:instructionNote": { … },
-   *       "invoice_lines:12:name":   { "sourceLang": "ar", "ar": "…", "en": "…" }
+   *       "invoice_lines:12:name":   { "sourceLang": "en", "ar": "إيجار مارس", "en": "March rent" }
    *     }
    *
    * Key is `<entity_type>:<id>:<field>`; read `[uiLang]` and fall back to the
-   * original value when the entry, or that side of it, is absent. Two queries,
-   * not one, because the two halves are different entity types — never one per
-   * line.
+   * original value when the entry, or that side of it, is absent.
+   *
+   * No queries and no model calls: these fields are not machine-translated (see
+   * `issueInvoice`). What the map carries is which language each value is in,
+   * plus the seller's own `name_ar` where they wrote one — which is the only
+   * second language on a ZATCA document that anything actually renders.
    */
   async getOneWithLines(
     userId: number, id: number,
@@ -652,14 +641,20 @@ export class InvoiceService {
       .where(eq(invoiceLinesTable.invoiceId, id))
       .orderBy(invoiceLinesTable.lineNumber);
 
-    const translations = await this.translations.getFor("invoices", [invoice.id], ["notes", "instructionNote"]);
+    // Built from the columns, with no query and no model call. `attachSource`
+    // names the language the text was typed in; `name_ar`, where the seller
+    // filled it in, IS the other side — the same value `invoice-template.ts`
+    // prints on the PDF, so the two cannot disagree.
+    const translations: TranslationMap = {};
     this.translations.attachSource(translations, "invoices", invoice.id, "notes", invoice.notes);
-    this.translations.attachSource(translations, "invoices", invoice.id, "instructionNote", (invoice as any).instructionNote);
-    const lineMap = await this.translations.getFor("invoice_lines", lines.map((l) => l.id), ["name"]);
+    this.translations.attachSource(
+      translations, "invoices", invoice.id, "instructionNote", (invoice as any).instructionNote,
+    );
     for (const line of lines) {
-      this.translations.attachSource(lineMap, "invoice_lines", line.id, "name", line.name);
+      this.translations.attachSource(translations, "invoice_lines", line.id, "name", line.name);
+      this.translations.attachHuman(translations, "invoice_lines", line.id, "name", "ar", line.nameAr);
     }
-    return { invoice, lines, translations: { ...translations, ...lineMap } };
+    return { invoice, lines, translations };
   }
 
   async softDelete(userId: number, id: number) {

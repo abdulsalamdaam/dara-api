@@ -1293,6 +1293,14 @@ class AdminController {
    * SELECT and asks the provider nothing, so running this repeatedly is free
    * and interrupting it loses only the rows it had not reached.
    *
+   * It also CONVERGES, which is the property that makes calling it repeatedly a
+   * plan rather than a loop: a field it has attempted and cannot currently
+   * progress is not selected again, so two sweeps in a row with nothing new in
+   * between examine nothing the second time. With no key that means one sweep
+   * records every source and the next finds nothing — and configuring a key
+   * makes all of it outstanding again. The rule in full, and why each clause is
+   * there, is on `TranslationService.sweep`.
+   *
    * `limit` bounds how many FIELDS are examined (default 50, max 500). It is
    * deliberately modest: with a key configured each outstanding field is a
    * model call, and a limit large enough to matter is a limit large enough to

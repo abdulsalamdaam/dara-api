@@ -32,7 +32,9 @@ import { pgTable, serial, integer, text, timestamp, index, uniqueIndex } from "d
  *             (no `OPENAI_API_KEY`, or a sweep has yet to reach it)
  *   done    — `text` holds the translation
  *   failed  — the provider was asked and refused; `error` says why. Retried by
- *             the next sweep or the next save of the same field.
+ *             the next sweep or the next save of the same field, until
+ *             `attempts` reaches the ceiling — a refusal that repeats is not a
+ *             reason to keep paying.
  *   skipped — there is nothing to translate: the source is empty, or
  *             `detectLanguage` found no language in it (a bare number, a
  *             currency amount, an em dash). Stored rather than left absent so a
@@ -40,9 +42,13 @@ import { pgTable, serial, integer, text, timestamp, index, uniqueIndex } from "d
  *             `lang` and `source_lang` are `und` on these.
  *
  * `source_hash` is what keeps the cost bounded: the provider is called only
- * when the source text has actually changed. Rows whose `source_hash` no longer
- * matches the live text are pruned on the next `ensureTranslation`, so a stale
- * translation can never outlive the text it translated.
+ * when the source text has actually changed. It is also what keeps a stale
+ * translation from being SERVED — the read path re-hashes the live text and
+ * ignores any row that disagrees with it, so an edited line item shows the
+ * original rather than the previous translation whether or not the background
+ * prune in `ensureTranslation` ever ran. The sweep computes the same hash in
+ * SQL (`encode(sha256(convert_to(btrim(…), 'UTF8')), 'hex')`) so that it can
+ * find and repair such a row.
  *
  * **No foreign keys**, for the same reason `app_logs` has none: this table
  * refers to eleven different tables by name and cannot constrain against all of
@@ -73,6 +79,16 @@ export const translationsTable = pgTable("translations", {
   model: text("model"),
   status: text("status").notNull().default("pending"),
   error: text("error"),
+  /**
+   * How many times this source text has been sent to the provider.
+   *
+   * The ceiling on a `failed` row. Without it a refusal is a standing order: a
+   * field the provider will never accept is asked again on every save and every
+   * sweep, at full price, for ever. A retry that cannot succeed on a second try
+   * — a 400, a truncated reply — is recorded straight at the ceiling. An edit to
+   * the source drops the row, so a new text always starts at zero.
+   */
+  attempts: integer("attempts").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({

@@ -27,7 +27,7 @@ import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
 import { AppLogService } from "../../common/logging/app-log.service";
 import {
-  TranslationService, itemDescriptionFields, type TranslationMap,
+  TranslationService, itemDescriptionFields, type TranslationMap, type SourceTexts,
 } from "../translation/translation.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
@@ -207,19 +207,20 @@ class SimpleInvoicesController {
    * provider has not answered yet).
    *
    * The side the user typed carries the ORIGINAL text: only the missing
-   * language is stored, so `attachSource` fills the other half from the row we
-   * already have rather than keeping a second copy of it in the table.
+   * language is stored, so the other half is filled from the row we already
+   * have rather than keeping a second copy of it in the table.
    */
   private async docTranslations(docs: any[]): Promise<TranslationMap> {
-    const rows = docs.filter((d) => d?.id);
-    if (rows.length === 0) return {};
-    const map = await this.translations.getFor("simple_invoices", rows.map((d) => d.id));
-    for (const doc of rows) {
-      for (const [field, text] of Object.entries(this.docTextFields(doc))) {
-        this.translations.attachSource(map, "simple_invoices", doc.id, field, text);
-      }
+    const sources: SourceTexts = {};
+    for (const doc of docs) {
+      if (doc?.id) sources[doc.id] = this.docTextFields(doc);
     }
-    return map;
+    if (Object.keys(sources).length === 0) return {};
+    // The LIVE text goes in, not just the ids: `getFor` returns a stored
+    // translation only when its `source_hash` still matches what is on the
+    // document right now, so an edited line item shows the original rather
+    // than the previous line's English.
+    return this.translations.getFor("simple_invoices", sources);
   }
 
   /**

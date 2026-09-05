@@ -498,14 +498,13 @@ export async function ensureSchema(): Promise<void> {
           model text,
           status text not null default 'pending',
           error text,
+          attempts integer not null default 0,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
         )
       `);
-      // The upsert target: one row per target language per field. Unique, so a
-      // concurrent save and sweep cannot both insert and leave two answers.
-      await client.query(`create unique index if not exists translations_entity_field_lang_idx
-        on translations (entity_type, entity_id, field, lang)`);
+      // The retry ceiling, on tables created before it existed.
+      await client.query(`alter table translations add column if not exists attempts integer not null default 0`);
       // The bulk read a list view does — every field of every row on the page.
       await client.query(`create index if not exists translations_entity_idx
         on translations (entity_type, entity_id)`);
@@ -514,6 +513,40 @@ export async function ensureSchema(): Promise<void> {
         on translations (status)`);
     } catch (err: any) {
       log.warn(`ensure translations failed: ${err?.message || err}`);
+    }
+
+    // The unique index is NOT one of the additive niceties above, and it does
+    // not get their warn-and-carry-on treatment.
+    //
+    // Every write in `translation.service.ts` is an `insert … on conflict
+    // (entity_type, entity_id, field, lang) do update`. With no unique index on
+    // exactly those columns Postgres raises 42P10 on all of them, and that
+    // exception is caught by `ensureTranslation`, which is fire-and-forget and
+    // deliberately cannot throw. So the failure mode is silence: nothing is
+    // stored, no request fails, nobody finds out. It is a configuration error,
+    // so it is reported as one — and verified afterwards rather than assumed,
+    // because `create index if not exists` succeeds against an index of the
+    // same NAME over different columns.
+    try {
+      await client.query(`create unique index if not exists translations_entity_field_lang_idx
+        on translations (entity_type, entity_id, field, lang)`);
+    } catch (err: any) {
+      log.error(`translations unique index could NOT be created: ${err?.message || err}`);
+    }
+    try {
+      const { rows } = await client.query(
+        `select 1 from pg_indexes where schemaname = current_schema()
+           and tablename = 'translations' and indexname = 'translations_entity_field_lang_idx'`,
+      );
+      if (rows.length === 0) {
+        log.error(
+          "translations_entity_field_lang_idx is MISSING — every translation write will fail with " +
+          "Postgres 42P10 and NOTHING will be stored. Create it by hand: create unique index " +
+          "translations_entity_field_lang_idx on translations (entity_type, entity_id, field, lang)",
+        );
+      }
+    } catch (err: any) {
+      log.error(`could not verify the translations unique index: ${err?.message || err}`);
     }
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
