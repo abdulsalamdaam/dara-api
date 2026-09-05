@@ -493,15 +493,17 @@ for (const docType of ["credit", "debit"] as const) {
 
 /**
  * The real `InvoiceService`, wired to the real onboarding service and the real
- * database. `builder`, `signer` and `api` are deliberately null: the gate under
- * test fires before any of them is touched, so reaching one at all would prove
- * the gate had already been passed.
+ * database. `builder`, `signer`, `api` and the translator are deliberately
+ * null: the gate under test fires before any of them is touched, so reaching
+ * one at all would prove the gate had already been passed.
  */
 function realInvoiceService() {
   const onboarding = new ZatcaOnboardingService(
     getDb() as never, null as never, null as never, null as never, null as never,
   );
-  return new InvoiceService(getDb() as never, null as never, null as never, null as never, onboarding);
+  return new InvoiceService(
+    getDb() as never, null as never, null as never, null as never, onboarding, null as never,
+  );
 }
 
 const issueDto = (ownerId: number, over: Record<string, unknown> = {}) => ({

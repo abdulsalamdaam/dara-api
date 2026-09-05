@@ -34,3 +34,4 @@ export * from "./landlordPayouts";
 export * from "./ejarApiLogs";
 export * from "./appSettings";
 export * from "./appLogs";
+export * from "./translations";

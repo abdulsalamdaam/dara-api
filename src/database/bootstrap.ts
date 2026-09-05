@@ -467,6 +467,55 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure app_logs failed: ${err?.message || err}`);
     }
 
+    // Phase 1.5d: translations — the second language of user-typed free text.
+    //
+    // Entity-agnostic on purpose: keyed by (entity_type, entity_id, field,
+    // lang) rather than by `name_en` columns bolted onto each table, so
+    // pointing it at contracts or maintenance later is two call sites and not
+    // another migration. See `db/src/schema/translations.ts` for the reasoning
+    // and for what each status means.
+    //
+    // No foreign keys, for the same reason `app_logs` has none: this table
+    // names eleven different tables and cannot constrain against all of them,
+    // and a translation must never be why a delete fails. Orphans are inert.
+    //
+    // Additive and idempotent like everything else here; there is no migration
+    // file. A container that boots before this succeeds simply has no
+    // translations — every write is fire-and-forget and every read falls back
+    // to the original text, so nothing 500s.
+    try {
+      await client.query(`
+        create table if not exists translations (
+          id serial primary key,
+          entity_type text not null,
+          entity_id integer not null,
+          field text not null,
+          source_lang text not null,
+          source_hash text not null,
+          lang text not null,
+          "text" text,
+          provider text,
+          model text,
+          status text not null default 'pending',
+          error text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+      `);
+      // The upsert target: one row per target language per field. Unique, so a
+      // concurrent save and sweep cannot both insert and leave two answers.
+      await client.query(`create unique index if not exists translations_entity_field_lang_idx
+        on translations (entity_type, entity_id, field, lang)`);
+      // The bulk read a list view does — every field of every row on the page.
+      await client.query(`create index if not exists translations_entity_idx
+        on translations (entity_type, entity_id)`);
+      // The sweep's entry point: find what is still pending or failed.
+      await client.query(`create index if not exists translations_status_idx
+        on translations (status)`);
+    } catch (err: any) {
+      log.warn(`ensure translations failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

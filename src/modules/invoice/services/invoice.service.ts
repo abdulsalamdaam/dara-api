@@ -18,6 +18,7 @@ import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
 import { withSellerChainLock } from "./chain-lock";
 import { isOnboarded, resolveStandaloneSellerId } from "../../../common/invoice-readiness";
+import { TranslationService, type TranslationMap } from "../../translation/translation.service";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -56,7 +57,29 @@ export class InvoiceService {
     private readonly signer: InvoiceSignerService,
     private readonly api: ZatcaApiService,
     private readonly onboarding: ZatcaOnboardingService,
+    private readonly translations: TranslationService,
   ) {}
+
+  /**
+   * Store the other language of an e-invoice's free text.
+   *
+   * `invoice_lines.name` is what a tenant actually reads on the document, and
+   * it exists in exactly one language — whichever the landlord typed. The
+   * invoice's own `notes` and the `instructionNote` on a credit/debit note are
+   * the siblings on the same path.
+   *
+   * **Returns immediately.** This runs after a document has already been signed
+   * and filed with ZATCA; nothing about it may delay or endanger that.
+   */
+  private queueTranslations(invoice: Invoice, lines: InvoiceLine[]): void {
+    this.translations.queue("invoices", invoice.id, {
+      notes: invoice.notes,
+      instructionNote: (invoice as any).instructionNote,
+    });
+    for (const line of lines) {
+      this.translations.queue("invoice_lines", line.id, { name: line.name });
+    }
+  }
 
   /**
    * Issue (build → sign → submit → store) a new invoice for the given user.
@@ -335,6 +358,8 @@ export class InvoiceService {
       catch { /* the invoice is filed; a stale flag must not fail the call */ }
     }
 
+    this.queueTranslations(invoice, linesRows);
+
     return { invoice, lines: linesRows };
   }
 
@@ -596,7 +621,24 @@ export class InvoiceService {
     return { data: rows, total: Number(totalRow[0]?.total ?? 0) };
   }
 
-  async getOneWithLines(userId: number, id: number): Promise<{ invoice: Invoice; lines: InvoiceLine[] }> {
+  /**
+   * One invoice, its lines, and the second language of every free-text field on
+   * it — in the shape the web consumes:
+   *
+   *     "translations": {
+   *       "invoices:7:notes":        { "sourceLang": "ar", "ar": "…", "en": "…" },
+   *       "invoices:7:instructionNote": { … },
+   *       "invoice_lines:12:name":   { "sourceLang": "ar", "ar": "…", "en": "…" }
+   *     }
+   *
+   * Key is `<entity_type>:<id>:<field>`; read `[uiLang]` and fall back to the
+   * original value when the entry, or that side of it, is absent. Two queries,
+   * not one, because the two halves are different entity types — never one per
+   * line.
+   */
+  async getOneWithLines(
+    userId: number, id: number,
+  ): Promise<{ invoice: Invoice; lines: InvoiceLine[]; translations: TranslationMap }> {
     const [invoice] = await this.db
       .select()
       .from(invoicesTable)
@@ -609,7 +651,15 @@ export class InvoiceService {
       .from(invoiceLinesTable)
       .where(eq(invoiceLinesTable.invoiceId, id))
       .orderBy(invoiceLinesTable.lineNumber);
-    return { invoice, lines };
+
+    const translations = await this.translations.getFor("invoices", [invoice.id], ["notes", "instructionNote"]);
+    this.translations.attachSource(translations, "invoices", invoice.id, "notes", invoice.notes);
+    this.translations.attachSource(translations, "invoices", invoice.id, "instructionNote", (invoice as any).instructionNote);
+    const lineMap = await this.translations.getFor("invoice_lines", lines.map((l) => l.id), ["name"]);
+    for (const line of lines) {
+      this.translations.attachSource(lineMap, "invoice_lines", line.id, "name", line.name);
+    }
+    return { invoice, lines, translations: { ...translations, ...lineMap } };
   }
 
   async softDelete(userId: number, id: number) {

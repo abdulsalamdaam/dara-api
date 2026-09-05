@@ -26,6 +26,9 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
 import { AppLogService } from "../../common/logging/app-log.service";
+import {
+  TranslationService, itemDescriptionFields, type TranslationMap,
+} from "../translation/translation.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -160,7 +163,64 @@ class SimpleInvoicesController {
     private readonly pdfa3: PdfA3Service,
     private readonly uploads: UploadsService,
     private readonly appLog: AppLogService,
+    private readonly translations: TranslationService,
   ) {}
+
+  /**
+   * The free-text a landlord types on a billing document, keyed by the path a
+   * UI uses to reach the same value in the response.
+   *
+   * One function for both directions — the write path queues exactly these and
+   * the read path looks up exactly these — because two lists that drift apart
+   * mean translations stored under keys nothing ever reads.
+   */
+  private docTextFields(doc: any): Record<string, string> {
+    const fields: Record<string, string> = itemDescriptionFields(doc?.items);
+    if (typeof doc?.notes === "string" && doc.notes.trim()) fields.notes = doc.notes;
+    return fields;
+  }
+
+  /**
+   * Store the other language of this document's free text. **Returns
+   * immediately** — the translation happens after the response has gone, and
+   * an OpenAI outage cannot turn a saved invoice into a 500.
+   */
+  private queueDocTranslations(doc: any): void {
+    if (!doc?.id) return;
+    this.translations.queue("simple_invoices", doc.id, this.docTextFields(doc));
+  }
+
+  /**
+   * The translations for a set of documents, in one query, in the shape the web
+   * consumes:
+   *
+   *     "translations": {
+   *       "simple_invoices:12:notes":                 { "sourceLang": "ar", "ar": "…", "en": "…" },
+   *       "simple_invoices:12:items.0.description":   { "sourceLang": "ar", "ar": "…", "en": "…" }
+   *     }
+   *
+   * The key is `<entity_type>:<id>:<field>` and `field` is the response-JSON
+   * path, so a component holding a document reads
+   * `translations["simple_invoices:" + doc.id + ":items." + i + ".description"]`
+   * and takes `[uiLang]`, falling back to the original value when the entry or
+   * that side of it is missing (never translated, nothing to translate, or the
+   * provider has not answered yet).
+   *
+   * The side the user typed carries the ORIGINAL text: only the missing
+   * language is stored, so `attachSource` fills the other half from the row we
+   * already have rather than keeping a second copy of it in the table.
+   */
+  private async docTranslations(docs: any[]): Promise<TranslationMap> {
+    const rows = docs.filter((d) => d?.id);
+    if (rows.length === 0) return {};
+    const map = await this.translations.getFor("simple_invoices", rows.map((d) => d.id));
+    for (const doc of rows) {
+      for (const [field, text] of Object.entries(this.docTextFields(doc))) {
+        this.translations.attachSource(map, "simple_invoices", doc.id, field, text);
+      }
+    }
+    return map;
+  }
 
   /**
    * GET /simple-invoices/:id/pdfa3
@@ -423,7 +483,11 @@ class SimpleInvoicesController {
       const relatedNotes = r.type === "invoice" ? notesByInvoice.get(r.number) ?? [] : [];
       return { ...r, collectedAmount: collected, voucherAmount, notesAdjustment, netTotal, balanceDue, linkedInvoiceNumber, relatedNotes };
     });
-    return { data, page: q.page, pageSize: q.pageSize, total, stats };
+    // One extra query for the whole page — never one per row. The web renders
+    // line-item descriptions in the list, so it needs the same map the detail
+    // endpoint returns; the shape is documented on `docTranslations`.
+    const translations = await this.docTranslations(data);
+    return { data, page: q.page, pageSize: q.pageSize, total, stats, translations };
   }
 
   /**
@@ -640,7 +704,9 @@ class SimpleInvoicesController {
           eq(simpleInvoicesTable.billingReference, doc.number),
           eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
     }
-    return { ...doc, collectedAmount: collected, notesAdjustment, netTotal, balanceDue, relatedNotes };
+    // See `docTranslations` for the exact shape a UI consumes.
+    const translations = await this.docTranslations([doc]);
+    return { ...doc, collectedAmount: collected, notesAdjustment, netTotal, balanceDue, relatedNotes, translations };
   }
 
   /**
@@ -855,6 +921,8 @@ class SimpleInvoicesController {
       } as any).returning();
     });
 
+    this.queueDocTranslations(doc);
+
     // NB: the paired commission invoice is NOT created here — it's spawned only
     // when this rent invoice is APPROVED (see approve()), so a commission never
     // sits next to a still-draft rent invoice.
@@ -982,6 +1050,7 @@ class SimpleInvoicesController {
       billingReference: rentDoc.number,
       notes: `عمولة إدارة بنسبة ${pct}% على الفاتورة ${rentDoc.number}`,
     } as any).returning();
+    this.queueDocTranslations(comm);
     return comm ?? null;
   }
 
@@ -1048,6 +1117,7 @@ class SimpleInvoicesController {
       receiptNumber: voucher, paymentMethod: method, notes: body?.notes ?? null,
       attachmentKey,
     } as any).returning();
+    this.queueDocTranslations(doc);
 
     // Record the collection against the linked installment(s), distributing the
     // amount across their remaining balances and updating their paid status.
@@ -1169,6 +1239,11 @@ class SimpleInvoicesController {
     }
     const [updated] = await this.db.update(simpleInvoicesTable).set(patch)
       .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scopeId(user)))).returning();
+    // An edited line item makes its stored translation wrong in the most
+    // dangerous way — by still looking right — so re-queueing on every PATCH is
+    // the point, not an optimisation to skip. Unchanged text costs one indexed
+    // SELECT and no model call; changed text drops the stale row first.
+    this.queueDocTranslations(updated);
     return updated;
   }
 

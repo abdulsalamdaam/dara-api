@@ -22,6 +22,7 @@ import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.s
 import { TaqnyatService } from "../sms/taqnyat.service";
 import { TrialSettingsService } from "./trial-settings.service";
 import { normalizeTrialDays } from "../../common/trial";
+import { TranslationService } from "../translation/translation.service";
 
 /**
  * Subscription window: starts now; ends after `trialDays`, or at the given
@@ -112,6 +113,7 @@ class AdminController {
     private readonly ejarPolicy: EjarPolicyService,
     private readonly sms: TaqnyatService,
     private readonly trialSettings: TrialSettingsService,
+    private readonly translations: TranslationService,
   ) {}
 
   /**
@@ -1272,6 +1274,40 @@ class AdminController {
     if (!user) throw new NotFoundException("User not found");
     void this.email.sendRegistrationRejected(user.email, user.name, body?.reason ?? null);
     return { success: true, id: user.id, accountStatus: user.accountStatus };
+  }
+
+  /**
+   * POST /api/admin/translations/sweep?limit=50
+   *
+   * Fill in the second language of the free text that has none yet.
+   *
+   * This is the only way existing data gets a translation: the work is a
+   * network call per row, so no migration could do it, and every row written
+   * before this layer existed has nothing stored. It is also the retry — a
+   * batch that failed against a provider outage is marked `failed` and picked
+   * up by the next sweep — and it is what makes the day an `OPENAI_API_KEY` is
+   * finally configured a one-request event rather than a re-save of every
+   * invoice in the database.
+   *
+   * Idempotent: text that already has a current translation costs one indexed
+   * SELECT and asks the provider nothing, so running this repeatedly is free
+   * and interrupting it loses only the rows it had not reached.
+   *
+   * `limit` bounds how many FIELDS are examined (default 50, max 500). It is
+   * deliberately modest: with a key configured each outstanding field is a
+   * model call, and a limit large enough to matter is a limit large enough to
+   * outlive the proxy in front of us. Call it repeatedly instead — the newest
+   * rows are always taken first, so the budget is spent on documents somebody
+   * might actually open.
+   *
+   * Behind `SuperAdminGuard` with the rest of this controller: it spends money
+   * and reads every account's text.
+   */
+  @Post("translations/sweep")
+  async sweepTranslations(@Body() body: any, @Query("limit") limitQuery?: string) {
+    const raw = Number(body?.limit ?? limitQuery ?? 50);
+    const limit = Number.isFinite(raw) ? raw : 50;
+    return this.translations.sweep(limit);
   }
 
   @Post("demo/reset")

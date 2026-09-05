@@ -4,6 +4,7 @@ import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule } from "@nestjs/throttler";
 import { OtpThrottlerGuard } from "./common/throttler";
 import { LoggingModule } from "./common/logging/app-log.service";
+import { TranslationModule } from "./modules/translation/translation.service";
 import { AllExceptionsFilter } from "./common/logging/all-exceptions.filter";
 import { RequestLogMiddleware } from "./common/logging/request-log.middleware";
 
@@ -96,6 +97,9 @@ import { ReportsModule } from "./modules/reports/reports.module";
     // and every service that wants to record something all resolve
     // AppLogService from here.
     LoggingModule,
+    // Also global, and for the same reason: any module that stores a piece of
+    // user-typed free text can inject the translator without a graph change.
+    TranslationModule,
     TwilioModule,
     SmsModule,
     EmailModule,
