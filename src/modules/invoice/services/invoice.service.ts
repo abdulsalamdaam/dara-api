@@ -18,7 +18,6 @@ import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
 import { withSellerChainLock } from "./chain-lock";
 import { isOnboarded, resolveStandaloneSellerId } from "../../../common/invoice-readiness";
-import { TranslationService, type TranslationMap } from "../../translation/translation.service";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -57,7 +56,6 @@ export class InvoiceService {
     private readonly signer: InvoiceSignerService,
     private readonly api: ZatcaApiService,
     private readonly onboarding: ZatcaOnboardingService,
-    private readonly translations: TranslationService,
   ) {}
 
   /**
@@ -337,15 +335,6 @@ export class InvoiceService {
       catch { /* the invoice is filed; a stale flag must not fail the call */ }
     }
 
-    // NOTHING is queued for translation here, deliberately. Issuing an
-    // e-invoice used to send `notes`, `instructionNote` and every line's `name`
-    // to the model; no screen has ever read any of them back (the portal calls
-    // `pickText` only for `simple_invoices`), so it was a model call per line of
-    // every ZATCA document in exchange for nothing. `invoice_lines.name_ar` is
-    // the sharper version of the same point: the seller's own Arabic is already
-    // on the row and is what the PDF prints, so a machine translation would be
-    // paying to make the PDF and the screen disagree. `getOneWithLines` builds
-    // the pair from the columns instead.
     return { invoice, lines: linesRows };
   }
 
@@ -607,27 +596,7 @@ export class InvoiceService {
     return { data: rows, total: Number(totalRow[0]?.total ?? 0) };
   }
 
-  /**
-   * One invoice, its lines, and the second language of every free-text field on
-   * it — in the shape the web consumes:
-   *
-   *     "translations": {
-   *       "invoices:7:notes":        { "sourceLang": "ar", "ar": "…", "en": null },
-   *       "invoices:7:instructionNote": { … },
-   *       "invoice_lines:12:name":   { "sourceLang": "en", "ar": "إيجار مارس", "en": "March rent" }
-   *     }
-   *
-   * Key is `<entity_type>:<id>:<field>`; read `[uiLang]` and fall back to the
-   * original value when the entry, or that side of it, is absent.
-   *
-   * No queries and no model calls: these fields are not machine-translated (see
-   * `issueInvoice`). What the map carries is which language each value is in,
-   * plus the seller's own `name_ar` where they wrote one — which is the only
-   * second language on a ZATCA document that anything actually renders.
-   */
-  async getOneWithLines(
-    userId: number, id: number,
-  ): Promise<{ invoice: Invoice; lines: InvoiceLine[]; translations: TranslationMap }> {
+  async getOneWithLines(userId: number, id: number): Promise<{ invoice: Invoice; lines: InvoiceLine[] }> {
     const [invoice] = await this.db
       .select()
       .from(invoicesTable)
@@ -640,21 +609,7 @@ export class InvoiceService {
       .from(invoiceLinesTable)
       .where(eq(invoiceLinesTable.invoiceId, id))
       .orderBy(invoiceLinesTable.lineNumber);
-
-    // Built from the columns, with no query and no model call. `attachSource`
-    // names the language the text was typed in; `name_ar`, where the seller
-    // filled it in, IS the other side — the same value `invoice-template.ts`
-    // prints on the PDF, so the two cannot disagree.
-    const translations: TranslationMap = {};
-    this.translations.attachSource(translations, "invoices", invoice.id, "notes", invoice.notes);
-    this.translations.attachSource(
-      translations, "invoices", invoice.id, "instructionNote", (invoice as any).instructionNote,
-    );
-    for (const line of lines) {
-      this.translations.attachSource(translations, "invoice_lines", line.id, "name", line.name);
-      this.translations.attachHuman(translations, "invoice_lines", line.id, "name", "ar", line.nameAr);
-    }
-    return { invoice, lines, translations };
+    return { invoice, lines };
   }
 
   async softDelete(userId: number, id: number) {
