@@ -90,6 +90,33 @@ None is flagged by ZATCA. None is correct.
 
 ---
 
+## 2.7 B2C reporting has never been attempted on production — know the trigger
+
+Deliberately parked (07 Sep 2026): with one onboarded landlord issuing a
+standard B2B invoice, nobody is exposed. Recorded so it is not a surprise.
+
+`submitted_to = 'reporting'` is **zero rows on production**. Simplified invoices
+succeed in sandbox (3 x `202 reported`), but under the PRODUCTION certificate the
+compliance endpoint accepted the 3 standard documents and rejected the 3
+simplified ones on `Invalid signed properties hashing` (DARA-NOTES 2b-ii, where
+the things already proven correct are listed - do not re-chase them).
+
+Why it stays hidden: clearance re-stamps a standard invoice and never checks our
+signature; reporting does. The only endpoint never called is the one that
+validates the thing already rejected elsewhere.
+
+**The trigger is narrow, which is why it is worth writing down.** It is NOT
+residential rent - an all-exempt supply is `skipped` and never sent. It is the
+first **taxable** invoice to a buyer with **no VAT number**: commercial rent or
+fees billed to an individual. That document is simplified, goes to reporting,
+and is the experiment.
+
+Cheapest way to answer it without touching ZATCA: the restored
+`.github/workflows/zatca-validate.yml` signs the matrix with a real production
+certificate offline, and the SDK runs SIX checks on a simplified document -
+including `[QR]` and `[SIGNATURE]` - against only four on a standard one. That
+is precisely the check clearance skips.
+
 ## 3. Observability — we are debugging blind
 
 These cost six queries and a day of guessing on the owner-264 question. Each is
