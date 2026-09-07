@@ -69,7 +69,7 @@ jobs:
           # 278 on `main`, 295 on `master`: production deliberately does not
           # carry the subscription-invoice feature, so it does not carry its
           # 17 tests either. The two branches are meant to differ here.
-          BASELINE_PASS=278     # may go UP
+          BASELINE_PASS=301     # may go UP
 
           # tee, so the full run is in the log whichever way this goes. With
           # `set -o pipefail` a failing suite fails the step here, before any
