@@ -67,6 +67,62 @@ const managementFee = { id: "2", name: "رسوم إدارة الأملاك", qua
 
 const walkIn = { name: "عميل نقدي" };
 
+// ---------------------------------------------------------------------------
+// One REAL document, reproduced field-for-field.
+//
+// A standard invoice a live landlord issued was refused by ZATCA with
+// `401 Invalid-Authentication-Certificate` — a problem with the certificate,
+// not the document, and since fixed by re-onboarding. Before that customer is
+// asked to retry we want ZATCA's own verdict on the DOCUMENT, so a second
+// attempt does not fail for a second, different reason. Nothing below touches
+// a database: every value is transcribed from the document itself.
+//
+// Note `idScheme: "OTH"` on the seller. The field is called `crn`, but this
+// seller identifies with a national ID, and OTH is ZATCA's scheme for one —
+// NAT and IQA are not valid values (DARA-NOTES §2b-i).
+const realSeller: SellerSnapshot = {
+  name: "ابراهيم العقيل",
+  nameAr: "ابراهيم العقيل",
+  vat: "310404305800003",
+  crn: "1037898051",
+  idScheme: "OTH",
+  street: "19ا",
+  buildingNo: "6802",
+  district: "الفيصلية",
+  city: "الدمام",
+  postalZone: "32272",
+  additionalNo: "3988",
+} as SellerSnapshot;
+
+const realBuyerAddress = {
+  name: "شركة بيلا سيلك",
+  vat: "311311625400003",
+  street: "5ح",
+  buildingNo: "7148",
+  district: "الشاطئ الغربي",
+  city: "الدمام",
+  postalZone: "32413",
+  additionalNo: "3093",
+};
+
+// The element under test. `buyerFromParty` fills the buyer's `id` from the
+// tenant's `national_id` and picks the scheme from the party TYPE — so a tenant
+// recorded as a company publishes that number as `schemeID="CRN"`. But
+// 7037911018 is a 7-prefixed ten-digit number, which is the shape of a UNIFIED
+// NATIONAL NUMBER, whose ZATCA scheme is 700 and not CRN. The element is
+// optional for a VAT-registered buyer and no sample in the matrix above
+// carries one at all, so nothing has ever asked ZATCA what it makes of the
+// three possibilities. These do, separately.
+const realBuyerNationalNumber = "7037911018";
+const realBuyerCrnScheme = { ...realBuyerAddress, id: realBuyerNationalNumber, idScheme: "CRN" };
+const realBuyerNoId = realBuyerAddress;
+const realBuyer700Scheme = { ...realBuyerAddress, id: realBuyerNationalNumber, idScheme: "700" };
+
+// 50,000.00 taxable + 2,500.00 exempt = net 52,500.00, VAT 7,500.00,
+// gross 60,000.00 — the totals printed on the document.
+const realRent = { id: "1", name: "الإيجار", quantity: 1, unitPrice: 50000, vatPercent: 15, vatCategory: "S" as const };
+const realWater = { id: "2", name: "المياه", quantity: 1, unitPrice: 2500, vatPercent: 0, vatCategory: "E" as const };
+
 const MATRIX = [
   { file: "01-standard-invoice", profile: "standard", docType: "invoice", buyer, lines: [commercialRent] },
   { file: "02-standard-credit", profile: "standard", docType: "credit", buyer, lines: [commercialRent], ref: true },
@@ -80,6 +136,17 @@ const MATRIX = [
     lines: [{ id: "1", name: "خدمة مصدرة", quantity: 1, unitPrice: 5000, vatPercent: 0, vatCategory: "Z" as const }] },
   { file: "10-standard-multiline", profile: "standard", docType: "invoice", buyer,
     lines: [commercialRent, managementFee, { id: "3", name: "صيانة", quantity: 3, unitPrice: 133.33, vatPercent: 15, vatCategory: "S" as const }] },
+
+  // The real document, three ways. Same seller, same buyer, same two lines,
+  // same first-in-chain position (icv 1 against the initial PIH seed) — the
+  // buyer's PartyIdentification is the ONLY thing that differs, so whatever the
+  // SDK says about one and not another is about that element and nothing else.
+  { file: "11-real-standard-buyerid-crn", profile: "standard", docType: "invoice",
+    buyer: realBuyerCrnScheme, seller: realSeller, lines: [realRent, realWater], icv: 1 },
+  { file: "12-real-standard-buyerid-omitted", profile: "standard", docType: "invoice",
+    buyer: realBuyerNoId, seller: realSeller, lines: [realRent, realWater], icv: 1 },
+  { file: "13-real-standard-buyerid-700", profile: "standard", docType: "invoice",
+    buyer: realBuyer700Scheme, seller: realSeller, lines: [realRent, realWater], icv: 1 },
 ] as const;
 
 async function main() {
@@ -90,16 +157,22 @@ async function main() {
   const pih = "NWZlY2ViNjZmZmM4NmYzOGQ5NTI3ODZjNmQ2OTZjNzljMmRiYzIzOWRkNGU5MWI0NjcyOWQ3M2EyN2ZiNTdlOQ==";
 
   mkdirSync(outDir, { recursive: true });
-  let icv = 0;
+  let seq = 0;
   for (const spec of MATRIX) {
-    icv += 1;
+    seq += 1;
+    // The document number stays one-per-sample so no two files collide, but the
+    // ICV is the sample's own when it declares one: a document reproducing a
+    // real first-in-chain invoice has to say icv 1, because that is the only
+    // value the initial PIH seed is valid against.
+    const icv = "icv" in spec ? (spec.icv as number) : seq;
+    const docSeller: SellerSnapshot = ("seller" in spec ? spec.seller : seller) as SellerSnapshot;
     const built = builder.build({
       profile: spec.profile,
       docType: spec.docType,
-      invoiceId: `VAL-${icv}`,
+      invoiceId: `VAL-${seq}`,
       icv,
       pih,
-      seller,
+      seller: docSeller,
       buyer: spec.buyer as any,
       lines: spec.lines as any,
       billingReference: "ref" in spec && spec.ref ? { id: "VAL-1" } : undefined,
@@ -112,8 +185,8 @@ async function main() {
       certPem,
       profile: spec.profile,
       qrFields: {
-        sellerName: seller.name,
-        vatNumber: seller.vat,
+        sellerName: docSeller.name,
+        vatNumber: docSeller.vat,
         timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
         totalWithVat: built.totals.taxInclusive.toFixed(2),
         vatTotal: built.totals.taxAmount.toFixed(2),
