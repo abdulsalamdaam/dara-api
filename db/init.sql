@@ -1326,7 +1326,7 @@ ALTER TABLE "invoices" ADD CONSTRAINT "invoices_payment_id_payments_id_fk" FOREI
 ALTER TABLE "invoice_lines" ADD CONSTRAINT "invoice_lines_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 
 CREATE UNIQUE INDEX "zatca_credentials_user_id_uniq" ON "zatca_credentials" USING btree ("user_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "invoices_user_invoice_number_uniq" ON "invoices" USING btree ("user_id","invoice_number");--> statement-breakpoint
+CREATE UNIQUE INDEX "invoices_user_invoice_number_uniq" ON "invoices" USING btree ("user_id","invoice_number") WHERE "deleted_at" is null;--> statement-breakpoint
 CREATE UNIQUE INDEX "invoices_user_env_icv_uniq" ON "invoices" USING btree ("user_id","environment","icv");--> statement-breakpoint
 CREATE INDEX "invoices_user_idx" ON "invoices" USING btree ("user_id","created_at");--> statement-breakpoint
 CREATE INDEX "invoices_contract_idx" ON "invoices" USING btree ("contract_id");--> statement-breakpoint

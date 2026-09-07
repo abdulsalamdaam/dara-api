@@ -18,6 +18,7 @@ import { ZatcaApiService, isCredentialRejection } from "./zatca-api.service";
 import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.service";
 import { withSellerChainLock } from "./chain-lock";
 import { isOnboarded, resolveStandaloneSellerId } from "../../../common/invoice-readiness";
+import { isZatcaAccepted } from "../../../common/zatca-acceptance";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -66,13 +67,18 @@ export class InvoiceService {
    *   2. assemble the unsigned UBL using the seller snapshot from creds
    *   3. sign (XAdES) + compute QR
    *   4. submit to ZATCA (compliance/clearance/reporting)
-   *   5. write invoice + invoice_lines rows
-   *   6. update PIH chain head + ICV
+   *   5. if ZATCA ACCEPTED it, advance the PIH chain head + ICV
+   *   6. write invoice + invoice_lines rows
    *
-   * Failures at step 4 still write a row with status="error" so the caller
-   * can retry submission later via `resubmit()`.
+   * Failures at step 4 still write a row with status="error"/"rejected" so the
+   * caller can retry submission later — via `resubmit()` for the same signed
+   * bytes, or by re-issuing, which is what `POST /simple-invoices/:id/
+   * submit-zatca` does when the seller's certificate has changed underneath.
    *
-   * Serialized per seller — see `withSellerChainLock`. Steps 1 and 6 are a
+   * Steps 5 and 6 are in that order on purpose, and step 5 is conditional; both
+   * points are argued where they happen.
+   *
+   * Serialized per seller — see `withSellerChainLock`. Steps 1 and 5 are a
    * read-modify-write of a counter that ZATCA requires to be strictly
    * sequential, with a network round trip in between, so two concurrent
    * issues for one seller must not interleave.
@@ -95,10 +101,19 @@ export class InvoiceService {
     if (!dto.lines?.length) throw new BadRequestException("invoice must have at least one line");
     if (!dto.invoiceNumber) throw new BadRequestException("invoiceNumber required");
 
-    // Reject duplicate invoice number early for a clean error. NOTE: the unique
-    // index is (userId, invoiceNumber) and does NOT exclude soft-deleted rows,
-    // so this check must NOT filter by deletedAt — otherwise a previously-deleted
-    // number passes here but collides on insert as a raw DB error.
+    // Reject duplicate invoice number early for a clean error. This check has
+    // to agree EXACTLY with `invoices_user_invoice_number_uniq`, or one of the
+    // two is a trap: too loose and a collision surfaces as a raw 23505 after
+    // the document has been signed and sent, too strict and a number nothing
+    // holds is refused before anything is tried.
+    //
+    // The index now carries `where deleted_at is null`, so this filters the
+    // same way. That predicate is what makes a rejected document retryable at
+    // all: the retry path supersedes the failed attempt by soft-deleting it,
+    // which frees the number for the fresh one. Until the predicate existed,
+    // the dead row held the number for ever and this line answered 409 to
+    // every retry — before signing anything, so nothing in the response even
+    // named ZATCA.
     const [existing] = await this.db
       .select({ id: invoicesTable.id })
       .from(invoicesTable)
@@ -106,6 +121,7 @@ export class InvoiceService {
         and(
           eq(invoicesTable.userId, userId),
           eq(invoicesTable.invoiceNumber, dto.invoiceNumber),
+          isNull(invoicesTable.deletedAt),
         ),
       );
     if (existing) throw new ConflictException(`Invoice number ${dto.invoiceNumber} already exists`);
@@ -223,16 +239,19 @@ export class InvoiceService {
     // everything past this point is irreversible in a way this case does not
     // deserve:
     //
-    //   · the ICV is consumed unconditionally (see the comment further down),
-    //     and `invoices_user_owner_env_icv_uniq` has no `deleted_at` predicate,
-    //     so a burned counter cannot be reclaimed by deleting the row;
+    //   · a row here is a claim that a document exists. It does not, and the
+    //     chain must not move for it — the counter and the PIH describe what
+    //     ZATCA HOLDS, and ZATCA never authenticated this;
     //   · the row itself would make `simple_invoices.zatca_invoice_id` non-null,
     //     which `isSubmittedToZatca` reads as "this document reached ZATCA" and
     //     uses to block a contract rebuild — permanently, for a document ZATCA
     //     never saw.
     //
     // Nothing was filed, so nothing should be recorded as filed. The seller has
-    // to link again; correcting the invoice cannot help.
+    // to link again; correcting the invoice cannot help. This bail-out post-dates
+    // the damage it now prevents: before it existed a 401 fell straight through
+    // to the commit below, which ran unconditionally, and a live landlord's
+    // `prod_pih` was left holding the hash of a document ZATCA had refused.
     if (isCredentialRejection(resp)) {
       await this.onboarding.markLinkInvalid(
         userId, ownerId,
@@ -249,10 +268,64 @@ export class InvoiceService {
     }
 
     const status = this.deriveStatus(resp);
+    // Did ZATCA take this document into its records? Everything below turns on
+    // it: the chain head, whether the ICV slot is held, and whether the "link
+    // revoked" flag can be retired.
+    const accepted = isZatcaAccepted(status);
     const clearedXml =
       submitTo === "clearance" && (resp.json as any)?.clearedInvoice
         ? Buffer.from(String((resp.json as any).clearedInvoice), "base64").toString("utf8")
         : null;
+
+    // ADVANCE THE CHAIN FIRST, and only if ZATCA accepted the document.
+    //
+    // Two rules in one line, and they used to be neither. The old code advanced
+    // after every completed HTTP call, "regardless of ZATCA acceptance — the
+    // chain is local". It is not local. `prod_icv` and `prod_pih` are our copy
+    // of ZATCA'S position in the seller's chain: the next document must carry
+    // the counter after the last one ZATCA HOLDS and a PIH that is the hash of
+    // that document. A refused invoice is not held. Advancing for one moved the
+    // head onto a document ZATCA never authenticated, and every later invoice
+    // for that seller would then chain onto something that does not exist —
+    // observed on production, on a live landlord, after a 401; the row had to
+    // be corrected by hand.
+    //
+    // WHY BEFORE THE INSERT, and what happens if ZATCA accepts but the insert
+    // then fails. The two writes cannot be made atomic with ZATCA, so one of
+    // them has to be exposed, and the choice is which failure to prefer:
+    //
+    //   · commit last (what it used to do): the insert throws, `issue()` throws,
+    //     and the chain is left BEHIND a document ZATCA is holding. The next
+    //     invoice re-uses the spent ICV and the stale PIH, so ZATCA refuses it
+    //     — and refuses the one after that, and the one after that. One failed
+    //     write bricks the seller's e-invoicing until somebody edits the
+    //     database.
+    //   · commit first (what it does now): the insert throws, `issue()` still
+    //     throws, and we are missing our own row for a document ZATCA holds.
+    //     The document is filed and legal; what we have lost is our copy of the
+    //     signed XML and the QR. The chain is intact, so the NEXT invoice is
+    //     fine, and the damage stays at one document instead of all of them.
+    //
+    // Neither is good and only one is recoverable, so: chain first. It is also
+    // by far the smaller write — one UPDATE of two columns, against an INSERT
+    // carrying the signed XML, the cleared XML and three jsonb blobs — so it is
+    // the far less likely of the two to be the one that fails.
+    //
+    // On a rejection nothing is committed, which is what makes a retry possible
+    // at all: the counter still names the last accepted document, so the retry
+    // re-uses the same ICV and the same PIH. The rejected row does not hold that
+    // ICV either — `invoices_user_owner_env_icv_uniq` is now scoped to the same
+    // accepted statuses this branch tests (see `common/zatca-acceptance.ts`),
+    // and the two must be changed together or a retry collides on insert.
+    if (accepted) {
+      await this.onboarding.commitInvoiceState(
+        userId,
+        decrypted.environment,
+        nextIcv,
+        signed.invoiceHashBase64,
+        ownerId,
+      );
+    }
 
     const [invoice] = await this.db
       .insert(invoicesTable)
@@ -314,23 +387,14 @@ export class InvoiceService {
       )
       .returning();
 
-    // Always advance PIH if we produced a valid signed hash, regardless of
-    // ZATCA acceptance — the chain is local and re-submitting the same
-    // invoice will use the same hash anyway.
-    await this.onboarding.commitInvoiceState(
-      userId,
-      decrypted.environment,
-      nextIcv,
-      signed.invoiceHashBase64,
-      ownerId,
-    );
-
     // ZATCA accepted a document, so the link works — retire any earlier "ZATCA
     // stopped accepting this" flag. Proving it with an accepted document rather
     // than only with a fresh CSID matters because the flag can be raised by a
     // transient 403, and a seller who is in fact fine should not have to
-    // re-onboard to clear it.
-    if (status === "cleared" || status === "reported" || status === "submitted") {
+    // re-onboard to clear it. Same definition of "accepted" as the chain
+    // advance above, from the same place, so the two can never disagree about
+    // what ZATCA did with this document.
+    if (accepted) {
       try { await this.onboarding.clearLinkInvalid(userId, ownerId); }
       catch { /* the invoice is filed; a stale flag must not fail the call */ }
     }
@@ -627,9 +691,19 @@ export class InvoiceService {
   /**
    * Resubmit an invoice (e.g. after a transient ZATCA outage). The signed
    * XML is re-used as-is — re-signing would invalidate the hash chain.
+   *
+   * Under the seller's chain lock, because it can now WRITE the counter: since
+   * `issue()` stopped advancing the chain for a document ZATCA refused, a
+   * resubmission that succeeds is the moment the chain should move, and the
+   * counter has exactly one writer at a time (see `withSellerChainLock`).
    */
   async resubmit(userId: number, id: number) {
     const { invoice } = await this.getOneWithLines(userId, id);
+    return withSellerChainLock(userId, invoice.ownerId ?? null, () =>
+      this.resubmitUnderChainLock(userId, invoice));
+  }
+
+  private async resubmitUnderChainLock(userId: number, invoice: Invoice) {
     if (!invoice.signedXml || !invoice.invoiceHash) {
       throw new BadRequestException("Invoice has no signed XML to resubmit");
     }
@@ -655,6 +729,31 @@ export class InvoiceService {
       environment: invoice.environment,
     });
     const newStatus = this.deriveStatus(resp);
+
+    // A resubmission that ZATCA accepts is the point at which the chain moves,
+    // for a document whose first attempt left it standing still. Three
+    // conditions, and each of them is a way to corrupt the chain if skipped:
+    //
+    //   · it was not accepted before and is now — otherwise this re-writes the
+    //     head with a hash it already holds, or moves it for a second refusal;
+    //   · the ACTIVE slot is the environment this document was signed for —
+    //     `commitInvoiceState` picks its columns by env, and a seller who has
+    //     since switched would have the wrong chain rewritten;
+    //   · the head sits exactly one ICV behind this document, i.e. this really
+    //     is the next one. If anything has been accepted since, this document's
+    //     frozen ICV and PIH are stale, ZATCA should refuse it, and rewinding
+    //     the head to it would strand every invoice filed in between.
+    if (
+      !isZatcaAccepted(invoice.status)
+      && isZatcaAccepted(newStatus)
+      && decrypted.environment === invoice.environment
+      && decrypted.icv === invoice.icv - 1
+    ) {
+      await this.onboarding.commitInvoiceState(
+        userId, invoice.environment, invoice.icv, invoice.invoiceHash, invoice.ownerId ?? null,
+      );
+    }
+
     const clearedXml =
       submitTo === "clearance" && (resp.json as any)?.clearedInvoice
         ? Buffer.from(String((resp.json as any).clearedInvoice), "base64").toString("utf8")

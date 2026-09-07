@@ -428,10 +428,12 @@ Three things it deliberately does NOT do, each of which breaks a later re-link:
   `deletedAt IS NULL` and then INSERTs — soft-delete + re-link is a raw 23505.
 - **It does not reset ICV/PIH.** Those are not credentials; they are the
   landlord's position in a sequence ZATCA requires to be monotonic, and
-  `invoices_user_owner_env_icv_uniq` enforces the same thing locally (also with
-  no `deleted_at` predicate, so `reset-chain`'s soft-delete does **not** free
-  the ICV slots it zeroes the counter past). Zeroing them makes the first
-  invoice after a re-link collide with a submitted one.
+  `invoices_user_owner_env_icv_uniq` enforces the same thing locally. That index
+  is now partial — `deleted_at is null and status in ('cleared','reported',
+  'submitted')` — so `reset-chain`'s soft-delete does free the ICV slots it
+  zeroes the counter past, which it never used to. Zeroing them still makes the
+  first invoice after a re-link collide with a submitted one, because a
+  submitted one is exactly what the index still counts.
 - **It does not clear `prodSlotEnv`,** even though the slot it describes is now
   empty. Simulation and production share `prod_icv`/`prod_pih`, so that column
   is the only record of which chain the retained counter came from; erase it and
@@ -578,11 +580,14 @@ every invoice is signed into a void. The gateway reports it as **401/403**
 (`isCredentialRejection`).
 
 - `InvoiceService.issue` aborts on it **before** inserting the `invoices` row and
-  before `commitInvoiceState`. This ordering is the whole point: past that line
-  the ICV is spent unconditionally and `invoices_user_owner_env_icv_uniq` has no
-  `deleted_at` predicate, so a burned counter cannot be reclaimed — and a
-  persisted row would set `zatca_invoice_id`, which `isSubmittedToZatca` reads as
-  "this reached ZATCA" and uses to block a contract rebuild forever.
+  before `commitInvoiceState`. Nothing was filed, so nothing may be recorded as
+  filed: a row would set `zatca_invoice_id`, which `isSubmittedToZatca` reads as
+  "this reached ZATCA" and uses to block a contract rebuild forever, and the
+  chain head must not move for a document ZATCA never authenticated. This
+  bail-out post-dates the damage it prevents — before it existed, a 401 fell
+  through to a `commitInvoiceState` that ran after every completed call, and a
+  live landlord's `prod_pih` was left holding the hash of a refused document
+  (see §2b-v).
 - `zatca_credentials.link_invalid_at` / `link_invalid_reason` record it (added by
   `bootstrap.ts`, not a migration — so **deploy the API before anything reads
   the column**; a failed ALTER only warns, and every read of the table would
@@ -664,6 +669,75 @@ explicitly now. `submitTo` may not contradict the profile (clearance is B2B,
 reporting is B2C) and `compliance` cannot be requested at all — the service
 chooses it for sandbox and simulation, and a live seller asking for it would
 spend a real ICV on a document ZATCA files nowhere.
+
+---
+
+### 2b-v. The chain moves only for a document ZATCA accepted, and a refused one must be retryable
+
+Three defects, one rule between them (06 Sep 2026).
+
+**`prod_icv` / `prod_pih` are not a local sequence.** `issue()` used to call
+`commitInvoiceState` after every completed HTTP call, with a comment saying it
+advanced "regardless of ZATCA acceptance — the chain is local". It is not local:
+those two columns are our copy of ZATCA's position in the seller's chain, and
+the next document must carry the counter after the last one ZATCA HOLDS with a
+PIH that is the hash of that document. A live landlord's 401-refused invoice
+advanced `prod_pih` to the hash of a document ZATCA never authenticated; his
+next invoice would have chained onto something that does not exist, and the row
+was corrected by hand. `common/zatca-acceptance.ts` now holds the one definition
+of "accepted" — `cleared`, `reported`, `submitted` — used by the chain advance,
+by the retry short-circuit and, as a SQL twin, by the ICV index.
+
+`submitted` is in the set because it is a 2xx with no clearance or reporting
+verdict, which is exactly what ZATCA's COMPLIANCE endpoint answers for a
+document it validated and was never asked to clear — and every sandbox and
+simulation submission goes to that endpoint, so it is the only terminal status
+those sellers reach. Leaving it out would pin their counter and collide their
+next invoice on its own ICV, after signing. `error` is out: we do not know
+whether it arrived, and treating unknown as accepted breaks the chain for every
+later invoice rather than costing one retry.
+
+**The commit now happens BEFORE the row is inserted.** The two writes cannot be
+made atomic with ZATCA, so one of them is exposed, and this is the cheaper
+exposure. Commit last and a failed insert leaves the chain BEHIND a document
+ZATCA is holding — the next invoice re-uses a spent ICV and a stale PIH and is
+refused, as is the one after that, until somebody edits the database. Commit
+first and a failed insert costs our own copy of one filed document. Recoverable
+beats unrecoverable, and the commit is also the far smaller write.
+
+**A rejected document used to block its own retry, twice over.**
+`POST /simple-invoices/:id/submit-zatca` short-circuited with "already filed
+with ZATCA" on the mere EXISTENCE of an `invoices` row, so a landlord whose
+invoice ZATCA refused was told it had worked. Only an accepted row
+short-circuits now; an unaccepted one is soft-deleted as superseded and the
+document is re-issued from scratch — re-issued, not resent, because the usual
+reason to retry is that the seller has re-onboarded and the stored XML carries a
+certificate ZATCA has already refused.
+
+That needed both unique indexes to gain predicates, since neither had one:
+
+| index | now | why |
+|---|---|---|
+| `invoices_user_invoice_number_uniq` | `where deleted_at is null` | the dead row held `INV-000002` for ever, so `issue()` answered 409 to every retry before signing anything |
+| `invoices_user_owner_env_icv_uniq` | `where deleted_at is null and status in ('cleared','reported','submitted')` | with the chain no longer advancing for a refusal, the retry computes the same ICV — and collided with the corpse of the first attempt, after signing and sending |
+
+Both are rewritten in place by `bootstrap.ts` (a `do` block, so drop+create is
+one transaction and uniqueness is never unenforced), which also drops the
+account-wide `invoices_user_env_icv_uniq` that `db/init.sql` still ships. Safe
+on existing data in both directions: a partial unique index covers a subset of
+the rows the total one covered, so if the total index holds today the partial
+one holds too. **`db/init.sql` predates `invoices.owner_id` and does not declare
+the column** — the owner-scoped index has only ever existed via `drizzle-kit
+push`, which is why bootstrap is where it lives and why that block warns rather
+than throwing.
+
+`resubmit()` now takes the seller chain lock and can advance the chain, which it
+never needed to before: a resubmission is the moment a document whose first
+attempt left the chain standing still finally enters it. It only commits when
+the document was not accepted before and is now, when the active slot is the
+environment it was signed for, and when the head sits exactly one ICV behind it
+— otherwise this document's frozen ICV and PIH are stale and rewinding to them
+would strand everything filed in between.
 
 ---
 

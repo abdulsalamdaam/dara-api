@@ -19,6 +19,12 @@ compliance certificate. He re-linked on 2 Sep and his device is active in Fatoor
 resend it** — it needs the *submit to ZATCA* action. Until then he has no cleared
 invoice, and believes he does.
 
+The action itself now works. It used to short-circuit on the mere existence of
+an `invoices` row and answer "already filed with ZATCA" about the document ZATCA
+had refused; and even past that, the invoice number and the ICV slot were still
+held by the dead row. See DARA-NOTES §2b-v. Still to do: press it, and confirm
+the re-issued document clears under the new certificate.
+
 ### 1.2 Decide: does the strict ZATCA rule stay?
 Since 01 Sep, approving any tax invoice requires the seller to be linked,
 regardless of VAT registration. Measured on production: **1 of 48 landlords is
@@ -133,10 +139,24 @@ compliance-check logging fix exists; onboarding still does not log.
 
 ## 4. Security and data hygiene
 
-### 4.1 `createReceiptVoucher` does not validate `kind`
+### 4.1 `createReceiptVoucher` validated nothing — DONE
 `billing.module.ts` — `body?.kind ?? "receipt"`, no `KNOWN_DOC_KINDS` check, and
-the row is inserted `status: "confirmed"`. A caller can mint a **confirmed**
+the row is inserted `status: "confirmed"`. A caller could mint a **confirmed**
 `kind: "invoice"` tax document with taxable lines, past both gates, in one call.
+
+Worse, and not recorded here at the time: it ran neither `assertNonNegative` nor
+`assertTotalMatchesItems`, while `total` came off the request and `subtotal` was
+derived from the items. `{"amount": 999999, "items": [{"amount": 100, "vat":
+true}]}` was accepted and stored a confirmed tax document claiming ~999,899 of
+VAT.
+
+Fixed: `validateReceiptVoucher` (exported, pure, specced in
+`billing.receipt-voucher.spec.ts`) runs all of it up front — the kind against
+`VOUCHER_KINDS` (`receipt`/`deposit`, each asserted tax-exempt), the two
+assertions every other document path runs, and every line forced exempt, since a
+سند قبض charges no VAT. `confirmed` stays: the money HAS been received and the
+handler writes the payment-collections to prove it. What made `confirmed`
+dangerous was `confirmed` × an unbounded kind × an unchecked total.
 
 ### 4.2 Tenant login with a shared phone
 `0502907100` is on **five tenant records across five accounts** and five

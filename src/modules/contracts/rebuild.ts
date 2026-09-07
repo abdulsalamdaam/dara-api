@@ -47,9 +47,19 @@ export const DEPOSIT_KIND = "deposit";
  *   skipped   — exempt or out-of-scope supply, no e-invoice needed  → not sent
  *
  * `failed` counts as submitted deliberately. A rejected submission still
- * travelled: it consumed an ICV in the landlord's ZATCA chain and ZATCA has a
- * record of the attempt. Treating it as "never happened" is exactly the kind of
- * optimism this gate exists to refuse. `submitted` counts for the same reason.
+ * travelled: ZATCA has a record of the attempt. Treating it as "never happened"
+ * is exactly the kind of optimism this gate exists to refuse. `submitted`
+ * counts for the same reason.
+ *
+ * Half of that reasoning has since changed and the conclusion has not. A
+ * rejected submission no longer consumes an ICV — the chain advances only for a
+ * document ZATCA ACCEPTED (`common/zatca-acceptance.ts`), and the document is
+ * re-issued rather than resent when the landlord retries it. So `failed` now
+ * bars a rebuild only on the strength of the attempt having reached ZATCA, not
+ * of a counter having moved. That is still the safe side of a gate whose job is
+ * to refuse to destroy the installments behind an issued tax document, and
+ * loosening it is a decision to take on its own merits rather than as a
+ * side-effect of the chain fix.
  *
  * `pending` does NOT, and that is what makes the credential-rejection case safe
  * to retry: the submission path aborts before writing an invoices row or

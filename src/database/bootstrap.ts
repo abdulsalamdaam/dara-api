@@ -126,6 +126,95 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure zatca_credentials.link_invalid_at/link_invalid_reason failed: ${err?.message || err}`);
     }
 
+    // The two unique indexes that govern the ZATCA chain, brought into line with
+    // what the chain actually means. Neither carried a predicate, and between
+    // them they made a refused invoice unretryable by anyone without database
+    // access:
+    //
+    //   · the NUMBER index held `INV-000002` for ever once a row existed under
+    //     it, so `InvoiceService.issue` answered 409 to every retry, before it
+    //     signed anything — the response never even mentioned ZATCA. It is now
+    //     scoped to live rows, so the retry path can supersede a failed attempt
+    //     by soft-deleting it and re-use the number for the fresh, re-signed
+    //     document. (This is also what `resetChain` always meant by soft-
+    //     deleting the rows whose counter it zeroes.)
+    //   · the ICV index held the ICV slot of a document ZATCA had REFUSED. Now
+    //     that the chain head no longer advances for a refusal, the retry
+    //     computes that same ICV again — and would have collided with the
+    //     corpse of the first attempt, after signing and sending it. It is now
+    //     scoped to rows ZATCA accepted, which is exactly the set that occupies
+    //     a position in the chain. The status list is the SQL twin of
+    //     `ZATCA_ACCEPTED_STATUSES` in `src/common/zatca-acceptance.ts`.
+    //
+    // This is also the only place the ICV index gets built: `db/init.sql`
+    // predates `invoices.owner_id` and does not declare the column, so it still
+    // ships the account-wide `invoices_user_env_icv_uniq` and the owner-scoped
+    // index has only ever existed via `drizzle-kit push`. The `do` block below
+    // is wrapped in the same try/catch as everything else here, so on a cluster
+    // where that column really is missing it warns and leaves the old index
+    // standing rather than taking the boot down with it.
+    //
+    // Rewritten in place rather than created alongside, because an index cannot
+    // change definition under the same name and the name is what the code and
+    // these notes refer to. Safe on existing data in both directions: a partial
+    // unique index covers a SUBSET of the rows the total one covered, so if the
+    // total index holds today the partial one holds too — production's one
+    // refused invoice included. A `do` block is a single statement and so a
+    // single transaction, which means uniqueness is never unenforced in a
+    // window between the drop and the create.
+    try {
+      await client.query(`
+        do $$
+        declare def text;
+        begin
+          select indexdef into def from pg_indexes
+            where schemaname = 'public' and indexname = 'invoices_user_invoice_number_uniq';
+          if def is null then
+            create unique index "invoices_user_invoice_number_uniq"
+              on invoices (user_id, invoice_number) where deleted_at is null;
+          elsif def not like '%deleted_at%' then
+            drop index "invoices_user_invoice_number_uniq";
+            create unique index "invoices_user_invoice_number_uniq"
+              on invoices (user_id, invoice_number) where deleted_at is null;
+          end if;
+
+          select indexdef into def from pg_indexes
+            where schemaname = 'public' and indexname = 'invoices_user_owner_env_icv_uniq';
+          if def is null then
+            create unique index "invoices_user_owner_env_icv_uniq"
+              on invoices (user_id, coalesce(owner_id, 0), environment, icv)
+              where deleted_at is null and status in ('cleared', 'reported', 'submitted');
+          elsif def not like '%status%' then
+            drop index "invoices_user_owner_env_icv_uniq";
+            create unique index "invoices_user_owner_env_icv_uniq"
+              on invoices (user_id, coalesce(owner_id, 0), environment, icv)
+              where deleted_at is null and status in ('cleared', 'reported', 'submitted');
+          end if;
+
+          -- The account-wide predecessor of the index above, still in
+          -- db/init.sql and so present on any cluster created from it. It
+          -- shares one ICV sequence across every landlord on the account, which
+          -- is not what a per-landlord chain is; the owner-scoped index has
+          -- superseded it everywhere else.
+          drop index if exists "invoices_user_env_icv_uniq";
+        end $$;
+      `);
+    } catch (err: any) {
+      log.warn(`ensure invoices unique indexes failed: ${err?.message || err}`);
+    }
+
+    // The subscription tax invoice we issue when a customer pays. All four are
+    // nullable and stamped at activation, so every historical row simply has no
+    // invoice — which is correct: none was ever issued for it.
+    try {
+      await client.query(`alter table subscription_payments add column if not exists invoice_number text`);
+      await client.query(`alter table subscription_payments add column if not exists invoice_issued_at timestamptz`);
+      await client.query(`alter table subscription_payments add column if not exists period_start timestamptz`);
+      await client.query(`alter table subscription_payments add column if not exists period_end timestamptz`);
+    } catch (err: any) {
+      log.warn(`ensure subscription_payments invoice columns failed: ${err?.message || err}`);
+    }
+
     // "This account has already had its free trial." `subscription_is_trial`
     // is cleared by the first payment, so without this column nothing on the
     // row remembers a trial was ever granted and an account could be given a
