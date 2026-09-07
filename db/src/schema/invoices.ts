@@ -127,12 +127,32 @@ export const invoicesTable = pgTable("invoices", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
-  // Invoice numbers must be unique per seller (across all envs).
-  invoiceNumberUniq: uniqueIndex("invoices_user_invoice_number_uniq").on(t.userId, t.invoiceNumber),
+  // Invoice numbers must be unique per seller (across all envs) — among LIVE
+  // rows. The predicate is what lets a refused document be retried: the retry
+  // supersedes the failed attempt by soft-deleting it, which frees the number
+  // for the fresh, re-signed one. Without it the dead row held the number for
+  // ever and `InvoiceService.issue` answered 409 to every retry, before it
+  // signed anything. `resetChain` soft-deletes for the same reason and was
+  // equally unable to free what it deleted.
+  invoiceNumberUniq: uniqueIndex("invoices_user_invoice_number_uniq")
+    .on(t.userId, t.invoiceNumber)
+    .where(sql`deleted_at is null`),
   // ICV must be unique per (landlord seller, environment) — each landlord has
   // its OWN ICV/PIH chain, so account-level (owner_id null → 0) and every
   // landlord get independent sequences.
-  icvUniq: uniqueIndex("invoices_user_owner_env_icv_uniq").on(t.userId, sql`coalesce(${t.ownerId}, 0)`, t.environment, t.icv),
+  //
+  // Scoped to rows ZATCA ACCEPTED, because those are the only ones that occupy
+  // a position in the chain. A rejected document does not exist as far as ZATCA
+  // is concerned; the chain head does not advance for it (see
+  // `InvoiceService.issue`), so the next attempt re-uses that ICV and would
+  // otherwise collide with the corpse of the last one — after signing and
+  // sending, which is the worst possible moment to find out. The status list
+  // here is the SQL twin of `ZATCA_ACCEPTED_STATUSES` in
+  // `src/common/zatca-acceptance.ts`; change one and change both, plus the
+  // matching DDL in `src/database/bootstrap.ts` and `db/init.sql`.
+  icvUniq: uniqueIndex("invoices_user_owner_env_icv_uniq")
+    .on(t.userId, sql`coalesce(${t.ownerId}, 0)`, t.environment, t.icv)
+    .where(sql`deleted_at is null and status in ('cleared', 'reported', 'submitted')`),
   byUser: index("invoices_user_idx").on(t.userId, t.createdAt),
   byContract: index("invoices_contract_idx").on(t.contractId),
   byPayment: index("invoices_payment_idx").on(t.paymentId),

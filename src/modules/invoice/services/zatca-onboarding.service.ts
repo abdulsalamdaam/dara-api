@@ -731,7 +731,8 @@ export class ZatcaOnboardingService {
   /**
    * Return the active environment's decrypted credentials and the current
    * (icv, pih) pair. Caller is responsible for incrementing & writing back
-   * the new PIH after a successful submission via `commitInvoiceState`.
+   * the new PIH via `commitInvoiceState` — and only when ZATCA accepted the
+   * document, which is the whole contract of that method.
    */
   async getActiveCredentials(userId: number, ownerId: number | null = null): Promise<{ creds: ZatcaCredentials; decrypted: DecryptedCreds }> {
     const creds = await this.getCredentials(userId, ownerId);
@@ -766,7 +767,17 @@ export class ZatcaOnboardingService {
     };
   }
 
-  /** Persist the new ICV + PIH after a successful (or failed) submission. */
+  /**
+   * Move the seller's chain head to (icv, newPih).
+   *
+   * Call this ONLY for a document ZATCA accepted. These two columns are our
+   * copy of ZATCA's position in the seller's chain, not a local sequence: the
+   * next invoice must carry the counter after the last document ZATCA HOLDS and
+   * a PIH that is the hash of that document. Advancing for a refused one points
+   * the head at something that does not exist, and every invoice the seller
+   * issues afterwards inherits the break. `common/zatca-acceptance.ts` is where
+   * "accepted" is defined, for every caller.
+   */
   async commitInvoiceState(userId: number, env: ZatcaEnv, icv: number, newPih: string, ownerId: number | null = null) {
     const creds = await this.getCredentials(userId, ownerId);
     if (!creds) return;

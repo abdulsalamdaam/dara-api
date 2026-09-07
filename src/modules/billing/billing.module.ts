@@ -33,6 +33,7 @@ import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoi
 import { CHAIN_BUSY } from "../invoice/services/chain-lock";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
+import { isZatcaAccepted } from "../../common/zatca-acceptance";
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -146,6 +147,85 @@ function isTaxExemptKind(kind: unknown): boolean {
 
 /** Every sub-kind the product actually issues; anything else is refused. */
 const KNOWN_DOC_KINDS = new Set([...TAX_EXEMPT_KINDS, "invoice", "manual"]);
+
+/**
+ * The only kinds `POST /simple-invoices/receipt-voucher` may mint.
+ *
+ * That endpoint inserts `status: "confirmed"` — issued, immutable, undeletable
+ * and submittable — without ever running the invoice-readiness gate, because a
+ * سند قبض is evidence that money arrived and not a tax document. The gate is
+ * skipped on the strength of the kind, so the kind cannot be the caller's to
+ * choose: it read `body?.kind ?? "receipt"` with no check at all, which made
+ * `{"kind":"invoice"}` a one-call route to a confirmed TAX invoice that no
+ * gate had ever seen. Both members here are in `TAX_EXEMPT_KINDS`, and the
+ * handler asserts that, so the exemption this endpoint relies on is a property
+ * of the row it writes rather than a claim about it.
+ */
+const VOUCHER_KINDS = new Set(["receipt", "deposit"]);
+
+/** What a validated receipt voucher is allowed to say about itself. */
+export interface ValidatedReceiptVoucher {
+  kind: string;
+  items: LineItem[];
+  /** The money received — the document total. */
+  amount: number;
+  /** Σ of the line amounts. Equal to `amount`, because a voucher carries no VAT. */
+  subtotal: number;
+}
+
+/**
+ * Everything `POST /simple-invoices/receipt-voucher` has to be sure of before
+ * it writes a row that is `confirmed` — issued, immutable, undeletable — the
+ * moment it lands. It ran none of it.
+ *
+ * Split out of the handler and exported because it is the whole of the rule and
+ * none of it needs a database: it can be asserted on directly, which is what
+ * `billing.receipt-voucher.spec.ts` does with the request that used to work.
+ */
+export function validateReceiptVoucher(body: any): ValidatedReceiptVoucher {
+  const amount = round2(Number(body?.amount));
+  if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("المبلغ غير صالح");
+
+  // The kind decides whether the readiness gate applies, so it cannot be the
+  // caller's free choice on a path that skips the gate. `body?.kind ?? "receipt"`
+  // with nothing behind it made `{"kind":"invoice"}` a confirmed TAX invoice in
+  // one call, past both gates. `isTaxExemptKind` is asserted as well as the
+  // allowlist so that adding a member to `VOUCHER_KINDS` that is NOT tax-exempt
+  // fails here rather than quietly re-opening the same hole.
+  const kind = body?.kind == null || String(body.kind).trim() === ""
+    ? "receipt"
+    : String(body.kind).trim();
+  if (!VOUCHER_KINDS.has(kind) || !isTaxExemptKind(kind)) {
+    throw new BadRequestException(
+      `سند القبض لا يقبل نوع المستند: ${kind} · A receipt voucher may only be issued as ${[...VOUCHER_KINDS].join(" or ")}`,
+    );
+  }
+
+  // A receipt voucher's lines never carry VAT. It is not a tax document: it
+  // records money received against an invoice that already charged whatever VAT
+  // there was, and `isTaxExemptKind` keeps it out of the ZATCA path entirely.
+  // `normalizeItems` defaults a line with no `vat` flag to TRUE (legacy
+  // behaviour on the invoice path), so the flag is overridden here rather than
+  // trusted — otherwise the check below would start demanding 15% on top of
+  // every voucher whose caller simply omitted it.
+  const items = (Array.isArray(body?.items) && body.items.length
+    ? normalizeItems(body.items)
+    : [{ description: String(body?.description || "سند قبض").trim(), quantity: 1, unitPrice: amount, amount, vat: false }]
+  ).map((it) => ({ ...it, vat: false }));
+
+  // The same two assertions every other document path runs, and for the same
+  // reason — this one ran NEITHER. `total` came straight off the request while
+  // `subtotal` was derived from the items, so
+  // `{"amount": 999999, "items": [{"amount": 100, "vat": true}]}` stored
+  // subtotal 100 against total 999,999 and minted ~999,899 of VAT out of
+  // nothing, on a document that is confirmed on arrival. With every line exempt
+  // the check reduces to "the amount received is the sum of what it is a
+  // receipt for", which is the only thing a سند قبض can honestly claim.
+  assertNonNegative(items, amount);
+  assertTotalMatchesItems(items, amount);
+
+  return { kind, items, amount, subtotal: round2(items.reduce((s, it) => s + it.amount, 0)) };
+}
 
 @ApiTags("simple-invoices")
 @ApiBearerAuth("user-jwt")
@@ -994,8 +1074,9 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async createReceiptVoucher(@CurrentUser() user: AuthUser, @Body() body: any) {
     const uid = scopeId(user);
-    const amount = round2(Number(body?.amount));
-    if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("المبلغ غير صالح");
+    // Kind, line items and total — all of it refused up front, before a number
+    // is minted or a contract is touched. See `validateReceiptVoucher`.
+    const { kind: voucherKind, items, amount, subtotal } = validateReceiptVoucher(body);
     const paidDate = body?.paidDate || today();
     const method = body?.method || "bank_transfer";
     const attachmentKey = body?.attachmentKey ?? null;
@@ -1026,19 +1107,22 @@ class SimpleInvoicesController {
     // A receipt voucher must belong to a contract.
     if (!contractId) throw new BadRequestException("العقد مطلوب لإصدار سند القبض");
 
-    const items = Array.isArray(body?.items) && body.items.length
-      ? normalizeItems(body.items)
-      : [{ description: String(body?.description || "سند قبض").trim(), quantity: 1, unitPrice: amount, amount, vat: false }];
-    const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
     const voucher = await nextReceiptVoucherNumber(this.db, uid);
     // A receipt voucher is NOT an invoice — its document number IS the RV number;
     // it never consumes an INV-#### sequence.
     const number = voucher;
 
-    // A voucher document is always kind = "receipt" (evidence). Whether it also
-    // counts as a collection is decided by recording an actual payment-collection
-    // below, NOT by the kind — so it never leaks into the Invoices list.
-    const voucherKind = body?.kind ?? "receipt";
+    // Whether the voucher also counts as a collection is decided by recording an
+    // actual payment-collection below, NOT by the kind — so it never leaks into
+    // the Invoices list.
+    //
+    // The status stays `confirmed` deliberately: the money HAS been received,
+    // the handler records the payment-collections to prove it, and a draft
+    // receipt for money already banked would be a lie in the other direction —
+    // it would also leave the collection rows below hanging off a document that
+    // had not been issued. What made `confirmed` dangerous was never the status
+    // on its own but `confirmed` × an unbounded kind × an unchecked total, and
+    // `validateReceiptVoucher` shuts the other two.
     const [doc] = await this.db.insert(simpleInvoicesTable).values({
       userId: uid, number, type: "invoice", kind: voucherKind, status: "confirmed",
       contractId: contractId ?? null, tenantId: tenantId ?? null, tenantName: tenantName ?? null,
@@ -1380,8 +1464,8 @@ class SimpleInvoicesController {
    * POST /simple-invoices/:id/submit-zatca
    * Manually (re)submit an already-approved document to ZATCA. For invoices that
    * were approved before the landlord was onboarded (or before auto-submit), or
-   * whose earlier attempt failed. Idempotent: if it's already in ZATCA, returns
-   * that instead of duplicating.
+   * whose earlier attempt failed. Idempotent about documents ZATCA HOLDS: it
+   * reports one back instead of filing it twice.
    */
   @Post(":id/submit-zatca")
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
@@ -1391,12 +1475,42 @@ class SimpleInvoicesController {
       .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status !== "confirmed") throw new BadRequestException("اعتمد المستند قبل إرساله لهيئة الزكاة");
-    // Already mirrored? Don't duplicate — report its current ZATCA status.
-    const [existing] = await this.db.select({ status: invoicesTable.status, profile: invoicesTable.profile })
+
+    // Is it ALREADY FILED? The existence of an `invoices` row is not the answer,
+    // and reading it as one was the whole defect: this returned "already filed
+    // with ZATCA" for a row ZATCA had REJECTED, so the one landlord whose
+    // invoice was refused was told the thing had worked and had no way left to
+    // try again. The button that exists precisely to retry a failed submission
+    // refused to, on the grounds that it had failed.
+    //
+    // Only a row ZATCA accepted may short-circuit. A rejected or errored one is
+    // a superseded attempt: it is soft-deleted so it stops holding the invoice
+    // number (`invoices_user_invoice_number_uniq` is scoped to live rows), and
+    // the retry re-issues from scratch. Re-issuing rather than resending the
+    // stored bytes is the point — the usual reason a document was refused and
+    // is now worth retrying is that the seller has re-onboarded since, so the
+    // old signed XML carries a certificate ZATCA has already refused once.
+    const existing = await this.db.select({ id: invoicesTable.id, status: invoicesTable.status, profile: invoicesTable.profile })
       .from(invoicesTable).where(and(eq(invoicesTable.userId, uid), eq(invoicesTable.invoiceNumber, doc.number), isNull(invoicesTable.deletedAt)));
-    if (existing) {
-      return { zatca: { submitted: true, status: existing.status, profile: existing.profile, environment: "", httpStatus: 0, invoiceId: 0, warnings: 0, alreadyExists: true } };
+    const filed = existing.find((e) => isZatcaAccepted(e.status));
+    if (filed) {
+      return { zatca: { submitted: true, status: filed.status, profile: filed.profile, environment: "", httpStatus: 0, invoiceId: 0, warnings: 0, alreadyExists: true } };
     }
+    if (existing.length) {
+      // Nothing ZATCA holds is being erased here: every row in this list was
+      // refused or never arrived. The reason it goes is that it is standing on
+      // the invoice number the retry needs. Its ICV is already free — the ICV
+      // index only counts accepted rows — and the failure itself survives on
+      // the document as `zatca_status` / `zatca_error`.
+      await this.db.update(invoicesTable).set({ deletedAt: new Date() })
+        .where(and(
+          inArray(invoicesTable.id, existing.map((e) => e.id)),
+          eq(invoicesTable.userId, uid),
+          isNull(invoicesTable.deletedAt),
+        ));
+      this.logger.log(`ZATCA: ${doc.number} retry — superseded ${existing.length} unaccepted attempt(s) [${existing.map((e) => e.status).join(", ")}]`);
+    }
+
     const zatca = await this.submitApprovedDocToZatca(uid, doc);
     return { zatca };
   }

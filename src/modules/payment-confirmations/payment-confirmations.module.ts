@@ -6,7 +6,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiTags, ApiBearerAuth, ApiConsumes } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, ilike, count } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, or, ilike, count, sql } from "drizzle-orm";
 import {
   paymentConfirmationsTable, paymentsTable, contractsTable, contractUnitsTable,
   tenantsTable, unitsTable, propertiesTable, notificationsTable, simpleInvoicesTable,
@@ -29,11 +29,32 @@ import {
 const METHODS = ["bank_transfer", "cash", "cheque", "other"] as const;
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
-/** Next INV-###### number for an account (mirrors the billing module). */
-async function nextInvoiceNumber(db: Drizzle, userId: number): Promise<string> {
-  const [row] = await db.select({ c: count() }).from(simpleInvoicesTable)
-    .where(and(eq(simpleInvoicesTable.userId, userId), eq(simpleInvoicesTable.type, "invoice")));
-  return `INV-${String(Number(row?.c ?? 0) + 1).padStart(6, "0")}`;
+/**
+ * Next INV-###### number for an account — the billing module's rule, not an
+ * approximation of it.
+ *
+ * It used to COUNT rows of `type = 'invoice'`, which is wrong twice over.
+ * Receipt vouchers (`RV-…`) and commission invoices (`COM-…`) are stored as
+ * `type = 'invoice'` too, so every one of them pushed the count past the real
+ * INV sequence and the tenant's invoice was numbered into a gap; and a count
+ * never notices a deleted row, so after one deletion it hands back a number
+ * that already exists. Both end at the same place — a document whose number is
+ * not its position, or a 23505 on insert.
+ *
+ * MAX(sequence)+1 over the `INV-` prefix, inside the transaction that inserts,
+ * under the same `pg_advisory_xact_lock(userId, 1)` key the billing module
+ * takes. The lock is what stops this handler and a landlord creating an invoice
+ * in the same moment from reading the same maximum — they are different
+ * modules, so only a shared key makes them exclusive.
+ */
+async function nextInvoiceNumber(tx: any, userId: number): Promise<string> {
+  const res: any = await tx.execute(sql`
+    select coalesce(max(cast(substring(${simpleInvoicesTable.number} from '[0-9]+$') as integer)), 0) as m
+    from ${simpleInvoicesTable}
+    where ${simpleInvoicesTable.userId} = ${userId} and ${simpleInvoicesTable.number} like 'INV-%'
+  `);
+  const rows = Array.isArray(res) ? res : (res?.rows ?? []);
+  return `INV-${String(Number(rows?.[0]?.m ?? 0) + 1).padStart(6, "0")}`;
 }
 
 /* ─────────────── Tenant side — submit & track ─────────────── */
@@ -403,27 +424,56 @@ export class PaymentConfirmationsController {
         const [contract] = await this.db
           .select({ tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
           .from(contractsTable).where(eq(contractsTable.id, row.contractId));
-        const amount = round2(Number(payment.amount));
-        const items = [{ description: payment.description || "إيجار", quantity: 1, unitPrice: amount, amount, vat: false }];
-        await this.db.insert(simpleInvoicesTable).values({
-          userId: uid,
-          number: await nextInvoiceNumber(this.db, uid),
-          type: "invoice",
-          status: "draft",
-          contractId: row.contractId,
-          paymentId: row.paymentId,
-          paymentIds: [row.paymentId],
-          tenantId: contract?.tenantId ?? row.tenantId,
-          tenantName: contract?.tenantName ?? null,
-          items,
-          subtotal: amount.toFixed(2),
-          total: amount.toFixed(2),
-          issueDate: new Date().toISOString().slice(0, 10),
-          // Carry the tenant's payment proof onto the invoice so the landlord
-          // sees it through to collection.
-          attachmentKey: row.proofKey ?? null,
-          notes: `من تأكيد دفع${row.reference ? ` · ${row.reference}` : ""}`,
-        } as any);
+        // READ the installment's VAT flag; do not assume it.
+        //
+        // The line was hard-coded `vat: false`. `zatcaLinesFromDoc` maps that to
+        // ZATCA category `E` (exempt), and `runZatcaSubmission` skips a document
+        // whose lines are all exempt as `not_required` — so a taxable
+        // commercial installment, invoiced from a tenant's payment proof, was
+        // coded exempt and never reached ZATCA at all. The same invoice raised
+        // by the landlord through `POST /simple-invoices` carried 15% and was
+        // cleared. Same installment, two different tax positions, decided by
+        // which of the two people pressed a button.
+        //
+        // `payments.amount` is stored VAT-INCLUSIVE when the flag is on (see
+        // `contracts/installments.ts`, which multiplies by 1.15 as it builds the
+        // schedule), so the gross figure is the document TOTAL and the line
+        // carries the net. Writing the gross into both, as this did, would have
+        // asked `assertTotalMatchesItems` for another 15% on top at approval and
+        // been refused there — the tenant's route to an invoice would simply
+        // have stopped working the moment it started charging VAT.
+        const gross = round2(Number(payment.amount));
+        const vat = !!payment.vatEnabled;
+        const net = vat ? round2(gross / 1.15) : gross;
+        const items = [{ description: payment.description || "إيجار", quantity: 1, unitPrice: net, amount: net, vat }];
+        await this.db.transaction(async (tx) => {
+          // Same lock key and key space as the billing module's `create`, so the
+          // two cannot read the same MAX(number) at the same moment.
+          await tx.execute(sql`select pg_advisory_xact_lock(${uid}, 1)`);
+          await tx.insert(simpleInvoicesTable).values({
+            userId: uid,
+            number: await nextInvoiceNumber(tx, uid),
+            type: "invoice",
+            status: "draft",
+            contractId: row.contractId,
+            paymentId: row.paymentId,
+            paymentIds: [row.paymentId],
+            tenantId: contract?.tenantId ?? row.tenantId,
+            tenantName: contract?.tenantName ?? null,
+            items,
+            subtotal: net.toFixed(2),
+            total: gross.toFixed(2),
+            issueDate: new Date().toISOString().slice(0, 10),
+            // The installment's own due date, which is what this invoice is
+            // for. Left null, every invoice raised this way read as having no
+            // due date and so never became overdue.
+            dueDate: payment.dueDate ?? null,
+            // Carry the tenant's payment proof onto the invoice so the landlord
+            // sees it through to collection.
+            attachmentKey: row.proofKey ?? null,
+            notes: `من تأكيد دفع${row.reference ? ` · ${row.reference}` : ""}`,
+          } as any);
+        });
       }
     }
 
