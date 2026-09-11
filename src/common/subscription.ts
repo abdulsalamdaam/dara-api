@@ -73,3 +73,18 @@ export function deriveSubscription(input: {
   // Grace expired.
   return { status: "locked", graceUntil, daysUntilLock, needsPayment: true, locked: true };
 }
+
+/**
+ * The end of a subscription window of `cycle` starting at `from`.
+ *
+ * Shared rather than duplicated because two paths compute it: activation (the
+ * window the payment bought) and a retro-issued invoice, which has to
+ * reconstruct the window of a payment that was activated before the invoice
+ * columns existed.
+ */
+export function nextEndDate(cycle: "monthly" | "yearly", from = new Date()): Date {
+  const d = new Date(from);
+  if (cycle === "yearly") d.setFullYear(d.getFullYear() + 1);
+  else d.setMonth(d.getMonth() + 1);
+  return d;
+}
