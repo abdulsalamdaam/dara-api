@@ -21,6 +21,9 @@ import { AdminCustomerOverviewController } from "./customer-overview.controller"
 import { EjarPolicyService, type ManualAddOverride } from "../ejar/ejar.policy.service";
 import { TaqnyatService } from "../sms/taqnyat.service";
 import { TrialSettingsService } from "./trial-settings.service";
+import { SubscriptionModule } from "../subscription/subscription.module";
+import { SubscriptionInvoiceService, subscriptionInvoiceNumber } from "../subscription/subscription-invoice.service";
+import { AppLogService } from "../../common/logging/app-log.service";
 import { normalizeTrialDays } from "../../common/trial";
 
 /**
@@ -112,6 +115,8 @@ class AdminController {
     private readonly ejarPolicy: EjarPolicyService,
     private readonly sms: TaqnyatService,
     private readonly trialSettings: TrialSettingsService,
+    private readonly subscriptionInvoices: SubscriptionInvoiceService,
+    private readonly appLog: AppLogService,
   ) {}
 
   /**
@@ -1288,6 +1293,80 @@ class AdminController {
     await seedDemoData(this.db, demoUserId);
     return { success: true, message: "تم إعادة ضبط بيانات الحساب التجريبي" };
   }
+
+  /**
+   * Issue — or re-issue — the invoice for one paid subscription payment.
+   *
+   * Nothing could do this before. `activateFromPaidRow` returns early on a row
+   * that is already `paid`, so the invoice is only ever issued at the instant
+   * payment is confirmed: a payment taken before the invoice existed, or one
+   * whose render or send failed, had no route to a document at all. Production
+   * has several such rows, the oldest from June. First subscriptions and
+   * renewals are the same row shape here, so both are covered.
+   *
+   * Idempotent. The number is derived from the row id, so re-issuing produces
+   * the same `SUB-nnnnnn`; the stamp only fills in what is missing, and only a
+   * confirmed send moves `invoice_emailed_at`. Re-issuing a row that already
+   * has a number is allowed on purpose — that is what recovery from a failed
+   * send looks like.
+   *
+   * Body (all optional):
+   *   · `dryRun: true` — render and resolve everything, return the PDF's size
+   *     and the document data, write NOTHING and send NOTHING. This is how the
+   *     endpoint is tested against real customer rows safely.
+   *   · `to: "someone@example.com"` — send here instead of the account holder,
+   *     so a live test can be pointed at our own mailbox.
+   *
+   * Same guards as every other route on this controller (`JwtAuthGuard` +
+   * `SuperAdminGuard`): it renders and emails a customer's billing document.
+   */
+  @Post("subscription-payments/:id/issue-invoice")
+  async issueSubscriptionInvoice(@CurrentUser() admin: AuthUser, @Param("id") id: string, @Body() body: any) {
+    const rowId = Number(id);
+    if (!Number.isInteger(rowId) || rowId <= 0) throw new BadRequestException("رقم الدفعة غير صالح");
+
+    const [row] = await this.db.select().from(subscriptionPaymentsTable)
+      .where(eq(subscriptionPaymentsTable.id, rowId));
+    if (!row) throw new NotFoundException("الدفعة غير موجودة");
+    // An invoice states that money was received. Refuse anything not confirmed
+    // paid rather than minting a document for a payment that may never land.
+    if (row.status !== "paid") throw new BadRequestException("لا تصدر فاتورة إلا لدفعة مؤكدة الدفع");
+
+    const dryRun = body?.dryRun === true || body?.dryRun === "true";
+    const to = typeof body?.to === "string" && body.to.trim() ? body.to.trim() : undefined;
+
+    const result = await this.subscriptionInvoices.issue(this.db, rowId, { dryRun, to });
+
+    // Logged either way, and to `app_logs` rather than stdout: this is a
+    // privileged action that emails a paying customer, and "who re-sent this,
+    // when, to where" has to survive the container.
+    this.appLog?.record({
+      level: result.ok ? "log" : "error",
+      event: dryRun ? "subscription_invoice_dry_run" : "subscription_invoice_reissued",
+      context: "AdminSubscriptionInvoice",
+      userId: row.userId,
+      message: `admin ${admin?.id ?? "?"} ${dryRun ? "previewed" : "re-issued"} ${subscriptionInvoiceNumber(rowId)}`,
+      meta: {
+        paymentId: rowId, invoiceNumber: result.invoiceNumber, adminUserId: admin?.id ?? null,
+        dryRun, ok: result.ok, reason: result.reason ?? null, to: result.to ?? null,
+        pdfBytes: result.pdfBytes ?? null, overrodeRecipient: !!to,
+      },
+    });
+
+    return {
+      ok: result.ok,
+      dryRun: result.dryRun,
+      paymentId: rowId,
+      invoiceNumber: result.invoiceNumber,
+      reason: result.reason ?? null,
+      to: result.to ?? null,
+      pdfBytes: result.pdfBytes ?? null,
+      emailedAt: result.emailedAt ?? null,
+      // Only on a dry run — the resolved document, so it can be checked before
+      // anything is sent to a customer.
+      invoice: result.data ?? null,
+    };
+  }
 }
 
 /**
@@ -1322,7 +1401,10 @@ class PublicTrialController {
  * link into it: both already carry the account's `id` on every row.
  */
 @Module({
-  imports: [EjarModule],
+  // SubscriptionModule for `SubscriptionInvoiceService` — the admin re-issue
+  // endpoint renders and sends the same document the payment path does, rather
+  // than owning a second copy of how to build it.
+  imports: [EjarModule, SubscriptionModule],
   controllers: [AdminController, AdminCustomerOverviewController, PublicTrialController],
   providers: [TrialSettingsService],
   exports: [TrialSettingsService],

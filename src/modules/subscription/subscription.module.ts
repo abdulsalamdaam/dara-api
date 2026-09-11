@@ -8,7 +8,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
-import { deriveSubscription } from "../../common/subscription";
+import { deriveSubscription, nextEndDate } from "../../common/subscription";
 import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -17,14 +17,6 @@ import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.net").replace(/\/$/, "");
-
-/** Open / renew the subscription window for `cycle` starting now. */
-function nextEndDate(cycle: BillingCycle, from = new Date()): Date {
-  const d = new Date(from);
-  if (cycle === "yearly") d.setFullYear(d.getFullYear() + 1);
-  else d.setMonth(d.getMonth() + 1);
-  return d;
-}
 
 type SubscriptionPaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
 
@@ -411,5 +403,7 @@ class SubscriptionWebhookController {
   imports: [InvoiceModule],
   controllers: [SubscriptionController, SubscriptionWebhookController],
   providers: [SubscriptionInvoiceService],
+  // Exported for the admin re-issue endpoint (`AdminModule`).
+  exports: [SubscriptionInvoiceService],
 })
 export class SubscriptionModule {}

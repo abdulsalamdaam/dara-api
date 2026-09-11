@@ -215,6 +215,20 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure subscription_payments invoice columns failed: ${err?.message || err}`);
     }
 
+    // Delivery is a separate fact from numbering. The number and the issue date
+    // are stamped BEFORE the document is rendered and mailed, so the download
+    // endpoint has a stable number; without this column a render or a send that
+    // failed after that stamp left a row indistinguishable from a delivered
+    // one. NULL beside a non-null invoice_number means "issued but never
+    // confirmed sent" — the only way to find such a row afterwards, and what
+    // the admin re-issue endpoint acts on. Its own try/catch so it is attempted
+    // even if one of the columns above cannot be added.
+    try {
+      await client.query(`alter table subscription_payments add column if not exists invoice_emailed_at timestamptz`);
+    } catch (err: any) {
+      log.warn(`ensure subscription_payments.invoice_emailed_at failed: ${err?.message || err}`);
+    }
+
     // "This account has already had its free trial." `subscription_is_trial`
     // is cleared by the first payment, so without this column nothing on the
     // row remembers a trial was ever granted and an account could be given a

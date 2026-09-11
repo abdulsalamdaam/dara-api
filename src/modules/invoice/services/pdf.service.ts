@@ -5,6 +5,14 @@ import os from "node:os";
 import { ShellService } from "./shell.service";
 import { renderInvoiceHtml, type RenderContext } from "./invoice-template";
 
+/**
+ * A one-page A4 document with inline assets and no network renders in about a
+ * second. Sixty is a wedged Chrome, not a slow one — and the caller on the
+ * subscription path is fire-and-forget, so without a limit the process, its
+ * tab and its temp directory simply leak. `ShellService` kills it and throws.
+ */
+const CHROME_RENDER_TIMEOUT_MS = 60_000;
+
 const CHROME_PATHS = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -68,10 +76,16 @@ export class PdfService {
         "--headless=new",
         "--disable-gpu",
         "--no-sandbox",
+        // Containers get a 64 MB /dev/shm by default. Chrome puts its shared
+        // renderer memory there, runs out, and the tab dies mid-render — which
+        // surfaces as a zero-byte or missing PDF rather than as an error about
+        // memory. This moves that allocation to /tmp, and is the standard flag
+        // for exactly this.
+        "--disable-dev-shm-usage",
         "--no-pdf-header-footer",
         `--print-to-pdf=${pdfPath}`,
         `file://${htmlPath}`,
-      ]);
+      ], { timeoutMs: CHROME_RENDER_TIMEOUT_MS });
       return await fs.readFile(pdfPath);
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });

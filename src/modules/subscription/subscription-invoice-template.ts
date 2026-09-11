@@ -1,7 +1,8 @@
 import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-assets";
+import { subscriptionDocumentHeading } from "../../common/dara-seller";
 
 /**
- * The tax invoice Dara issues to a customer for their own subscription.
+ * The invoice Dara issues to a customer for their own subscription.
  *
  * Not to be confused with `invoice-template.ts`, which renders the LANDLORD's
  * invoice to their tenant. This one runs the other way round: Dara is the
@@ -18,25 +19,23 @@ import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-
  *  · Colours must be explicit. A PDF has one ground; nothing here reacts to a
  *    viewer theme.
  *
- * The document addresses the customer BY NAME and nothing more. There is an
- * "invoice to" block carrying the company's registered name (or the person's)
- * and, when the account has one, an address — and that is all either party
- * gets. No seller block, and no registration numbers for anybody: no buyer
- * VAT, no seller VAT, no CR. Dara is identified by the lockup at the top and
- * the contact line at the bottom.
+ * **The document prints in one of two modes and says which it is.** The rule
+ * lives in `common/dara-seller.ts` (`isTaxInvoice`) — read the comment there
+ * before changing anything below, because the heading, the seller block, the
+ * VAT row and the QR are four faces of one decision and must move together:
  *
- * That is the design as specified, and the omissions are decisions rather than
- * oversights — do not "fix" them by adding fields back. It does mean the
- * document is a receipt rather than a compliant KSA tax invoice despite its
- * heading; making it compliant is a design change to raise, not a field to
- * slip in. Tests assert both the name being present and the numbers being
- * absent.
+ *  · TAX INVOICE (a seller VAT number is configured) — headed «فاتورة ضريبية»,
+ *    with a seller block carrying our name, VAT number and (when set) CR, a VAT
+ *    row, and the ZATCA Phase-1 QR that encodes the same seller name and VAT
+ *    number in tags 1 and 2.
+ *  · INVOICE (no VAT number) — headed «فاتورة», no seller registration block,
+ *    NO VAT row at all (not a 0% one), no QR. The total is the amount charged.
  *
- * The one place the seller's VAT number does appear is inside the ZATCA
- * Phase-1 QR, which mandates it (tag 2) along with the seller name (tag 1).
- * That is encoded, not printed, and no QR is emitted at all when the number is
- * unconfigured — a QR scanning to an empty VAT number looks official and
- * certifies nothing.
+ * The buyer side is the same either way: an «فاتورة إلى» block carrying the
+ * company's registered name (or the person's) and, when the account has one, an
+ * address. No buyer VAT number and no buyer CR in either mode — the reference
+ * design carries none, and neither is required of us to identify the customer.
+ * Tests assert the whole shape of both modes.
  */
 
 /** Everything the document states. Assembled by the caller — this only renders. */
@@ -46,11 +45,11 @@ export interface SubscriptionInvoiceData {
   /** Issue date, already formatted for print (`YYYY/M/D`). */
   issueDate: string;
   /**
-   * Dara, as it appears in the footer — the contact row and the website bar.
-   * There is no seller BLOCK on this document: the reference design carries
-   * one party only, and everything the reader needs to identify us is the
-   * lockup at the top and the contact line at the bottom.
+   * Whether this document is a TAX invoice. The single switch the heading, the
+   * seller registration block, the VAT row and the QR all read — see
+   * `isTaxInvoice()` in `common/dara-seller.ts`.
    */
+  taxInvoice: boolean;
   /**
    * Who the invoice is addressed to — the company's registered name, or the
    * person's, and optionally an address. `addressLines` may be empty: plenty
@@ -61,7 +60,17 @@ export interface SubscriptionInvoiceData {
     name: string;
     addressLines: string[];
   };
+  /**
+   * Dara. `addressLines` / `email` / `phone` / `website` are the footer contact
+   * row and the website bar, printed in both modes. `name` / `vatNumber` /
+   * `crNumber` are the seller REGISTRATION block, printed only on a tax
+   * invoice — that block is what makes the heading true, so the two are never
+   * separated. `crNumber` may be null even then; it prints when configured.
+   */
   seller: {
+    name: string;
+    vatNumber: string | null;
+    crNumber: string | null;
     addressLines: string[];
     email: string | null;
     phone: string | null;
@@ -75,10 +84,28 @@ export interface SubscriptionInvoiceData {
     /** quantity × unitPrice, excluding VAT. */
     amount: number;
   }>;
-  /** Sum of line amounts, excluding VAT. */
+  /**
+   * Sum of the line amounts. On a tax invoice that is the net, excluding VAT;
+   * on a plain invoice there is no VAT to exclude and it equals the total.
+   */
   subtotal: number;
-  vatRate: number;
-  vatAmount: number;
+  /**
+   * The VAT line, or **null when there is no VAT line at all**. Null is not
+   * "zero": a plain invoice omits the row entirely rather than printing 0%,
+   * because we are not charging VAT at a rate of zero — we are not charging it.
+   */
+  vat: {
+    /** The configured rate, e.g. 15. */
+    rate: number;
+    /** VAT contained in `total`, in the document's currency. */
+    amount: number;
+    /**
+     * Whether `rate` may be printed as a percentage beside the amount. False
+     * when the printed figures do not reproduce it — see
+     * `vatRateMatchesAmounts()`; the label then appears without a percentage.
+     */
+    ratePrinted: boolean;
+  } | null;
   total: number;
   currencyLabel: string;
   /**
@@ -114,6 +141,31 @@ const ICON = {
 };
 
 export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): string {
+  // The four faces of one decision (see the file comment): what the document
+  // calls itself, whether it names a registered seller, whether it states VAT,
+  // and what the closing note claims. All read `d.taxInvoice` and nothing else,
+  // so they cannot drift apart.
+  const heading = subscriptionDocumentHeading(d.taxInvoice);
+
+  const sellerBlock = d.taxInvoice
+    ? `<div class="party seller">
+        <div class="lbl">صادرة من</div>
+        <div class="nm">${esc(d.seller.name)}</div>
+        <div class="reg"><b>الرقم الضريبي:</b> <span dir="ltr">${esc(d.seller.vatNumber ?? "")}</span></div>
+        ${d.seller.crNumber ? `<div class="reg"><b>السجل التجاري:</b> <span dir="ltr">${esc(d.seller.crNumber)}</span></div>` : ""}
+      </div>`
+    : "";
+
+  // No VAT configured → no row. Deliberately not a 0% line: printing a rate of
+  // zero states a tax position we have not taken.
+  const vatRow = d.vat
+    ? `<tr><td class="k">ضريبة القيمة المضافة${d.vat.ratePrinted ? ` (${esc(d.vat.rate)}%)` : ""}:</td><td class="v">${money(d.vat.amount)}</td></tr>`
+    : "";
+
+  const note = d.taxInvoice
+    ? "فاتورة ضريبية عن اشتراكك في منصة دارا. المبالغ بالريال السعودي وشاملة ضريبة القيمة المضافة."
+    : "فاتورة عن اشتراكك في منصة دارا. المبالغ بالريال السعودي.";
+
   const rows = d.lines.map((l) => `
         <tr>
           <td class="qty">${esc(l.quantity)}</td>
@@ -182,12 +234,18 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .pill .v { font-weight: 600; }
 
 
-  /* ── Recipient ────────────────────────────────────────────────────── */
-  .parties { display: flex; justify-content: flex-start; margin-top: 8mm; }
+  /* ── Parties ──────────────────────────────────────────────────────── */
+  /* One block (the buyer) on a plain invoice; two on a tax invoice, where the
+     seller's registration block sits opposite it. space-between renders the
+     single-block case identically to the flex-start it replaces. */
+  .parties { display: flex; justify-content: space-between; gap: 8mm; margin-top: 8mm; }
   .party { max-width: 90mm; }
+  .party.seller { text-align: end; }
   .party .lbl { color: #6B7A90; font-size: 11px; margin-bottom: 1mm; }
   .party .nm { font-weight: 800; font-size: 13.5px; color: #15192E; }
   .party .ln { color: #46566B; }
+  .party .reg { color: #46566B; font-variant-numeric: tabular-nums; }
+  .party .reg b { font-weight: 600; color: #2B3648; }
 
   /* ── Items ────────────────────────────────────────────────────────── */
   /* Inset from the text column, as on the reference. Full width left the
@@ -254,7 +312,7 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
 
     <div class="head">
       <div class="lockup">${DARA_LOCKUP_SVG}</div>
-      <h1>فاتورة ضريبية</h1>
+      <h1>${esc(heading)}</h1>
     </div>
     <div class="rule"></div>
 
@@ -271,6 +329,7 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
         <div class="nm">${esc(d.buyer.name)}</div>
         ${d.buyer.addressLines.filter(Boolean).map((l) => `<div class="ln">${esc(l)}</div>`).join("")}
       </div>
+      ${sellerBlock}
     </div>
 
     <table>
@@ -292,15 +351,13 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
       <div class="totals">
       <table>
         <tr><td class="k">المجموع:</td><td class="v">${money(d.subtotal)}</td></tr>
-        <tr><td class="k">ضريبة القيمة المضافة (${esc(d.vatRate)}%):</td><td class="v">${money(d.vatAmount)}</td></tr>
+        ${vatRow}
         <tr class="grand"><td class="k">الإجمالي:</td><td class="v">${money(d.total)} ${esc(d.currencyLabel)}</td></tr>
       </table>
       </div>
     </div>
 
-    <div class="note">
-      فاتورة ضريبية عن اشتراكك في منصة دارا. المبالغ بالريال السعودي وشاملة ضريبة القيمة المضافة.
-    </div>
+    <div class="note">${esc(note)}</div>
 
     <div class="foot">
       <div class="row">${contact.map(([icon, text]) => `<span>${icon}<span dir="auto">${esc(text)}</span></span>`).join("")}</div>
