@@ -22,7 +22,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
-import { BUYER_ID_SCHEMES, exemptionReasonFor, isVatCategory, unexplainedExemptLines } from "../../common/vat-exemption";
+import { BUYER_ID_SCHEMES, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, unexplainedExemptLines } from "../../common/vat-exemption";
 
 /**
  * The values the invoice columns can actually hold.
@@ -142,6 +142,9 @@ export class InvoicesController {
     const unexplained = unexplainedExemptLines(body.lines);
     if (unexplained.length)
       throw new BadRequestException(`every E or Z line needs a ZATCA exemption reason code (VATEX-SA-…): ${unexplained.join(", ")}`);
+    const conflicts = exemptionReasonConflicts(body.lines);
+    if (conflicts.length)
+      throw new BadRequestException(`one exemption reason per VAT category on a document (EN16931 BR-E-08) — ${conflicts.join(" | ")}; issue a separate document`);
 
     // Presence was the only thing ever asked of these — see PROFILES above for
     // why that is not enough.

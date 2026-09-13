@@ -89,6 +89,30 @@ export function unexplainedExemptLines(
     .map((l) => l.name);
 }
 
+/**
+ * Categories whose lines disagree about the reason. EN16931 keeps ONE VAT
+ * breakdown per category (BR-E-08 sums every exempt line into it), so a
+ * document cannot say "this exempt line is real estate and that one is
+ * financial services" — the second ground needs its own document. Returns
+ * `["E: rent, loan fee"]`-style descriptions; empty means consistent.
+ */
+export function exemptionReasonConflicts(
+  lines: ReadonlyArray<{ name: string; vatCategory?: string; exemptionReasonCode?: string | null }>,
+): string[] {
+  const byCat = new Map<string, Map<string, string[]>>();
+  for (const l of lines) {
+    if (!isVatCategory(l.vatCategory) || l.vatCategory === "S") continue;
+    const reason = exemptionReasonFor(l.vatCategory, l.exemptionReasonCode);
+    if (!reason) continue;
+    const m = byCat.get(l.vatCategory) ?? new Map<string, string[]>();
+    m.set(reason, [...(m.get(reason) ?? []), l.name]);
+    byCat.set(l.vatCategory, m);
+  }
+  return [...byCat.entries()]
+    .filter(([, m]) => m.size > 1)
+    .map(([cat, m]) => `${cat}: ${[...m.values()].flat().join(", ")}`);
+}
+
 // ── Party identification schemes ────────────────────────────────────────────
 
 /** BR-KSA-08: what a SELLER may identify with. No NAT, no IQA — an individual's national ID goes under OTH. */

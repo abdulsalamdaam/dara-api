@@ -111,8 +111,10 @@ export class InvoiceBuilderService {
       const lineVat = +((lineNet * vatPct) / 100).toFixed(2);
       const lineTotalIncVat = +(lineNet + lineVat).toFixed(2);
       const cat = (line.vatCategory || "S") as VatCategory;
-      // One subtotal per (category, rate, reason): two exempt lines with
-      // different reasons are two VAT breakdowns, each carrying its own code.
+      // One subtotal per (category, rate), carrying the ONE reason its lines
+      // share. EN16931 sums every line of a category into a single breakdown
+      // (BR-E-08), so two exempt lines with different reasons cannot be said
+      // on one document — that is refused below, not split.
       const reasonCode = exemptionReasonFor(cat, line.exemptionReasonCode);
       if (cat !== "S" && !reasonCode) {
         throw new Error(
@@ -136,12 +138,17 @@ export class InvoiceBuilderService {
 
       lineExtension += lineNet;
       taxAmount += lineVat;
-      const key = `${cat}|${vatPct}|${reasonCode ?? ""}`;
+      const key = `${cat}|${vatPct}`;
       if (!subtotalsByRate.has(key)) {
         subtotalsByRate.set(key, {
           category: cat, percent: vatPct, taxable: 0, tax: 0,
           ...(reasonCode ? { exemptionReasonCode: reasonCode, exemptionReasonText: reasonText } : {}),
         });
+      } else if (reasonCode && subtotalsByRate.get(key)!.exemptionReasonCode !== reasonCode) {
+        throw new Error(
+          `line "${line.name}" is ${cat} for ${reasonCode} but another ${cat} line on this document is for ` +
+          `${subtotalsByRate.get(key)!.exemptionReasonCode} — one exemption reason per category (EN16931 BR-E-08); issue a separate document`,
+        );
       }
       const sub = subtotalsByRate.get(key)!;
       sub.taxable += lineNet;

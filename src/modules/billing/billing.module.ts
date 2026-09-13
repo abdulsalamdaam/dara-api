@@ -25,7 +25,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, eInvoiceBuyerBlockers, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceBlocker, type InvoiceReadiness } from "../../common/invoice-readiness";
-import { buyerIdScheme, exemptionReasonFor, isVatCategory, unexplainedExemptLines, type VatCategory } from "../../common/vat-exemption";
+import { buyerIdScheme, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, unexplainedExemptLines, type VatCategory } from "../../common/vat-exemption";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
@@ -1653,6 +1653,11 @@ class SimpleInvoicesController {
         this.logger.warn(`ZATCA: ${doc.number} not sent — no exemption reason on: ${unexplained.join(", ")}`);
         return { submitted: false, code: "error", reason: `بنود بدون ضريبة وبدون سبب إعفاء: ${unexplained.join("، ")}` };
       }
+      const conflicts = exemptionReasonConflicts(lines);
+      if (conflicts.length) {
+        this.logger.warn(`ZATCA: ${doc.number} not sent — more than one exemption reason in a category: ${conflicts.join(" | ")}`);
+        return { submitted: false, code: "error", reason: `سبب إعفاء واحد لكل فئة ضريبية في المستند الواحد: ${conflicts.join(" | ")}` };
+      }
 
       // Buyer's full structured address comes from the tenant record (rent) or
       // the landlord/owner record (commission) — both store a national address —
@@ -1859,8 +1864,15 @@ class SimpleInvoicesController {
     const hasTaxable = lines.some((l) => l.vatCategory === "S" || l.vatCategory === "Z");
     if (!hasTaxable) return null;
     const names = unexplainedExemptLines(lines);
-    if (!names.length) return null;
-    return { entity: "document", id: doc.id ?? null, name: names.join("، "), missing: ["exemptionReason"], action: "edit_document" };
+    if (names.length) {
+      return { entity: "document", id: doc.id ?? null, name: names.join("، "), missing: ["exemptionReason"], action: "edit_document" };
+    }
+    // One reason per category: EN16931 keeps a single exempt breakdown.
+    const conflicts = exemptionReasonConflicts(lines);
+    if (conflicts.length) {
+      return { entity: "document", id: doc.id ?? null, name: conflicts.join(" | "), missing: ["exemptionReasonConflict"], action: "edit_document" };
+    }
+    return null;
   }
 
   /** Normalize a resolved party into a ZATCA BuyerSnapshot (blanks → null). */

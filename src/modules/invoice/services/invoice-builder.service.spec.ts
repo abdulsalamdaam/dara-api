@@ -47,14 +47,23 @@ describe("InvoiceBuilderService", () => {
       assert.match(zero.exemptionReasonText!, /Export of services/);
     });
 
-    it("keeps exempt lines with different reasons in different breakdowns", () => {
+    it("keeps one breakdown per category and refuses two reasons inside it", () => {
       const { totals } = builder.computeTotals([
         { name: "rent", quantity: 1, unitPrice: 1000, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
-        { name: "loan fee", quantity: 1, unitPrice: 10, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-29" },
         { name: "rent 2", quantity: 1, unitPrice: 500, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
       ]);
-      const codes = totals.subtotals.map((s) => `${s.exemptionReasonCode}:${s.taxable}`).sort();
-      assert.deepEqual(codes, ["VATEX-SA-29:10", "VATEX-SA-30:1500"]);
+      assert.equal(totals.subtotals.length, 1);
+      assert.equal(totals.subtotals[0].exemptionReasonCode, "VATEX-SA-30");
+      assert.equal(totals.subtotals[0].taxable, 1500);
+      // EN16931 BR-E-08 sums every exempt line into ONE breakdown, so a second
+      // reason has nowhere to go — the SDK warned on exactly this shape.
+      assert.throws(
+        () => builder.computeTotals([
+          { name: "rent", quantity: 1, unitPrice: 1000, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+          { name: "loan fee", quantity: 1, unitPrice: 10, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-29" },
+        ]),
+        /loan fee.*VATEX-SA-29.*VATEX-SA-30.*BR-E-08/,
+      );
     });
 
     it("refuses a non-standard line with no reason rather than inventing one", () => {

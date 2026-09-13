@@ -171,10 +171,12 @@ const MATRIX = [
   { file: "14-standard-buyerid-nat", profile: "standard", docType: "invoice", buyer: buyerNatScheme, lines: [commercialRent] },
   { file: "15-standard-buyerid-iqa", profile: "standard", docType: "invoice", buyer: buyerIqaScheme, lines: [commercialRent] },
   { file: "16-standard-seller-700", profile: "standard", docType: "invoice", buyer, seller: seller700, lines: [commercialRent] },
-  // Two exempt reasons on one document: two VAT breakdowns, each with its code.
-  { file: "17-standard-two-exempt-reasons", profile: "standard", docType: "invoice", buyer,
-    lines: [commercialRent, residentialRent,
-      { id: "3", name: "رسوم تمويل", quantity: 1, unitPrice: 100, vatPercent: 0, vatCategory: "E" as const, exemptionReasonCode: "VATEX-SA-29" }] },
+  // The other exempt code a landlord could hold: financial services (Art. 29).
+  // (Two reasons on one document is NOT a shape: EN16931 BR-E-08 keeps one
+  // exempt breakdown per document, and the SDK warned when we tried.)
+  { file: "17-standard-exempt-financial", profile: "standard", docType: "invoice", buyer,
+    lines: [commercialRent,
+      { id: "2", name: "رسوم تمويل", quantity: 1, unitPrice: 100, vatPercent: 0, vatCategory: "E" as const, exemptionReasonCode: "VATEX-SA-29" }] },
 ] as const;
 
 async function main() {

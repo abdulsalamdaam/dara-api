@@ -411,8 +411,10 @@ The rule now (`common/vat-exemption.ts`, both repos):
 - The reason is a property of the LINE (`exemptionReason` on the item,
   `exemptionReasonCode` on the builder's line). The builder REFUSES a non-S line
   without a valid reason for its category; only `O` defaults (to OOS, its only
-  code). Subtotals group by category + rate + reason, so two exempt reasons
-  are two VAT breakdowns.
+  code). Subtotals stay one per category + rate; EN16931 sums every line of a
+  category into ONE breakdown (BR-E-08 — the SDK warned when we tried two), so
+  lines of one category with DIFFERENT reasons are refused: one exempt ground
+  per document, a second needs its own.
 - Rent lines built from a contract's installments state `VATEX-SA-30` at the
   source (web `lib/vat-exemption.ts` → `rentExemption`). A fee line without VAT
   states nothing; the invoice form asks for a reason when the document is
