@@ -56,7 +56,11 @@ export type BuyerSnapshot = {
 export type InvoiceTotals = {
   lineExtension: number; taxExclusive: number;
   taxAmount: number; taxInclusive: number; payable: number;
-  subtotals: { category: string; percent: number; taxable: number; tax: number }[];
+  subtotals: {
+    category: string; percent: number; taxable: number; tax: number;
+    /** BT-121 / BT-120 — present on every non-standard subtotal, absent on S. */
+    exemptionReasonCode?: string; exemptionReasonText?: string;
+  }[];
 };
 export type ZatcaResponse = {
   validationResults?: {

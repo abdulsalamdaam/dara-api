@@ -44,7 +44,7 @@ test("legitimate values still pass, Arabic and pipe-delimited serials included",
   // own pipe-delimited EGS serial, and an Arabic seller name (the certificate
   // subject is UTF-8 precisely so these work).
   assert.equal(csrField("serialNumber", "1-Dara|2-PMS|3-264-2"), "1-Dara|2-PMS|3-264-2");
-  assert.equal(csrField("sellerName", "ابراهيم العقيل"), "ابراهيم العقيل");
+  assert.equal(csrField("sellerName", "عبدالله المؤجر"), "عبدالله المؤجر");
   assert.equal(csrField("commonName", "Dara-264"), "Dara-264");
   assert.equal(csrField("countryName", "  SA  "), "SA", "trimmed, not rejected");
 });
@@ -54,7 +54,7 @@ test("Arabic is allowed in the subject and refused in the SAN", () => {
   // dirName section is parsed as Latin-1 no matter what, so Arabic there is
   // double-encoded and then silently truncated away. Refusing is the only way
   // the user finds out at all.
-  assert.equal(csrField("organizationName", "ابراهيم العقيل"), "ابراهيم العقيل");
+  assert.equal(csrField("organizationName", "عبدالله المؤجر"), "عبدالله المؤجر");
   assert.throws(() => csrField("locationAddress", "1190, طريق الملك فهد, الدمام"), /لاتينية/);
   assert.throws(() => csrField("industryCategory", "عقارات"), /لاتينية/);
   // The ASCII rendering the onboarding screen sends instead.
@@ -74,10 +74,10 @@ test("every ZATCA-mandated SAN attribute survives a real seller", async () => {
     environment: "production",
     commonName: "Dara-264",
     serialNumber: "1-Dara|2-PMS|3-264-2",
-    organizationIdentifier: "310404305800003",
-    organizationUnitName: "1037898051",
+    organizationIdentifier: "388888888800003",
+    organizationUnitName: "1000000001",
     // Arabic in the SUBJECT is fine — that half is genuinely UTF-8.
-    organizationName: "ابراهيم العقيل",
+    organizationName: "عبدالله المؤجر",
     countryName: "SA",
     invoiceType: "1100",
     locationAddress: "6802 32272 SA",
@@ -100,15 +100,15 @@ test("every ZATCA-mandated SAN attribute survives a real seller", async () => {
     for (const attr of ["SN=", "UID=", "title=", "registeredAddress=", "businessCategory="]) {
       assert.ok(text.includes(attr), `${attr} missing from the SAN — openssl dropped it`);
     }
-    assert.ok(text.includes("ابراهيم العقيل"), "the seller name was re-encoded");
+    assert.ok(text.includes("عبدالله المؤجر"), "the seller name was re-encoded");
 
     // Belt and braces, and the assertion that actually matters: check the
     // BYTES rather than any rendering of them. No openssl version can disagree
     // about what is in the DER, so this cannot drift with the toolchain the
     // way the text above just did.
     const der = Buffer.from(r.csr.replace(/-----[^-]+-----|\s/g, ""), "base64");
-    const single = Buffer.from("ابراهيم العقيل", "utf8");
-    const doubled = Buffer.from(Buffer.from("ابراهيم العقيل", "utf8").toString("latin1"), "utf8");
+    const single = Buffer.from("عبدالله المؤجر", "utf8");
+    const doubled = Buffer.from(Buffer.from("عبدالله المؤجر", "utf8").toString("latin1"), "utf8");
     assert.ok(der.includes(single), "the seller name is not single-encoded UTF-8 in the DER");
     assert.ok(!der.includes(doubled), "the seller name was double-encoded into the DER");
   } finally {

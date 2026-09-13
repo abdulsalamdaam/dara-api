@@ -22,6 +22,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
+import { BUYER_ID_SCHEMES, exemptionReasonFor, isVatCategory, unexplainedExemptLines } from "../../common/vat-exemption";
 
 /**
  * The values the invoice columns can actually hold.
@@ -127,6 +128,20 @@ export class InvoicesController {
     if (!body.profile) throw new BadRequestException("profile required");
     if (!Array.isArray(body.lines) || body.lines.length === 0)
       throw new BadRequestException("at least one line required");
+    // Each line's VAT category is one of ZATCA's four, and a non-standard line
+    // names its reason from ZATCA's list for that category (BR-KSA-CL-04) —
+    // out-of-scope alone has a default, being the only code it has. The
+    // builder refuses otherwise, but after the seller's chain lock is taken.
+    for (const l of body.lines) {
+      if (l.vatCategory != null && !isVatCategory(l.vatCategory))
+        throw new BadRequestException(`lines[].vatCategory must be one of S | Z | E | O — received ${JSON.stringify(l.vatCategory)}`);
+      const cat = l.vatCategory ?? "S";
+      if (cat !== "S" && l.exemptionReasonCode != null && exemptionReasonFor(cat, l.exemptionReasonCode) == null)
+        throw new BadRequestException(`lines[].exemptionReasonCode ${JSON.stringify(l.exemptionReasonCode)} is not a ZATCA reason code for VAT category ${cat}`);
+    }
+    const unexplained = unexplainedExemptLines(body.lines);
+    if (unexplained.length)
+      throw new BadRequestException(`every E or Z line needs a ZATCA exemption reason code (VATEX-SA-…): ${unexplained.join(", ")}`);
 
     // Presence was the only thing ever asked of these — see PROFILES above for
     // why that is not enough.
@@ -207,6 +222,13 @@ export class InvoicesController {
     // and POSTed to clearance — a document we already knew ZATCA would reject,
     // for an ICV that cannot be reclaimed. So it is refused here, before
     // `issue()` touches anything.
+    // A VAT-registered buyer makes the document B2B, and B2B is cleared, not
+    // reported: a caller asking for `simplified` with a buyer VAT number would
+    // file the right document at the wrong endpoint.
+    if (profile === "simplified" && body.buyer?.vat && String(body.buyer.vat).trim())
+      throw new BadRequestException("a buyer with a VAT number is a registered business — the invoice must be standard, not simplified");
+    if (body.buyer?.idScheme != null && !(BUYER_ID_SCHEMES as readonly string[]).includes(String(body.buyer.idScheme)))
+      throw new BadRequestException(`buyer.idScheme must be one of ${BUYER_ID_SCHEMES.join(" | ")} — received ${JSON.stringify(body.buyer.idScheme)}`);
     const buyerMissing = eInvoiceBuyerBlockers(body.buyer, profile);
     if (buyerMissing.length) {
       const readiness = readinessOf(

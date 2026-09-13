@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type { SellerSnapshot, BuyerSnapshot, InvoiceTotals } from "@dara/database";
+import { EXEMPTION_REASONS, exemptionReasonFor, type VatCategory } from "../../../common/vat-exemption";
 
 const NS = {
   inv: "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2",
@@ -41,6 +42,16 @@ export interface InvoiceLineInput {
   unitPrice: number;
   vatPercent: number;
   vatCategory?: "S" | "Z" | "E" | "O";
+  /**
+   * BT-121 for a non-standard line — one of ZATCA's VATEX-SA-* codes for that
+   * category. Required for E and Z; O defaults to VATEX-SA-OOS, the only code
+   * it has. A line that lacks one cannot be built: the builder used to fill in
+   * "real estate, Article 30" for every exempt line, which turned a water
+   * recharge into a false statement on a signed document.
+   */
+  exemptionReasonCode?: string;
+  /** BT-120. Defaults to the code's canonical text; O is free text by design. */
+  exemptionReasonText?: string;
 }
 
 /** Internal line shape after totals are computed. */
@@ -88,7 +99,7 @@ export class InvoiceBuilderService {
   computeTotals(lines: InvoiceLineInput[]): { totals: InvoiceTotals; computed: ComputedLine[] } {
     let lineExtension = 0;
     let taxAmount = 0;
-    const subtotalsByRate = new Map<string, { category: string; percent: number; taxable: number; tax: number }>();
+    const subtotalsByRate = new Map<string, InvoiceTotals["subtotals"][number]>();
     const computed: ComputedLine[] = [];
 
     for (let i = 0; i < lines.length; i++) {
@@ -99,7 +110,19 @@ export class InvoiceBuilderService {
       const vatPct = Number(line.vatPercent || 0);
       const lineVat = +((lineNet * vatPct) / 100).toFixed(2);
       const lineTotalIncVat = +(lineNet + lineVat).toFixed(2);
-      const cat = (line.vatCategory || "S") as "S" | "Z" | "E" | "O";
+      const cat = (line.vatCategory || "S") as VatCategory;
+      // One subtotal per (category, rate, reason): two exempt lines with
+      // different reasons are two VAT breakdowns, each carrying its own code.
+      const reasonCode = exemptionReasonFor(cat, line.exemptionReasonCode);
+      if (cat !== "S" && !reasonCode) {
+        throw new Error(
+          `line "${line.name}" has VAT category ${cat} but no valid exemption reason code` +
+          (line.exemptionReasonCode ? ` (${line.exemptionReasonCode} is not a ${cat} code)` : ""),
+        );
+      }
+      const reasonText = reasonCode
+        ? (line.exemptionReasonText?.trim() || EXEMPTION_REASONS[reasonCode]!.text)
+        : undefined;
 
       computed.push({
         ...line,
@@ -113,9 +136,12 @@ export class InvoiceBuilderService {
 
       lineExtension += lineNet;
       taxAmount += lineVat;
-      const key = `${cat}|${vatPct}`;
+      const key = `${cat}|${vatPct}|${reasonCode ?? ""}`;
       if (!subtotalsByRate.has(key)) {
-        subtotalsByRate.set(key, { category: cat, percent: vatPct, taxable: 0, tax: 0 });
+        subtotalsByRate.set(key, {
+          category: cat, percent: vatPct, taxable: 0, tax: 0,
+          ...(reasonCode ? { exemptionReasonCode: reasonCode, exemptionReasonText: reasonText } : {}),
+        });
       }
       const sub = subtotalsByRate.get(key)!;
       sub.taxable += lineNet;
@@ -276,19 +302,13 @@ export class InvoiceBuilderService {
       })
       .join("\n  ");
 
-    // Non-standard categories (E/Z/O) MUST carry a tax-exemption reason or ZATCA
-    // rejects the document. Map each to its KSA reason code.
-    // KSA VAT exemption-reason codes. This is a property-management product, so
-    // an Exempt (E) supply is residential real-estate leasing → Article 30
-    // (VATEX-SA-30). Zero-rated/out-of-scope keep their general codes.
-    const EXEMPTION: Record<string, { code: string; text: string }> = {
-      E: { code: "VATEX-SA-30", text: "Real estate transactions exempt from VAT under Article 30 of the VAT Regulations" },
-      Z: { code: "VATEX-SA-32", text: "Export of goods" },
-      O: { code: "VATEX-SA-OOS", text: "Not subject to VAT" },
-    };
+    // Non-standard categories (E/Z/O) MUST carry a tax-exemption reason
+    // (BR-KSA-23/69/24) from ZATCA's list for that category (BR-KSA-CL-04).
+    // computeTotals has already refused any subtotal without one, and grouped
+    // by reason, so each breakdown states exactly the reason its lines carry.
     const taxSubtotalsXml = totals.subtotals
       .map((s) => {
-        const ex = s.category !== "S" ? EXEMPTION[s.category] : null;
+        const ex = s.exemptionReasonCode ? { code: s.exemptionReasonCode, text: s.exemptionReasonText ?? "" } : null;
         return `<cac:TaxSubtotal>
       <cbc:TaxableAmount currencyID="${currency}">${money(s.taxable)}</cbc:TaxableAmount>
       <cbc:TaxAmount currencyID="${currency}">${money(s.tax)}</cbc:TaxAmount>

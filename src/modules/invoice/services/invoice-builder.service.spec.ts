@@ -33,15 +33,42 @@ describe("InvoiceBuilderService", () => {
       const { totals } = builder.computeTotals([
         { name: "A", quantity: 1, unitPrice: 100, vatPercent: 15 },
         { name: "B", quantity: 1, unitPrice: 200, vatPercent: 15 },
-        { name: "C", quantity: 1, unitPrice: 50, vatPercent: 0, vatCategory: "Z" },
+        { name: "C", quantity: 1, unitPrice: 50, vatPercent: 0, vatCategory: "Z", exemptionReasonCode: "VATEX-SA-33" },
       ]);
       assert.equal(totals.subtotals.length, 2);
       const standard = totals.subtotals.find((s) => s.category === "S")!;
       const zero = totals.subtotals.find((s) => s.category === "Z")!;
       assert.equal(standard.taxable, 300);
       assert.equal(standard.tax, 45);
+      assert.equal(standard.exemptionReasonCode, undefined, "S carries no reason (BR-S-10)");
       assert.equal(zero.taxable, 50);
       assert.equal(zero.tax, 0);
+      assert.equal(zero.exemptionReasonCode, "VATEX-SA-33");
+      assert.match(zero.exemptionReasonText!, /Export of services/);
+    });
+
+    it("keeps exempt lines with different reasons in different breakdowns", () => {
+      const { totals } = builder.computeTotals([
+        { name: "rent", quantity: 1, unitPrice: 1000, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+        { name: "loan fee", quantity: 1, unitPrice: 10, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-29" },
+        { name: "rent 2", quantity: 1, unitPrice: 500, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+      ]);
+      const codes = totals.subtotals.map((s) => `${s.exemptionReasonCode}:${s.taxable}`).sort();
+      assert.deepEqual(codes, ["VATEX-SA-29:10", "VATEX-SA-30:1500"]);
+    });
+
+    it("refuses a non-standard line with no reason rather than inventing one", () => {
+      assert.throws(
+        () => builder.computeTotals([{ name: "المياه", quantity: 1, unitPrice: 2500, vatPercent: 0, vatCategory: "E" }]),
+        /المياه.*category E.*no valid exemption reason/,
+      );
+      assert.throws(
+        () => builder.computeTotals([{ name: "X", quantity: 1, unitPrice: 1, vatPercent: 0, vatCategory: "Z", exemptionReasonCode: "VATEX-SA-30" }]),
+        /not a Z code/,
+      );
+      // Out of scope has exactly one code, so it needs no choice.
+      const { totals } = builder.computeTotals([{ name: "O", quantity: 1, unitPrice: 1, vatPercent: 0, vatCategory: "O" }]);
+      assert.equal(totals.subtotals[0].exemptionReasonCode, "VATEX-SA-OOS");
     });
 
     it("totals match across the API surface", () => {
@@ -79,6 +106,20 @@ describe("InvoiceBuilderService", () => {
       assert.match(r.xml, /Buyer Co\./);
       assert.match(r.xml, /<cbc:ProfileID>reporting:1\.0<\/cbc:ProfileID>/);
       assert.match(r.xml, /<cbc:DocumentCurrencyCode>SAR<\/cbc:DocumentCurrencyCode>/);
+    });
+
+    it("writes each breakdown's own reason code and text into the XML", () => {
+      const r = builder.build({
+        profile: "standard", docType: "invoice", invoiceId: "X", icv: 1, pih: "Z", seller,
+        buyer: { name: "Buyer Co.", vat: "311111111100003" },
+        lines: [
+          { name: "إيجار تجاري", quantity: 1, unitPrice: 100, vatPercent: 15 },
+          { name: "إيجار سكني", quantity: 1, unitPrice: 100, vatPercent: 0, vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+        ],
+      });
+      assert.match(r.xml, /<cbc:ID>E<\/cbc:ID>\s*<cbc:Percent>0\.00<\/cbc:Percent>\s*<cbc:TaxExemptionReasonCode>VATEX-SA-30<\/cbc:TaxExemptionReasonCode>\s*<cbc:TaxExemptionReason>Real estate transactions mentioned in Article 30/);
+      assert.doesNotMatch(r.xml, /<cbc:ID>S<\/cbc:ID>\s*<cbc:Percent>15\.00<\/cbc:Percent>\s*<cbc:TaxExemptionReasonCode>/);
+      assert.equal((r.xml.match(/VATEX-SA-30/g) ?? []).length, 1, "the reason sits on the breakdown, not on lines");
     });
 
     it("uses 0200000 invoiceTypeName for simplified profile", () => {

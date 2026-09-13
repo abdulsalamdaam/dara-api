@@ -62,66 +62,85 @@ const buyer = {
 const commercialRent = { id: "1", name: "إيجار تجاري", quantity: 1, unitPrice: 20000, vatPercent: 15, vatCategory: "S" as const };
 // Residential rent is VAT-exempt and the management fee on top is not — a
 // mixed document is the shape Dara issues most often, so it is in the matrix.
-const residentialRent = { id: "1", name: "إيجار سكني", quantity: 1, unitPrice: 15000, vatPercent: 0, vatCategory: "E" as const };
+const residentialRent = { id: "1", name: "إيجار سكني", quantity: 1, unitPrice: 15000, vatPercent: 0, vatCategory: "E" as const, exemptionReasonCode: "VATEX-SA-30" };
 const managementFee = { id: "2", name: "رسوم إدارة الأملاك", quantity: 1, unitPrice: 750, vatPercent: 15, vatCategory: "S" as const };
 
 const walkIn = { name: "عميل نقدي" };
 
 // ---------------------------------------------------------------------------
-// One REAL document, reproduced field-for-field.
+// The individual-landlord shape, reproduced structurally.
 //
 // A standard invoice a live landlord issued was refused by ZATCA with
 // `401 Invalid-Authentication-Certificate` — a problem with the certificate,
 // not the document, and since fixed by re-onboarding. Before that customer is
-// asked to retry we want ZATCA's own verdict on the DOCUMENT, so a second
-// attempt does not fail for a second, different reason. Nothing below touches
-// a database: every value is transcribed from the document itself.
+// asked to retry we want ZATCA's own verdict on the DOCUMENT SHAPE, so a
+// second attempt does not fail for a second, different reason.
+//
+// Every value below is SYNTHETIC. This repository is public and this script
+// runs in CI, so no real name, VAT number, national ID, unified number or
+// address belongs here — only pattern-valid stand-ins with the same shape.
 //
 // Note `idScheme: "OTH"` on the seller. The field is called `crn`, but this
 // seller identifies with a national ID, and OTH is ZATCA's scheme for one —
-// NAT and IQA are not valid values (DARA-NOTES §2b-i).
-const realSeller: SellerSnapshot = {
-  name: "ابراهيم العقيل",
-  nameAr: "ابراهيم العقيل",
-  vat: "310404305800003",
-  crn: "1037898051",
+// NAT and IQA are not valid seller values (DARA-NOTES §2b-i).
+const individualSeller: SellerSnapshot = {
+  name: "مؤجر فرد",
+  nameAr: "مؤجر فرد",
+  vat: "388888888800003",
+  crn: "1038475612",
   idScheme: "OTH",
-  street: "19ا",
-  buildingNo: "6802",
+  street: "شارع الأمير سلطان",
+  buildingNo: "4321",
   district: "الفيصلية",
   city: "الدمام",
   postalZone: "32272",
-  additionalNo: "3988",
+  additionalNo: "7890",
 } as SellerSnapshot;
 
-const realBuyerAddress = {
-  name: "شركة بيلا سيلك",
-  vat: "311311625400003",
-  street: "5ح",
-  buildingNo: "7148",
+const unifiedNumberBuyerAddress = {
+  name: "شركة مستأجر بالرقم الموحد",
+  vat: "377777777700003",
+  street: "شارع الملك سعود",
+  buildingNo: "5678",
   district: "الشاطئ الغربي",
   city: "الدمام",
   postalZone: "32413",
-  additionalNo: "3093",
+  additionalNo: "1234",
 };
 
 // The element under test. `buyerFromParty` fills the buyer's `id` from the
 // tenant's `national_id` and picks the scheme from the party TYPE — so a tenant
-// recorded as a company publishes that number as `schemeID="CRN"`. But
-// 7037911018 is a 7-prefixed ten-digit number, which is the shape of a UNIFIED
-// NATIONAL NUMBER, whose ZATCA scheme is 700 and not CRN. The element is
-// optional for a VAT-registered buyer and no sample in the matrix above
-// carries one at all, so nothing has ever asked ZATCA what it makes of the
-// three possibilities. These do, separately.
-const realBuyerNationalNumber = "7037911018";
-const realBuyerCrnScheme = { ...realBuyerAddress, id: realBuyerNationalNumber, idScheme: "CRN" };
-const realBuyerNoId = realBuyerAddress;
-const realBuyer700Scheme = { ...realBuyerAddress, id: realBuyerNationalNumber, idScheme: "700" };
+// recorded as a company publishes that number as `schemeID="CRN"`. But a
+// 7-prefixed ten-digit number is the shape of a UNIFIED NATIONAL NUMBER, whose
+// ZATCA scheme is 700 and not CRN. The element is optional for a VAT-registered
+// buyer and no sample in the matrix above carries one at all, so these ask the
+// SDK about the three possibilities, separately.
+const buyerUnifiedNumber = "7029384756";
+const buyerCrnScheme = { ...unifiedNumberBuyerAddress, id: buyerUnifiedNumber, idScheme: "CRN" };
+const buyerNoId = unifiedNumberBuyerAddress;
+const buyer700Scheme = { ...unifiedNumberBuyerAddress, id: buyerUnifiedNumber, idScheme: "700" };
 
-// 50,000.00 taxable + 2,500.00 exempt = net 52,500.00, VAT 7,500.00,
-// gross 60,000.00 — the totals printed on the document.
-const realRent = { id: "1", name: "الإيجار", quantity: 1, unitPrice: 50000, vatPercent: 15, vatCategory: "S" as const };
-const realWater = { id: "2", name: "المياه", quantity: 1, unitPrice: 2500, vatPercent: 0, vatCategory: "E" as const };
+// Commercial rent plus a water recharge, both at 15%. The live document had
+// the water line EXEMPT under "real estate, Article 30" — a false statement
+// the old builder produced for every VAT-free line, since removed. A utility
+// recharge on a commercial lease is standard-rated; this is the honest shape.
+const mixedRent = { id: "1", name: "الإيجار", quantity: 1, unitPrice: 50000, vatPercent: 15, vatCategory: "S" as const };
+const mixedWater = { id: "2", name: "المياه", quantity: 1, unitPrice: 2500, vatPercent: 15, vatCategory: "S" as const };
+
+// A VAT-REGISTERED INDIVIDUAL as buyer: a standard invoice that identifies the
+// buyer by national ID or iqama. The buyer list (BR-KSA-14) has NAT and IQA —
+// unlike the seller list — and DARA-NOTES once said "never NAT or IQA" about
+// both. These two ask the SDK, which is the only opinion that counts.
+const registeredIndividualBuyer = {
+  name: "مستأجر فرد مسجل ضريبياً",
+  vat: "366666666600003",
+  street: "شارع العليا", buildingNo: "1111", district: "العليا", city: "الرياض", postalZone: "12211", additionalNo: "2222",
+};
+const buyerNatScheme = { ...registeredIndividualBuyer, id: "1029384756", idScheme: "NAT" };
+const buyerIqaScheme = { ...registeredIndividualBuyer, id: "2029384756", idScheme: "IQA" };
+
+// A seller that identifies with a unified establishment number (scheme 700).
+const seller700: SellerSnapshot = { ...seller, name: "مؤسسة بالرقم الموحد", nameAr: "مؤسسة بالرقم الموحد", vat: "355555555500003", crn: "7038475612", idScheme: "700" } as SellerSnapshot;
 
 const MATRIX = [
   { file: "01-standard-invoice", profile: "standard", docType: "invoice", buyer, lines: [commercialRent] },
@@ -133,20 +152,29 @@ const MATRIX = [
   { file: "07-standard-mixed-exempt", profile: "standard", docType: "invoice", buyer, lines: [residentialRent, managementFee] },
   { file: "08-simplified-mixed-exempt", profile: "simplified", docType: "invoice", buyer: walkIn, lines: [residentialRent, managementFee] },
   { file: "09-standard-zero-rated", profile: "standard", docType: "invoice", buyer,
-    lines: [{ id: "1", name: "خدمة مصدرة", quantity: 1, unitPrice: 5000, vatPercent: 0, vatCategory: "Z" as const }] },
+    lines: [{ id: "1", name: "خدمة مصدرة", quantity: 1, unitPrice: 5000, vatPercent: 0, vatCategory: "Z" as const, exemptionReasonCode: "VATEX-SA-33" }] },
   { file: "10-standard-multiline", profile: "standard", docType: "invoice", buyer,
     lines: [commercialRent, managementFee, { id: "3", name: "صيانة", quantity: 3, unitPrice: 133.33, vatPercent: 15, vatCategory: "S" as const }] },
 
-  // The real document, three ways. Same seller, same buyer, same two lines,
+  // The individual-landlord document, three ways. Same seller, same buyer, same two lines,
   // same first-in-chain position (icv 1 against the initial PIH seed) — the
   // buyer's PartyIdentification is the ONLY thing that differs, so whatever the
   // SDK says about one and not another is about that element and nothing else.
-  { file: "11-real-standard-buyerid-crn", profile: "standard", docType: "invoice",
-    buyer: realBuyerCrnScheme, seller: realSeller, lines: [realRent, realWater], icv: 1 },
-  { file: "12-real-standard-buyerid-omitted", profile: "standard", docType: "invoice",
-    buyer: realBuyerNoId, seller: realSeller, lines: [realRent, realWater], icv: 1 },
-  { file: "13-real-standard-buyerid-700", profile: "standard", docType: "invoice",
-    buyer: realBuyer700Scheme, seller: realSeller, lines: [realRent, realWater], icv: 1 },
+  { file: "11-individual-standard-buyerid-crn", profile: "standard", docType: "invoice",
+    buyer: buyerCrnScheme, seller: individualSeller, lines: [mixedRent, mixedWater], icv: 1 },
+  { file: "12-individual-standard-buyerid-omitted", profile: "standard", docType: "invoice",
+    buyer: buyerNoId, seller: individualSeller, lines: [mixedRent, mixedWater], icv: 1 },
+  { file: "13-individual-standard-buyerid-700", profile: "standard", docType: "invoice",
+    buyer: buyer700Scheme, seller: individualSeller, lines: [mixedRent, mixedWater], icv: 1 },
+
+  // Buyer identified by national ID / iqama; seller identified by a 700 number.
+  { file: "14-standard-buyerid-nat", profile: "standard", docType: "invoice", buyer: buyerNatScheme, lines: [commercialRent] },
+  { file: "15-standard-buyerid-iqa", profile: "standard", docType: "invoice", buyer: buyerIqaScheme, lines: [commercialRent] },
+  { file: "16-standard-seller-700", profile: "standard", docType: "invoice", buyer, seller: seller700, lines: [commercialRent] },
+  // Two exempt reasons on one document: two VAT breakdowns, each with its code.
+  { file: "17-standard-two-exempt-reasons", profile: "standard", docType: "invoice", buyer,
+    lines: [commercialRent, residentialRent,
+      { id: "3", name: "رسوم تمويل", quantity: 1, unitPrice: 100, vatPercent: 0, vatCategory: "E" as const, exemptionReasonCode: "VATEX-SA-29" }] },
 ] as const;
 
 async function main() {

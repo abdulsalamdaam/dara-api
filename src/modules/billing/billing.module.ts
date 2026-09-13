@@ -24,7 +24,8 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { checkInvoiceReadiness, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { checkInvoiceReadiness, eInvoiceBuyerBlockers, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceBlocker, type InvoiceReadiness } from "../../common/invoice-readiness";
+import { buyerIdScheme, exemptionReasonFor, isVatCategory, unexplainedExemptLines, type VatCategory } from "../../common/vat-exemption";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
@@ -41,7 +42,13 @@ const DEPOSIT_DESC = "تأمين (وديعة)";
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const today = () => new Date().toISOString().slice(0, 10);
 
-type LineItem = { description: string; quantity: number; unitPrice: number; amount: number; vat?: boolean };
+type LineItem = {
+  description: string; quantity: number; unitPrice: number; amount: number; vat?: boolean;
+  /** ZATCA BT-118. Absent on legacy rows, where `vat` alone decides S vs E. */
+  vatCategory?: VatCategory;
+  /** ZATCA BT-121 for a non-standard line. Chosen where the line is created; never inferred here. */
+  exemptionReason?: string;
+};
 
 /** Result of the best-effort ZATCA mirror on approval — surfaced to the UI. */
 type ZatcaSubmitOutcome =
@@ -67,7 +74,16 @@ function normalizeItems(raw: any): LineItem[] {
       const amount = it?.amount != null ? round2(Number(it.amount)) : round2(quantity * unitPrice);
       // Per-line VAT flag — default true when omitted (legacy behaviour).
       const vat = it?.vat == null ? true : !!it.vat;
-      return { description: String(it?.description ?? "").trim(), quantity, unitPrice, amount, vat };
+      // The ZATCA category and reason travel with the line. They used to be
+      // dropped right here, which is why `zatcaLinesFromDoc` could never see
+      // one and every VAT-free line became "exempt, real estate".
+      const vatCategory = isVatCategory(it?.vatCategory) ? it.vatCategory : undefined;
+      const exemptionReason = typeof it?.exemptionReason === "string" && it.exemptionReason.trim() ? it.exemptionReason.trim() : undefined;
+      return {
+        description: String(it?.description ?? "").trim(), quantity, unitPrice, amount, vat,
+        ...(vatCategory ? { vatCategory } : {}),
+        ...(exemptionReason ? { exemptionReason } : {}),
+      };
     })
     .filter((it) => it.description || it.amount);
 }
@@ -1355,6 +1371,14 @@ class SimpleInvoicesController {
         tenantName: doc.tenantName ?? null,
         client: (doc.client as any) ?? null,
       });
+      // The document's own lines are checked alongside the parties: a VAT-free
+      // line with no stated reason cannot go to ZATCA, and the landlord fixes
+      // it on the document, not on any record.
+      const lineBlocker = this.unexplainedLinesBlocker(doc);
+      if (lineBlocker) {
+        readiness.ok = false;
+        readiness.blockers = [...readiness.blockers, lineBlocker];
+      }
       if (!readiness.ok) {
         // A refused approval used to leave NO trace anywhere. From the
         // database it was indistinguishable from the landlord never having
@@ -1622,6 +1646,13 @@ class SimpleInvoicesController {
         this.logger.debug(`ZATCA: ${doc.number} skipped — exempt/out-of-scope supply (no e-invoice required)`);
         return { submitted: false, code: "not_required", reason: "Exempt or out-of-scope supply — ZATCA e-invoice not required" };
       }
+      // Credit/debit notes and rebuilds reach here without the approve gate,
+      // so the same refusal lives here too. Nothing is signed and no ICV moves.
+      const unexplained = unexplainedExemptLines(lines);
+      if (unexplained.length) {
+        this.logger.warn(`ZATCA: ${doc.number} not sent — no exemption reason on: ${unexplained.join(", ")}`);
+        return { submitted: false, code: "error", reason: `بنود بدون ضريبة وبدون سبب إعفاء: ${unexplained.join("، ")}` };
+      }
 
       // Buyer's full structured address comes from the tenant record (rent) or
       // the landlord/owner record (commission) — both store a national address —
@@ -1702,6 +1733,16 @@ class SimpleInvoicesController {
       // number and address this branch would otherwise silently do without.
       const profile: "standard" | "simplified" = buyer?.vat ? "standard" : "simplified";
 
+      // A standard invoice identifies its buyer in full or is rejected after the
+      // ICV is spent. The approve gate reads the tenant record for this; notes
+      // and rebuilds skip that gate, and the record may have changed since — so
+      // the snapshot that is actually about to be signed is what gets checked.
+      const buyerMissing = eInvoiceBuyerBlockers(buyer, profile);
+      if (buyerMissing.length) {
+        this.logger.warn(`ZATCA: ${doc.number} not sent — buyer incomplete for a ${profile} invoice: ${buyerMissing.join(", ")}`);
+        return { submitted: false, code: "error", reason: `بيانات العميل ناقصة للفاتورة الضريبية: ${buyerMissing.join("، ")}` };
+      }
+
       const dto: CreateInvoiceDto = {
         invoiceNumber: doc.number,
         ownerId,
@@ -1779,14 +1820,18 @@ class SimpleInvoicesController {
   /** ZATCA invoice lines from a billing doc's items. Each item may carry an
    *  explicit ZATCA VAT category (S = standard 15%, Z = zero-rated, E = exempt,
    *  O = out-of-scope). Legacy items only have a `vat` boolean: true → S; false
-   *  → E (exempt), the correct default for non-VAT property rent. */
+   *  → E (exempt).
+   *
+   *  The exemption REASON (BT-121) comes only from the line itself. An E or Z
+   *  line without one is left without one, and `unexplainedLines` below turns
+   *  that into a refusal — the alternative, inventing "real estate, Article 30"
+   *  for whatever the landlord left unticked, is what this replaced. */
   private zatcaLinesFromDoc(doc: any): InvoiceLineInput[] {
-    const VALID = ["S", "Z", "E", "O"] as const;
     return normalizeItems(doc.items).map((it, i) => {
       const quantity = it.quantity || 1;
       const unitPrice = it.unitPrice || (quantity ? round2(it.amount / quantity) : it.amount);
-      const raw = (it as any).vatCategory as string | undefined;
-      const category = (raw && (VALID as readonly string[]).includes(raw) ? raw : (it.vat ? "S" : "E")) as "S" | "Z" | "E" | "O";
+      const category: VatCategory = it.vatCategory ?? (it.vat ? "S" : "E");
+      const reason = exemptionReasonFor(category, it.exemptionReason);
       return {
         id: String(i + 1),
         name: it.description || "بند",
@@ -1794,8 +1839,28 @@ class SimpleInvoicesController {
         unitPrice,
         vatPercent: category === "S" ? 15 : 0,
         vatCategory: category,
+        ...(reason ? { exemptionReasonCode: reason } : {}),
       } as InvoiceLineInput;
     });
+  }
+
+  /**
+   * The lines of a document that would be e-invoiced (it has a taxable line)
+   * yet are not standard-rated and carry no exemption reason. A document with
+   * such a line cannot be filed honestly: ZATCA demands a reason on every
+   * non-standard VAT breakdown, and the only reasons available are specific
+   * legal grounds (real estate, financial services, exports…) that nobody but
+   * the landlord can assert. An all-exempt document is not e-invoiced at all,
+   * so it is not asked. Returns the blocker the approve path refuses with, or
+   * null.
+   */
+  private unexplainedLinesBlocker(doc: any): InvoiceBlocker | null {
+    const lines = this.zatcaLinesFromDoc(doc);
+    const hasTaxable = lines.some((l) => l.vatCategory === "S" || l.vatCategory === "Z");
+    if (!hasTaxable) return null;
+    const names = unexplainedExemptLines(lines);
+    if (!names.length) return null;
+    return { entity: "document", id: doc.id ?? null, name: names.join("، "), missing: ["exemptionReason"], action: "edit_document" };
   }
 
   /** Normalize a resolved party into a ZATCA BuyerSnapshot (blanks → null). */
@@ -1811,12 +1876,13 @@ class SimpleInvoicesController {
     return {
       name: blank(p.name) || cl.name || (doc.kind === "commission" ? "المؤجر" : "العميل"),
       vat: blank(p.vat),
-      // BT-46: the buyer's own identifier. A company states its commercial
-      // registration; an individual states a national ID or iqama, for which
-      // ZATCA's only valid scheme is OTH — NAT and IQA are not accepted values
-      // (see DARA-NOTES §2b-i, verified against ZATCA's validator).
+      // BT-46: the buyer's own identifier, and the scheme it is filed under —
+      // read off the number's shape first (a 7-prefixed unified number is
+      // "700" whatever the party type says), then the type. The BUYER list is
+      // wider than the seller's: NAT and IQA are valid here (BR-KSA-14), only
+      // the seller is confined to OTH for a national ID (BR-KSA-08).
       id: blank(p.id) || blank(cl.idNumber),
-      idScheme: type === "company" ? "CRN" : type === "individual" ? "OTH" : null,
+      idScheme: buyerIdScheme(blank(p.id) || blank(cl.idNumber), type),
       street: blank(p.street) || cl.address || null,
       buildingNo: blank(p.buildingNo),
       district: blank(p.district),

@@ -28,9 +28,16 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     env:
-      SDK_REPO: https://github.com/mrsool/zatca.git
-      SDK_COMMIT: 2cddf57aed26522621fe673ab1659f83e5ad63d0
-      SDK_JAR_SHA256: d672dc6c6c5df0dfbe1bda1af6ae5a161d6ab92a91711a0aa087a3f83bca03f0
+      # ZATCA publishes the SDK behind a JS-gated download page with no stable
+      # URL, so it is taken from a public mirror and pinned by commit AND by the
+      # SHA-256 of the jar (R3.4.8, 23,947,837 bytes). R3.2.7, the previous pin,
+      # predates the format rules (BR-KSA-F-07…F-13), BR-KSA-99 and three
+      # zero-rated codes that the live endpoints enforce today.
+      SDK_REPO: https://github.com/aashahin/zatca-sdk.git
+      SDK_COMMIT: 7ed29640512e158e12ca623c9841a46a3962f710
+      SDK_DIR: resources/examples/zatca-einvoicing-sdk-Java-238-R3.4.8
+      SDK_JAR: Apps/zatca-einvoicing-sdk-238-R3.4.8.jar
+      SDK_JAR_SHA256: 48abeb828d453ef6fafba792fddbbb2701da5c7018c24bde918853e80ff5d530
     steps:
       - uses: actions/checkout@v4
 
@@ -61,11 +68,31 @@ jobs:
           git init -q
           git remote add origin "$SDK_REPO"
           git config core.sparseCheckout true
-          echo "einvoicing-sdk/*" > .git/info/sparse-checkout
+          echo "$SDK_DIR/*" > .git/info/sparse-checkout
           git fetch -q --depth 1 origin "$SDK_COMMIT"
           git checkout -q FETCH_HEAD
-          echo "$SDK_JAR_SHA256  einvoicing-sdk/Apps/zatca-einvoicing-sdk-238-R3.2.7.jar" | sha256sum -c -
+          echo "$SDK_JAR_SHA256  $SDK_DIR/$SDK_JAR" | sha256sum -c -
+          # The tree the rest of the job uses, at the path config.json names.
+          mv "$SDK_DIR" einvoicing-sdk
           chmod +x einvoicing-sdk/Apps/fatoora
+          # R3.4.x ships config.json with Windows paths, and its own install.sh
+          # writes `Data/Rules/schematrons` while the folder is `Schematrons` —
+          # on Linux that points at nothing. So the config is written here,
+          # against the files that exist, the way install.sh means to.
+          R=/zatca
+          jq -n --arg xsd "$R/Data/Schemas/xsds/UBL2.1/xsd/maindoc/UBL-Invoice-2.1.xsd" \
+                --arg en "$R/Data/Rules/Schematrons/CEN-EN16931-UBL.xsl" \
+                --arg ksa "$R/Data/Rules/Schematrons/20210819_ZATCA_E-invoice_Validation_Rules.xsl" \
+                --arg cert "$R/Data/Certificates/cert.pem" \
+                --arg key "$R/Data/Certificates/ec-secp256k1-priv-key.pem" \
+                --arg pih "$R/Data/PIH/pih.txt" \
+                --arg input "$R/Data/Input" \
+                --arg usage "$R/Configuration/usage.txt" \
+                '{xsdPath:$xsd, enSchematron:$en, zatcaSchematron:$ksa, certPath:$cert, privateKeyPath:$key, pihPath:$pih, inputPath:$input, usagePathFile:$usage}' \
+                > einvoicing-sdk/Configuration/config.json
+          test -f einvoicing-sdk/Data/Rules/Schematrons/20210819_ZATCA_E-invoice_Validation_Rules.xsl
+          test -f einvoicing-sdk/Data/Certificates/ec-secp256k1-priv-key.pem
+          grep -q '238-R3.4.8' einvoicing-sdk/Apps/global.json
 
       - name: Sign the document matrix with the SDK's own test certificate
         run: |

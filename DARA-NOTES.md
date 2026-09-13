@@ -225,8 +225,7 @@ credentials row at all, so their invoices skip with `not_linked`.
 
 ### 2b-i. ZATCA onboarding flow, the B2C signing wall, and how to test it
 
-Hard-won from a full production debugging run for owner 264 (ابراهيم العقيل,
-user 47, VAT 310404305800003). Read this before touching ZATCA onboarding.
+Hard-won from a full production debugging run for owner 264 (user 47). Read this before touching ZATCA onboarding.
 
 **The correct onboarding sequence (what ZATCA requires):**
 1. `saveProfile` — seller profile (name, VAT, CRN/ID, national address, EGS
@@ -298,7 +297,7 @@ record. The stored certificate is issued by `CN=PRZEINVOICESCA1-CA` (the
 production CA; the test one is `TSZEINVOICE-SubCA-1`) and runs to 26 Aug 2031.
 `active_environment` and `prod_slot_env` are both `production`.
 
-**The certificate subject is double-encoded** — `ابراهيم العقيل` appears as
+**The certificate subject is double-encoded** — the seller's Arabic name appears as
 `Ø§Ø¨Ø±Ø§Ù‡ÙŠÙ……`. The CSR config has no `utf8 = yes`, so openssl reads
 already-UTF-8 Arabic as Latin-1 and re-encodes it. Harmless for invoices (the
 seller name on the document comes from the XML, not the certificate) and not
@@ -380,12 +379,63 @@ half the requests. Always confirm by BEHAVIOUR, and stop the stale container:
 `sudo -n docker ps --format '{{.Names}}\t{{.Image}}'|grep <uuid>` → `docker stop <old>`.
 
 **seller_id_scheme = OTH is correct** for a national ID. ZATCA's only valid
-schemes are CRN, MOM, MLS, SAG, OTH, 700 (verified against its validator). NAT
-and IQA are NOT valid — they were briefly added to the UI and removed (859d2a7).
+SELLER schemes are CRN, MOM, MLS, SAG, OTH, 700 (BR-KSA-08, verified against its
+validator). NAT and IQA are NOT valid for the seller — they were briefly added
+to the UI and removed (859d2a7). The BUYER list (BR-KSA-14) is wider and DOES
+include NAT and IQA; see §2b-iii. "NID" is not a scheme anywhere. Since Sep
+2026 the scheme is inferred from the number when not chosen (7… → 700, 1…/2… →
+OTH) and validated server-side; `POST /zatca/profile` refuses anything else.
 
 **Onboarding is not logged on production.** The compliance-check logging fix
 (534cfc0) is on master/staging only. Cherry-pick it if you need the endpoint
 responses server-side; otherwise read the HTTP response the call returns.
+
+### 2b-ii-a. Exemption reasons are per line, and never guessed
+
+The builder used to label EVERY exempt (E) subtotal `VATEX-SA-30` ("real estate
+transactions, Article 30") and every zero-rated one `VATEX-SA-32` ("export of
+goods"), because the only exempt supply anyone had in mind was residential
+rent. Any line a landlord left VAT-unticked — water, electricity, a fee —
+therefore went to ZATCA as an Article-30 real-estate exemption: a false
+statement on a signed document that the sandbox accepts without a word (the
+live owner-264 document of 30 Aug 2026 carried one on its water line). Worse,
+`normalizeItems` dropped `vatCategory` from every line, so the category could
+never be anything but `vat ? S : E`.
+
+The rule now (`common/vat-exemption.ts`, both repos):
+
+- ZATCA's code list is transcribed from the SDK's BR-KSA-CL-04 (R3.4.8): E =
+  29, 29-7, 30; Z = 32, 33, 34-1…5, 35, 36, EDU, HEA, MLTRY, DIPLOMAT,
+  DUTYFREE, ROYALDECREE, 32(bis); O = OOS. The 2023 PDF is missing the last
+  three. There is NO lease-specific code: residential rent is `E` + `VATEX-SA-30`.
+- The reason is a property of the LINE (`exemptionReason` on the item,
+  `exemptionReasonCode` on the builder's line). The builder REFUSES a non-S line
+  without a valid reason for its category; only `O` defaults (to OOS, its only
+  code). Subtotals group by category + rate + reason, so two exempt reasons
+  are two VAT breakdowns.
+- Rent lines built from a contract's installments state `VATEX-SA-30` at the
+  source (web `lib/vat-exemption.ts` → `rentExemption`). A fee line without VAT
+  states nothing; the invoice form asks for a reason when the document is
+  otherwise taxable, and the approve path refuses with a `document` blocker
+  (`missing: ["exemptionReason"]`, `name` = the lines) if one is still missing.
+  `runZatcaSubmission` refuses the same way for notes and rebuilds, before any
+  ICV moves. An all-exempt document is not e-invoiced and is not asked.
+- `POST /invoices` validates category and reason per line and refuses a
+  `simplified` profile when the buyer carries a VAT number.
+
+**The CI validator is pinned to SDK R3.4.8** (`aashahin/zatca-sdk` mirror,
+commit + jar SHA-256), not R3.2.7 — R3.2.7 (Dec 2023) predates the format rules
+BR-KSA-F-07…F-13, BR-KSA-99 and the three newest Z codes. Two traps in R3.4.x:
+`config.json` ships with Windows paths and its own `install.sh` writes
+`Data/Rules/schematrons` while the folder is `Schematrons`, so the workflow
+writes `config.json` itself; and BR-KSA-F-13 warns on IDs with an 8-digit run
+or sequence (`00000000`, `12345678`), so synthetic fixtures avoid those.
+
+**This repository (`dara-api`) is PUBLIC on GitHub.** The sample matrix, the
+spec files and these notes carried a real landlord's and tenant's names, VAT
+numbers, national/unified numbers and addresses from 7 Sep to 13 Sep 2026
+(commit b1f8105). Fixtures are synthetic now; nothing about a real person
+belongs in this repo, in CI logs, or in these notes beyond a row id.
 
 ### 2b-ii. The invoice gate is split in two, and ZATCA can be unlinked
 
@@ -471,8 +521,8 @@ else is required and how the buyer is identified:
 
 | buyer | also required | ZATCA `schemeID` | document |
 |---|---|---|---|
-| `individual` | — | `OTH` | simplified → **reported** |
-| `company` | VAT number + full national address | `CRN` | standard → **cleared** |
+| `individual` | — | `NAT` (1…) / `IQA` (2…) / `OTH` | simplified → **reported** |
+| `company` | VAT number + full national address | `CRN`, or `700` for a 7-prefixed unified number | standard → **cleared** |
 
 The VAT NUMBER, not the type, is what actually selects the profile
 (`billing.module.ts`) — registration is what makes a buyer B2B, and an
@@ -481,7 +531,17 @@ insist a company really carries the VAT number and address that clearance
 needs. `BuyerSnapshot` gained `id`/`idScheme` and the builder now emits
 `<cac:PartyIdentification>` inside `AccountingCustomerParty` — **standard
 invoices only**: a B2C buyer has no identifier to state and ZATCA does not ask
-for one. Valid schemes are CRN, MOM, MLS, SAG, OTH, 700 — never NAT or IQA.
+for one. The scheme is chosen by the number's SHAPE first and the type second
+(`buyerIdScheme` in `common/vat-exemption.ts`): a 7-prefixed ten-digit number
+is the unified establishment number and goes out as `700` whatever the type
+says (BR-KSA-F-09 would flag it under CRN); a company's other number is `CRN`;
+an individual's 1-prefixed number is `NAT`, 2-prefixed `IQA`, anything else
+`OTH`. The BUYER list (BR-KSA-14) is TIN, CRN, MOM, MLS, 700, SAG, NAT, GCC,
+IQA, PAS, OTH — NAT and IQA are valid HERE, unlike on the seller. The buyer ID
+is mandatory on a standard invoice only when the buyer VAT number is absent
+(BR-KSA-81); with the VAT number present it is optional, and the SDK passed
+all three of CRN / 700 / omitted for the same VAT-registered buyer (matrix
+samples 11–13) and NAT / IQA for a registered individual (14–15).
 
 **No tax invoice is issued by an unlinked seller — unconditionally.** The gate
 first demanded the ZATCA link only of a VAT-registered seller, on the reasoning
@@ -1145,7 +1205,7 @@ established**. Do not tell anyone it is until at least the first item is done.
 1. **No invoice has ever cleared in production.** Zero rows in `invoices` with
    `environment = 'production'`. One real clearance is the gate on everything
    else here: it proves the submission path, and it produces the first genuine
-   cleared XML. `ابراهيم العقيل` (owner 264) is currently the only account that
+   cleared XML. Owner 264 is currently the only account that
    can do it — and as of 28 Aug 2026 it now can: it passes the compliance suite
    6/6 and holds a production CSID (§2b-i). What is left is a real invoice
    through `/core`, which nothing has done yet.

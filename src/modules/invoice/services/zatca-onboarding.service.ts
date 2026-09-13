@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { inferSellerIdScheme } from "../../../common/vat-exemption";
 import { eq, and, isNull, isNotNull } from "drizzle-orm";
 import {
   zatcaCredentialsTable,
@@ -194,7 +195,7 @@ export class ZatcaOnboardingService {
           sellerNameAr: profile.sellerNameAr ?? null,
           sellerVatNumber: profile.sellerVatNumber,
           sellerCrn: profile.sellerCrn ?? null,
-          sellerIdScheme: profile.sellerIdScheme ?? "CRN",
+          sellerIdScheme: profile.sellerIdScheme ?? inferSellerIdScheme(profile.sellerCrn),
           sellerStreet: profile.sellerStreet,
           sellerBuildingNo: profile.sellerBuildingNo,
           sellerDistrict: profile.sellerDistrict,
@@ -224,7 +225,7 @@ export class ZatcaOnboardingService {
         sellerNameAr: profile.sellerNameAr ?? null,
         sellerVatNumber: profile.sellerVatNumber,
         sellerCrn: profile.sellerCrn ?? null,
-        sellerIdScheme: profile.sellerIdScheme ?? "CRN",
+        sellerIdScheme: profile.sellerIdScheme ?? inferSellerIdScheme(profile.sellerCrn),
         sellerStreet: profile.sellerStreet,
         sellerBuildingNo: profile.sellerBuildingNo,
         sellerDistrict: profile.sellerDistrict,

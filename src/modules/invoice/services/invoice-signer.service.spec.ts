@@ -265,12 +265,12 @@ describe("CsrService — Arabic in the certificate subject", { skip: !shouldRun 
   const csr = new CsrService(new ShellService());
 
   it("puts Arabic into the CSR subject as Arabic", async () => {
-    const arabicName = "ابراهيم العقيل";
+    const arabicName = "عبدالله المؤجر";
     const out = await csr.generateCsr({
       environment: "sandbox",
       commonName: arabicName,
       serialNumber: "1-Dara|2-PMS|3-1",
-      organizationIdentifier: "310404305800003",
+      organizationIdentifier: "388888888800003",
       organizationUnitName: "الرياض",
       organizationName: arabicName,
       countryName: "SA",
