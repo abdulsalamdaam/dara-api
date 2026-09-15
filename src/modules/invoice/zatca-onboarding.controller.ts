@@ -1,6 +1,7 @@
 import {
   BadRequestException, Body, Controller, Delete, Get, Param, Post, Query, UseGuards,
 } from "@nestjs/common";
+import { SELLER_ID_SCHEMES, idFormatError, inferSellerIdScheme } from "../../common/vat-exemption";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -135,6 +136,22 @@ export class ZatcaOnboardingController {
     const missing = required.filter(([k]) => !body?.[k] || !String(body[k]).trim()).map(([, label]) => label);
     if (missing.length) {
       throw new BadRequestException(`Required ZATCA seller fields missing: ${missing.join(", ")}.`);
+    }
+    // The seller identifier is optional, but if it is given it goes onto every
+    // invoice as `PartyIdentification/@schemeID`, and ZATCA accepts exactly
+    // six schemes there (BR-KSA-08) with a shape per scheme (BR-KSA-F-08/09).
+    // This used to be free text, and the UI's default of "CRN" put national
+    // IDs on the wire as commercial registrations.
+    if (body.sellerCrn && String(body.sellerCrn).trim()) {
+      const scheme = body.sellerIdScheme ? String(body.sellerIdScheme).trim().toUpperCase() : inferSellerIdScheme(body.sellerCrn);
+      if (!(SELLER_ID_SCHEMES as readonly string[]).includes(scheme)) {
+        throw new BadRequestException(`sellerIdScheme must be one of ${SELLER_ID_SCHEMES.join(", ")} — received ${JSON.stringify(body.sellerIdScheme)}. A national ID or iqama is filed under OTH.`);
+      }
+      const bad = idFormatError(scheme, String(body.sellerCrn));
+      if (bad) throw new BadRequestException(`sellerCrn does not fit scheme ${scheme}: ${bad}.`);
+      body = { ...body, sellerCrn: String(body.sellerCrn).trim(), sellerIdScheme: scheme };
+    } else {
+      body = { ...body, sellerCrn: null, sellerIdScheme: null };
     }
     return this.onboarding.upsertProfile(scopeId(user), body, this.oid(body.ownerId));
   }

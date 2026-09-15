@@ -27,9 +27,11 @@ export interface InvoiceBlocker {
   /**
    * Which record to fix. `zatca` means onboarding, not a field; `buyer` is the
    * external customer typed onto the document itself, which has no row to send
-   * anyone to — the user is already looking at it.
+   * anyone to — the user is already looking at it. `document` is the same
+   * idea for the LINES: a VAT-free line with no exemption reason; `name`
+   * carries the offending line descriptions.
    */
-  entity: "tenant" | "landlord" | "contract" | "zatca" | "buyer";
+  entity: "tenant" | "landlord" | "contract" | "zatca" | "buyer" | "document";
   /** Row id, so the UI can deep-link straight to it. Null for `buyer`. */
   id: number | null;
   name: string | null;
@@ -577,7 +579,7 @@ export function readinessMessage(
 ): string {
   const label: Record<InvoiceBlocker["entity"], string> = {
     tenant: "المستأجر", landlord: "المؤجر", contract: "العقد",
-    buyer: "العميل", zatca: "الزكاة والضريبة",
+    buyer: "العميل", zatca: "الزكاة والضريبة", document: "بنود المستند",
   };
   return (scope === "draft" ? readiness.draftBlockers : readiness.blockers)
     .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.join("، ")}`)
