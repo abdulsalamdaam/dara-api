@@ -64,7 +64,7 @@ describe("party identification schemes", () => {
   });
 
   it("infers the seller scheme from the number's shape, not from a CRN default", () => {
-    assert.equal(inferSellerIdScheme("1037898051".replace(/\d/g, (d, i) => (i === 0 ? "1" : "0"))), "OTH"); // 1000000000-shaped national ID
+    assert.equal(inferSellerIdScheme("1038475612"), "OTH"); // a national ID
     assert.equal(inferSellerIdScheme("2000000001"), "OTH"); // iqama
     assert.equal(inferSellerIdScheme("7000000001"), "700");
     assert.equal(inferSellerIdScheme("1010000000"), "OTH", "a 1-prefixed 10-digit number is a national ID, not a CR");
