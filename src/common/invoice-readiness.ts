@@ -581,8 +581,25 @@ export function readinessMessage(
     tenant: "المستأجر", landlord: "المؤجر", contract: "العقد",
     buyer: "العميل", zatca: "الزكاة والضريبة", document: "بنود المستند",
   };
+  // The keys are for the UI to localize; this text is what a toast or a log
+  // shows verbatim, so it names the fields in the reader's words too. An
+  // unknown key falls through as itself rather than hiding.
+  const field: Record<string, string> = {
+    name: "الاسم", email: "البريد الإلكتروني", phone: "رقم الجوال",
+    idNumber: "رقم الهوية / السجل", buyerType: "نوع العميل", vatNumber: "الرقم الضريبي",
+    street: "الشارع", buildingNumber: "رقم المبنى", buildingNo: "رقم المبنى",
+    district: "الحي", city: "المدينة", postalCode: "الرمز البريدي", postalZone: "الرمز البريدي",
+    id: "رقم الهوية / السجل", idScheme: "نوع المعرّف",
+    tenantLink: "لا يوجد مستأجر مرتبط بالعقد", landlordLink: "لا يوجد مؤجر مرتبط بالعقار",
+    contract: "العقد غير موجود",
+    zatcaNotConfigured: "المؤجر غير مربوط بهيئة الزكاة والضريبة",
+    zatcaLinkRevoked: "انقطع الربط مع هيئة الزكاة والضريبة",
+    zatcaOnboardingIncomplete: "لم يكتمل الربط مع هيئة الزكاة والضريبة",
+    exemptionReason: "سبب الإعفاء من الضريبة — عدّل المستند وحدّد السبب أو فعّل الضريبة على البند",
+    exemptionReasonConflict: "سبب إعفاء واحد لكل فئة ضريبية — أصدر مستنداً منفصلاً",
+  };
   return (scope === "draft" ? readiness.draftBlockers : readiness.blockers)
-    .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.join("، ")}`)
+    .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.map((m) => field[m] ?? m).join("، ")}`)
     .join(" | ");
 }
 
