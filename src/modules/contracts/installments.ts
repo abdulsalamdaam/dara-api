@@ -23,7 +23,8 @@ export function feeLineTreatment(
 ): { vatCategory?: VatCategory; exemptionReason?: string } {
   const name = (description ?? "").trim();
   if (!name || !Array.isArray(fees)) return {};
-  const fee = (fees as FeeEntry[]).find((f) => String(f?.name ?? "").trim() === name);
+  // A nameless fee's installments are written as "رسوم" — match it the same way.
+  const fee = (fees as FeeEntry[]).find((f) => (String(f?.name ?? "").trim() || "رسوم") === name);
   if (!fee || !isVatCategory(fee.vatCategory) || fee.vatCategory === "S") return {};
   const reason = exemptionReasonFor(fee.vatCategory, fee.exemptionReason);
   return reason ? { vatCategory: fee.vatCategory, exemptionReason: reason } : {};

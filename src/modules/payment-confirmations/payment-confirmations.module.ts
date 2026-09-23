@@ -448,7 +448,11 @@ export class PaymentConfirmationsController {
         const net = vat ? round2(gross / 1.15) : gross;
         // A VAT-free fee states the treatment the landlord chose for it in the
         // contract (0% / exempt / out of scope, with ZATCA's reason).
-        const treatment = vat ? { vatCategory: "S" as const } : feeLineTreatment(contract?.additionalFees, payment.description);
+        // Rent (no description) with VAT off is the residential lease — Article
+        // 30, exactly as the web states it when the landlord raises the invoice.
+        const treatment = vat ? { vatCategory: "S" as const }
+          : !payment.description ? { vatCategory: "E" as const, exemptionReason: "VATEX-SA-30" }
+          : feeLineTreatment(contract?.additionalFees, payment.description);
         const items = [{ description: payment.description || "إيجار", quantity: 1, unitPrice: net, amount: net, vat, ...treatment }];
         await this.db.transaction(async (tx) => {
           // Same lock key and key space as the billing module's `create`, so the

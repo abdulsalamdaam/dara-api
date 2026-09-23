@@ -11,6 +11,10 @@ describe("feeLineTreatment", () => {
     { name: "Legacy", vat: false },
   ];
 
+  it("finds a nameless fee under the name its installments carry", () => {
+    assert.deepEqual(feeLineTreatment([{ name: "", vatCategory: "O" }], "رسوم"), { vatCategory: "O", exemptionReason: "VATEX-SA-OOS" });
+  });
+
   it("inherits the treatment the landlord chose for the fee, by name", () => {
     assert.deepEqual(feeLineTreatment(fees, " رسوم خدمات "), { vatCategory: "E", exemptionReason: "VATEX-SA-30" });
     assert.deepEqual(feeLineTreatment(fees, "Export fee"), { vatCategory: "Z", exemptionReason: "VATEX-SA-33" });
