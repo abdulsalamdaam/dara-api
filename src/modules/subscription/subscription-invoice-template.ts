@@ -1,4 +1,8 @@
-import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_DATA_URI } from "../../common/brand-assets";
+import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_SVG } from "../../common/brand-assets";
+
+/** The pattern tile in the header's ink, as a data URI for `background-image`. */
+const PATTERN_TILE_COBALT =
+  `data:image/svg+xml;utf8,${encodeURIComponent(DARA_PATTERN_TILE_SVG.replace('fill="#000"', 'fill="#2B378C"'))}`;
 import { subscriptionDocumentHeading } from "../../common/dara-seller";
 
 /**
@@ -204,17 +208,19 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .page { position: relative; width: 210mm; min-height: 297mm; padding: 15mm 14mm 0; }
 
   /* ── Header ───────────────────────────────────────────────────────────
-     The pattern is a masked block rather than a background image so it can
-     fade out downward, the way the brand utility does on the web. */
+     The pattern is the tile painted as a plain repeating background, faded
+     downward by a white gradient laid over it. It used to be a CSS mask
+     (tile + gradient), which headless Chrome's PDF output combines as a union
+     — a flat tint across the header with the tiles surviving only as a
+     clipped strip at its foot. Backgrounds print the same everywhere. */
   .pattern {
     position: absolute; top: 0; inset-inline: 0; height: 44mm;
-    background-color: #2B378C; opacity: .13;
-    -webkit-mask-image: url("${DARA_PATTERN_TILE_DATA_URI}"), linear-gradient(to bottom, #000 30%, transparent 100%);
-    -webkit-mask-repeat: repeat, no-repeat;
-    -webkit-mask-size: 26mm 30mm, 100% 100%;
-    mask-image: url("${DARA_PATTERN_TILE_DATA_URI}"), linear-gradient(to bottom, #000 30%, transparent 100%);
-    mask-repeat: repeat, no-repeat;
-    mask-size: 26mm 30mm, 100% 100%;
+    background-image:
+      linear-gradient(to bottom, rgba(255,255,255,0) 30%, #FFFFFF 100%),
+      url("${PATTERN_TILE_COBALT}");
+    background-repeat: no-repeat, repeat;
+    background-size: 100% 100%, 26mm 30mm;
+    opacity: .13;
   }
   /* Logo on the right, title on the left — as on the reference. */
   .head { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10mm; min-height: 30mm; }

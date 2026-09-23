@@ -401,6 +401,9 @@ export class EjarController {
         dueDate: "",
         paymentMethod: "separate",
         vat: !!f?.vat,
+        // The fee's ZATCA treatment, as the fees step chose it.
+        ...(typeof f?.vatCategory === "string" ? { vatCategory: f.vatCategory } : {}),
+        ...(typeof f?.exemptionReason === "string" && f.exemptionReason ? { exemptionReason: f.exemptionReason } : {}),
         ...(f?.recurrence === "custom" && Array.isArray(f?.customSchedule)
           ? {
               customSchedule: (f.customSchedule as Array<{ dueDate?: unknown; amount?: unknown }>)

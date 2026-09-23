@@ -22,6 +22,7 @@ import { notifyTenant } from "../../common/notify";
 import { TenantAuthGuard, type TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { CurrentTenant } from "../../common/decorators/current-tenant.decorator";
 import { UploadsService } from "../uploads/uploads.service";
+import { feeLineTreatment } from "../contracts/installments";
 import {
   listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
@@ -422,7 +423,7 @@ export class PaymentConfirmationsController {
         ));
       if (payment && !existingInv) {
         const [contract] = await this.db
-          .select({ tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId })
+          .select({ tenantName: contractsTable.tenantName, tenantId: contractsTable.tenantId, additionalFees: contractsTable.additionalFees })
           .from(contractsTable).where(eq(contractsTable.id, row.contractId));
         // READ the installment's VAT flag; do not assume it.
         //
@@ -445,7 +446,10 @@ export class PaymentConfirmationsController {
         const gross = round2(Number(payment.amount));
         const vat = !!payment.vatEnabled;
         const net = vat ? round2(gross / 1.15) : gross;
-        const items = [{ description: payment.description || "إيجار", quantity: 1, unitPrice: net, amount: net, vat }];
+        // A VAT-free fee states the treatment the landlord chose for it in the
+        // contract (0% / exempt / out of scope, with ZATCA's reason).
+        const treatment = vat ? { vatCategory: "S" as const } : feeLineTreatment(contract?.additionalFees, payment.description);
+        const items = [{ description: payment.description || "إيجار", quantity: 1, unitPrice: net, amount: net, vat, ...treatment }];
         await this.db.transaction(async (tx) => {
           // Same lock key and key space as the billing module's `create`, so the
           // two cannot read the same MAX(number) at the same moment.

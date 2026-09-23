@@ -177,6 +177,18 @@ const MATRIX = [
   { file: "17-standard-exempt-financial", profile: "standard", docType: "invoice", buyer,
     lines: [commercialRent,
       { id: "2", name: "رسوم تمويل", quantity: 1, unitPrice: 100, vatPercent: 0, vatCategory: "E" as const, exemptionReasonCode: "VATEX-SA-29" }] },
+  // The treatments a contract fee or invoice line can now be given in the UI
+  // beside 15%: out of scope (O, always VATEX-SA-OOS) and a zero-rated line on
+  // a document that also carries standard-rated rent — both profiles.
+  { file: "18-standard-out-of-scope-fee", profile: "standard", docType: "invoice", buyer,
+    lines: [commercialRent,
+      { id: "2", name: "رسوم حكومية مستردة", quantity: 1, unitPrice: 250, vatPercent: 0, vatCategory: "O" as const, exemptionReasonCode: "VATEX-SA-OOS" }] },
+  { file: "19-simplified-out-of-scope-fee", profile: "simplified", docType: "invoice", buyer: walkIn,
+    lines: [commercialRent,
+      { id: "2", name: "رسوم حكومية مستردة", quantity: 1, unitPrice: 250, vatPercent: 0, vatCategory: "O" as const, exemptionReasonCode: "VATEX-SA-OOS" }] },
+  { file: "20-standard-mixed-zero-rated", profile: "standard", docType: "invoice", buyer,
+    lines: [commercialRent,
+      { id: "2", name: "خدمة مصدرة", quantity: 1, unitPrice: 500, vatPercent: 0, vatCategory: "Z" as const, exemptionReasonCode: "VATEX-SA-33" }] },
 ] as const;
 
 async function main() {

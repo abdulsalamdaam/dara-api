@@ -1,10 +1,33 @@
+import { exemptionReasonFor, isVatCategory, type VatCategory } from "../../common/vat-exemption";
 export type FeeEntry = {
   id: string; name: string; amount: string; recurrence: string; dueDate: string; paymentMethod: string;
   // Used when recurrence === "custom": a hand-built list of {dueDate, amount}.
   customSchedule?: Array<{ dueDate: string; amount: string | number }>;
   // When true, 15% VAT is added on top of every installment of this fee.
   vat?: boolean;
+  // The ZATCA treatment the landlord chose for the fee (S/Z/E/O) and, for Z/E,
+  // the BT-121 reason. Stored as sent; invoices raised from the fee inherit it.
+  vatCategory?: string;
+  exemptionReason?: string;
 };
+
+/**
+ * The VAT a VAT-free fee installment's invoice line states: the treatment the
+ * landlord chose for that fee, found on the contract by name (`appendFees`
+ * writes the fee name as the installment description). Nothing when the fee
+ * stated none or the reason does not belong to the category — the approve gate
+ * then asks, rather than anything here guessing.
+ */
+export function feeLineTreatment(
+  fees: unknown, description: string | null | undefined,
+): { vatCategory?: VatCategory; exemptionReason?: string } {
+  const name = (description ?? "").trim();
+  if (!name || !Array.isArray(fees)) return {};
+  const fee = (fees as FeeEntry[]).find((f) => String(f?.name ?? "").trim() === name);
+  if (!fee || !isVatCategory(fee.vatCategory) || fee.vatCategory === "S") return {};
+  const reason = exemptionReasonFor(fee.vatCategory, fee.exemptionReason);
+  return reason ? { vatCategory: fee.vatCategory, exemptionReason: reason } : {};
+}
 /** Per-year rent override — `year` is 1-based (year 1, 2, 3, …). */
 export type RentTerm = { year: number; amount: number };
 /** One hand-built rent installment for a custom payment schedule. */
