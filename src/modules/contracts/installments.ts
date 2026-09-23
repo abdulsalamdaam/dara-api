@@ -217,8 +217,11 @@ function appendFees(
   if (!additionalFees || additionalFees.length === 0) return;
 
   for (const fee of additionalFees) {
-    // 15% VAT added on top of the fee when opted in.
-    const feeVat = fee.vat ? 1 + VAT_RATE : 1;
+    // 15% VAT added on top of the fee when it is standard-rated. A stated
+    // treatment decides; `vat` alone only speaks for a legacy fee that has
+    // none — so `vat: true` beside "exempt" can never charge VAT.
+    const standard = isVatCategory(fee.vatCategory) ? fee.vatCategory === "S" : !!fee.vat;
+    const feeVat = standard ? 1 + VAT_RATE : 1;
 
     // Custom fee schedule — one row per hand-built {dueDate, amount}.
     if (fee.recurrence === "custom") {
@@ -231,7 +234,7 @@ function appendFees(
           dueDate: new Date(e.dueDate).toISOString().split("T")[0]!,
           status: "pending",
           description: fee.name || "رسوم",
-          vatEnabled: !!fee.vat,
+          vatEnabled: standard,
           isDemo: false,
         });
       }
@@ -250,7 +253,7 @@ function appendFees(
         dueDate: d.toISOString().split("T")[0]!,
         status: "pending",
         description: fee.name || "رسوم",
-        vatEnabled: !!fee.vat,
+        vatEnabled: standard,
         isDemo: false,
       });
       continue;
@@ -271,7 +274,7 @@ function appendFees(
         dueDate: d.toISOString().split("T")[0]!,
         status: "pending",
         description: fee.name || "رسوم",
-        vatEnabled: !!fee.vat,
+        vatEnabled: standard,
         isDemo: false,
       });
     }

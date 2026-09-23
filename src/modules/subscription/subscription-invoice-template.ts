@@ -1,8 +1,8 @@
 import { DARA_LOCKUP_SVG, DARA_PATTERN_TILE_SVG } from "../../common/brand-assets";
 
-/** The pattern tile in the header's ink, as a data URI for `background-image`. */
-const PATTERN_TILE_COBALT =
-  `data:image/svg+xml;utf8,${encodeURIComponent(DARA_PATTERN_TILE_SVG.replace('fill="#000"', 'fill="#2B378C"'))}`;
+/** The pattern tile in the header's tint (#2B378C at 13% over white, pre-blended), for `background-image`. */
+const PATTERN_TILE_TINT =
+  `data:image/svg+xml;utf8,${encodeURIComponent(DARA_PATTERN_TILE_SVG.replace('fill="#000"', 'fill="#E3E5EF"'))}`;
 import { subscriptionDocumentHeading } from "../../common/dara-seller";
 
 /**
@@ -208,19 +208,28 @@ export function renderSubscriptionInvoiceHtml(d: SubscriptionInvoiceData): strin
   .page { position: relative; width: 210mm; min-height: 297mm; padding: 15mm 14mm 0; }
 
   /* ── Header ───────────────────────────────────────────────────────────
-     The pattern is the tile painted as a plain repeating background, faded
-     downward by a white gradient laid over it. It used to be a CSS mask
-     (tile + gradient), which headless Chrome's PDF output combines as a union
-     — a flat tint across the header with the tiles surviving only as a
-     clipped strip at its foot. Backgrounds print the same everywhere. */
+     The look is the one the header has always had: a solid tint across the
+     top that fades downward, with the pattern tiles emerging below it. It
+     used to be drawn as a two-layer CSS MASK at 13% opacity. Chrome prints
+     that correctly, but a PDF soft mask / transparency group is exactly what
+     simpler viewers — mail clients' attachment previews — get wrong, so the
+     emailed invoice showed a broken header.
+     Same picture, no transparency at all: #E3E5EF is Cobalt-ink #2B378C at
+     13% over white, pre-blended. The tiles are that colour, opaque, over a
+     gradient from it to white — which is exactly the union the mask made. */
   .pattern {
     position: absolute; top: 0; inset-inline: 0; height: 44mm;
-    background-image:
-      linear-gradient(to bottom, rgba(255,255,255,0) 30%, #FFFFFF 100%),
-      url("${PATTERN_TILE_COBALT}");
-    background-repeat: no-repeat, repeat;
-    background-size: 100% 100%, 26mm 30mm;
-    opacity: .13;
+    background: linear-gradient(to bottom, #E3E5EF 30%, #FFFFFF 100%);
+  }
+  /* The tiles only where the tint has started to fade (below 30% = 13.2mm),
+     shifted back by the same amount so they keep the grid they had. Over the
+     solid part they would add nothing but anti-aliased seams. */
+  .pattern::before {
+    content: ""; position: absolute; inset: 13.2mm 0 0 0;
+    background-image: url("${PATTERN_TILE_TINT}");
+    background-repeat: repeat;
+    background-size: 26mm 30mm;
+    background-position: 0 -13.2mm;
   }
   /* Logo on the right, title on the left — as on the reference. */
   .head { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10mm; min-height: 30mm; }
