@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { inferSellerIdScheme } from "../../../common/vat-exemption";
-import { eq, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   zatcaCredentialsTable,
   ZATCA_INITIAL_PIH,
@@ -798,6 +798,15 @@ export class ZatcaOnboardingService {
    * invoices this call has just soft-deleted.
    */
   async resetChain(userId: number, env: ZatcaEnv, ownerId: number | null = null) {
+    // Never on production. ZATCA requires a live EGS's ICV to be monotonic and
+    // never reset, and the "reset" also soft-deletes the invoices on the chain —
+    // on production those are filed tax invoices, legal documents that must
+    // stay visible. Rehearsal chains (sandbox, simulation) are what this is for.
+    if (env === "production") {
+      throw new ConflictException(
+        "لا يمكن تصفير تسلسل الفواتير على بيئة الإنتاج — هيئة الزكاة تشترط ألا يُعاد العدّاد، والفواتير المرسلة مستندات نظامية.",
+      );
+    }
     return withSellerChainLock(userId, ownerId, () => this.resetChainUnderLock(userId, env, ownerId));
   }
 
@@ -808,11 +817,23 @@ export class ZatcaOnboardingService {
       env === "sandbox"
         ? { sandboxIcv: 0, sandboxPih: ZATCA_INITIAL_PIH }
         : { prodIcv: 0, prodPih: ZATCA_INITIAL_PIH };
-    // Also drop existing invoice rows for this env (audit-safe: soft delete).
+    // Retire THIS chain's invoice rows (soft delete), so the zeroed counter and
+    // the live accepted rows agree — `InvoiceService.issue` continues from the
+    // later of the two, so a reset that left them live would not reset anything.
+    //
+    // Scoped to the seller exactly as `invoices_user_owner_env_icv_uniq` is.
+    // It used to take (user, env) alone: resetting one landlord's chain retired
+    // every OTHER landlord's invoices in that environment — whose counters it
+    // did not touch — and the account-level seller's with them.
     await this.db
       .update(invoicesTable)
       .set({ deletedAt: new Date() })
-      .where(and(eq(invoicesTable.userId, userId), eq(invoicesTable.environment, env)));
+      .where(and(
+        eq(invoicesTable.userId, userId),
+        sql`coalesce(${invoicesTable.ownerId}, 0) = ${ownerId ?? 0}`,
+        eq(invoicesTable.environment, env),
+        isNull(invoicesTable.deletedAt),
+      ));
     await this.db.update(zatcaCredentialsTable).set(updates).where(eq(zatcaCredentialsTable.id, creds.id));
     // Best-effort: orphan invoice_lines via cascade — no separate cleanup needed.
     void invoiceLinesTable;

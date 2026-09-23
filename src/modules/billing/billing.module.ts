@@ -3,7 +3,7 @@ import {
   BadRequestException, ConflictException, StreamableFile, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql, isNotNull} from "drizzle-orm";
+import { and, eq, ne, isNull, or, ilike, count, asc, desc, sum, inArray, getTableColumns, sql, isNotNull, like } from "drizzle-orm";
 import {
   simpleInvoicesTable, paymentsTable, paymentCollectionsTable, contractsTable,
   contractUnitsTable, unitsTable, propertiesTable, companiesTable, usersTable,
@@ -32,9 +32,10 @@ import { Logger } from "@nestjs/common";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { InvoiceService, type CreateInvoiceDto } from "../invoice/services/invoice.service";
 import { CHAIN_BUSY } from "../invoice/services/chain-lock";
+import { ACCEPTED_NOT_RECORDED_NOTE } from "../invoice/services/chain-head";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
-import { isZatcaAccepted } from "../../common/zatca-acceptance";
+import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acceptance";
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -1516,6 +1517,23 @@ class SimpleInvoicesController {
     // old signed XML carries a certificate ZATCA has already refused once.
     const existing = await this.db.select({ id: invoicesTable.id, status: invoicesTable.status, profile: invoicesTable.profile })
       .from(invoicesTable).where(and(eq(invoicesTable.userId, uid), eq(invoicesTable.invoiceNumber, doc.number), isNull(invoicesTable.deletedAt)));
+    // ZATCA accepted this document once already and only our copy was lost (see
+    // `InvoiceService.recordAcceptedButUnsaved`). Re-issuing would file the same
+    // invoice a second time under a new UUID — refuse, and say why.
+    const [orphan] = await this.db.select({ id: invoicesTable.id, uuid: invoicesTable.uuid })
+      .from(invoicesTable).where(and(
+        eq(invoicesTable.userId, uid),
+        eq(invoicesTable.invoiceNumber, doc.number),
+        isNotNull(invoicesTable.deletedAt),
+        inArray(invoicesTable.status, [...ZATCA_ACCEPTED_STATUSES]),
+        like(invoicesTable.notes, `${ACCEPTED_NOT_RECORDED_NOTE}%`),
+      )).limit(1);
+    if (orphan) {
+      throw new ConflictException({
+        error: "zatca_accepted_not_recorded",
+        message: `هيئة الزكاة والضريبة قبلت هذا المستند مسبقاً (المرجع: ${orphan.uuid}) — إعادة إرساله تسجّله مرتين. تواصل مع الدعم لاستعادة النسخة.`,
+      });
+    }
     const filed = existing.find((e) => isZatcaAccepted(e.status));
     if (filed) {
       return { zatca: { submitted: true, status: filed.status, profile: filed.profile, environment: "", httpStatus: 0, invoiceId: 0, warnings: 0, alreadyExists: true } };
@@ -1790,7 +1808,20 @@ class SimpleInvoicesController {
         this.logger.warn(`ZATCA: ${doc?.number} not sent — ZATCA refused the credentials (HTTP ${b.httpStatus ?? "?"})`);
         return { submitted: false, code: "link_invalid", reason: String(b.message ?? "ZATCA refused the credentials") };
       }
+      // Filed with ZATCA, not stored here. Kept whole rather than cut at 300
+      // characters: the reference at the end is what support needs to re-attach
+      // the document, and the reason is what stops the user retrying.
+      if (body && typeof body === "object" && (body as any).error === "zatca_accepted_not_recorded") {
+        this.logger.error(`ZATCA: ${doc?.number} accepted by ZATCA but not stored (uuid ${(body as any).uuid ?? "?"})`);
+        return { submitted: false, code: "error", reason: String((body as any).message) };
+      }
       this.logger.warn(`ZATCA submit failed for ${doc?.number}: ${e?.message ?? e}`);
+      // A driver error is a SQL statement with the signed XML in its parameters —
+      // it went onto the document verbatim and told the user nothing. The full
+      // text is in the log line above.
+      if (/^Failed query:/.test(String(e?.message ?? ""))) {
+        return { submitted: false, code: "error", reason: "تعذّر حفظ نتيجة الإرسال إلى هيئة الزكاة في النظام (خطأ في قاعدة البيانات). تواصل مع الدعم قبل إعادة المحاولة." };
+      }
       return { submitted: false, code: "error", reason: e?.message ? String(e.message).slice(0, 300) : "ZATCA submission failed" };
     }
   }

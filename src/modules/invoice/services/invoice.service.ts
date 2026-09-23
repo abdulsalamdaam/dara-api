@@ -19,6 +19,8 @@ import { ZatcaOnboardingService, type DecryptedCreds } from "./zatca-onboarding.
 import { withSellerChainLock } from "./chain-lock";
 import { isOnboarded, resolveStandaloneSellerId } from "../../../common/invoice-readiness";
 import { isZatcaAccepted } from "../../../common/zatca-acceptance";
+import { appLog } from "../../../common/logging/app-log.service";
+import { ACCEPTED_NOT_RECORDED_NOTE, lastAcceptedInChain, reconcileChainHead } from "./chain-head";
 
 export interface CreateInvoiceDto {
   invoiceNumber: string;
@@ -148,7 +150,26 @@ export class InvoiceService {
           "لا يمكن توقيع فاتورة حقيقية — لم يكتمل ربط المؤجر بهيئة الزكاة والضريبة (الشهادة الحالية للفحص فقط). أكمل الربط من الإعدادات.",
       });
     }
-    const nextIcv = decrypted.icv + 1;
+    // The chain head is the later of the stored counter and the last document
+    // ZATCA accepted on this chain — see `chain-head.ts`. A counter that sits
+    // behind a live accepted row would sign an ICV that row already holds, have
+    // ZATCA accept it, and only THEN collide on insert: filed with ZATCA, lost
+    // here. Checked under the chain lock, before anything is signed.
+    const head = reconcileChainHead(
+      { icv: decrypted.icv, pih: decrypted.pih },
+      await lastAcceptedInChain(this.db, userId, ownerId, decrypted.environment),
+    );
+    if (head.healed) {
+      this.logger.warn(
+        `ZATCA chain head for user=${userId} owner=${ownerId ?? "self"} env=${decrypted.environment} `
+        + `was at ICV ${decrypted.icv}, behind accepted invoice ICV ${head.icv} — continuing from ${head.icv}`,
+      );
+      appLog()?.event("zatca_chain_head_healed", {
+        ownerId, environment: decrypted.environment, storedIcv: decrypted.icv, acceptedIcv: head.icv,
+      }, { userId });
+      await this.onboarding.commitInvoiceState(userId, decrypted.environment, head.icv, head.pih, ownerId);
+    }
+    const nextIcv = head.icv + 1;
     const issueDate = todayIsoDate();
     const issueTime = todayIsoTime();
 
@@ -178,7 +199,7 @@ export class InvoiceService {
       docType: dto.docType ?? "invoice",
       invoiceId: dto.invoiceNumber,
       icv: nextIcv,
-      pih: decrypted.pih,
+      pih: head.pih,
       issueDate,
       issueTime,
       seller: sellerSnapshot,
@@ -327,9 +348,7 @@ export class InvoiceService {
       );
     }
 
-    const [invoice] = await this.db
-      .insert(invoicesTable)
-      .values({
+    const row = {
         userId,
         ownerId,
         invoiceNumber: dto.invoiceNumber,
@@ -343,7 +362,7 @@ export class InvoiceService {
         issueDate,
         issueTime,
         icv: nextIcv,
-        pih: decrypted.pih,
+        pih: head.pih,
         environment: decrypted.environment,
         billingReferenceId: dto.billingReferenceId ?? null,
         instructionNote: dto.instructionNote ?? null,
@@ -364,8 +383,16 @@ export class InvoiceService {
         clearedXml,
         notes: dto.notes ?? null,
         isDemo: dto.isDemo ?? false,
-      })
-      .returning();
+      } satisfies typeof invoicesTable.$inferInsert;
+
+    let invoice: Invoice;
+    try {
+      [invoice] = await this.db.insert(invoicesTable).values(row).returning();
+    } catch (err) {
+      // Nothing filed, nothing lost: the caller sees the failure as it is.
+      if (!accepted) throw err;
+      throw await this.recordAcceptedButUnsaved(row, err);
+    }
 
     const linesRows = await this.db
       .insert(invoiceLinesTable)
@@ -530,6 +557,69 @@ export class InvoiceService {
     }
     const passed = results.filter((r) => r.ok).length;
     return { ok: results.length > 0 && passed === results.length, passed, total: results.length, results };
+  }
+
+  /**
+   * ZATCA accepted a document and our own row for it could not be written.
+   *
+   * The chain head has already moved (see the commit-first argument in
+   * `issueUnderChainLock`), so the NEXT document is safe; what is at stake is
+   * this one. ZATCA holds it, and before this nothing here did — not the signed
+   * XML, not the QR, not even its UUID — while the billing document was marked
+   * `failed` with a raw SQL statement as the reason, which invited the one move
+   * that makes it worse: a retry, which files the same invoice with ZATCA a
+   * second time under a new UUID and ICV.
+   *
+   * So keep the whole row, soft-deleted. Both unique indexes on `invoices` are
+   * scoped to live rows, so a soft-deleted copy cannot collide with whatever
+   * the live insert did, and it carries everything needed to re-attach the
+   * document by hand. The marker in `notes` is what `submit-zatca` reads to
+   * refuse a re-issue. If even that write fails (the database is the problem,
+   * not the row), the identifying facts go to the log.
+   *
+   * Returns the exception to throw — a readable one, naming what happened and
+   * what not to do, instead of the driver's message.
+   */
+  private async recordAcceptedButUnsaved(
+    row: typeof invoicesTable.$inferInsert,
+    cause: unknown,
+  ): Promise<ConflictException> {
+    const pg = (cause as any)?.cause ?? cause;
+    const reason = [pg?.code, pg?.constraint].filter(Boolean).join(" ") || String((cause as Error)?.message ?? cause).slice(0, 200);
+    const facts = {
+      invoiceNumber: row.invoiceNumber, uuid: row.uuid, icv: row.icv, environment: row.environment,
+      ownerId: row.ownerId ?? null, status: row.status, invoiceHash: row.invoiceHash, reason,
+    };
+    let quarantinedId: number | null = null;
+    try {
+      const [q] = await this.db.insert(invoicesTable).values({
+        ...row,
+        deletedAt: new Date(),
+        notes: `${ACCEPTED_NOT_RECORDED_NOTE} ${reason}${row.notes ? ` | ${row.notes}` : ""}`,
+      }).returning({ id: invoicesTable.id });
+      quarantinedId = q?.id ?? null;
+    } catch (e) {
+      this.logger.error(`ZATCA accepted ${row.invoiceNumber} but even the quarantine copy failed: ${(e as Error)?.message ?? e}`);
+    }
+    this.logger.error(`ZATCA accepted a document that could not be stored: ${JSON.stringify({ ...facts, quarantinedId })}`);
+    appLog()?.record({
+      level: "error",
+      event: "zatca_accepted_not_recorded",
+      userId: row.userId,
+      message: `ZATCA accepted ${row.invoiceNumber} (ICV ${row.icv}, ${row.environment}) but the invoices row could not be written`,
+      meta: { ...facts, quarantinedId },
+    });
+    return new ConflictException({
+      error: "zatca_accepted_not_recorded",
+      message:
+        `قبلت هيئة الزكاة والضريبة الفاتورة ${row.invoiceNumber} لكن تعذّر حفظ نسختها في النظام. `
+        + "لا تُعِد إرسالها — ستُسجَّل لدى الهيئة مرتين. تواصل مع الدعم لاستعادة النسخة "
+        + `(المرجع: ${row.uuid}).`,
+      invoiceNumber: row.invoiceNumber,
+      uuid: row.uuid,
+      icv: row.icv,
+      quarantinedId,
+    });
   }
 
   private sellerSnapshotFrom(creds: ZatcaCredentials): SellerSnapshot {
@@ -713,6 +803,22 @@ export class InvoiceService {
     // — and now that a free invoice carries the account holder's owner_id, it
     // would simply 404 for any account with no account-level row.
     const { decrypted } = await this.onboarding.getActiveCredentials(userId, invoice.ownerId ?? null);
+    // A document that was never accepted, whose ICV has since been taken by one
+    // that was, is stale: sending it spends a duplicate ICV at ZATCA, and if
+    // ZATCA accepted it the status update below would collide on
+    // `invoices_user_owner_env_icv_uniq` — after the fact, like the issue path
+    // used to. Refuse before anything travels.
+    if (!isZatcaAccepted(invoice.status)) {
+      const tail = await lastAcceptedInChain(this.db, userId, invoice.ownerId ?? null, invoice.environment);
+      if (tail && tail.icv >= invoice.icv) {
+        throw new ConflictException({
+          error: "zatca_icv_superseded",
+          message:
+            `تسلسل الفاتورة (ICV ${invoice.icv}) استُخدم لفاتورة لاحقة قبلتها هيئة الزكاة — لا يمكن إعادة إرسال هذه النسخة. `
+            + "أعد إصدار المستند بدلاً من إعادة إرساله.",
+        });
+      }
+    }
     const submitTo = (invoice.submittedTo ?? "compliance") as "compliance" | "clearance" | "reporting";
     const submission =
       submitTo === "clearance"
