@@ -1,0 +1,54 @@
+{
+  "status": "success",
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "pin_tweet": null,
+    "tweets": [
+      {
+        "type": "tweet",
+        "id": "1838100000000000005",
+        "url": "https://twitter.com/Ejar_sa/status/1838100000000000005",
+        "text": "إيجار: إلزامية توثيق العقود التجارية اعتبارًا من 1 يناير https://t.co/q1 https://t.co/m1",
+        "retweetCount": 10, "replyCount": 2, "likeCount": 90, "quoteCount": 1, "viewCount": 8000,
+        "createdAt": "Thu Sep 25 16:00:30 +0000 2026",
+        "lang": "ar",
+        "isReply": false,
+        "author": { "type": "user", "userName": "Ejar_sa", "id": "555", "name": "إيجار", "profilePicture": "https://pbs.twimg.com/profile_images/2/b_normal.png" },
+        "entities": { "urls": [{ "url": "https://t.co/q1", "expanded_url": "https://ejar.sa/ar/news/1", "display_url": "ejar.sa/ar/news/1" }] },
+        "extendedEntities": { "media": [{ "type": "video", "url": "https://t.co/m1", "media_url_https": "https://pbs.twimg.com/thumb.jpg", "video_info": { "variants": [ { "content_type": "video/mp4", "bitrate": 256000, "url": "https://video.twimg.com/low.mp4" }, { "content_type": "video/mp4", "bitrate": 2176000, "url": "https://video.twimg.com/high.mp4" }, { "content_type": "application/x-mpegURL", "url": "https://video.twimg.com/pl.m3u8" } ] } }] },
+        "quoted_tweet": null,
+        "retweeted_tweet": null
+      },
+      {
+        "type": "tweet",
+        "id": "1838100000000000004",
+        "text": "@someone حياك الله، تواصل معنا",
+        "createdAt": "Thu Sep 25 15:00:00 +0000 2026",
+        "isReply": true, "inReplyToUserId": "777",
+        "author": { "userName": "Ejar_sa", "id": "555", "name": "إيجار" },
+        "retweeted_tweet": null
+      },
+      {
+        "type": "tweet",
+        "id": "1838100000000000003",
+        "text": "RT @rega_ksa: something",
+        "createdAt": "Thu Sep 25 14:00:00 +0000 2026",
+        "isReply": false,
+        "author": { "userName": "Ejar_sa", "id": "555", "name": "إيجار" },
+        "retweeted_tweet": { "id": "1" }
+      },
+      {
+        "type": "tweet",
+        "id": "1838100000000000001",
+        "text": "Older than sinceId",
+        "createdAt": "Wed Sep 24 10:00:00 +0000 2026",
+        "isReply": false,
+        "author": { "userName": "Ejar_sa", "id": "555", "name": "إيجار" },
+        "retweeted_tweet": null
+      }
+    ]
+  },
+  "has_next_page": true,
+  "next_cursor": "CURSOR2"
+}

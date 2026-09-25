@@ -1,0 +1,330 @@
+import { Inject, Injectable, Logger } from "@nestjs/common";
+import { and, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import {
+  newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable,
+  type NewsJobSettings, type NewsRunLogEntry, type NewsSource,
+} from "@dara/database";
+import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { AppLogService } from "../../common/logging/app-log.service";
+import { buildProvider, readNewsConfig, type NewsConfig } from "./news.config";
+import { compareTweetIds, ProviderError, type NormalisedTweet, type SourceProvider } from "./news.types";
+import { dedupeTweets } from "./news.dedupe";
+import { AI_BATCH_SIZE, decideStatus, describeAiError, NewsAiFilter } from "./news.ai";
+import { tryAcquireNewsLock, type NewsRunLock } from "./news.lock";
+
+/** How far back the "same story" comparison and the AI's recent-titles list look. */
+const RECENT_WINDOW_MS = 72 * 3_600_000;
+/** Items the AI never judged (it failed) are retried by later runs for this long. */
+const RETRY_WINDOW_MS = 7 * 24 * 3_600_000;
+const RETRY_MAX = 60;
+/** Give up on the remaining batches after this many AI failures in a row. */
+const AI_MAX_CONSECUTIVE_FAILURES = 2;
+const LOG_CAP = 500;
+
+export type StartRunResult =
+  | { kind: "started"; runId: string }
+  | { kind: "busy" }
+  | { kind: "not_configured"; missing: string[] };
+
+type Counters = {
+  accountsTotal: number; accountsOk: number; fetched: number; newItems: number;
+  published: number; rejected: number; duplicates: number;
+};
+
+/**
+ * One news run: fetch every account → drop duplicates → store → Claude → status.
+ *
+ * Stored BEFORE the AI sees anything, as `hidden` with `ai_relevant = null`.
+ * That ordering is what makes an AI failure (or a crash mid-run) lose nothing:
+ * the post is in the table, invisible to landlords, and the next run picks up
+ * every unjudged item from the last week and tries again. Nothing is ever
+ * published without a verdict.
+ */
+@Injectable()
+export class NewsRunnerService {
+  private readonly logger = new Logger("NewsRunner");
+  /** Test seam: a provider / AI to use instead of the env-built ones. */
+  providerOverride: SourceProvider | null = null;
+  aiOverride: Pick<NewsAiFilter, "classify"> | null = null;
+
+  constructor(
+    @Inject(DRIZZLE) private readonly db: Drizzle,
+    private readonly appLog: AppLogService,
+  ) {}
+
+  config(): NewsConfig {
+    return readNewsConfig();
+  }
+
+  /**
+   * Take the lock, write the `running` row, return — the run itself continues
+   * in the background. `busy` when another run holds the lock.
+   */
+  async startRun(trigger: "schedule" | "manual", userId: number | null, sourceIds?: string[]): Promise<StartRunResult> {
+    const cfg = this.config();
+    const testSeams = !!(this.providerOverride && this.aiOverride);
+    if (!testSeams && (!cfg.configured.source || !cfg.configured.ai)) {
+      return { kind: "not_configured", missing: cfg.configured.missing };
+    }
+    const lock = await tryAcquireNewsLock();
+    if (!lock) return { kind: "busy" };
+    let runId: string;
+    try {
+      const [row] = await this.db
+        .insert(newsJobRunsTable)
+        .values({ trigger, triggeredBy: userId, status: "running" })
+        .returning({ id: newsJobRunsTable.id });
+      runId = row.id;
+    } catch (err) {
+      await lock.release();
+      throw err;
+    }
+    this.appLog.record({ level: "log", event: "news_run_started", context: "News", userId, meta: { runId, trigger } });
+    void this.execute(runId, cfg, lock, sourceIds);
+    return { kind: "started", runId };
+  }
+
+  /** A scheduled slot that could not run: recorded, not failed. */
+  async recordSkipped(trigger: "schedule" | "manual", reason: string): Promise<void> {
+    await this.db.insert(newsJobRunsTable).values({
+      trigger, status: "skipped", finishedAt: new Date(), error: reason,
+      log: [{ at: new Date().toISOString(), level: "warn", message: reason }],
+    });
+  }
+
+  private async execute(runId: string, cfg: NewsConfig, lock: NewsRunLock, sourceIds?: string[]): Promise<void> {
+    const log: NewsRunLogEntry[] = [];
+    const c: Counters = { accountsTotal: 0, accountsOk: 0, fetched: 0, newItems: 0, published: 0, rejected: 0, duplicates: 0 };
+    let partial = false;
+    const push = (level: NewsRunLogEntry["level"], message: string, handle?: string) => {
+      if (log.length < LOG_CAP) log.push({ at: new Date().toISOString(), level, message, ...(handle ? { handle } : {}) });
+      else if (log.length === LOG_CAP) log.push({ at: new Date().toISOString(), level: "warn", message: "log truncated" });
+    };
+    const flush = () =>
+      this.db.update(newsJobRunsTable).set({ ...c, log: [...log] }).where(eq(newsJobRunsTable.id, runId)).catch(() => undefined);
+
+    try {
+      const settings = await this.loadSettings();
+      const provider = this.providerOverride ?? buildProvider(cfg);
+      const ai = this.aiOverride ?? new NewsAiFilter(process.env.ANTHROPIC_API_KEY!.trim(), cfg.model);
+      if (!provider) throw new Error(`source provider not configured: ${cfg.configured.missing.join(", ")}`);
+      push("info", `provider=${provider.name} model=${cfg.model} lookback=${settings.lookbackHours}h max/account=${settings.maxPerAccount} min_score=${settings.minScore}`);
+
+      // ── 1. sources ─────────────────────────────────────────────────────
+      const sources = sourceIds?.length
+        ? await this.db.select().from(newsSourcesTable).where(inArray(newsSourcesTable.id, sourceIds))
+        : await this.db.select().from(newsSourcesTable).where(eq(newsSourcesTable.enabled, true));
+      c.accountsTotal = sources.length;
+      if (!sources.length) push("warn", sourceIds?.length ? "none of the requested accounts exist" : "no enabled accounts");
+
+      // ── 2. fetch, one account at a time ────────────────────────────────
+      const since = new Date(Date.now() - settings.lookbackHours * 3_600_000);
+      const fetched: Array<NormalisedTweet & { sourceId: string }> = [];
+      let stopReason: string | null = null;
+
+      for (const src of sources) {
+        if (stopReason) {
+          push("warn", `skipped: ${stopReason}`, src.handle);
+          continue;
+        }
+        try {
+          const res = await provider.fetchLatest(src.handle, {
+            sinceId: src.lastSeenTweetId, since, max: settings.maxPerAccount, userId: src.xUserId,
+          });
+          c.accountsOk++;
+          c.fetched += res.tweets.length;
+          fetched.push(...res.tweets.map((t) => ({ ...t, sourceId: src.id })));
+          await this.afterFetch(src, res.profile, res.tweets, push);
+          push("info", `fetched ${res.tweets.length} post(s)${res.skipped ? `, skipped ${res.skipped} retweet/reply` : ""}`, src.handle);
+        } catch (err) {
+          partial = true;
+          const pe = err instanceof ProviderError ? err : new ProviderError("other", (err as Error)?.message ?? String(err));
+          push("error", `${pe.kind}: ${pe.message}`, src.handle);
+          await this.db.update(newsSourcesTable).set({ lastError: `${pe.kind}: ${pe.message}`.slice(0, 500) })
+            .where(eq(newsSourcesTable.id, src.id)).catch(() => undefined);
+          // A rate limit or an exhausted plan will fail every remaining account
+          // the same way; stop spending calls. Their last_seen id is untouched,
+          // so the next run's lookback covers them.
+          if (pe.kind === "rate_limit" || pe.kind === "quota" || pe.kind === "auth") {
+            stopReason = pe.kind === "rate_limit"
+              ? `provider rate limit${pe.retryAfterSec ? ` (retry after ${pe.retryAfterSec}s)` : ""}`
+              : pe.kind === "quota" ? "provider quota exhausted" : "provider rejected the credentials";
+          }
+        }
+        await flush();
+      }
+
+      // ── 3. dedupe ──────────────────────────────────────────────────────
+      const ids = [...new Set(fetched.map((t) => t.id))];
+      const existing = ids.length
+        ? await this.db.select({ id: newsItemsTable.externalId }).from(newsItemsTable).where(inArray(newsItemsTable.externalId, ids))
+        : [];
+      const recentRows = await this.db
+        .select({ externalId: newsItemsTable.externalId, text: newsItemsTable.text, title: newsItemsTable.aiTitleEn, titleAr: newsItemsTable.aiTitleAr })
+        .from(newsItemsTable)
+        .where(and(eq(newsItemsTable.status, "published"), gte(newsItemsTable.createdAt, new Date(Date.now() - RECENT_WINDOW_MS))))
+        .orderBy(desc(newsItemsTable.createdAt))
+        .limit(200);
+      const d = dedupeTweets(fetched, new Set(existing.map((e) => e.id)), recentRows.map((r) => ({ id: r.externalId, text: r.text })));
+      c.duplicates += d.exactDuplicates.length + d.nearDuplicates.length;
+      if (d.exactDuplicates.length) push("info", `${d.exactDuplicates.length} already stored — skipped`);
+      for (const n of d.nearDuplicates) push("info", `${n.tweet.id} dropped: same story as ${n.duplicateOf}`, n.tweet.authorHandle);
+
+      // ── 4. store as hidden/unjudged ────────────────────────────────────
+      const bySourceId = new Map(fetched.map((t) => [t.id, t.sourceId]));
+      const toStore = d.kept as Array<NormalisedTweet>;
+      const inserted = toStore.length
+        ? await this.db.insert(newsItemsTable).values(toStore.map((t) => ({
+            sourceId: bySourceId.get(t.id) ?? null,
+            externalId: t.id,
+            url: t.url,
+            authorHandle: t.authorHandle,
+            authorName: t.authorName,
+            authorAvatarUrl: t.authorAvatarUrl,
+            text: t.text,
+            lang: t.lang,
+            postedAt: t.postedAt ? new Date(t.postedAt) : null,
+            media: t.media,
+            metrics: t.metrics,
+            status: "hidden",
+            aiReason: "awaiting AI review",
+            runId,
+          }))).onConflictDoNothing({ target: newsItemsTable.externalId }).returning({ id: newsItemsTable.id, externalId: newsItemsTable.externalId })
+        : [];
+      c.newItems = inserted.length;
+      c.duplicates += toStore.length - inserted.length; // lost a race with another writer
+      await flush();
+
+      // ── 5. AI: this run's items + earlier ones the AI never judged ─────
+      const insertedIds = new Set(inserted.map((r) => r.externalId));
+      const queue: NormalisedTweet[] = toStore.filter((t) => insertedIds.has(t.id));
+      const retry = await this.db.select().from(newsItemsTable).where(and(
+        isNull(newsItemsTable.aiRelevant),
+        eq(newsItemsTable.status, "hidden"),
+        gte(newsItemsTable.createdAt, new Date(Date.now() - RETRY_WINDOW_MS)),
+        sql`${newsItemsTable.runId} is distinct from ${runId}`,
+      )).orderBy(desc(newsItemsTable.createdAt)).limit(RETRY_MAX);
+      if (retry.length) push("info", `retrying AI review for ${retry.length} earlier unjudged item(s)`);
+      for (const r of retry) {
+        queue.push({
+          id: r.externalId, url: r.url ?? "", text: r.text, lang: r.lang, postedAt: r.postedAt?.toISOString() ?? null,
+          authorHandle: r.authorHandle ?? "", authorName: r.authorName, authorAvatarUrl: r.authorAvatarUrl,
+          media: r.media ?? [], metrics: r.metrics ?? { likes: 0, retweets: 0, replies: 0, views: null },
+        });
+      }
+
+      const recentTitles = recentRows
+        .map((r) => ({ externalId: r.externalId, title: r.title || r.titleAr || "" }))
+        .filter((r) => r.title)
+        .slice(0, 60);
+      let consecutiveFailures = 0;
+
+      for (let i = 0; i < queue.length; i += AI_BATCH_SIZE) {
+        const batch = queue.slice(i, i + AI_BATCH_SIZE);
+        const batchIds = batch.map((t) => t.id);
+        if (consecutiveFailures >= AI_MAX_CONSECUTIVE_FAILURES) {
+          partial = true;
+          push("error", `AI skipped for ${batch.length} item(s) after repeated failures — kept hidden, will retry next run`);
+          await this.markAiFailure(batchIds, "AI not attempted after repeated failures; will retry next run");
+          continue;
+        }
+        try {
+          const out = await ai.classify(batch, { extraInstructions: settings.extraInstructions, recent: recentTitles });
+          consecutiveFailures = 0;
+          for (const p of out.problems) push("warn", p);
+          for (const [id, v] of out.verdicts) {
+            const status = decideStatus(v, settings.minScore);
+            if (v.duplicateOf) c.duplicates++;
+            else if (status === "published") c.published++;
+            else c.rejected++;
+            await this.db.update(newsItemsTable).set({
+              aiRelevant: v.relevant, aiScore: v.score, aiCategory: v.category,
+              aiTitleAr: v.titleAr || null, aiTitleEn: v.titleEn || null,
+              aiSummaryAr: v.summaryAr || null, aiSummaryEn: v.summaryEn || null,
+              aiTags: v.tags, aiReason: v.reason || null, status,
+            }).where(and(eq(newsItemsTable.externalId, id), isNull(newsItemsTable.aiRelevant)));
+            if (status === "published") recentTitles.unshift({ externalId: id, title: v.titleEn || v.titleAr });
+          }
+          if (out.missing.length) {
+            partial = true;
+            push("warn", `AI returned no verdict for ${out.missing.length} item(s) — kept hidden, will retry`);
+            await this.markAiFailure(out.missing, "AI returned no verdict; will retry next run");
+          }
+          push("info", `AI batch ${i / AI_BATCH_SIZE + 1}: ${out.verdicts.size} verdict(s), ${out.usage.input}/${out.usage.output} tokens`);
+        } catch (err) {
+          consecutiveFailures++;
+          partial = true;
+          const msg = describeAiError(err);
+          push("error", `${msg} — ${batch.length} item(s) kept hidden, will retry next run`);
+          await this.markAiFailure(batchIds, `AI failed: ${msg}`.slice(0, 500));
+        }
+        await flush();
+      }
+
+      // ── 6. finish ──────────────────────────────────────────────────────
+      const status = c.accountsTotal > 0 && c.accountsOk === 0 ? "failed" : partial ? "partial" : "success";
+      push(status === "success" ? "info" : "warn",
+        `done: ${c.accountsOk}/${c.accountsTotal} accounts, ${c.fetched} fetched, ${c.newItems} new, ${c.published} published, ${c.rejected} rejected, ${c.duplicates} duplicates`);
+      await this.db.update(newsJobRunsTable).set({
+        ...c, status, finishedAt: new Date(), log,
+        error: status === "failed" ? "every account failed — see log" : null,
+      }).where(eq(newsJobRunsTable.id, runId));
+      this.appLog.record({
+        level: status === "success" ? "log" : "warn", event: "news_run_finished", context: "News",
+        message: `news run ${status}`, meta: { runId, status, ...c },
+      });
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err);
+      this.logger.error(`news run ${runId} failed: ${msg}`);
+      push("error", `run failed: ${msg}`);
+      await this.db.update(newsJobRunsTable).set({ ...c, status: "failed", finishedAt: new Date(), error: msg.slice(0, 1000), log })
+        .where(eq(newsJobRunsTable.id, runId)).catch(() => undefined);
+      this.appLog.record({ level: "error", event: "news_run_failed", context: "News", error: err, meta: { runId } });
+    } finally {
+      await lock.release();
+    }
+  }
+
+  /** Source bookkeeping after a successful fetch, incl. a rename seen on X. */
+  private async afterFetch(
+    src: NewsSource,
+    profile: { userId: string | null; name: string | null; avatarUrl: string | null },
+    tweets: NormalisedTweet[],
+    push: (l: NewsRunLogEntry["level"], m: string, h?: string) => void,
+  ): Promise<void> {
+    const newest = tweets.reduce<string | null>((m, t) => (!m || compareTweetIds(t.id, m) > 0 ? t.id : m), null);
+    const patch: Partial<typeof newsSourcesTable.$inferInsert> = { lastFetchedAt: new Date(), lastError: null };
+    if (newest && (!src.lastSeenTweetId || compareTweetIds(newest, src.lastSeenTweetId) > 0)) patch.lastSeenTweetId = newest;
+    if (profile.userId && profile.userId !== src.xUserId) patch.xUserId = profile.userId;
+    // An admin-entered display name wins; X's only fills a blank one.
+    if (profile.name && !src.displayName) patch.displayName = profile.name;
+    if (profile.avatarUrl && profile.avatarUrl !== src.avatarUrl) patch.avatarUrl = profile.avatarUrl;
+
+    // Fetched by user id, the timeline reports the account's CURRENT username.
+    const current = tweets[0]?.authorHandle;
+    if (current && current !== src.handle && /^[a-z0-9_]{1,15}$/.test(current)) {
+      const [clash] = await this.db.select({ id: newsSourcesTable.id }).from(newsSourcesTable).where(eq(newsSourcesTable.handle, current));
+      if (!clash) {
+        patch.handle = current;
+        push("info", `account renamed @${src.handle} → @${current}`, current);
+      }
+    }
+    await this.db.update(newsSourcesTable).set(patch).where(eq(newsSourcesTable.id, src.id));
+  }
+
+  private async markAiFailure(externalIds: string[], reason: string): Promise<void> {
+    if (!externalIds.length) return;
+    await this.db.update(newsItemsTable).set({ aiReason: reason })
+      .where(and(inArray(newsItemsTable.externalId, externalIds), isNull(newsItemsTable.aiRelevant)))
+      .catch(() => undefined);
+  }
+
+  async loadSettings(): Promise<NewsJobSettings> {
+    const [row] = await this.db.select().from(newsJobSettingsTable).where(eq(newsJobSettingsTable.id, 1));
+    if (row) return row;
+    const [created] = await this.db.insert(newsJobSettingsTable).values({ id: 1 }).onConflictDoNothing().returning();
+    if (created) return created;
+    const [again] = await this.db.select().from(newsJobSettingsTable).where(eq(newsJobSettingsTable.id, 1));
+    return again;
+  }
+}

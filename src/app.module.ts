@@ -45,6 +45,7 @@ import { PackageModule } from "./modules/package/package.module";
 import { SubscriptionModule } from "./modules/subscription/subscription.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { ReportsModule } from "./modules/reports/reports.module";
+import { NewsModule } from "./modules/news/news.module";
 
 @Module({
   imports: [
@@ -133,6 +134,7 @@ import { ReportsModule } from "./modules/reports/reports.module";
     SubscriptionModule,
     AuditModule,
     ReportsModule,
+    NewsModule,
   ],
   providers: [
     // OtpThrottlerGuard extends ThrottlerGuard with two improvements: (1) it
