@@ -25,7 +25,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { checkInvoiceReadiness, eInvoiceBuyerBlockers, isOnboarded, readinessMessage, resolveStandaloneSellerId, type InvoiceBlocker, type InvoiceReadiness } from "../../common/invoice-readiness";
-import { buyerIdScheme, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, unexplainedExemptLines, type VatCategory } from "../../common/vat-exemption";
+import { acceptsCustomExemptionText, buyerIdScheme, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, normalizeExemptionReasonText, unexplainedExemptLines, type VatCategory } from "../../common/vat-exemption";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { foreignKeyId, requiredForeignKeyId } from "../../common/validation";
 import { Logger } from "@nestjs/common";
@@ -49,6 +49,12 @@ type LineItem = {
   vatCategory?: VatCategory;
   /** ZATCA BT-121 for a non-standard line. Chosen where the line is created; never inferred here. */
   exemptionReason?: string;
+  /**
+   * ZATCA BT-120: the landlord's own wording for WHY the line is out of scope.
+   * Kept only on an `O` line — VATEX-SA-OOS is the one free-text reason; an E
+   * or Z line always prints its code's official text. Trimmed, ≤ 300 chars.
+   */
+  exemptionReasonText?: string;
 };
 
 /** Result of the best-effort ZATCA mirror on approval — surfaced to the UI. */
@@ -66,7 +72,7 @@ type ZatcaSubmitOutcome =
     };
 
 
-function normalizeItems(raw: any): LineItem[] {
+export function normalizeItems(raw: any): LineItem[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((it) => {
@@ -80,10 +86,15 @@ function normalizeItems(raw: any): LineItem[] {
       // one and every VAT-free line became "exempt, real estate".
       const vatCategory = isVatCategory(it?.vatCategory) ? it.vatCategory : undefined;
       const exemptionReason = typeof it?.exemptionReason === "string" && it.exemptionReason.trim() ? it.exemptionReason.trim() : undefined;
+      // Own wording only where ZATCA takes it (O). On an E/Z line it is dropped
+      // rather than refused: the line still states its code, and the official
+      // text of that code is what the document must say.
+      const exemptionReasonText = acceptsCustomExemptionText(vatCategory) ? normalizeExemptionReasonText(it?.exemptionReasonText) : undefined;
       return {
         description: String(it?.description ?? "").trim(), quantity, unitPrice, amount, vat,
         ...(vatCategory ? { vatCategory } : {}),
         ...(exemptionReason ? { exemptionReason } : {}),
+        ...(exemptionReasonText ? { exemptionReasonText } : {}),
       };
     })
     .filter((it) => it.description || it.amount);
@@ -1674,7 +1685,7 @@ class SimpleInvoicesController {
       const conflicts = exemptionReasonConflicts(lines);
       if (conflicts.length) {
         this.logger.warn(`ZATCA: ${doc.number} not sent — more than one exemption reason in a category: ${conflicts.join(" | ")}`);
-        return { submitted: false, code: "error", reason: `سبب إعفاء واحد لكل فئة ضريبية في المستند الواحد: ${conflicts.join(" | ")}` };
+        return { submitted: false, code: "error", reason: `سبب إعفاء واحد (وصياغة واحدة لخارج النطاق) لكل فئة ضريبية في المستند الواحد: ${conflicts.join(" | ")}` };
       }
 
       // Buyer's full structured address comes from the tenant record (rent) or
@@ -1876,6 +1887,10 @@ class SimpleInvoicesController {
         vatPercent: category === "S" ? 15 : 0,
         vatCategory: category,
         ...(reason ? { exemptionReasonCode: reason } : {}),
+        // BT-120 in the landlord's words — out-of-scope only (normalizeItems
+        // keeps it nowhere else). Different wordings on two O lines are refused
+        // by `exemptionReasonConflicts`, since the builder prints one per category.
+        ...(reason && category === "O" && it.exemptionReasonText ? { exemptionReasonText: it.exemptionReasonText } : {}),
       } as InvoiceLineInput;
     });
   }

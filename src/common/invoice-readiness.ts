@@ -596,7 +596,7 @@ export function readinessMessage(
     zatcaLinkRevoked: "انقطع الربط مع هيئة الزكاة والضريبة",
     zatcaOnboardingIncomplete: "لم يكتمل الربط مع هيئة الزكاة والضريبة",
     exemptionReason: "سبب الإعفاء من الضريبة — عدّل المستند وحدّد السبب أو فعّل الضريبة على البند",
-    exemptionReasonConflict: "سبب إعفاء واحد لكل فئة ضريبية — أصدر مستنداً منفصلاً",
+    exemptionReasonConflict: "سبب إعفاء واحد لكل فئة ضريبية، وصياغة واحدة لسبب «خارج النطاق» — وحّدها أو أصدر مستنداً منفصلاً",
   };
   return (scope === "draft" ? readiness.draftBlockers : readiness.blockers)
     .map((b) => `${label[b.entity]}${b.name ? ` (${b.name})` : ""}: ${b.missing.map((m) => field[m] ?? m).join("، ")}`)

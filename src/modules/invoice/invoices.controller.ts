@@ -22,7 +22,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { InvoiceService, type CreateInvoiceDto } from "./services/invoice.service";
 import { PdfService } from "./services/pdf.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
-import { BUYER_ID_SCHEMES, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, unexplainedExemptLines } from "../../common/vat-exemption";
+import { BUYER_ID_SCHEMES, acceptsCustomExemptionText, exemptionReasonConflicts, exemptionReasonFor, isVatCategory, normalizeExemptionReasonText, unexplainedExemptLines } from "../../common/vat-exemption";
 
 /**
  * The values the invoice columns can actually hold.
@@ -138,6 +138,11 @@ export class InvoicesController {
       const cat = l.vatCategory ?? "S";
       if (cat !== "S" && l.exemptionReasonCode != null && exemptionReasonFor(cat, l.exemptionReasonCode) == null)
         throw new BadRequestException(`lines[].exemptionReasonCode ${JSON.stringify(l.exemptionReasonCode)} is not a ZATCA reason code for VAT category ${cat}`);
+      // BT-120 is the landlord's own wording only for out-of-scope (O); an E or
+      // Z line prints its code's official text, so any wording sent for one is
+      // dropped here — the builder would otherwise print it verbatim.
+      const text = acceptsCustomExemptionText(cat) ? normalizeExemptionReasonText(l.exemptionReasonText) : undefined;
+      if (text) l.exemptionReasonText = text; else delete l.exemptionReasonText;
     }
     const unexplained = unexplainedExemptLines(body.lines);
     if (unexplained.length)

@@ -50,7 +50,7 @@ export const EXEMPTION_REASONS: Readonly<Record<string, ExemptionReason>> = {
   "VATEX-SA-ROYALDECREE": { category: "Z", text: "Supply on which the Government bears the VAT | توريد تتحمل الدولة ضريبته" },
   "VATEX-SA-32(bis)": { category: "Z", text: "Supply under Customs Suspension Arrangement | توريد تحت وضع تعليق الرسوم الجمركية" },
   // ── O: out of scope (free text; this is the default) ─────────────────────
-  "VATEX-SA-OOS":  { category: "O", text: "Services outside scope of tax / Not subject to VAT | التوريدات الغير خاضعة للضريبة" },
+  "VATEX-SA-OOS":  { category: "O", text: "Services outside scope of tax / Not subject to VAT | التوريدات غير الخاضعة للضريبة" },
 };
 
 export function isVatCategory(v: unknown): v is VatCategory {
@@ -89,23 +89,77 @@ export function unexplainedExemptLines(
     .map((l) => l.name);
 }
 
+/** BT-120 as a landlord may write it: the most we keep of their own wording. */
+export const EXEMPTION_REASON_TEXT_MAX = 300;
+
+/**
+ * Whether a line of this category may carry its own BT-120 wording. Only `O`:
+ * VATEX-SA-OOS is the one code ZATCA leaves as taxpayer free text ("state why
+ * the supply is outside the scope"). For E and Z the text IS the code's
+ * official description — a landlord's paraphrase of "Article 30 real estate"
+ * that says something else is a false statement on a signed document (and,
+ * per the compliance review, the SDK's rules hold a text-matches-code check,
+ * commented out for now).
+ */
+export function acceptsCustomExemptionText(category: unknown): boolean {
+  return category === "O";
+}
+
+/**
+ * A landlord's own BT-120 wording, cleaned for a signed XML document, or
+ * undefined when there is nothing left of it. Control characters are not legal
+ * XML 1.0 (the builder escapes `& < >` but cannot escape those), line breaks
+ * become spaces — it is one sentence on the document — and the cap counts
+ * code points so an Arabic or emoji character is never cut in half.
+ */
+export function normalizeExemptionReasonText(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const clean = raw.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return undefined;
+  return Array.from(clean).slice(0, EXEMPTION_REASON_TEXT_MAX).join("").trim();
+}
+
+/**
+ * The BT-120 text a line's reason will print as. For `O`, its own wording or
+ * the canonical OOS text — the builder's own rule (`exemptionReasonText?.trim()
+ * || canonical`), so the conflict check compares exactly what would be
+ * written. For E and Z, always the canonical text: callers never pass wording
+ * for those (see `acceptsCustomExemptionText`).
+ */
+export function effectiveExemptionReasonText(category: VatCategory, code: string, custom?: string | null): string {
+  const own = acceptsCustomExemptionText(category) && typeof custom === "string" ? custom.trim() : "";
+  return own || EXEMPTION_REASONS[code]?.text || "";
+}
+
 /**
  * Categories whose lines disagree about the reason. EN16931 keeps ONE VAT
  * breakdown per category (BR-E-08 sums every exempt line into it), so a
  * document cannot say "this exempt line is real estate and that one is
  * financial services" — the second ground needs its own document. Returns
  * `["E: rent, loan fee"]`-style descriptions; empty means consistent.
+ *
+ * The same holds for the out-of-scope TEXT (BT-120), the one free-text
+ * reason. The breakdown carries one text, and the builder takes it from the
+ * first line of the category — so two O lines with different wording would
+ * print only the first, silently, and which survived would depend on line
+ * order. O lines therefore agree on the text as it will be PRINTED: a line's
+ * own wording, or the canonical OOS text when it has none. "Own wording on one
+ * line, none on another" is a conflict too, deliberately: either way one line's
+ * statement would be lost, and which wording is right is the landlord's call.
+ * E and Z lines are compared by code alone — their text is always the official
+ * one, whatever a caller sent.
  */
 export function exemptionReasonConflicts(
-  lines: ReadonlyArray<{ name: string; vatCategory?: string; exemptionReasonCode?: string | null }>,
+  lines: ReadonlyArray<{ name: string; vatCategory?: string; exemptionReasonCode?: string | null; exemptionReasonText?: string | null }>,
 ): string[] {
   const byCat = new Map<string, Map<string, string[]>>();
   for (const l of lines) {
     if (!isVatCategory(l.vatCategory) || l.vatCategory === "S") continue;
     const reason = exemptionReasonFor(l.vatCategory, l.exemptionReasonCode);
     if (!reason) continue;
+    const key = `${reason}\u0000${effectiveExemptionReasonText(l.vatCategory, reason, l.exemptionReasonText)}`;
     const m = byCat.get(l.vatCategory) ?? new Map<string, string[]>();
-    m.set(reason, [...(m.get(reason) ?? []), l.name]);
+    m.set(key, [...(m.get(key) ?? []), l.name]);
     byCat.set(l.vatCategory, m);
   }
   return [...byCat.entries()]

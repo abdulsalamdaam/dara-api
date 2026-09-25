@@ -4,8 +4,12 @@ import {
   BUYER_ID_SCHEMES,
   EXEMPTION_REASONS,
   SELLER_ID_SCHEMES,
+  EXEMPTION_REASON_TEXT_MAX,
   buyerIdScheme,
+  effectiveExemptionReasonText,
+  exemptionReasonConflicts,
   exemptionReasonFor,
+  normalizeExemptionReasonText,
   idFormatError,
   inferSellerIdScheme,
   isExemptionReasonFor,
@@ -52,6 +56,71 @@ describe("unexplainedExemptLines", () => {
       { name: "خارج النطاق", vatCategory: "O" },
     ]);
     assert.deepEqual(names, ["المياه", "خدمة مصدرة"]);
+  });
+});
+
+describe("exemptionReasonConflicts — one reason, and one out-of-scope wording, per category", () => {
+  it("refuses two different codes in one category (EN16931 BR-E-08)", () => {
+    assert.deepEqual(exemptionReasonConflicts([
+      { name: "rent", vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+      { name: "loan fee", vatCategory: "E", exemptionReasonCode: "VATEX-SA-29" },
+    ]), ["E: rent, loan fee"]);
+  });
+
+  it("refuses two O lines whose own wordings differ — the builder would print only the first", () => {
+    assert.deepEqual(exemptionReasonConflicts([
+      { name: "رسوم حكومية", vatCategory: "O", exemptionReasonText: "رسوم حكومية مستردة بالتكلفة" },
+      { name: "غرامة", vatCategory: "O", exemptionReasonText: "تعويض لا يقابله توريد" },
+    ]), ["O: رسوم حكومية, غرامة"]);
+  });
+
+  it("refuses own wording on one O line against the default on another — either way a statement is lost", () => {
+    assert.equal(exemptionReasonConflicts([
+      { name: "a", vatCategory: "O", exemptionReasonText: "رسوم حكومية مستردة" },
+      { name: "b", vatCategory: "O" },
+    ]).length, 1);
+  });
+
+  it("accepts O lines that agree, byte for byte after trimming", () => {
+    assert.deepEqual(exemptionReasonConflicts([
+      { name: "a", vatCategory: "O", exemptionReasonText: "رسوم حكومية مستردة & <بالتكلفة>" },
+      { name: "b", vatCategory: "O", exemptionReasonCode: "VATEX-SA-OOS", exemptionReasonText: "  رسوم حكومية مستردة & <بالتكلفة> " },
+      { name: "c", vatCategory: "S" },
+    ]), []);
+    assert.deepEqual(exemptionReasonConflicts([{ name: "a", vatCategory: "O" }, { name: "b", vatCategory: "O", exemptionReasonText: "  " }]), []);
+  });
+
+  it("ignores wording on E and Z lines — their text is always the official one", () => {
+    assert.deepEqual(exemptionReasonConflicts([
+      { name: "rent 1", vatCategory: "E", exemptionReasonCode: "VATEX-SA-30", exemptionReasonText: "anything" },
+      { name: "rent 2", vatCategory: "E", exemptionReasonCode: "VATEX-SA-30" },
+    ]), []);
+  });
+});
+
+describe("BT-120 own wording", () => {
+  it("cleans a landlord's text for a signed XML document", () => {
+    assert.equal(normalizeExemptionReasonText("  رسوم\n حكومية\u0000 & <مستردة>  "), "رسوم حكومية & <مستردة>");
+    assert.equal(normalizeExemptionReasonText("   "), undefined);
+    assert.equal(normalizeExemptionReasonText(42), undefined);
+    assert.equal(normalizeExemptionReasonText(null), undefined);
+  });
+
+  it("caps at 300 code points without splitting a character", () => {
+    const long = "ع".repeat(EXEMPTION_REASON_TEXT_MAX + 50);
+    assert.equal(Array.from(normalizeExemptionReasonText(long)!).length, EXEMPTION_REASON_TEXT_MAX);
+    const emoji = "😀".repeat(EXEMPTION_REASON_TEXT_MAX + 1);
+    assert.equal(normalizeExemptionReasonText(emoji), "😀".repeat(EXEMPTION_REASON_TEXT_MAX));
+  });
+
+  it("prints own wording only for O, the canonical text otherwise", () => {
+    assert.equal(effectiveExemptionReasonText("O", "VATEX-SA-OOS", "own"), "own");
+    assert.equal(effectiveExemptionReasonText("O", "VATEX-SA-OOS"), EXEMPTION_REASONS["VATEX-SA-OOS"]!.text);
+    assert.equal(effectiveExemptionReasonText("E", "VATEX-SA-30", "own"), EXEMPTION_REASONS["VATEX-SA-30"]!.text);
+  });
+
+  it("the OOS canonical Arabic is grammatical («غير الخاضعة», not «الغير خاضعة»)", () => {
+    assert.match(EXEMPTION_REASONS["VATEX-SA-OOS"]!.text, /التوريدات غير الخاضعة للضريبة/);
   });
 });
 

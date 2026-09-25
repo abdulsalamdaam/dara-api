@@ -189,6 +189,19 @@ const MATRIX = [
   { file: "20-standard-mixed-zero-rated", profile: "standard", docType: "invoice", buyer,
     lines: [commercialRent,
       { id: "2", name: "خدمة مصدرة", quantity: 1, unitPrice: 500, vatPercent: 0, vatCategory: "Z" as const, exemptionReasonCode: "VATEX-SA-33" }] },
+  // Out of scope in the landlord's own words (BT-120). OOS is the one reason
+  // ZATCA leaves as free text; the wording carries the XML specials `& < >` and
+  // quotes (the builder must escape them, or the document is not well-formed)
+  // and mixed Arabic/Latin. Both profiles, since simplified is the one ZATCA
+  // actually reports against our signature.
+  { file: "21-standard-out-of-scope-own-text", profile: "standard", docType: "invoice", buyer,
+    lines: [commercialRent,
+      { id: "2", name: "رسوم تسجيل مستردة", quantity: 1, unitPrice: 300, vatPercent: 0, vatCategory: "O" as const, exemptionReasonCode: "VATEX-SA-OOS",
+        exemptionReasonText: `رسوم حكومية مستردة بالتكلفة & دون هامش <لا تخضع للضريبة> — "Gov't fee" recharged at cost` }] },
+  { file: "22-simplified-out-of-scope-own-text", profile: "simplified", docType: "invoice", buyer: walkIn,
+    lines: [commercialRent,
+      { id: "2", name: "رسوم تسجيل مستردة", quantity: 1, unitPrice: 300, vatPercent: 0, vatCategory: "O" as const, exemptionReasonCode: "VATEX-SA-OOS",
+        exemptionReasonText: `رسوم حكومية مستردة بالتكلفة & دون هامش <لا تخضع للضريبة> — "Gov't fee" recharged at cost` }] },
 ] as const;
 
 async function main() {
