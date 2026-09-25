@@ -6,8 +6,9 @@ title and summary. Landlords read the curated feed in the portal. Super-admins m
 the accounts, the schedule, the run-now button, run history and moderation.
 
 **Status (26 Sep 2026):** staging only (`master`). Not on `main` or production.
-It is inert until the keys below are set: the UI shows a "not configured" banner and
-scheduled runs are recorded as `skipped`.
+Since v2 it needs no keys: with at least one enabled RSS source it runs free (RSS +
+keyword filter). With no RSS source and no X key, the UI shows a "not configured"
+banner and scheduled runs are recorded as `skipped`.
 
 ## Files in this folder
 | file | what |
@@ -18,17 +19,52 @@ scheduled runs are recorded as `skipped`.
 | `DESIGN.md` | screen spec: wireframes, components, states, i18n keys (web repo only) |
 | `QA.md` | QA report from staging, bugs fixed, and the fixes after QA (web repo only) |
 | `seed-accounts.json` | the 20 verified X accounts seeded on staging |
+| `rss-feeds.json`, `seed-rss.sql` | v2: the 15 verified RSS feeds, and an idempotent insert for them |
+| `lexicon.md` | v2: the keyword filter's scoring spec, lexicon and worked examples |
+| `CONTRACT-v2-FREE.md` | v2 addendum (RSS + keyword filter) with the backend deviations |
 | `qa/*.png` | QA screenshots: AR/EN × 360/1280 (web repo only) |
 
 ## Where things are
 - **API** (`dara-api`): `src/modules/news/`, schema `db/src/schema/news.ts`,
-  migration `db/drizzle/0061_re_news.sql`. The migration is idempotent and applied on
-  every boot by `ensureSchema`, so it needs no manual SQL.
+  migrations `db/drizzle/0061_re_news.sql` + `0062_re_news_rss.sql`. Both are idempotent
+  and applied on every boot by `ensureSchema`, so they need no manual SQL.
 - **Web** (`dara-web`): portal `components/dashboard/NewsView.tsx` + `components/news/*`.
   Admin `components/admin/tabs/NewsTab.tsx` + `components/admin/tabs/news/*`. Hooks are
   in `lib/api-hooks.ts` and `admin-hooks.ts`, strings under `news.*` / `admin.news.*`.
 - **Screens:** portal `/dashboard/news?cat=&q=`. Admin
   `/admin?tab=news&section=overview|sources|items|runs|settings`.
+
+## Free mode (v2) — RSS + keyword filter, no keys, no cost
+The feature runs with **no keys at all**:
+- **Sources** can be RSS/Atom feeds (`news_sources.kind = 'rss'`, `feed_url`) next to X
+  accounts. Feeds need no key. Add them in Admin → News → Sources, or seed the 15 verified
+  ones with `psql "$DATABASE_URL" -f docs/news/seed-rss.sql` (idempotent). Without an X key,
+  X rows are skipped with a log line, and the run succeeds on RSS alone.
+- **Filter:** `NEWS_FILTER=auto` (the default) uses Claude when `ANTHROPIC_API_KEY` is set,
+  and otherwise the free keyword filter (`news.keyword-filter.ts` + `news.lexicon.ts`, spec
+  in `lexicon.md`). `keyword` forces the free filter and `ai` forces Claude. Items record
+  which filter judged them in `news_items.filter_kind` (`ai` | `keyword`).
+- **Keyword filter:** it is deterministic and costs nothing. It scores 0–100 and publishes
+  at `min_score` (60), like the AI path. The title is the publisher's own headline and the
+  summary is the first ~220 characters of the description, in the source language only;
+  the other language stays empty. The untrusted-post guard still applies. It is a 1:1 port
+  of the business spec's reference scorer (0 differences on 608 real items). Known limits
+  are listed in `lexicon.md` §7.
+- **Fetching feeds:** one conditional GET per feed per run (ETag / Last-Modified are stored
+  on the source row), with a 15 s timeout, a 2 MB cap applied after decompression, and at
+  most 5 redirects. An SSRF guard allows http(s) on ports 80 and 443 only, with no
+  credentials. The host must resolve only to public addresses, and this is checked at
+  connect time, so DNS rebinding cannot slip through, and again on every redirect.
+  Parsing uses `fast-xml-parser` with entities off (no XXE, no billion-laughs), and HTML
+  is stripped to text.
+- Migration `0062_re_news_rss.sql` holds the v2 columns. It is idempotent, and
+  `ensureSchema` runs it on boot after 0061.
+- **Local check (26 Sep 2026, throwaway DB, 15 feeds, 36 h lookback):** 132 fetched, 119
+  new, 8 published, 111 rejected, 13 near-duplicates stored hidden. The second run
+  published 0 new items: 128 were already stored and 2 feeds answered 304. **Limit:**
+  one story syndicated with different wording, such as the REDF deposit, can still
+  appear 3–5 times. The Jaccard 0.6 near-duplicate check misses short, reworded
+  headlines.
 
 ## How a run works
 1. **Trigger.** A 60 s in-process tick claims a due run atomically with a conditional
@@ -68,9 +104,10 @@ scheduled runs are recorded as `skipped`.
 | var | purpose |
 |---|---|
 | `X_BEARER_TOKEN` | official X API v2 (paid tier with read access to user timelines) |
-| `TWITTERAPI_IO_KEY` | twitterapi.io, a cheaper third-party source. Needs **one** of these two |
+| `TWITTERAPI_IO_KEY` | twitterapi.io, a cheaper third-party source. X needs **one** of these two; without either, X rows are skipped |
 | `NEWS_SOURCE_PROVIDER` | `x` / `twitterapiio`. Blank means whichever key is set, X first |
-| `ANTHROPIC_API_KEY` | required, the Claude filter |
+| `NEWS_FILTER` | `auto` (default: Claude if `ANTHROPIC_API_KEY` is set, else keyword) / `keyword` / `ai` |
+| `ANTHROPIC_API_KEY` | optional since v2: the Claude filter |
 | `NEWS_AI_MODEL` | default `claude-sonnet-5` |
 | `NEWS_MAX_AI_ITEMS_PER_RUN` | default 150, max 2000 |
 | `NEWS_SCHEDULER_DISABLED` | `1` = no in-process tick (local dev) |

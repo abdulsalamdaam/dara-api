@@ -121,3 +121,48 @@ All paths under the global `/api` prefix.
     `duplicates` + logged; AI-flagged duplicates are stored as `rejected` with `aiReason` "duplicate of …".
 15. Tables are created by `ensureSchema` on boot from `db/drizzle/0061_re_news.sql` (idempotent) —
     deploy needs no manual SQL.
+
+## Free mode (v2): RSS sources and the keyword filter
+
+The full addendum, with its own "v2 backend deviations" section, is `CONTRACT-v2-FREE.md` in this folder.
+This is what shipped in dara-api:
+
+1. **Sources.** `news_sources` has new columns: `kind` (`x` | `rss`), `feedUrl`, `siteUrl`,
+   `httpEtag` and `httpLastModified`. `handle` is null on rss rows.
+   `POST /admin/news/sources`: rss is chosen by `{ kind:'rss', feedUrl, displayName?, notes?, enabled? }`,
+   or by a body that has `feedUrl` and no `handle`. The response is 201 with the row. A duplicate feed
+   gives 409. A bad or private URL gives 400 `feedUrl rejected: …`, after DNS is resolved and checked.
+   An unknown `kind` gives 400.
+2. **Test.** `POST /admin/news/sources/test { kind:'rss', feedUrl }` and
+   `POST /admin/news/sources/:id/test` (rss row) both return **200**
+   `{ kind:'rss', ok, handle:null, feedUrl, provider:'rss', title, siteUrl, profile:{userId:null,name,avatarUrl:null}|null,
+   tweets: item[≤5], skipped, error:{kind,message}|null }`. X test responses now also carry
+   `kind:'x'`. An X test without a key gives 400 `X is not configured — missing: …`.
+3. **Status.** `GET /admin/news/status` adds these fields:
+   - `filter` (`keyword` | `ai`) and `filterSetting` (`auto` | `keyword` | `ai`);
+   - `sources: { x:{configured,count,enabled}, rss:{count,enabled} }`;
+   - `warnings: string[]`, for problems that do not block a run.
+
+   `model` is null in keyword mode. `configured.source` is true when an X key is set
+   or an enabled RSS source exists. `configured.ai` is true when the chosen filter can
+   run; keyword mode is always ready. `missing` lists only what blocks every run.
+4. **Items from RSS** use the same shape as posts:
+   - `externalId` is the sha256 hex of the guid. A guid that is not a URL is scoped by the feed URL.
+     Without a guid, the hash is of the link.
+   - `url` is the article link. Google News links are kept as they are.
+   - `authorHandle` is the publisher's host (`argaam.com`, the Google News `<source url>` host, or
+     the feed's own host). The card uses it for "Read at <site>" and the favicon.
+   - `authorName` is the publisher, from Google `<source>`, the admin display name, or the feed title.
+   - `authorAvatarUrl` is null and `metrics` is null.
+   - `text` is the title, then a blank line, then the cleaned description. Google News
+     descriptions are dropped.
+   - `lang` is `ar` or `en`.
+   - `media` holds images, http(s) only.
+5. **Keyword verdicts.** `filterKind` is `keyword` (it is `ai` for Claude, and null when not
+   judged). `aiScore` runs 0–100. Only the source language's `aiTitle*` and `aiSummary*` are set;
+   the other is null. `aiReason` reads `keyword <score>: matched: … | neg: … | foreign: …`.
+   `aiTags` holds lexicon tags such as `rega` or `rent-freeze`.
+6. **Runs.** Log lines are labelled with a feed's display name or host. A run with no X key
+   logs one info line, "N X account(s) skipped — no X key set", and is not partial. Items
+   already stored by an earlier run are logged but no longer counted in `duplicates`.
+
