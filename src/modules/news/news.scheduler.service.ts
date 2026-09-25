@@ -1,13 +1,13 @@
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
-import { and, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { newsJobRunsTable, newsJobSettingsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { computeNextRunAt, NEWS_TZ } from "./news.schedule";
 import { NewsRunnerService } from "./news.runner.service";
+import { tryAcquireNewsLock } from "./news.lock";
 
 const TICK_MS = 60_000;
 const BOOT_DELAY_MS = 20_000;
-const STALE_MS = 60 * 60_000;
 
 /**
  * The daily trigger. In-process, no new infrastructure — a 60-second tick, the
@@ -49,14 +49,39 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
     if (this.boot) clearTimeout(this.boot);
   }
 
-  /** Stale-run recovery + a first next_run_at. Never throws. */
+  /**
+   * A `running` row that no process is running: its owner died (a deploy or a
+   * crash mid-run). Every live run holds the advisory lock from before its row
+   * is written until after its row is finished, so "the lock is free" proves
+   * nobody owns a `running` row. Such rows are marked failed; otherwise the
+   * admin UI shows "running" (and keeps Run now disabled) forever.
+   *
+   * Checked on boot and on every tick — a restart shortly after a run began
+   * leaves a row too young for any age rule, and a run on another instance is
+   * never touched because that instance still holds the lock.
+   */
+  async recoverOrphanedRuns(): Promise<number> {
+    const [open] = await this.db.select({ id: newsJobRunsTable.id }).from(newsJobRunsTable)
+      .where(eq(newsJobRunsTable.status, "running")).limit(1);
+    if (!open) return 0;
+    const lock = await tryAcquireNewsLock();
+    if (!lock) return 0; // a run is genuinely in progress somewhere
+    try {
+      const rows = await this.db.update(newsJobRunsTable)
+        .set({ status: "failed", finishedAt: new Date(), error: "interrupted (the API restarted while the run was in progress)" })
+        .where(eq(newsJobRunsTable.status, "running"))
+        .returning({ id: newsJobRunsTable.id });
+      if (rows.length) this.logger.warn(`marked ${rows.length} interrupted news run(s) failed`);
+      return rows.length;
+    } finally {
+      await lock.release();
+    }
+  }
+
+  /** Orphaned-run recovery + a first next_run_at. Never throws. */
   async onBoot(): Promise<void> {
     try {
-      const stale = await this.db.update(newsJobRunsTable)
-        .set({ status: "failed", finishedAt: new Date(), error: "interrupted (process restarted while running)" })
-        .where(and(eq(newsJobRunsTable.status, "running"), lt(newsJobRunsTable.startedAt, new Date(Date.now() - STALE_MS))))
-        .returning({ id: newsJobRunsTable.id });
-      if (stale.length) this.logger.warn(`marked ${stale.length} stale news run(s) failed`);
+      await this.recoverOrphanedRuns();
 
       const s = await this.runner.loadSettings();
       if (s && !s.nextRunAt) {
@@ -74,6 +99,7 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return "idle";
     this.ticking = true;
     try {
+      await this.recoverOrphanedRuns().catch((err) => this.logger.warn(`news orphan check failed: ${(err as Error)?.message ?? err}`));
       const s = await this.runner.loadSettings();
       if (!s || !s.enabled) return "idle";
       if (!s.nextRunAt) {
