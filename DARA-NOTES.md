@@ -1265,3 +1265,26 @@ established**. Do not tell anyone it is until at least the first item is done.
 7. Beyond this repo entirely: onboarding every VAT-registered seller, reporting
    simplified invoices within 24h, and archiving. Those belong to a ZATCA
    advisor, not to the code.
+
+---
+
+## 9. Real-estate news (staging only, Sep 2026)
+
+A daily job fetches posts from admin-managed X accounts. Claude filters and
+summarises them, and landlords read the feed at `/dashboard/news`. Super-admins
+manage it at `/admin?tab=news`. It lives in `dara-api` `src/modules/news`
+(migration `0061`, applied by `ensureSchema` on boot) and on the `feat/re-news`
+branch in both repos, merged to `master` only.
+
+- **Inert until keys are set on the staging API:** `ANTHROPIC_API_KEY` plus one
+  of `X_BEARER_TOKEN` / `TWITTERAPI_IO_KEY`. Until then, scheduled runs are
+  recorded as `skipped` and Run now returns 400 naming the missing vars.
+- **The scheduler is in-process:** a 60 s tick with an atomic claim and a pg
+  advisory lock. Set `NEWS_SCHEDULER_DISABLED=1` for local runs. The API `.env`
+  points at production, so never run the scheduler locally against it.
+- **Tweet text is untrusted.** It is wrapped as data for the model, and
+  `news.guard.ts` holds any post that tries to steer the AI. Keep both if the
+  prompt changes.
+- **Full runbook, spec, design and QA:** `docs/news/README.md`. The full set is
+  in `dara-web`; `dara-api` (public) carries the runbook, contract and business
+  spec.

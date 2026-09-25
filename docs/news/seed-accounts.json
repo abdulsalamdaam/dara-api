@@ -1,0 +1,22 @@
+[
+  {"handle": "rega_ksa", "display_name_ar": "الهيئة العامة للعقار", "display_name_en": "Real Estate General Authority (REGA)", "why": "Sector regulator: rules, rent-freeze decisions, licensing, market indicators.", "verified": true},
+  {"handle": "ejar_sa", "display_name_ar": "إيجار", "display_name_en": "Ejar", "why": "Rental platform: lease-registration rules and platform changes. Timeline is mostly customer replies, so fetch with replies excluded.", "verified": true},
+  {"handle": "rersaudi", "display_name_ar": "السجل العقاري", "display_name_en": "Real Estate Registry (RER)", "why": "First-registration zones and deed-registration rules affecting owners.", "verified": true},
+  {"handle": "lands_sa", "display_name_ar": "الأراضي البيضاء والعقارات الشاغرة", "display_name_en": "White Lands & Vacant Properties Program", "why": "White-land and vacant-property fee phases, billing dates, cities.", "verified": true},
+  {"handle": "momah_sa", "display_name_ar": "وزارة البلديات والإسكان", "display_name_en": "Ministry of Municipalities and Housing (MOMAH)", "why": "Housing policy, municipal rules, building codes.", "verified": true},
+  {"handle": "sakani", "display_name_ar": "سكني", "display_name_en": "Sakani", "why": "Housing programme: supply, eligibility and product changes.", "verified": true},
+  {"handle": "redfksa", "display_name_ar": "صندوق التنمية العقارية", "display_name_en": "Real Estate Development Fund (REDF)", "why": "Mortgage subsidy rules and housing-finance data.", "verified": true},
+  {"handle": "saudinhc", "display_name_ar": "الشركة الوطنية للإسكان", "display_name_en": "National Housing Company (NHC)", "why": "Large residential project launches and supply that moves local markets.", "verified": true},
+  {"handle": "sama_gov", "display_name_ar": "البنك المركزي السعودي", "display_name_en": "Saudi Central Bank (SAMA)", "why": "Rate decisions, mortgage lending statistics, finance rules.", "verified": true},
+  {"handle": "saudirefinance", "display_name_ar": "الشركة السعودية لإعادة التمويل العقاري", "display_name_en": "Saudi Real Estate Refinance Co. (SRC)", "why": "Mortgage refinance programmes and sukuk issuances.", "verified": true},
+  {"handle": "zatca_sa", "display_name_ar": "هيئة الزكاة والضريبة والجمارك", "display_name_en": "ZATCA", "why": "Real-estate transaction tax, VAT on property, e-invoicing deadlines. High volume of non-real-estate posts; relies on AI filter.", "verified": true},
+  {"handle": "stats_saudi", "display_name_ar": "الهيئة العامة للإحصاء", "display_name_en": "General Authority for Statistics (GASTAT)", "why": "Quarterly real-estate price index and rent component of CPI.", "verified": true},
+  {"handle": "mojksa", "display_name_ar": "وزارة العدل", "display_name_en": "Ministry of Justice", "why": "Real-estate transaction volumes and deed services. Mostly non-real-estate; optional, keep disabled if noisy.", "verified": true},
+  {"handle": "tadawul", "display_name_ar": "تداول السعودية", "display_name_en": "Saudi Exchange", "why": "REIT listings and distributions, developer disclosures. Low hit rate; optional.", "verified": true},
+  {"handle": "argaam", "display_name_ar": "أرقام", "display_name_en": "Argaam", "why": "Leading Saudi financial outlet: sector data, developer results, regulator coverage.", "verified": true},
+  {"handle": "argaamplus", "display_name_ar": "أرقام بلس", "display_name_en": "Argaam Plus", "why": "English Argaam: same coverage in English, useful for EN summaries.", "verified": true},
+  {"handle": "aleqtisadiah", "display_name_ar": "صحيفة الاقتصادية", "display_name_en": "Aleqtisadiah", "why": "Saudi economic daily with regular real-estate market reporting.", "verified": true},
+  {"handle": "asharqbusiness", "display_name_ar": "الشرق بلومبرغ", "display_name_en": "Asharq Bloomberg", "why": "Business news covering Saudi property, giga projects and financing.", "verified": true},
+  {"handle": "alarabiyabn_ksa", "display_name_ar": "العربية Business - السعودية", "display_name_en": "Al Arabiya Business - Saudi", "why": "Saudi-specific business coverage including real estate.", "verified": true},
+  {"handle": "arabnewsbiz", "display_name_ar": "عرب نيوز - أعمال", "display_name_en": "Arab News Business", "why": "English Saudi business news including real-estate sector.", "verified": true}
+]
