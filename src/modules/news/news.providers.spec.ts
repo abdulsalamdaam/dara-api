@@ -110,7 +110,7 @@ describe("readNewsConfig", () => {
     const c = readNewsConfig({ TWITTERAPI_IO_KEY: "k", ANTHROPIC_API_KEY: "a" });
     assert.equal(c.provider, "twitterapiio");
     assert.deepEqual(c.configured, { source: true, ai: true, missing: [] });
-    assert.equal(c.model, "claude-opus-5");
+    assert.equal(c.model, "claude-sonnet-5");
   });
   it("an explicit provider without its key is missing that key", () => {
     const c = readNewsConfig({ NEWS_SOURCE_PROVIDER: "x", TWITTERAPI_IO_KEY: "k", ANTHROPIC_API_KEY: "a", NEWS_AI_MODEL: "claude-sonnet-5" });

@@ -12,7 +12,7 @@ import { TwitterApiIoProvider } from "./providers/twitterapiio.provider";
  *   ANTHROPIC_API_KEY     the AI filter
  *   NEWS_AI_MODEL         default DEFAULT_NEWS_MODEL
  */
-export const DEFAULT_NEWS_MODEL = "claude-opus-5";
+export const DEFAULT_NEWS_MODEL = "claude-sonnet-5";
 
 export type ProviderName = "x" | "twitterapiio";
 
