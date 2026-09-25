@@ -42,14 +42,21 @@ export const WORD = "\\p{L}\\p{N}_";
 const AR_CLITIC = "(?:و|ف|ب|ل|ك|ال|وال|فال|بال|كال|لل|ولل|فلل|وب|ول)?";
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** One lexicon term → a regex over NORMALISED text. */
+/**
+ * One lexicon term → a regex over NORMALISED text. A `*` ending ANY word of
+ * the phrase means "any suffix" for that word, so "مطور* عقاري*" matches
+ * «مطورين عقاريين» (the reference scorer honoured only a final `*` and
+ * silently dropped a mid-phrase one).
+ */
 export function compileTerm(term: string): RegExp {
-  const star = term.endsWith("*");
-  const t = normaliseForMatch(term.replace(/\*+$/, ""));
-  if (!t) throw new Error(`empty lexicon term: "${term}"`);
-  const arabic = /[؀-ۿ]/.test(t);
-  const body = t.split(" ").map(esc).join("\\s+");
-  return new RegExp(`(?<![${WORD}])${arabic ? AR_CLITIC : ""}${body}${star ? `[${WORD}]*` : ""}(?![${WORD}])`, "u");
+  const words = String(term).trim().split(/\s+/).map((w) => {
+    const star = w.endsWith("*");
+    const t = normaliseForMatch(w.replace(/\*+$/, ""));
+    return t ? t.split(" ").map(esc).join("\\s+") + (star ? `[${WORD}]*` : "") : "";
+  }).filter(Boolean);
+  if (!words.length) throw new Error(`empty lexicon term: "${term}"`);
+  const arabic = /[؀-ۿ]/.test(term);
+  return new RegExp(`(?<![${WORD}])${arabic ? AR_CLITIC : ""}${words.join("\\s+")}(?![${WORD}])`, "u");
 }
 
 /**

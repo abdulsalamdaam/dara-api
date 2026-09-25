@@ -217,6 +217,8 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "القطاع العقاري", w: 25, tag: "market" },
     { t: "السوق العقاري*", w: 30, tag: "market" },
     { t: "سوق العقار*", w: 30, tag: "market" },
+    // "العقارات السعودية" / "السوق العقاري السعودي": the Saudi market named outright (QA v2).
+    { t: "العقار* السعودي*", w: 45, tag: "market", sa: true },
     { t: "real estate market", w: 30, tag: "market" },
     { t: "property market", w: 30, tag: "market" },
     { t: "الهيئه العامه للاحصاء", w: 20, tag: "gastat" },
@@ -392,6 +394,9 @@ export const NEGATIVE: Array<[term: string, penalty: number]> = [
   ["lowest since debut", 25],
   ["نصايح", 20],
   ["هل تعلم", 40],
+  // SEO question headlines ("هل نزل الدعم السكني اليوم؟") re-run a story daily (QA v2).
+  ["هل نزل", 30],
+  ["متي ينزل", 30],
   ["خبير يحذر", 15],
   ["كل ما تريد معرفته", 25],
   ["الابل", 60],

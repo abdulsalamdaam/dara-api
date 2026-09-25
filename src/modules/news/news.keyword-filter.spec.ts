@@ -54,6 +54,32 @@ describe("term matching", () => {
   });
 });
 
+describe("QA v2 tuning (staging run, 26 Sep 2026)", () => {
+  const m = (term: string, text: string) => compileTerm(term).test(normaliseForMatch(text));
+  it("a * inside a phrase applies to that word, not only the last one", () => {
+    assert.ok(m("مطور* عقاري*", "تحالف مطورين عقاريين"));
+    assert.ok(m("مشروع* سكني*", "إطلاق مشروعات سكنية جديدة"));
+    assert.ok(m("مجتمع* سكني*", "مجتمعات سكنية"));
+    assert.ok(!m("مطور* عقاري*", "المطورين العقاريين"), "a proclitic still attaches to the first word only");
+  });
+  it("the Saudi property market named outright publishes (was a false negative at 36)", () => {
+    const k = scoreKeywords("الأراضي تبتلع نصف السوق.. «نايت فرانك» ترصد تباطؤ العقارات السعودية");
+    assert.ok(k.score >= 60, `score ${k.score}`);
+    assert.equal(k.category, "market");
+    assert.ok(k.tags.includes("market"));
+  });
+  it("a foreign market stays out even with the new phrase", () => {
+    assert.ok(scoreKeywords("5 أضعاف في بعض المناطق.. العقارات المصرية أمام اختبار القدرة الشرائية").score < 60);
+    assert.ok(scoreKeywords("\"CISI\": الحذر يسيطر على القطاع العقاري في الإمارات").score < 60);
+  });
+  it("SEO question headlines («هل نزل الدعم السكني اليوم؟») are rejected (was a false positive at 60)", () => {
+    assert.ok(scoreKeywords("هل نزل الدعم السكني اليوم 24 سبتمبر 2026؟").score < 60);
+    assert.ok(scoreKeywords("متى ينزل الدعم السكني لشهر أكتوبر؟").score < 60);
+    // the real announcement of the same deposit still publishes
+    assert.ok(scoreKeywords("1.1 مليار ريال من صندوق التنمية العقارية السعودي لدعم مستفيدي الإسكان لشهر سبتمبر").score >= 60);
+  });
+});
+
 describe("keyword scoring — lexicon.md §6 worked examples", () => {
   for (const e of EXAMPLES) {
     it(`#${e.n} ${e.title.slice(0, 60)} → ${e.score} ${e.category}`, () => {
