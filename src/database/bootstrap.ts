@@ -558,6 +558,18 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure app_logs failed: ${err?.message || err}`);
     }
 
+    // Real-estate news tables. The migration file itself is the single source:
+    // it is idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING) and lives in
+    // db/drizzle, which — unlike db/sql — the Dockerfile copies into the image.
+    // A failure warns and boots anyway: only the news endpoints need these.
+    try {
+      const newsSql = findSqlFile(join("drizzle", "0061_re_news.sql"));
+      if (newsSql) await client.query(readFileSync(newsSql, "utf8"));
+      else log.warn("0061_re_news.sql not found — news tables not ensured");
+    } catch (err: any) {
+      log.warn(`ensure news tables failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
