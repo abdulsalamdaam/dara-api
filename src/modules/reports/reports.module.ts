@@ -344,6 +344,22 @@ class ReportsController {
     };
   }
 
+  /**
+   * The distinct expense categories this account has used, for the Expenses
+   * tab's category filter. That dropdown used to be built by downloading every
+   * expense the account had ever recorded. Soft-deleted rows are left out, as
+   * they are from the list the filter applies to.
+   */
+  @Get("expenses/categories")
+  @RequirePermissions(PERMISSIONS.EXPENSES_VIEW)
+  async expenseCategories(@CurrentUser() user: AuthUser): Promise<string[]> {
+    const rows = await this.db.selectDistinct({ category: expensesTable.category })
+      .from(expensesTable)
+      .where(and(eq(expensesTable.userId, scopeId(user)), isNull(expensesTable.deletedAt)))
+      .orderBy(asc(expensesTable.category));
+    return rows.map((r) => r.category).filter((c): c is string => !!c && !!c.trim());
+  }
+
   @Post("expenses")
   @RequirePermissions(PERMISSIONS.EXPENSES_WRITE)
   async createExpense(@CurrentUser() user: AuthUser, @Body() body: any) {

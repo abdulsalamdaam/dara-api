@@ -7,7 +7,9 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { liveStatus } from "../../common/payment-status";
+import { liveStatus, riyadhToday } from "../../common/payment-status";
+
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 @ApiTags("dashboard")
 @ApiBearerAuth("user-jwt")
@@ -86,6 +88,27 @@ class DashboardController {
       .filter(p => { const s = paymentStatus(p); return s === "pending" || s === "overdue"; })
       .reduce((s, p) => s + num(p.amount), 0);
 
+    // The money behind `overduePaymentsCount`. The portal printed "0 SAR
+    // overdue" beside a non-zero count because this figure did not exist.
+    const overdueAmount = round2(payments
+      .filter(p => paymentStatus(p) === "overdue")
+      .reduce((s, p) => s + num(p.amount), 0));
+
+    // Collected per calendar month of the current (Riyadh) year — the revenue
+    // chart. The portal used to download every installment the account had
+    // to add these twelve numbers up in the browser. Same rule it used:
+    // revenue is recognised when collected (paidDate), falling back to the
+    // due date for a paid row with no paid date on it.
+    const revenueYear = Number(riyadhToday().slice(0, 4));
+    const monthlyPaid: number[] = Array(12).fill(0);
+    for (const p of payments) {
+      if (p.status !== "paid") continue;
+      const d = String(p.paidDate || p.dueDate || "");
+      if (Number(d.slice(0, 4)) !== revenueYear) continue;
+      const m = Number(d.slice(5, 7)) - 1;
+      if (m >= 0 && m < 12) monthlyPaid[m] += num(p.amount);
+    }
+
     const occupancyRate = unitCount > 0 ? Math.round((rentedUnitsCount / unitCount) * 100) : 0;
 
     return {
@@ -102,6 +125,8 @@ class DashboardController {
       rentedUnitsCount,
       availableUnitsCount,
       maintenanceUnitsCount,
+      overdueAmount,
+      revenueByMonth: { year: revenueYear, months: monthlyPaid.map(round2) },
     };
   }
 }
