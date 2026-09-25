@@ -82,6 +82,8 @@ export const newsItemsTable = pgTable("news_items", {
   aiSummaryEn: text("ai_summary_en"),
   aiTags: text("ai_tags").array(),
   aiReason: text("ai_reason"),
+  /** Failed AI reviews. At AI_MAX_ATTEMPTS the item is given up: hidden, never retried. */
+  aiAttempts: integer("ai_attempts").notNull().default(0),
   /** 'published' | 'rejected' | 'hidden' */
   status: text("status").notNull().default("hidden"),
   pinned: boolean("pinned").notNull().default(false),

@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS "news_items" (
   "created_at"        timestamp with time zone NOT NULL DEFAULT now(),
   "updated_at"        timestamp with time zone NOT NULL DEFAULT now()
 );
+-- Added after first deploy; this file re-runs on every boot, so an ALTER here is enough.
+ALTER TABLE "news_items" ADD COLUMN IF NOT EXISTS "ai_attempts" integer NOT NULL DEFAULT 0;
 CREATE UNIQUE INDEX IF NOT EXISTS "news_items_external_id_uniq" ON "news_items" ("external_id");
 CREATE INDEX IF NOT EXISTS "news_items_feed_idx" ON "news_items" ("status", "pinned", "posted_at");
 CREATE INDEX IF NOT EXISTS "news_items_category_idx" ON "news_items" ("ai_category");

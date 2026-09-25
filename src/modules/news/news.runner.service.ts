@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import {
   newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable,
   type NewsJobSettings, type NewsRunLogEntry, type NewsSource,
@@ -9,16 +9,19 @@ import { AppLogService } from "../../common/logging/app-log.service";
 import { buildProvider, readNewsConfig, type NewsConfig } from "./news.config";
 import { compareTweetIds, ProviderError, type NormalisedTweet, type SourceProvider } from "./news.types";
 import { dedupeTweets } from "./news.dedupe";
-import { AI_BATCH_SIZE, decideStatus, describeAiError, NewsAiFilter } from "./news.ai";
+import { decideStatus, NewsAiFilter } from "./news.ai";
+import { AI_MAX_ATTEMPTS, capQueue, processAiQueue } from "./news.batches";
+import { detectManipulation, heldReason } from "./news.guard";
 import { tryAcquireNewsLock, type NewsRunLock } from "./news.lock";
 
 /** How far back the "same story" comparison and the AI's recent-titles list look. */
 const RECENT_WINDOW_MS = 72 * 3_600_000;
-/** Items the AI never judged (it failed) are retried by later runs for this long. */
+/**
+ * Items the AI never judged are retried by later runs for this long, and only
+ * while they have fewer than AI_MAX_ATTEMPTS failed reviews.
+ */
 const RETRY_WINDOW_MS = 7 * 24 * 3_600_000;
 const RETRY_MAX = 60;
-/** Give up on the remaining batches after this many AI failures in a row. */
-const AI_MAX_CONSECUTIVE_FAILURES = 2;
 const LOG_CAP = 500;
 
 export type StartRunResult =
@@ -168,13 +171,17 @@ export class NewsRunnerService {
       const d = dedupeTweets(fetched, new Set(existing.map((e) => e.id)), recentRows.map((r) => ({ id: r.externalId, text: r.text })));
       c.duplicates += d.exactDuplicates.length + d.nearDuplicates.length;
       if (d.exactDuplicates.length) push("info", `${d.exactDuplicates.length} already stored — skipped`);
-      for (const n of d.nearDuplicates) push("info", `${n.tweet.id} dropped: same story as ${n.duplicateOf}`, n.tweet.authorHandle);
+      for (const n of d.nearDuplicates) push("info", `${n.tweet.id} kept hidden: same story as ${n.duplicateOf}`, n.tweet.authorHandle);
 
       // ── 4. store as hidden/unjudged ────────────────────────────────────
+      // Near-duplicates are stored too — hidden, never sent to the AI, with
+      // "duplicate of <id>" — so an admin can still publish one.
       const bySourceId = new Map(fetched.map((t) => [t.id, t.sourceId]));
       const toStore = d.kept as Array<NormalisedTweet>;
-      const inserted = toStore.length
-        ? await this.db.insert(newsItemsTable).values(toStore.map((t) => ({
+      const nearDupReason = new Map(d.nearDuplicates.map((n) => [n.tweet.id, `duplicate of ${n.duplicateOf}`]));
+      const rowsToStore = [...toStore, ...d.nearDuplicates.map((n) => n.tweet)];
+      const inserted = rowsToStore.length
+        ? await this.db.insert(newsItemsTable).values(rowsToStore.map((t) => ({
             sourceId: bySourceId.get(t.id) ?? null,
             externalId: t.id,
             url: t.url,
@@ -187,20 +194,24 @@ export class NewsRunnerService {
             media: t.media,
             metrics: t.metrics,
             status: "hidden",
-            aiReason: "awaiting AI review",
+            ...(nearDupReason.has(t.id)
+              ? { aiRelevant: false, aiReason: nearDupReason.get(t.id)! }
+              : { aiReason: "awaiting AI review" }),
             runId,
           }))).onConflictDoNothing({ target: newsItemsTable.externalId }).returning({ id: newsItemsTable.id, externalId: newsItemsTable.externalId })
         : [];
-      c.newItems = inserted.length;
-      c.duplicates += toStore.length - inserted.length; // lost a race with another writer
+      const insertedIds = new Set(inserted.map((r) => r.externalId));
+      const keptInserted = toStore.filter((t) => insertedIds.has(t.id)).length;
+      c.newItems = keptInserted;
+      c.duplicates += toStore.length - keptInserted; // lost a race with another writer
       await flush();
 
       // ── 5. AI: this run's items + earlier ones the AI never judged ─────
-      const insertedIds = new Set(inserted.map((r) => r.externalId));
       const queue: NormalisedTweet[] = toStore.filter((t) => insertedIds.has(t.id));
       const retry = await this.db.select().from(newsItemsTable).where(and(
         isNull(newsItemsTable.aiRelevant),
         eq(newsItemsTable.status, "hidden"),
+        lt(newsItemsTable.aiAttempts, AI_MAX_ATTEMPTS),
         gte(newsItemsTable.createdAt, new Date(Date.now() - RETRY_WINDOW_MS)),
         sql`${newsItemsTable.runId} is distinct from ${runId}`,
       )).orderBy(desc(newsItemsTable.createdAt)).limit(RETRY_MAX);
@@ -213,27 +224,43 @@ export class NewsRunnerService {
         });
       }
 
+      // The run's cost bound. What is over the cap stays hidden and unjudged
+      // (no attempt counted); the next run's retry picks it up.
+      const { send, deferred } = capQueue(queue, cfg.maxAiItemsPerRun);
+      if (deferred.length) {
+        partial = true;
+        push("warn", `AI cap reached: ${cfg.maxAiItemsPerRun} item(s) per run (NEWS_MAX_AI_ITEMS_PER_RUN) — ${deferred.length} left hidden for the next run`);
+        this.logger.warn(`news run ${runId}: AI cap ${cfg.maxAiItemsPerRun} hit, ${deferred.length} deferred`);
+        await this.markAiFailure(deferred.map((t) => t.id), "awaiting AI review (per-run AI cap reached; next run)", false);
+      }
+
       const recentTitles = recentRows
         .map((r) => ({ externalId: r.externalId, title: r.title || r.titleAr || "" }))
         .filter((r) => r.title)
         .slice(0, 60);
-      let consecutiveFailures = 0;
 
-      for (let i = 0; i < queue.length; i += AI_BATCH_SIZE) {
-        const batch = queue.slice(i, i + AI_BATCH_SIZE);
-        const batchIds = batch.map((t) => t.id);
-        if (consecutiveFailures >= AI_MAX_CONSECUTIVE_FAILURES) {
+      await processAiQueue(send, {
+        classify: (batch) => ai.classify(batch, { extraInstructions: settings.extraInstructions, recent: recentTitles }),
+        log: (level, message) => push(level, message),
+        afterBatch: () => flush(),
+        onFailure: async (ids, reason, attempted) => {
           partial = true;
-          push("error", `AI skipped for ${batch.length} item(s) after repeated failures — kept hidden, will retry next run`);
-          await this.markAiFailure(batchIds, "AI not attempted after repeated failures; will retry next run");
-          continue;
-        }
-        try {
-          const out = await ai.classify(batch, { extraInstructions: settings.extraInstructions, recent: recentTitles });
-          consecutiveFailures = 0;
+          await this.markAiFailure(ids, reason, attempted);
+        },
+        onResult: async (batch, out, label) => {
+          const textById = new Map(batch.map((t) => [t.id, t.text]));
           for (const p of out.problems) push("warn", p);
           for (const [id, v] of out.verdicts) {
-            const status = decideStatus(v, settings.minScore);
+            let status: "published" | "rejected" | "hidden" = decideStatus(v, settings.minScore);
+            let reason = v.reason || null;
+            // Deterministic guard: a post that talks to the filter is never
+            // auto-published, whatever the model concluded.
+            const held = detectManipulation(textById.get(id) ?? "");
+            if (held && !v.duplicateOf) {
+              status = "hidden";
+              reason = heldReason(held, v.reason);
+              push("warn", `${id} held for review: ${held}`);
+            }
             if (v.duplicateOf) c.duplicates++;
             else if (status === "published") c.published++;
             else c.rejected++;
@@ -241,25 +268,18 @@ export class NewsRunnerService {
               aiRelevant: v.relevant, aiScore: v.score, aiCategory: v.category,
               aiTitleAr: v.titleAr || null, aiTitleEn: v.titleEn || null,
               aiSummaryAr: v.summaryAr || null, aiSummaryEn: v.summaryEn || null,
-              aiTags: v.tags, aiReason: v.reason || null, status,
+              aiTags: v.tags, aiReason: reason, status,
             }).where(and(eq(newsItemsTable.externalId, id), isNull(newsItemsTable.aiRelevant)));
             if (status === "published") recentTitles.unshift({ externalId: id, title: v.titleEn || v.titleAr });
           }
           if (out.missing.length) {
             partial = true;
-            push("warn", `AI returned no verdict for ${out.missing.length} item(s) — kept hidden, will retry`);
-            await this.markAiFailure(out.missing, "AI returned no verdict; will retry next run");
+            push("warn", `AI returned no verdict for ${out.missing.length} item(s) — kept hidden`);
+            await this.markAiFailure(out.missing, "AI returned no verdict", true);
           }
-          push("info", `AI batch ${i / AI_BATCH_SIZE + 1}: ${out.verdicts.size} verdict(s), ${out.usage.input}/${out.usage.output} tokens`);
-        } catch (err) {
-          consecutiveFailures++;
-          partial = true;
-          const msg = describeAiError(err);
-          push("error", `${msg} — ${batch.length} item(s) kept hidden, will retry next run`);
-          await this.markAiFailure(batchIds, `AI failed: ${msg}`.slice(0, 500));
-        }
-        await flush();
-      }
+          push("info", `AI batch ${label}: ${out.verdicts.size} verdict(s), ${out.usage.input}/${out.usage.output} tokens`);
+        },
+      });
 
       // ── 6. finish ──────────────────────────────────────────────────────
       const status = c.accountsTotal > 0 && c.accountsOk === 0 ? "failed" : partial ? "partial" : "success";
@@ -312,11 +332,25 @@ export class NewsRunnerService {
     await this.db.update(newsSourcesTable).set(patch).where(eq(newsSourcesTable.id, src.id));
   }
 
-  private async markAiFailure(externalIds: string[], reason: string): Promise<void> {
+  /**
+   * Record why the AI did not judge these items. `attempted` counts one failed
+   * review; at AI_MAX_ATTEMPTS the item is given up — it stays hidden with a
+   * reason saying so, and the retry query never picks it up again.
+   */
+  private async markAiFailure(externalIds: string[], reason: string, attempted: boolean): Promise<void> {
     if (!externalIds.length) return;
-    await this.db.update(newsItemsTable).set({ aiReason: reason })
+    const r = reason.slice(0, 400);
+    const set = attempted
+      ? {
+          aiAttempts: sql`${newsItemsTable.aiAttempts} + 1`,
+          aiReason: sql`case when ${newsItemsTable.aiAttempts} + 1 >= ${AI_MAX_ATTEMPTS}
+            then ${`AI gave up after ${AI_MAX_ATTEMPTS} attempts — review manually. Last error: ${r}`}
+            else ${`${r} (will retry next run)`} end`,
+        }
+      : { aiReason: r };
+    await this.db.update(newsItemsTable).set(set)
       .where(and(inArray(newsItemsTable.externalId, externalIds), isNull(newsItemsTable.aiRelevant)))
-      .catch(() => undefined);
+      .catch((err) => this.logger.warn(`markAiFailure: ${(err as Error)?.message ?? err}`));
   }
 
   async loadSettings(): Promise<NewsJobSettings> {
