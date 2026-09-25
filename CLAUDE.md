@@ -65,6 +65,16 @@ account classification is by topology rather than role key, VAT and derived
 installment status, the Arabic font-metric fix, and per-repo gotchas including
 the tsc baseline and the ValidationPipe whitelist.
 
+# Rule: staging only — never push or merge to production
+
+Until the account holder explicitly says to ship to production, **all work goes
+to `master` (staging) only**. Do not push, merge, cherry-pick, fast-forward or
+force-push anything to `main` in `dara-web` or `dara-api` — pushing `main`
+auto-deploys production via GitHub Actions. Do not trigger the production
+Coolify apps by hand either. "Deploy" / "push" / "ship" without the word
+production means staging. (Set 26 Sep 2026, after that day's production push
+was rolled back.)
+
 # Rule: never change ZATCA signing without validating it
 
 The signer, the invoice builder and the QR are **not** things to change and
