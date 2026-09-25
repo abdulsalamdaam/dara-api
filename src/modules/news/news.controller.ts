@@ -6,6 +6,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { listQuerySchema } from "../../common/pagination";
 import { NEWS_CATEGORIES } from "./news.types";
+import { readNewsConfig } from "./news.config";
 
 /** What a reader sees of an item — no AI score/reason, no moderation fields. */
 export const PUBLIC_ITEM_COLUMNS = {
@@ -80,9 +81,12 @@ export class NewsController {
   }
 
   /**
-   * GET /news/summary → `{ total, categories: [{ key, count }], lastUpdatedAt }`.
+   * GET /news/summary → `{ total, categories: [{ key, count }], lastUpdatedAt, filter }`.
    * Every category is listed (zero counts included) in the fixed order.
    * `lastUpdatedAt` is the end of the last run that fetched anything.
+   * `filter` ('keyword' | 'ai') is the filter runs use now, so the portal's
+   * disclosure can say whether an AI wrote the titles or they are the
+   * publishers' own headlines picked by keyword.
    */
   @Get("summary")
   async summary() {
@@ -98,6 +102,7 @@ export class NewsController {
       total: categories.reduce((s, c) => s + c.count, 0),
       categories,
       lastUpdatedAt: lastRun[0]?.at ?? null,
+      filter: readNewsConfig().filter,
     };
   }
 }
