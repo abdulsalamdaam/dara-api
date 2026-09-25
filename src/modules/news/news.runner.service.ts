@@ -1,18 +1,20 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { and, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import {
   newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable,
   type NewsJobSettings, type NewsRunLogEntry, type NewsSource,
 } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { AppLogService } from "../../common/logging/app-log.service";
-import { buildProvider, readNewsConfig, type NewsConfig } from "./news.config";
+import { buildProvider, readNewsConfig, type FilterKind, type NewsConfig } from "./news.config";
 import { compareTweetIds, ProviderError, type NormalisedTweet, type SourceProvider } from "./news.types";
 import { dedupeTweets } from "./news.dedupe";
 import { decideStatus, NewsAiFilter } from "./news.ai";
 import { AI_MAX_ATTEMPTS, capQueue, processAiQueue } from "./news.batches";
 import { detectManipulation, heldReason } from "./news.guard";
 import { tryAcquireNewsLock, type NewsRunLock } from "./news.lock";
+import { KeywordFilter } from "./news.keyword-filter";
+import { RssProvider, type RssFetchResult } from "./providers/rss.provider";
 
 /** How far back the "same story" comparison and the AI's recent-titles list look. */
 const RECENT_WINDOW_MS = 72 * 3_600_000;
@@ -35,7 +37,8 @@ type Counters = {
 };
 
 /**
- * One news run: fetch every account → drop duplicates → store → Claude → status.
+ * One news run: fetch every source (X accounts, RSS feeds) → drop duplicates →
+ * store → filter (Claude, or the free keyword filter) → status.
  *
  * Stored BEFORE the AI sees anything, as `hidden` with `ai_relevant = null`.
  * That ordering is what makes an AI failure (or a crash mid-run) lose nothing:
@@ -49,14 +52,35 @@ export class NewsRunnerService {
   /** Test seam: a provider / AI to use instead of the env-built ones. */
   providerOverride: SourceProvider | null = null;
   aiOverride: Pick<NewsAiFilter, "classify"> | null = null;
+  rssOverride: Pick<RssProvider, "fetchFeed"> | null = null;
 
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly appLog: AppLogService,
   ) {}
 
+  /** Env-only view (does not know about RSS rows) — prefer `readiness()`. */
   config(): NewsConfig {
     return readNewsConfig();
+  }
+
+  /** Enabled/total source rows per kind. */
+  async sourceCounts(): Promise<{ x: { count: number; enabled: number }; rss: { count: number; enabled: number } }> {
+    const rows = await this.db.select({ kind: newsSourcesTable.kind, enabled: newsSourcesTable.enabled, n: count() })
+      .from(newsSourcesTable).groupBy(newsSourcesTable.kind, newsSourcesTable.enabled);
+    const out = { x: { count: 0, enabled: 0 }, rss: { count: 0, enabled: 0 } };
+    for (const r of rows) {
+      const k = r.kind === "rss" ? out.rss : out.x;
+      k.count += Number(r.n);
+      if (r.enabled) k.enabled += Number(r.n);
+    }
+    return out;
+  }
+
+  /** The config a run would use now: env + whether any RSS source is enabled. */
+  async readiness(): Promise<NewsConfig> {
+    const counts = await this.sourceCounts();
+    return readNewsConfig(process.env, { rssEnabled: counts.rss.enabled });
   }
 
   /**
@@ -64,8 +88,8 @@ export class NewsRunnerService {
    * in the background. `busy` when another run holds the lock.
    */
   async startRun(trigger: "schedule" | "manual", userId: number | null, sourceIds?: string[]): Promise<StartRunResult> {
-    const cfg = this.config();
-    const testSeams = !!(this.providerOverride && this.aiOverride);
+    const cfg = await this.readiness();
+    const testSeams = !!((this.providerOverride || this.rssOverride) && this.aiOverride);
     if (!testSeams && (!cfg.configured.source || !cfg.configured.ai)) {
       return { kind: "not_configured", missing: cfg.configured.missing };
     }
@@ -109,16 +133,25 @@ export class NewsRunnerService {
     try {
       const settings = await this.loadSettings();
       const provider = this.providerOverride ?? buildProvider(cfg);
-      const ai = this.aiOverride ?? new NewsAiFilter(process.env.ANTHROPIC_API_KEY!.trim(), cfg.model);
-      if (!provider) throw new Error(`source provider not configured: ${cfg.configured.missing.join(", ")}`);
-      push("info", `provider=${provider.name} model=${cfg.model} lookback=${settings.lookbackHours}h max/account=${settings.maxPerAccount} min_score=${settings.minScore}`);
+      const rss = this.rssOverride ?? new RssProvider();
+      // The filter: Claude when configured (NEWS_FILTER / ANTHROPIC_API_KEY), else the free keyword filter.
+      const filterKind: FilterKind = this.aiOverride ? (this.aiOverride instanceof KeywordFilter ? "keyword" : "ai") : cfg.filter;
+      const ai = this.aiOverride
+        ?? (cfg.filter === "ai" ? new NewsAiFilter(process.env.ANTHROPIC_API_KEY!.trim(), cfg.model) : new KeywordFilter());
+      push("info", `x=${provider?.name ?? "off (no key)"} filter=${filterKind === "ai" ? `claude (${cfg.model})` : "keyword"} lookback=${settings.lookbackHours}h max/source=${settings.maxPerAccount} min_score=${settings.minScore}`);
+      for (const w of cfg.warnings) push("warn", w);
 
       // ── 1. sources ─────────────────────────────────────────────────────
-      const sources = sourceIds?.length
+      const all = sourceIds?.length
         ? await this.db.select().from(newsSourcesTable).where(inArray(newsSourcesTable.id, sourceIds))
         : await this.db.select().from(newsSourcesTable).where(eq(newsSourcesTable.enabled, true));
+      // X rows need a key. Without one they are skipped — logged, not an error —
+      // and the run carries on with RSS.
+      const xRows = all.filter((s) => s.kind !== "rss");
+      const sources = provider ? all : all.filter((s) => s.kind === "rss");
+      if (!provider && xRows.length) push("info", `${xRows.length} X account(s) skipped — no X key set (X_BEARER_TOKEN / TWITTERAPI_IO_KEY)`);
       c.accountsTotal = sources.length;
-      if (!sources.length) push("warn", sourceIds?.length ? "none of the requested accounts exist" : "no enabled accounts");
+      if (!all.length) push("warn", sourceIds?.length ? "none of the requested sources exist" : "no enabled sources");
 
       // ── 2. fetch, one account at a time ────────────────────────────────
       const since = new Date(Date.now() - settings.lookbackHours * 3_600_000);
@@ -126,23 +159,47 @@ export class NewsRunnerService {
       let stopReason: string | null = null;
 
       for (const src of sources) {
+        const label = sourceLabel(src);
+        if (src.kind === "rss") {
+          try {
+            const res = await rss.fetchFeed(src.feedUrl!, {
+              etag: src.httpEtag, lastModified: src.httpLastModified, since, max: settings.maxPerAccount, displayName: src.displayName,
+            });
+            c.accountsOk++;
+            c.fetched += res.items.length;
+            fetched.push(...res.items.map((t) => ({ ...t, sourceId: src.id })));
+            await this.afterRssFetch(src, res);
+            push("info", res.notModified ? "not modified since last run (304)"
+              : `fetched ${res.items.length} item(s)${res.skipped ? `, ${res.skipped} older or over the cap` : ""}`, label);
+          } catch (err) {
+            partial = true;
+            const pe = err instanceof ProviderError ? err : new ProviderError("other", (err as Error)?.message ?? String(err));
+            push("error", `${pe.kind}: ${pe.message}`, label);
+            await this.db.update(newsSourcesTable).set({ lastError: `${pe.kind}: ${pe.message}`.slice(0, 500) })
+              .where(eq(newsSourcesTable.id, src.id)).catch(() => undefined);
+            // One feed failing says nothing about the others: never stops the run.
+          }
+          await flush();
+          continue;
+        }
+        if (!provider) continue;
         if (stopReason) {
-          push("warn", `skipped: ${stopReason}`, src.handle);
+          push("warn", `skipped: ${stopReason}`, label);
           continue;
         }
         try {
-          const res = await provider.fetchLatest(src.handle, {
+          const res = await provider.fetchLatest(src.handle!, {
             sinceId: src.lastSeenTweetId, since, max: settings.maxPerAccount, userId: src.xUserId,
           });
           c.accountsOk++;
           c.fetched += res.tweets.length;
           fetched.push(...res.tweets.map((t) => ({ ...t, sourceId: src.id })));
           await this.afterFetch(src, res.profile, res.tweets, push);
-          push("info", `fetched ${res.tweets.length} post(s)${res.skipped ? `, skipped ${res.skipped} retweet/reply` : ""}`, src.handle);
+          push("info", `fetched ${res.tweets.length} post(s)${res.skipped ? `, skipped ${res.skipped} retweet/reply` : ""}`, label);
         } catch (err) {
           partial = true;
           const pe = err instanceof ProviderError ? err : new ProviderError("other", (err as Error)?.message ?? String(err));
-          push("error", `${pe.kind}: ${pe.message}`, src.handle);
+          push("error", `${pe.kind}: ${pe.message}`, label);
           await this.db.update(newsSourcesTable).set({ lastError: `${pe.kind}: ${pe.message}`.slice(0, 500) })
             .where(eq(newsSourcesTable.id, src.id)).catch(() => undefined);
           // A rate limit or an exhausted plan will fail every remaining account
@@ -168,9 +225,13 @@ export class NewsRunnerService {
         .where(and(eq(newsItemsTable.status, "published"), gte(newsItemsTable.createdAt, new Date(Date.now() - RECENT_WINDOW_MS))))
         .orderBy(desc(newsItemsTable.createdAt))
         .limit(200);
-      const d = dedupeTweets(fetched, new Set(existing.map((e) => e.id)), recentRows.map((r) => ({ id: r.externalId, text: r.text })));
-      c.duplicates += d.exactDuplicates.length + d.nearDuplicates.length;
-      if (d.exactDuplicates.length) push("info", `${d.exactDuplicates.length} already stored — skipped`);
+      const existingIds = new Set(existing.map((e) => e.id));
+      const d = dedupeTweets(fetched, existingIds, recentRows.map((r) => ({ id: r.externalId, text: r.text })));
+      // Items stored by an earlier run are the norm for feeds (a feed lists its
+      // last N items every time) — logged, not counted as duplicates.
+      const alreadyStored = d.exactDuplicates.filter((t) => existingIds.has(t.id)).length;
+      c.duplicates += d.exactDuplicates.length - alreadyStored + d.nearDuplicates.length;
+      if (alreadyStored) push("info", `${alreadyStored} already stored — skipped`);
       for (const n of d.nearDuplicates) push("info", `${n.tweet.id} kept hidden: same story as ${n.duplicateOf}`, n.tweet.authorHandle);
 
       // ── 4. store as hidden/unjudged ────────────────────────────────────
@@ -208,6 +269,8 @@ export class NewsRunnerService {
 
       // ── 5. AI: this run's items + earlier ones the AI never judged ─────
       const queue: NormalisedTweet[] = toStore.filter((t) => insertedIds.has(t.id));
+      // The keyword filter costs nothing and cannot fail: no cap, one pass.
+      const isAi = filterKind === "ai";
       const retry = await this.db.select().from(newsItemsTable).where(and(
         isNull(newsItemsTable.aiRelevant),
         eq(newsItemsTable.status, "hidden"),
@@ -220,13 +283,13 @@ export class NewsRunnerService {
         queue.push({
           id: r.externalId, url: r.url ?? "", text: r.text, lang: r.lang, postedAt: r.postedAt?.toISOString() ?? null,
           authorHandle: r.authorHandle ?? "", authorName: r.authorName, authorAvatarUrl: r.authorAvatarUrl,
-          media: r.media ?? [], metrics: r.metrics ?? { likes: 0, retweets: 0, replies: 0, views: null },
+          media: r.media ?? [], metrics: r.metrics ?? null,
         });
       }
 
       // The run's cost bound. What is over the cap stays hidden and unjudged
       // (no attempt counted); the next run's retry picks it up.
-      const { send, deferred } = capQueue(queue, cfg.maxAiItemsPerRun);
+      const { send, deferred } = isAi ? capQueue(queue, cfg.maxAiItemsPerRun) : { send: queue, deferred: [] };
       if (deferred.length) {
         partial = true;
         push("warn", `AI cap reached: ${cfg.maxAiItemsPerRun} item(s) per run (NEWS_MAX_AI_ITEMS_PER_RUN) — ${deferred.length} left hidden for the next run`);
@@ -268,7 +331,7 @@ export class NewsRunnerService {
               aiRelevant: v.relevant, aiScore: v.score, aiCategory: v.category,
               aiTitleAr: v.titleAr || null, aiTitleEn: v.titleEn || null,
               aiSummaryAr: v.summaryAr || null, aiSummaryEn: v.summaryEn || null,
-              aiTags: v.tags, aiReason: reason, status,
+              aiTags: v.tags, aiReason: reason, status, filterKind,
             }).where(and(eq(newsItemsTable.externalId, id), isNull(newsItemsTable.aiRelevant)));
             if (status === "published") recentTitles.unshift({ externalId: id, title: v.titleEn || v.titleAr });
           }
@@ -277,14 +340,16 @@ export class NewsRunnerService {
             push("warn", `AI returned no verdict for ${out.missing.length} item(s) — kept hidden`);
             await this.markAiFailure(out.missing, "AI returned no verdict", true);
           }
-          push("info", `AI batch ${label}: ${out.verdicts.size} verdict(s), ${out.usage.input}/${out.usage.output} tokens`);
+          push("info", isAi
+            ? `AI batch ${label}: ${out.verdicts.size} verdict(s), ${out.usage.input}/${out.usage.output} tokens`
+            : `keyword filter: ${out.verdicts.size} item(s) judged`);
         },
-      });
+      }, isAi ? {} : { batchSize: 200 });
 
       // ── 6. finish ──────────────────────────────────────────────────────
       const status = c.accountsTotal > 0 && c.accountsOk === 0 ? "failed" : partial ? "partial" : "success";
       push(status === "success" ? "info" : "warn",
-        `done: ${c.accountsOk}/${c.accountsTotal} accounts, ${c.fetched} fetched, ${c.newItems} new, ${c.published} published, ${c.rejected} rejected, ${c.duplicates} duplicates`);
+        `done: ${c.accountsOk}/${c.accountsTotal} sources, ${c.fetched} fetched, ${c.newItems} new, ${c.published} published, ${c.rejected} rejected, ${c.duplicates} duplicates`);
       await this.db.update(newsJobRunsTable).set({
         ...c, status, finishedAt: new Date(), log,
         error: status === "failed" ? "every account failed — see log" : null,
@@ -305,6 +370,18 @@ export class NewsRunnerService {
     }
   }
 
+  /** Feed bookkeeping: validators for the next conditional GET, site, a blank name. */
+  private async afterRssFetch(src: NewsSource, res: RssFetchResult): Promise<void> {
+    const patch: Partial<typeof newsSourcesTable.$inferInsert> = { lastFetchedAt: new Date(), lastError: null };
+    if (!res.notModified) {
+      patch.httpEtag = res.etag;
+      patch.httpLastModified = res.lastModified;
+      if (res.siteUrl && res.siteUrl !== src.siteUrl) patch.siteUrl = res.siteUrl;
+      if (res.title && !src.displayName) patch.displayName = res.title.slice(0, 120);
+    }
+    await this.db.update(newsSourcesTable).set(patch).where(eq(newsSourcesTable.id, src.id));
+  }
+
   /** Source bookkeeping after a successful fetch, incl. a rename seen on X. */
   private async afterFetch(
     src: NewsSource,
@@ -322,7 +399,7 @@ export class NewsRunnerService {
 
     // Fetched by user id, the timeline reports the account's CURRENT username.
     const current = tweets[0]?.authorHandle;
-    if (current && current !== src.handle && /^[a-z0-9_]{1,15}$/.test(current)) {
+    if (src.handle && current && current !== src.handle && /^[a-z0-9_]{1,15}$/.test(current)) {
       const [clash] = await this.db.select({ id: newsSourcesTable.id }).from(newsSourcesTable).where(eq(newsSourcesTable.handle, current));
       if (!clash) {
         patch.handle = current;
@@ -360,5 +437,16 @@ export class NewsRunnerService {
     if (created) return created;
     const [again] = await this.db.select().from(newsJobSettingsTable).where(eq(newsJobSettingsTable.id, 1));
     return again;
+  }
+}
+
+/** How a source is named in the run log: @handle for X, the host for a feed. */
+export function sourceLabel(src: Pick<NewsSource, "kind" | "handle" | "feedUrl" | "displayName">): string {
+  if (src.kind !== "rss") return src.handle ?? "?";
+  if (src.displayName) return src.displayName;
+  try {
+    return new URL(src.feedUrl ?? "").hostname.replace(/^www\./, "");
+  } catch {
+    return src.feedUrl ?? "feed";
   }
 }

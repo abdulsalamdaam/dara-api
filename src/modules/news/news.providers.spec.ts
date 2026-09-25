@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normaliseXTimeline, XApiProvider } from "./providers/x-api.provider";
 import { normaliseTwitterApiIo, TwitterApiIoProvider } from "./providers/twitterapiio.provider";
-import { readNewsConfig } from "./news.config";
+import { NO_SOURCE_MISSING, readNewsConfig, readNewsFilter } from "./news.config";
 import { ProviderError } from "./news.types";
 
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, "__fixtures__", name), "utf8"));
@@ -101,21 +101,59 @@ describe("twitterapi.io normalisation", () => {
 });
 
 describe("readNewsConfig", () => {
-  it("reports every missing var", () => {
+  it("with no key and no RSS source, only the missing source blocks (keyword filter needs nothing)", () => {
     const c = readNewsConfig({});
     assert.equal(c.provider, null);
-    assert.deepEqual(c.configured, { source: false, ai: false, missing: ["X_BEARER_TOKEN or TWITTERAPI_IO_KEY", "ANTHROPIC_API_KEY"] });
+    assert.equal(c.filter, "keyword");
+    assert.deepEqual(c.configured, { source: false, ai: true, missing: [NO_SOURCE_MISSING] });
   });
   it("picks the provider from whichever key is present", () => {
     const c = readNewsConfig({ TWITTERAPI_IO_KEY: "k", ANTHROPIC_API_KEY: "a" });
     assert.equal(c.provider, "twitterapiio");
+    assert.equal(c.filter, "ai");
     assert.deepEqual(c.configured, { source: true, ai: true, missing: [] });
     assert.equal(c.model, "claude-sonnet-5");
   });
-  it("an explicit provider without its key is missing that key", () => {
-    const c = readNewsConfig({ NEWS_SOURCE_PROVIDER: "x", TWITTERAPI_IO_KEY: "k", ANTHROPIC_API_KEY: "a", NEWS_AI_MODEL: "claude-sonnet-5" });
-    assert.equal(c.provider, "x");
-    assert.deepEqual(c.configured.missing, ["X_BEARER_TOKEN"]);
-    assert.equal(c.model, "claude-sonnet-5");
+  it("an explicit provider without its key blocks only when there is no RSS source", () => {
+    const env = { NEWS_SOURCE_PROVIDER: "x", TWITTERAPI_IO_KEY: "k", ANTHROPIC_API_KEY: "a", NEWS_AI_MODEL: "claude-sonnet-5" };
+    const c = readNewsConfig(env);
+    assert.equal(c.provider, null);
+    assert.deepEqual(c.configured.missing, ["X_BEARER_TOKEN, or an enabled RSS source"]);
+    const withRss = readNewsConfig(env, { rssEnabled: 2 });
+    assert.deepEqual(withRss.configured, { source: true, ai: true, missing: [] });
+    assert.deepEqual(withRss.warnings, ["X sources are skipped — X_BEARER_TOKEN"]);
+  });
+  it("RSS alone is a configured source", () => {
+    const c = readNewsConfig({}, { rssEnabled: 1 });
+    assert.equal(c.xConfigured, false);
+    assert.deepEqual(c.configured, { source: true, ai: true, missing: [] });
+    assert.deepEqual(c.warnings, []);
+  });
+});
+
+describe("NEWS_FILTER mode selection", () => {
+  const rss = { rssEnabled: 1 };
+  it("auto = Claude when ANTHROPIC_API_KEY is set, else keyword", () => {
+    assert.equal(readNewsConfig({}, rss).filter, "keyword");
+    assert.equal(readNewsConfig({ ANTHROPIC_API_KEY: "a" }, rss).filter, "ai");
+    assert.equal(readNewsConfig({ NEWS_FILTER: "auto", ANTHROPIC_API_KEY: " " }, rss).filter, "keyword");
+    assert.equal(readNewsConfig({ NEWS_FILTER: " AUTO " }, rss).filterSetting, "auto");
+  });
+  it("keyword is forced even with a key", () => {
+    const c = readNewsConfig({ NEWS_FILTER: "keyword", ANTHROPIC_API_KEY: "a" }, rss);
+    assert.equal(c.filter, "keyword");
+    assert.equal(c.configured.ai, true);
+  });
+  it("ai without a key blocks the run", () => {
+    const c = readNewsConfig({ NEWS_FILTER: "ai" }, rss);
+    assert.equal(c.filter, "ai");
+    assert.deepEqual(c.configured, { source: true, ai: false, missing: ["ANTHROPIC_API_KEY"] });
+  });
+  it("an unknown value falls back to auto with a warning", () => {
+    const c = readNewsConfig({ NEWS_FILTER: "claude", ANTHROPIC_API_KEY: "a" }, rss);
+    assert.equal(c.filterSetting, "auto");
+    assert.equal(c.filter, "ai");
+    assert.ok(c.warnings.some((w) => w.includes("NEWS_FILTER")));
+    assert.equal(readNewsFilter("nope"), null);
   });
 });

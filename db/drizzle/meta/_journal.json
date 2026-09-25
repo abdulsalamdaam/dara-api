@@ -435,6 +435,13 @@
       "when": 1779141600000,
       "tag": "0061_re_news",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1779141660000,
+      "tag": "0062_re_news_rss",
+      "breakpoints": true
     }
   ]
 }

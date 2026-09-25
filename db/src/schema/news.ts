@@ -1,25 +1,40 @@
 import {
   pgTable, text, uuid, boolean, integer, timestamp, jsonb, index, uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /**
- * Real-estate news — a daily job pulls posts from admin-managed X accounts, a
- * Claude filter keeps the Saudi real-estate ones and writes a bilingual title +
- * summary, and landlords read the result as a feed.
+ * Real-estate news — a daily job pulls posts from admin-managed X accounts and
+ * RSS/Atom feeds, a filter (Claude, or the free keyword lexicon) keeps the Saudi
+ * real-estate ones and titles them, and landlords read the result as a feed.
  *
  * Four tables, all owned by `src/modules/news`. Created by
- * `db/drizzle/0061_re_news.sql`, which `ensureSchema` also runs on every boot
- * (it is idempotent), so a deploy needs no manual SQL.
+ * `db/drizzle/0061_re_news.sql` + `0062_re_news_rss.sql`, which `ensureSchema`
+ * runs on every boot (both idempotent), so a deploy needs no manual SQL.
  */
 
 export type NewsMedia = { type: string; url: string | null; preview_url: string | null };
 export type NewsMetrics = { likes: number; retweets: number; replies: number; views: number | null };
 export type NewsRunLogEntry = { at: string; level: "info" | "warn" | "error"; message: string; handle?: string };
 
-/** One X account the job reads. `handle` is stored normalised: no @, lowercase. */
+/**
+ * One source the job reads: an X account (`kind = 'x'`, `handle` stored
+ * normalised: no @, lowercase) or an RSS/Atom feed (`kind = 'rss'`, `feedUrl`,
+ * no handle). Columns 0062 added are the rss ones plus `kind`.
+ */
 export const newsSourcesTable = pgTable("news_sources", {
   id: uuid("id").primaryKey().defaultRandom(),
-  handle: text("handle").notNull(),
+  /** 'x' | 'rss' */
+  kind: text("kind").notNull().default("x"),
+  /** X rows only (NULL for rss). */
+  handle: text("handle"),
+  /** RSS rows only: the feed URL (unique among rss rows). */
+  feedUrl: text("feed_url"),
+  /** RSS rows: the feed's own website (channel link) — the web shows its favicon. */
+  siteUrl: text("site_url"),
+  /** RSS conditional GET validators from the last 200 response. */
+  httpEtag: text("http_etag"),
+  httpLastModified: text("http_last_modified"),
   displayName: text("display_name"),
   avatarUrl: text("avatar_url"),
   /** X's numeric user id, cached after the first lookup (saves a call per run). */
@@ -34,6 +49,7 @@ export const newsSourcesTable = pgTable("news_sources", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   uniqHandle: uniqueIndex("news_sources_handle_uniq").on(t.handle),
+  uniqFeed: uniqueIndex("news_sources_feed_url_uniq").on(t.feedUrl).where(sql`${t.kind} = 'rss'`),
 }));
 
 export const newsJobRunsTable = pgTable("news_job_runs", {
@@ -84,6 +100,8 @@ export const newsItemsTable = pgTable("news_items", {
   aiReason: text("ai_reason"),
   /** Failed AI reviews. At AI_MAX_ATTEMPTS the item is given up: hidden, never retried. */
   aiAttempts: integer("ai_attempts").notNull().default(0),
+  /** Which filter judged it: 'ai' (Claude) | 'keyword' (free lexicon). NULL = not judged. */
+  filterKind: text("filter_kind"),
   /** 'published' | 'rejected' | 'hidden' */
   status: text("status").notNull().default("hidden"),
   pinned: boolean("pinned").notNull().default(false),

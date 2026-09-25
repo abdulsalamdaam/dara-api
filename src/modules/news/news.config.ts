@@ -3,63 +3,108 @@ import { XApiProvider } from "./providers/x-api.provider";
 import { TwitterApiIoProvider } from "./providers/twitterapiio.provider";
 
 /**
- * Which source + AI the job would use, read from the environment each time
+ * Which sources + filter the job would use, read from the environment each time
  * (so a Coolify env change + restart is all it takes, and a spec can set env).
  *
  *   NEWS_SOURCE_PROVIDER  x | twitterapiio   (default: whichever key is set, X first)
  *   X_BEARER_TOKEN        for `x`
  *   TWITTERAPI_IO_KEY     for `twitterapiio`
- *   ANTHROPIC_API_KEY     the AI filter
+ *   NEWS_FILTER           auto (default) | keyword | ai — auto = Claude when
+ *                         ANTHROPIC_API_KEY is set, else the free keyword filter
+ *   ANTHROPIC_API_KEY     the Claude filter
  *   NEWS_AI_MODEL         default DEFAULT_NEWS_MODEL
  *   NEWS_MAX_AI_ITEMS_PER_RUN  posts sent to the AI per run, default
  *                         DEFAULT_MAX_AI_ITEMS (the rest wait for the next run)
+ *
+ * RSS feeds need no key, so whether the job can run at all also depends on
+ * the source rows: pass `rssEnabled` (enabled rss rows). `missing` lists only
+ * what blocks EVERY run; a problem that only disables X (no key, a typo in
+ * NEWS_SOURCE_PROVIDER) is a `warning` while RSS can carry the run.
  */
 export const DEFAULT_NEWS_MODEL = "claude-sonnet-5";
 export const DEFAULT_MAX_AI_ITEMS = 150;
 const MAX_AI_ITEMS_CEILING = 2000;
 
 export type ProviderName = "x" | "twitterapiio";
+export type FilterKind = "ai" | "keyword";
+export type FilterSetting = "auto" | FilterKind;
+
+export const NO_SOURCE_MISSING = "an enabled RSS source, or X_BEARER_TOKEN / TWITTERAPI_IO_KEY";
 
 export interface NewsConfig {
+  /** The X provider, when its key is set; null = X rows are skipped. */
   provider: ProviderName | null;
+  /** The filter a run would use now. */
+  filter: FilterKind;
+  /** NEWS_FILTER as read (invalid → auto, with a warning). */
+  filterSetting: FilterSetting;
   model: string;
   /** Hard cap on posts sent to the AI in one run — the run's cost bound. */
   maxAiItemsPerRun: number;
+  /** X usable (a provider and its key). */
+  xConfigured: boolean;
+  /** source = some usable source kind; ai = the chosen filter can run. */
   configured: { source: boolean; ai: boolean; missing: string[] };
+  /** Non-blocking problems, for the admin status header. */
+  warnings: string[];
 }
 
-export function readNewsConfig(env: NodeJS.ProcessEnv = process.env): NewsConfig {
+export function readNewsFilter(raw: string | undefined): FilterSetting | null {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (!t || t === "auto") return "auto";
+  if (t === "keyword" || t === "ai") return t;
+  return null;
+}
+
+export function readNewsConfig(env: NodeJS.ProcessEnv = process.env, sources: { rssEnabled?: number } = {}): NewsConfig {
   const xKey = (env.X_BEARER_TOKEN ?? "").trim();
   const ioKey = (env.TWITTERAPI_IO_KEY ?? "").trim();
   const wanted = (env.NEWS_SOURCE_PROVIDER ?? "").trim().toLowerCase();
+  const aiKey = !!(env.ANTHROPIC_API_KEY ?? "").trim();
+  const rss = Math.max(0, sources.rssEnabled ?? 0);
   const missing: string[] = [];
+  const warnings: string[] = [];
 
+  // ── X ────────────────────────────────────────────────────────────────
   let provider: ProviderName | null;
+  let xProblem: string | null = null;
   if (wanted === "x" || wanted === "twitterapiio") provider = wanted;
   else if (wanted) {
     provider = null;
-    missing.push("NEWS_SOURCE_PROVIDER (must be 'x' or 'twitterapiio')");
+    xProblem = "NEWS_SOURCE_PROVIDER (must be 'x' or 'twitterapiio')";
   } else provider = xKey ? "x" : ioKey ? "twitterapiio" : null;
 
-  let source = false;
+  let xConfigured = false;
   if (provider === "x") {
-    source = !!xKey;
-    if (!source) missing.push("X_BEARER_TOKEN");
+    xConfigured = !!xKey;
+    if (!xConfigured) xProblem = "X_BEARER_TOKEN";
   } else if (provider === "twitterapiio") {
-    source = !!ioKey;
-    if (!source) missing.push("TWITTERAPI_IO_KEY");
-  } else if (!wanted) {
-    missing.push("X_BEARER_TOKEN or TWITTERAPI_IO_KEY");
+    xConfigured = !!ioKey;
+    if (!xConfigured) xProblem = "TWITTERAPI_IO_KEY";
   }
+  const source = xConfigured || rss > 0;
+  if (!source) missing.push(xProblem && wanted ? `${xProblem}, or an enabled RSS source` : NO_SOURCE_MISSING);
+  else if (xProblem) warnings.push(`X sources are skipped — ${xProblem}`);
 
-  const ai = !!(env.ANTHROPIC_API_KEY ?? "").trim();
+  // ── filter ───────────────────────────────────────────────────────────
+  let filterSetting = readNewsFilter(env.NEWS_FILTER);
+  if (!filterSetting) {
+    warnings.push("NEWS_FILTER must be 'auto', 'keyword' or 'ai' — using auto");
+    filterSetting = "auto";
+  }
+  const filter: FilterKind = filterSetting === "auto" ? (aiKey ? "ai" : "keyword") : filterSetting;
+  const ai = filter === "keyword" || aiKey;
   if (!ai) missing.push("ANTHROPIC_API_KEY");
 
   return {
-    provider,
+    provider: xConfigured ? provider : null,
+    filter,
+    filterSetting,
     model: (env.NEWS_AI_MODEL ?? "").trim() || DEFAULT_NEWS_MODEL,
     maxAiItemsPerRun: readMaxAiItems(env.NEWS_MAX_AI_ITEMS_PER_RUN),
+    xConfigured,
     configured: { source, ai, missing },
+    warnings,
   };
 }
 
@@ -73,7 +118,7 @@ export function readMaxAiItems(raw: string | undefined): number {
 }
 
 export function buildProvider(cfg: NewsConfig, env: NodeJS.ProcessEnv = process.env): SourceProvider | null {
-  if (!cfg.configured.source) return null;
+  if (!cfg.xConfigured) return null;
   if (cfg.provider === "x") return new XApiProvider(env.X_BEARER_TOKEN!.trim());
   if (cfg.provider === "twitterapiio") return new TwitterApiIoProvider(env.TWITTERAPI_IO_KEY!.trim());
   return null;

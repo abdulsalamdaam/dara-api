@@ -24,7 +24,11 @@ export interface NormalisedTweet {
   authorName: string | null;
   authorAvatarUrl: string | null;
   media: Array<{ type: string; url: string | null; preview_url: string | null }>;
-  metrics: { likes: number; retweets: number; replies: number; views: number | null };
+  /** X only; RSS items have none. */
+  metrics: { likes: number; retweets: number; replies: number; views: number | null } | null;
+  /** RSS only: the headline and the cleaned description, kept apart for the keyword filter. */
+  title?: string | null;
+  summary?: string | null;
 }
 
 export interface SourceProfile {

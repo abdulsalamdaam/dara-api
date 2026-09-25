@@ -39,6 +39,7 @@
     "class-validator": "^0.14.2",
     "drizzle-orm": "^0.45.1",
     "drizzle-zod": "^0.8.3",
+    "fast-xml-parser": "^5.11.1",
     "multer": "^2.1.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",

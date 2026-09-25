@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?><feed
+	xmlns="http://www.w3.org/2005/Atom"
+	xmlns:thr="http://purl.org/syndication/thread/1.0"
+	xml:lang="en-US"
+	>
+	<title type="text">The Verge</title>
+	<subtitle type="text">The Verge is about technology and how it makes us feel. Founded in 2011, we offer our audience everything from breaking news to reviews to award-winning features and investigations, on our site, in video, and in podcasts.</subtitle>
+
+	<updated>2026-09-25T19:09:57+00:00</updated>
+
+	<link rel="alternate" type="text/html" href="https://www.theverge.com" />
+	<id>https://www.theverge.com/rss/index.xml</id>
+	<link rel="self" type="application/atom+xml" href="https://www.theverge.com/rss/index.xml" />
+
+	<icon>https://platform.theverge.com/wp-content/uploads/sites/2/2025/01/verge-rss-large_80b47e.png?w=150&amp;h=150&amp;crop=1</icon>
+		<entry>
+			
+			<author>
+				<name>Brad Bourque</name>
+			</author>
+			
+			<author>
+				<name>Cameron Faulkner</name>
+			</author>
+			
+			<title type="html"><![CDATA[Roku&#8217;s first OLED TVs are up to $400 off, starting at $699]]></title>
+			<link rel="alternate" type="text/html" href="https://www.theverge.com/gadgets/1000859/roku-pro-series-oled-nothing-phone-4a-pro-deal-sale" />
+			<id>https://www.theverge.com/?p=1000859</id>
+			<updated>2026-09-25T14:18:57-04:00</updated>
+			<published>2026-09-25T14:18:57-04:00</published>
+			<category scheme="https://www.theverge.com" term="Deals" /><category scheme="https://www.theverge.com" term="Gadgets" /><category scheme="https://www.theverge.com" term="TVs" /><category scheme="https://www.theverge.com" term="Verge Shopping" />
+							<summary type="html"><![CDATA[Roku recently launched its first-ever OLED TVs. The $999 starting price was already impressive for the 55-inch Pro Series model that has a 120Hz refresh rate OLED panel (with four HDMI 2.1 ports and support for Dolby Vision and HDR 10 Plus). The price is even lower right now at Amazon when you enter the [&#8230;]]]></summary>
+			
+							<content type="html">
+											<![CDATA[
+
+						
+<figure>
+
+<img alt="" data-caption="Roku’s new OLED TVs are already marked down. | Image: The Verge" data-portal-copyright="Image: The Verge" data-has-syndication-rights="1" src="https://platform.theverge.com/wp-content/uploads/sites/2/2026/09/Roku-Pro-Series-2026-oled-roundup.png?quality=90&#038;strip=all&#038;crop=0,0,100,100" />
+	<figcaption>
+	Roku’s new OLED TVs are already marked down. | Image: The Verge	</figcaption>
+</figure>
+<p class="wp-block-paragraph">Roku recently launched its first-ever OLED TVs. The $999 starting price was already impressive for the 55-inch Pro Series model that has a 120Hz refresh rate OLED panel (with four HDMI 2.1 ports and support for Dolby Vision and HDR 10 Plus). The price is even lower right now at <a href="https://www.amazon.com/gp/product/B0GVW1M8JF">Amazon</a> when you enter the code <strong>ROKUOLED300</strong> at checkout. It knocks a clean $300 off, as the code indicates, making this the most affordable modern 55-inch OLED you can get right now.</p>
+
+<p class="wp-block-paragraph">If you&#8217;re more of a 65-inch TV kind of person, you&#8217;re in luck, as there&#8217;s a code that knocks $400 <a href="https://www.amazon.com/gp/product/B0GVW1GGPN">off that model</a> to make it just $799 at checkout. Enter the code <strong>ROKUOLED400</strong> to bring the $1,299 65-inch Pro Series down to $799. We haven&#8217;t had a chance to test either model, but they seem respectable if you want great picture quality without breaking the bank.</p>
+<div class="product-block"><h3>Roku Pro Series OLED (2026)</h3>
+<figure class="product-image"><img width="300" height="300" src="https://platform.theverge.com/wp-content/uploads/sites/2/2026/09/Roku-Pro-Series-2026-oled-product.png?w=300" class="attachment-medium size-medium" alt="" /></figure>
+<h3>Where to Buy:</h3><ul><li><a href="https://www.amazon.com/gp/product/B0GVW1M8JF"> <strike>$999.99</strike> $699.99 at <strong>Amazon (55-inch, with code ROKUOLED300)</strong></a></li><li><a href="https://www.amazon.com/gp/product/B0GVW1GGPN"> <strike>$1199.99</strike> $799.99 at <strong>Amazon (65-inch, with code ROKUOLED400)</strong></a></li></ul></div>
+<p class="wp-block-paragraph">Given that these are Roku TVs, the company&#8217;s software is built-in, negating the need to stick a streaming device into one of its HDMI ports, unless you prefer hardware from other brands. The Pro Series includes a backlit Roku remote, and it supports auto low latency mode, and has variable refresh rate (AMD FreeSync Premium) for gaming. There&#8217;s a pricier Pro Series LX coming in October starting at $1,299 that claims to be twice as bright as the Pro Series, with a reflection-reducing polarizer and 144Hz refresh rate.</p>
+
+<div id="hype-desk-root"></div>
+
+  window.HYPE_DESK_CONFIG = {
+    productImageUrl: "https://platform.theverge.com/wp-content/uploads/sites/2/2026/09/Corsair_Xeneon_Edge_Hype_Desk_16x9.jpg",
+    productImageAlt: "CORSAIR Xeneon Edge 14.5-inch LCD Touchscreen",
+    productTitle: "CORSAIR Xeneon Edge 14.5-inch LCD Touchscreen",
+    shortDescription: "The sidekick your battlestation has been waiting for.",
+    longDescription: "Your main monitor does the heavy lifting. The Xeneon Edge handles everything else. CORSAIR's 14.5-inch ultrawide touchscreen sticks magnetically to any metal surface — the side of your case, a PSU shroud, a monitor arm, or your desk — and instantly becomes a live dashboard for system stats, Twitch chat, weather, calendars, and more. The 2560x720 AHVA panel looks sharp from every angle, and 5-point capacitive touch makes flipping between widgets effortless. With CORSAIR iCUE, you can build out fully custom widget layouts — and the library just keeps growing. 20+ new widgets recently dropped, and the community can now create and share their own. It even runs as a Virtual Stream Deck via Elgato, turning it into an unlimited key layout for your most-used shortcuts and apps. Use code EDGE10 at checkout for 10% off at corsair.com through the end of the month.",
+    purchaseUrl: "https://go.corsair.com/c/482924/490888/8513?subId1=CorsairHypeDesk&amp;subId2=Article92826&amp;u=https%3A%2F%2Fwww.corsair.com%2Fus%2Fen%2Fp%2Fmonitors%2Fcc-9011306-ww%2Fxeneon-edge-14-5-lcd-touchscreen-cc-9011306-ww&amp;partnerpropertyid=7032191",
+    purchaseLinkText: "SHOP AT CORSAIR"
+  };
+
+
+
+<hr class="wp-block-separator has-alpha-channel-opacity" />
+
+<h2 class="wp-block-heading">Other deals to consider</h2>
+
+<ul class="wp-block-list">
+<li>The <strong>Nothing Phone 4A Pro</strong> got its first big discount at Amazon. The <a href="https://www.amazon.com/Nothing-Unlocked-Smartphone-Triple-Lens-Dual-SIM/dp/B0GFWQ77ZM">base model</a> with 8GB of memory and 128GB of storage is $449 (usually $499), and the <a href="https://www.amazon.com/Nothing-Unlocked-Smartphone-Triple-Lens-Dual-SIM/dp/B0GFWBXG3B/?th=1">upgraded model</a> with 12GB of memory and 256GB of storage is $509 (usually $599). The Phone 4A Pro borrows the high-end version’s signature feature, its Glyph Matrix, which displays the time, battery life, or notification icons. My colleague Dominic Preston <a href="https://www.theverge.com/tech/896626/nothing-phone-4a-pro-review-design-specs-battery-camera">reviewed the 4A Pro</a>, and appreciated its fun and unique design, slim build, and excellent display.</li>
+
+
+
+<li>Amazon has a variety of <strong>DJI Osmo Nano </strong>video camera bundles on sale. The <a href="https://www.amazon.com/dp/B0FBFZM45S">most basic option for $349</a> includes the camera, which has 64GB of internal storage, the Vision Dock with a built-in screen, a magnetic ball joint mount, a protective case, USB-C cable, and two magnetic mounting options. This tiny video camera has earned a reputation for offering surprisingly rich video quality despite its tiny size and affordable price point.</li>
+
+
+
+<li>You can grab an <strong>Ember Warming Mug</strong> for just $34.99 at <a href="https://home.woot.com/offers/ember-temperature-control-smart-cup-6-oz">Woot</a>, a significant discount from its list price of $129.99. This six ounce mug can keep your coffee or tea toasty for up to 90 minutes on a single charge, with an adjustable temperature range of 120 to 140 degrees Fahrenheit.</li>
+</ul>
+						]]>
+									</content>
+			
+					</entry>
+<entry>
+			
+			<author>
+				<name>Jacob Kastrenakes</name>
+			</author>
+			
+			<title type="html"><![CDATA[Phones don’t have lights]]></title>
+			<link rel="alternate" type="text/html" href="https://www.theverge.com/podcast/1000751/vergecast-meta-connect-muse-googlebooks" />
+			<id>https://www.theverge.com/?p=1000751</id>
+			<updated>2026-09-25T14:06:58-04:00</updated>
+			<published>2026-09-25T13:42:59-04:00</published>
+			<category scheme="https://www.theverge.com" term="Podcasts" /><category scheme="https://www.theverge.com" term="Vergecast" />
+							<summary type="html"><![CDATA[Mark Zuckerberg has a new defense of the Ray-Ban Meta glasses: They're actually doing more to signal they're taking a photo than phones do. He's brought this up in at least two recent interviews, noting that the glasses have a light that comes on to signal when a photo is being taken, while phones do [&#8230;]]]></summary>
+			
+							<content type="html">
+											<![CDATA[
+
+						
+<figure>
+
+<img alt="" data-caption="" data-portal-copyright="Image: Alex Parkin / The Verge" data-has-syndication-rights="1" src="https://platform.theverge.com/wp-content/uploads/sites/2/2026/09/VRG_VST_0925_Site.jpg?quality=90&#038;strip=all&#038;crop=0,0,100,100" />
+	<figcaption>
+		</figcaption>
+</figure>
+<p class="wp-block-paragraph">Mark Zuckerberg has a new defense of the Ray-Ban Meta glasses: They're actually doing <em>more </em>to signal they're taking a photo than phones do. He's brought this up in at least two recent interviews, noting that the glasses have a light that comes on to signal when a photo is being taken, while phones do not. In one of the interviews, <a href="https://www.youtube.com/watch?v=2cg56uF4hlc">Joanna Stern</a> notes that, while phones do not always emit a light, someone does have to hold a phone up in the air, which is itself pretty noticeable.</p>
+<p class="wp-block-paragraph">On today's <em>Vergecast</em>, we're talking about Meta Connect, the Muse AI assistant, all the new smart glasses hardware, and Zuckerberg's response to the privacy uproar ar …</p>
+<p><a href="https://www.theverge.com/podcast/1000751/vergecast-meta-connect-muse-googlebooks">Read the full story at The Verge.</a></p>
+						]]>
+									</content>
+			
+					</entry>
+	</feed>
