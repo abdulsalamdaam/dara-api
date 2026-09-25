@@ -442,22 +442,21 @@ custom text yet. Validated: sample-matrix cases 21/22 (OOS text with `& < > "`
 and Arabic), CI run 36192523144, all PASSED. Also fixed: the OOS Arabic text
 reads "غير الخاضعة" (was "الغير خاضعة").
 
-**The web form** (`CreateInvoiceModal`, `lib/vat-exemption.ts`): one "VAT
-treatment" select per line — "ضريبة 15%" or a reason — replaced the per-line
-15% checkbox + separate reason dropdown, so VAT-off and reason can't disagree.
-Offered first: SA-30 (residential lease, incl. its bundled services/utilities)
-and OOS (refundable deposit, pass-through paid on the tenant's behalf,
-penalty); SA-29/29-7/33/32 sit under "other" (`rare: true`) only so older
-documents still display — rent on Saudi property is never an export, whoever
-the tenant is. Commercial rent, commissions, brokerage and separate services
-are 15% and need no reason. The free-text box shows only for OOS
-(`allowsReasonText`). The form refuses on save what approval would refuse (two
-reasons / two wordings in one category); shows an unlisted code (Ejar, old
-docs) as itself rather than letting the select fall back to "15%"; reads a
-category-O line with no code as OOS; and keeps reasons when an all-exempt
-document is edited with VAT off. The utility/penalty guidance is the usual
-reading of the rules, not a ruling — facts decide; point landlords to their
-accountant.
+**The web form.** Staging (`master`) and production (`main`) differ here —
+take `master`'s version when syncing the branches. On `master` each line uses
+`VatTreatmentPicker`: a category (15% / 0% / exempt / out of scope), then a
+reason for 0% or exempt. The document-wide VAT checkbox is gone (e0c4067): it
+was a second, contradictory 15% control, since each line already states its
+treatment. A document with no 15% line adds no VAT; an all-exempt one is not
+e-invoiced. An `O` line gets an optional free-text box (≤300 chars), and out-of-
+scope lines whose wordings differ are refused on save. `main` got an interim
+single-select design (7eb9fa7) that `master` supersedes; it offered SA-30 and
+OOS first and the rest under "other", because for a landlord rent on Saudi
+property is never an export. Commercial rent, commissions, brokerage and
+separate services are 15% and need no reason. The utility and penalty
+guidance (residential utilities follow the rent as SA-30; a deposit, a
+pass-through or a penalty is OOS) is the usual reading of the rules, not a
+ruling: the facts decide, so point landlords to their accountant.
 
 **The CI validator is pinned to SDK R3.4.8** (`aashahin/zatca-sdk` mirror,
 commit + jar SHA-256), not R3.2.7 — R3.2.7 (Dec 2023) predates the format rules
