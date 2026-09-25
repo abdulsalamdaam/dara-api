@@ -425,6 +425,40 @@ The rule now (`common/vat-exemption.ts`, both repos):
 - `POST /invoices` validates category and reason per line and refuses a
   `simplified` profile when the buyer carries a VAT number.
 
+**Wording (BT-120) — only out-of-scope lines take the landlord's own words**
+(26 Sep 2026). A line's `exemptionReasonText` (≤300 chars, trimmed, control
+characters stripped) is kept ONLY on a category `O` line; on `E`/`Z` it is
+dropped, not refused, so those always print ZATCA's official text for the code.
+The reason: ZATCA's standard expects the official wording for E/Z (only OOS is
+"taxpayer free text"); the SDK's text-matches-code check exists but is
+commented out (R3.3.9 rules file), so a contradicting text would pass today and
+is still a false statement on a signed document. Limits: text 1–1000 chars
+(BR-KSA-F-06-C16); a missing text is only a warning (BR-KSA-83) — the builder
+always fills the canonical one. Because one breakdown per category carries one
+text, `exemptionReasonConflicts` also refuses O lines whose texts differ
+(custom vs default counts as different) — otherwise which line's words print
+would depend on line order. Contract fee lines (`installments.ts`) carry no
+custom text yet. Validated: sample-matrix cases 21/22 (OOS text with `& < > "`
+and Arabic), CI run 36192523144, all PASSED. Also fixed: the OOS Arabic text
+reads "غير الخاضعة" (was "الغير خاضعة").
+
+**The web form** (`CreateInvoiceModal`, `lib/vat-exemption.ts`): one "VAT
+treatment" select per line — "ضريبة 15%" or a reason — replaced the per-line
+15% checkbox + separate reason dropdown, so VAT-off and reason can't disagree.
+Offered first: SA-30 (residential lease, incl. its bundled services/utilities)
+and OOS (refundable deposit, pass-through paid on the tenant's behalf,
+penalty); SA-29/29-7/33/32 sit under "other" (`rare: true`) only so older
+documents still display — rent on Saudi property is never an export, whoever
+the tenant is. Commercial rent, commissions, brokerage and separate services
+are 15% and need no reason. The free-text box shows only for OOS
+(`allowsReasonText`). The form refuses on save what approval would refuse (two
+reasons / two wordings in one category); shows an unlisted code (Ejar, old
+docs) as itself rather than letting the select fall back to "15%"; reads a
+category-O line with no code as OOS; and keeps reasons when an all-exempt
+document is edited with VAT off. The utility/penalty guidance is the usual
+reading of the rules, not a ruling — facts decide; point landlords to their
+accountant.
+
 **The CI validator is pinned to SDK R3.4.8** (`aashahin/zatca-sdk` mirror,
 commit + jar SHA-256), not R3.2.7 — R3.2.7 (Dec 2023) predates the format rules
 BR-KSA-F-07…F-13, BR-KSA-99 and the three newest Z codes. Two traps in R3.4.x:
