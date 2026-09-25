@@ -16,7 +16,7 @@
  */
 
 // U+0610–U+061A, U+064B–U+065F, U+0670, U+06D6–U+06ED (tashkeel, Quranic marks), U+0640 tatweel.
-const TASHKEEL = /[ؐ-ًؚ-ٰٟۖ-ۭـ]/g;
+export const TASHKEEL = /[ؐ-ًؚ-ٰٟۖ-ۭـ]/g;
 
 /** Arabic + English normalisation used on both sides of every match. */
 export function normaliseForMatch(input: string): string {

@@ -220,11 +220,19 @@ export class NewsRunnerService {
         ? await this.db.select({ id: newsItemsTable.externalId }).from(newsItemsTable).where(inArray(newsItemsTable.externalId, ids))
         : [];
       const recentRows = await this.db
-        .select({ externalId: newsItemsTable.externalId, text: newsItemsTable.text, title: newsItemsTable.aiTitleEn, titleAr: newsItemsTable.aiTitleAr })
+        .select({
+          externalId: newsItemsTable.externalId, text: newsItemsTable.text, status: newsItemsTable.status,
+          title: newsItemsTable.aiTitleEn, titleAr: newsItemsTable.aiTitleAr,
+        })
         .from(newsItemsTable)
-        .where(and(eq(newsItemsTable.status, "published"), gte(newsItemsTable.createdAt, new Date(Date.now() - RECENT_WINDOW_MS))))
+        // Story clustering compares against what is on the feed AND what is held
+        // (hidden: near-duplicates, unjudged) — not against rejected items.
+        .where(and(
+          inArray(newsItemsTable.status, ["published", "hidden"]),
+          gte(newsItemsTable.createdAt, new Date(Date.now() - RECENT_WINDOW_MS)),
+        ))
         .orderBy(desc(newsItemsTable.createdAt))
-        .limit(200);
+        .limit(500);
       const existingIds = new Set(existing.map((e) => e.id));
       const d = dedupeTweets(fetched, existingIds, recentRows.map((r) => ({ id: r.externalId, text: r.text })));
       // Items stored by an earlier run are the norm for feeds (a feed lists its
@@ -232,7 +240,7 @@ export class NewsRunnerService {
       const alreadyStored = d.exactDuplicates.filter((t) => existingIds.has(t.id)).length;
       c.duplicates += d.exactDuplicates.length - alreadyStored + d.nearDuplicates.length;
       if (alreadyStored) push("info", `${alreadyStored} already stored — skipped`);
-      for (const n of d.nearDuplicates) push("info", `${n.tweet.id} kept hidden: same story as ${n.duplicateOf}`, n.tweet.authorHandle);
+      for (const n of d.nearDuplicates) push("info", `${n.tweet.id} kept hidden: same story as ${n.duplicateOf} (${n.rule})`, n.tweet.authorHandle);
 
       // ── 4. store as hidden/unjudged ────────────────────────────────────
       // Near-duplicates are stored too — hidden, never sent to the AI, with
@@ -298,6 +306,7 @@ export class NewsRunnerService {
       }
 
       const recentTitles = recentRows
+        .filter((r) => r.status === "published")
         .map((r) => ({ externalId: r.externalId, title: r.title || r.titleAr || "" }))
         .filter((r) => r.title)
         .slice(0, 60);

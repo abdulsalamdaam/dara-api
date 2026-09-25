@@ -59,12 +59,22 @@ The feature runs with **no keys at all**:
   is stripped to text.
 - Migration `0062_re_news_rss.sql` holds the v2 columns. It is idempotent, and
   `ensureSchema` runs it on boot after 0061.
-- **Local check (26 Sep 2026, throwaway DB, 15 feeds, 36 h lookback):** 132 fetched, 119
-  new, 8 published, 111 rejected, 13 near-duplicates stored hidden. The second run
-  published 0 new items: 128 were already stored and 2 feeds answered 304. **Limit:**
-  one story syndicated with different wording, such as the REDF deposit, can still
-  appear 3–5 times. The Jaccard 0.6 near-duplicate check misses short, reworded
-  headlines.
+- **Story clustering:** short, reworded headlines of one story are collapsed before the
+  filter runs. Two items are one story when they:
+  - share a distinctive figure plus a lexicon entity. Rounding and «مليارا و98 مليون» count
+    as the same figure, and entities are keyed by tag, so «الصندوق العقاري» and «صندوق
+    التنمية العقارية» are both `redf`;
+  - overlap ≥ 50% on content tokens (stopwords, months, currencies and figures dropped); or
+  - pass the old Jaccard ≥ 0.6.
+
+  Conflicting figures veto the last two rules. Clusters are single-link and are compared
+  against this run and against items stored in the last 72 h (published or hidden). The
+  canonical copy is `.gov.sa`, then a publisher's own feed or X, then Google News, and the
+  earliest wins a tie. The rest are stored hidden as "duplicate of <id>".
+- **Local check (26 Sep 2026, fresh throwaway DB, 15 feeds, 36 h lookback):** 133 fetched,
+  108 new, 4 published, 104 rejected, 25 duplicates stored hidden. The REDF deposit had
+  been 5 of 8 published items; it is now 1. The second run published 0 new items: 129
+  were already stored and 2 feeds answered 304.
 
 ## How a run works
 1. **Trigger.** A 60 s in-process tick claims a due run atomically with a conditional
