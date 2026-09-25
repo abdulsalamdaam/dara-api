@@ -1,5 +1,5 @@
 /// <reference types="multer" />
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Post, Query, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, HttpCode, Post, Query, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiTags, ApiBearerAuth, ApiConsumes, ApiBody } from "@nestjs/swagger";
 import { IsOptional, IsString, MaxLength } from "class-validator";
@@ -9,6 +9,9 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { scopeId } from "../../common/scope";
 import { UploadsService } from "./uploads.service";
 import { UploadKeyAccessService } from "./key-access.service";
+
+/** Upper bound on one `sign-batch` request — a page of cards, with margin. */
+const SIGN_BATCH_MAX = 100;
 
 class PresignPutDto {
   @IsString()
@@ -84,6 +87,37 @@ export class UploadsController {
     const ttlSeconds = ttl ? Math.max(30, Math.min(3600, Number(ttl))) : undefined;
     const url = await this.uploads.presignGet(key, ttlSeconds);
     return { key, url, expiresIn: ttlSeconds ?? 900 };
+  }
+
+  /**
+   * `sign` for many keys in one request. A page of property cards used to fire
+   * one `GET /uploads/sign` per thumbnail. Every key goes through exactly the
+   * same ownership check as `sign`; a key the caller may not read comes back
+   * with `url: null` (and is logged as a refusal, as `sign` would) rather than
+   * failing the whole batch, so one stale key cannot blank a page of photos.
+   * `@Body() body: any` on purpose — the global ValidationPipe whitelist strips
+   * every property off an undecorated DTO.
+   */
+  @Post("sign-batch")
+  @HttpCode(200)
+  async signBatch(@CurrentUser() user: AuthUser, @Body() body: any) {
+    const raw: unknown[] = Array.isArray(body?.keys) ? body.keys : [];
+    const keys = [...new Set(raw.filter((k): k is string => typeof k === "string" && k.length > 0 && k.length <= 1024))];
+    if (keys.length === 0) throw new BadRequestException("keys is required");
+    if (keys.length > SIGN_BATCH_MAX) throw new BadRequestException(`at most ${SIGN_BATCH_MAX} keys per request`);
+    const ttlNum = Number(body?.ttl);
+    const ttlSeconds = Number.isFinite(ttlNum) && body?.ttl != null ? Math.max(30, Math.min(3600, ttlNum)) : undefined;
+    const items = await Promise.all(keys.map(async (key) => {
+      try {
+        await this.keys.assertAccess(user, key, "sign");
+      } catch (err) {
+        if (err instanceof ForbiddenException) return { key, url: null as string | null, expiresIn: ttlSeconds ?? 900 };
+        throw err;
+      }
+      const url = await this.uploads.presignGet(key, ttlSeconds);
+      return { key, url: url as string | null, expiresIn: ttlSeconds ?? 900 };
+    }));
+    return { items };
   }
 
   /** Issue a signed PUT URL so the browser can upload directly to MinIO. */

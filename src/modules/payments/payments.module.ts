@@ -1,12 +1,12 @@
 import { Body, Controller, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists, sql } from "drizzle-orm";
+import { and, eq, ne, gte, lte, isNull, isNotNull, or, ilike, count, asc, desc, sum, inArray, notExists, sql } from "drizzle-orm";
 import { alias, unionAll } from "drizzle-orm/pg-core";
 import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, simpleInvoicesTable } from "@dara/database";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 const ADVANCE_NOTE = "إيجار مدفوع مقدماً";
-import { listQuerySchema, parseIdList } from "../../common/pagination";
+import { listQuerySchema, parseDateBound, parseIdList } from "../../common/pagination";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -65,6 +65,16 @@ class PaymentsController {
     if (status) conds.push(eq(liveStatusSql, status));
     else if (statusIn && statusIn.length > 0) conds.push(inArray(liveStatusSql, statusIn));
     if (contractIds && contractIds.length > 0) conds.push(inArray(paymentsTable.contractId, contractIds));
+    // `dueFrom` / `dueTo` — an inclusive YYYY-MM-DD window on the due date, for
+    // the installments calendar, which only ever shows one month but used to
+    // download every installment in the account. Deliberately NOT a
+    // pagination trigger (see `wantsPagination`): a caller that sends only the
+    // window keeps getting the bare array, just a shorter one. Like search and
+    // the status tab it narrows the rows, not the summary cards.
+    const dueFrom = parseDateBound(rawQuery?.dueFrom);
+    const dueTo = parseDateBound(rawQuery?.dueTo);
+    if (dueFrom) conds.push(gte(paymentsTable.dueDate, dueFrom));
+    if (dueTo) conds.push(lte(paymentsTable.dueDate, dueTo));
     // Deposits are not installments — they live on the contract as a receipt
     // voucher, so never surface them in the financial schedule (covers legacy
     // deposit rows created before the deposit-as-voucher change).

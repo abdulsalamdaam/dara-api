@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, isNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
+import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql } from "drizzle-orm";
 import { tenantsTable, contractsTable, simpleInvoicesTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -204,6 +204,37 @@ class TenantsController {
       total: Number(totalRow[0]?.total ?? 0),
       stats: { byType },
     };
+  }
+
+  /**
+   * The saved tenant record behind a contract's denormalised renter fields.
+   *
+   * A contract stores the renter as text (national ID, phone, name), and the
+   * portal links a contract — or a calendar installment — to the renter's
+   * profile by matching those against the tenants list. It used to download
+   * every tenant to do it. Same rule, in SQL: the newest tenant (the list's
+   * default order) whose national ID, phone or trimmed name equals the one
+   * given. Blank criteria never match. `{ tenant: null }` when nothing does.
+   */
+  @Get("match")
+  @RequirePermissions(PERMISSIONS.TENANTS_VIEW)
+  async match(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+    const nationalId = str(rawQuery?.nationalId);
+    const phone = str(rawQuery?.phone);
+    const name = str(rawQuery?.name);
+    const any: any[] = [];
+    if (nationalId) any.push(eq(tenantsTable.nationalId, nationalId));
+    if (phone) any.push(eq(tenantsTable.phone, phone));
+    if (name) any.push(sql`btrim(${tenantsTable.name}) = ${name}`);
+    if (any.length === 0) return { tenant: null };
+    const [tenant] = await this.db.select().from(tenantsTable)
+      .where(and(eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt), or(...any)))
+      .orderBy(desc(tenantsTable.createdAt), desc(tenantsTable.id))
+      .limit(1);
+    if (!tenant) return { tenant: null };
+    await attachTenantNationality(this.db, [tenant] as any[]);
+    return { tenant };
   }
 
   @Post()

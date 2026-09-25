@@ -162,7 +162,6 @@ class OwnersController {
       ));
     }
     const types = parseEnumList(rawQuery?.type, ["individual", "company"] as const);
-    if (types) conds.push(inArray(ownersTable.type, types));
     const statuses = parseEnumList(rawQuery?.status, ["active", "inactive"] as const);
     if (statuses) conds.push(inArray(ownersTable.status, statuses));
     const bool = (v: unknown) => v === "1" || v === "true" ? true : v === "0" || v === "false" ? false : undefined;
@@ -177,6 +176,12 @@ class OwnersController {
     else if (hasIban === false) conds.push(or(isNull(ownersTable.iban), eq(ownersTable.iban, "")));
     const nats = parseIdList(rawQuery?.nationalityLookupId);
     if (nats) conds.push(inArray(ownersTable.nationalityLookupId, nats));
+    // Every filter EXCEPT type — `stats.byType` feeds the tab's individual /
+    // company cards, which must keep their counts while one type is selected
+    // (same rule as tenants). Applying `type` last changes no result: the
+    // conditions are ANDed either way.
+    const statsWhere = and(...conds);
+    if (types) conds.push(inArray(ownersTable.type, types));
     const where = and(...conds);
 
     const sortFn = q.order === "asc" ? asc : desc;
@@ -187,15 +192,23 @@ class OwnersController {
       .orderBy(sortFn(ownersTable.createdAt), sortFn(ownersTable.id)).$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow] = await Promise.all([
+    const [rows, totalRow, typeRows] = await Promise.all([
       rowsQ,
       usePaginated
         ? this.db.select({ total: count() }).from(ownersTable).where(where)
         : Promise.resolve([{ total: 0 }]),
+      // The three headline cards, counted by the database in one query — the
+      // portal was firing a separate count request per card.
+      usePaginated
+        ? this.db.select({ type: ownersTable.type, cnt: count() })
+            .from(ownersTable).where(statsWhere).groupBy(ownersTable.type)
+        : Promise.resolve([]),
     ]);
     await attachLookupLabels(this.db, rows as any[], NATIONALITY_SPEC);
     if (!usePaginated) return rows;
-    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+    const byType: Record<string, number> = {};
+    for (const r of typeRows as Array<{ type: string; cnt: number }>) byType[r.type] = Number(r.cnt);
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0), stats: { byType } };
   }
 
   @Post()
