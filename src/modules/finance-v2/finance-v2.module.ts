@@ -33,9 +33,13 @@ import { ReconciliationService } from "./reports/reconciliation.service";
 import { legacyAccountingProvider } from "./reports/legacy-accounting";
 import { FinanceV2BugsController } from "./controllers/bugs.controller";
 import { FinanceV2Tier1Controller } from "./controllers/tier1.controller";
+import { FinanceV2Tier2Controller } from "./controllers/tier2.controller";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { ExpensesV2Service } from "./tier1/expenses-v2.service";
 import { TenantCreditsService } from "./tier1/tenant-credits.service";
+import { BankRecService } from "./tier2/bank-rec.service";
+import { RemindersService } from "./tier2/reminders.service";
+import { DryRunReminderSender, REMINDER_SENDER } from "./tier2/reminder-sender";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -48,14 +52,16 @@ import { TenantCreditsService } from "./tier1/tenant-credits.service";
     FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
-    FinanceV2BugsController, FinanceV2Tier1Controller,
+    FinanceV2BugsController, FinanceV2Tier1Controller, FinanceV2Tier2Controller,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
-    BankAccountsService, ExpensesV2Service, TenantCreditsService,
+    BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
+    // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
+    { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
 })
