@@ -4,6 +4,8 @@ import { ChartService } from "./chart.service";
 import { PeriodsService } from "./periods.service";
 import { riyadhToday, periodFor } from "./dates";
 import { LOCK_KEYS } from "./lock-keys";
+import { captureDims } from "./hooks/facts-loader";
+import { sqlOf } from "./hooks/sql";
 
 export interface SetupResult {
   accountsInserted: number;
@@ -19,6 +21,10 @@ export interface SetupResult {
  *  2. Create the current and previous fiscal years' monthly periods, all open.
  *  3. Create the default cash box (-> 1111) and bank account (-> 1113), and
  *     make them the account's defaults.
+ *  4. Capture `finance_contract_dims` for every contract (§4.3): terminate and
+ *     DELETE hard-delete `contract_units`, so the landlord/property of an
+ *     event is frozen from this side table. Best-effort, in a savepoint: a
+ *     failure here never blocks the switch (the hooks capture lazily too).
  */
 @Injectable()
 export class FinanceSetupService {
@@ -41,6 +47,13 @@ export class FinanceSetupService {
         where account_user_id = $1`,
       [userId, cash, bank],
     );
+    await c.query("savepoint fv2_dims");
+    try {
+      await captureDims(sqlOf(c), userId, null);
+      await c.query("release savepoint fv2_dims");
+    } catch {
+      await c.query("rollback to savepoint fv2_dims");
+    }
     return { accountsInserted, cashBankAccountId: cash, bankBankAccountId: bank };
   }
 

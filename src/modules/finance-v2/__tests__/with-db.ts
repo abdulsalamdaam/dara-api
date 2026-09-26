@@ -28,6 +28,8 @@ export const fv2DbSkip: string | false = !FV2_URL
 
 export const MIGRATION_0066 = join(__dirname, "../../../../db/drizzle/0066_finance_v2.sql");
 export const LEGACY_MIN = join(__dirname, "legacy-min.sql");
+/** The full legacy schema (schema only, generated from db/src/schema), for the hook specs that run real legacy handlers. */
+export const LEGACY_FULL = join(__dirname, "legacy-schema.sql");
 
 export interface TestDb {
   pool: pg.Pool;
@@ -38,7 +40,7 @@ export interface TestDb {
 }
 
 /** A fresh schema with the minimal legacy tables (optional) and 0066 applied. */
-export async function withDb(opts: { legacy?: boolean; migrate?: boolean } = {}): Promise<TestDb> {
+export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolean } = {}): Promise<TestDb> {
   if (fv2DbSkip) throw new Error(`fv2 DB specs: ${fv2DbSkip}`);
   const schema = `fv2_test_${randomBytes(5).toString("hex")}`;
   const admin = new pg.Client({ connectionString: FV2_URL });
@@ -49,7 +51,8 @@ export async function withDb(opts: { legacy?: boolean; migrate?: boolean } = {})
   const apply = async (file: string) => {
     await pool.query(readFileSync(file, "utf8"));
   };
-  if (opts.legacy !== false) await apply(LEGACY_MIN);
+  if (opts.legacy === "full") await apply(LEGACY_FULL);
+  else if (opts.legacy !== false) await apply(LEGACY_MIN);
   if (opts.migrate !== false) await apply(MIGRATION_0066);
   return {
     pool,

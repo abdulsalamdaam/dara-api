@@ -1,0 +1,164 @@
+/**
+ * Pure classification helpers the facts loaders share (DESIGN §4.1 "What
+ * counts as a charge, and in which VAT category", §4.3, §9 E7). No database,
+ * no clock: the loaders read rows and hand them here.
+ */
+import { rentVatFromUsage } from "../../../common/usage-vat";
+import { allocate, fromHalalas, jsonbHalalas, toHalalas } from "../money";
+import type { DocGroup, Nature, Usage, VatCategory } from "../rules";
+
+/** Legacy markers written by the existing code paths (string-identical). */
+export const DEPOSIT_DESC = "تأمين (وديعة)";
+export const ADVANCE_NOTE = "إيجار مدفوع مقدماً";
+/** contracts.module.ts terminate: a deposit voucher turned into a landlord collection. */
+export const CONVERSION_NOTE = "تأمين محوّل إلى إيراد عند إنهاء العقد";
+/** Ejar import writes this onto RENT rows (ejar.module.ts attachEjarInvoices). */
+const EJAR_RENT_DESC = /^فاتورة إيجار/;
+
+/**
+ * What an installment row is. Rent rows have a null description, except that
+ * the Ejar import stamps "فاتورة إيجار رقم …" onto rent rows (DISCOVERY §1.2.1);
+ * the legacy deposit row carries DEPOSIT_DESC; every other description is an
+ * additional fee (`appendFees` writes the fee name).
+ */
+export function installmentNature(description: string | null | undefined): Nature | "deposit" {
+  const d = (description ?? "").trim();
+  if (!d || EJAR_RENT_DESC.test(d)) return "rent";
+  if (d === DEPOSIT_DESC) return "deposit";
+  return "fee";
+}
+
+/** Residential or commercial from the property/unit usage keys (usage-vat.ts); null when usage does not decide. */
+export function usageOf(propertyUsageKey: string | null | undefined, unitUsageKey?: string | null): Usage | null {
+  const taxable = rentVatFromUsage(propertyUsageKey, unitUsageKey);
+  if (taxable === null) return null;
+  return taxable ? "commercial" : "residential";
+}
+
+/**
+ * The VAT category of an installment charge (§4.1):
+ *  - `vat_enabled` → S at 15% (warning `vat_unregistered_seller` when the seller has no VAT number);
+ *  - residential → E when the seller is VAT-registered, O when not;
+ *  - otherwise O (warning `commercial_without_vat` when the seller is registered).
+ */
+export function installmentVat(i: { vatEnabled: boolean; usage: Usage | null; sellerRegistered: boolean }):
+  { category: VatCategory; rate: number; warnings: string[] } {
+  if (i.vatEnabled) return { category: "S", rate: 15, warnings: i.sellerRegistered ? [] : ["vat_unregistered_seller"] };
+  if (i.usage === "residential") return { category: i.sellerRegistered ? "E" : "O", rate: 0, warnings: [] };
+  return { category: "O", rate: 0, warnings: i.sellerRegistered ? ["commercial_without_vat"] : [] };
+}
+
+export interface DocItem {
+  description?: unknown;
+  amount?: unknown;
+  vat?: unknown;
+  vatCategory?: unknown;
+}
+
+const CATS = new Set(["S", "Z", "E", "O"]);
+
+/**
+ * A document's VAT groups, from its own items, subtotal and total (§4.1,
+ * §2.1: documents are never re-split). Category per item: `vatCategory`,
+ * else the legacy `vat` flag (true → S, false → E; billing.module.ts
+ * `LineItem`). Nature: `fee` when the item's description names a covered fee
+ * installment, else `rent`. VAT = total − subtotal, all on the S groups
+ * (split by their nets). Σ items is reconciled to `subtotal` on the largest
+ * group, with a warning, so the entry always posts the document's own figures.
+ */
+export function documentGroups(
+  doc: { items: DocItem[] | null | undefined; subtotal: string; total: string },
+  opts: { feeNames?: ReadonlySet<string>; usage?: Usage | null; nature?: Nature } = {},
+): { groups: DocGroup[]; warnings: string[] } {
+  const warnings: string[] = [];
+  const buckets = new Map<string, { category: VatCategory; nature: Nature; net: number }>();
+  for (const it of Array.isArray(doc.items) ? doc.items : []) {
+    if (it == null || it.amount == null) continue;
+    const { halalas, rounded } = jsonbHalalas(it.amount);
+    if (rounded) warnings.push("jsonb_precision");
+    const explicit = typeof it.vatCategory === "string" && CATS.has(it.vatCategory) ? (it.vatCategory as VatCategory) : null;
+    const vatFlag = it.vat == null ? true : !!it.vat;
+    const category: VatCategory = explicit ?? (vatFlag ? "S" : "E");
+    const desc = String(it.description ?? "").trim();
+    const nature: Nature = opts.nature ?? (desc && opts.feeNames?.has(desc) ? "fee" : "rent");
+    const key = `${category}|${nature}`;
+    const b = buckets.get(key) ?? { category, nature, net: 0 };
+    b.net += halalas;
+    buckets.set(key, b);
+  }
+  const subtotal = toHalalas(doc.subtotal);
+  const total = toHalalas(doc.total);
+  let list = [...buckets.values()];
+  if (!list.length) {
+    list = [{ category: total > subtotal ? "S" : "O", nature: opts.nature ?? "rent", net: subtotal }];
+    warnings.push("document_without_items");
+  }
+  const sumNet = list.reduce((s, g) => s + g.net, 0);
+  if (sumNet !== subtotal) {
+    const biggest = list.reduce((a, b) => (Math.abs(b.net) > Math.abs(a.net) ? b : a));
+    biggest.net += subtotal - sumNet;
+    warnings.push("items_subtotal_mismatch");
+  }
+  const vatTotal = total - subtotal;
+  let sGroups = list.filter((g) => g.category === "S");
+  if (vatTotal !== 0 && !sGroups.length) {
+    list.push({ category: "S", nature: opts.nature ?? "rent", net: 0 });
+    sGroups = list.filter((g) => g.category === "S");
+    warnings.push("vat_without_standard_line");
+  }
+  const vats = sGroups.length ? allocate(vatTotal, sGroups.map((g) => Math.max(1, g.net))) : [];
+  const vatOf = new Map(sGroups.map((g, i) => [g, vats[i]]));
+  const groups: DocGroup[] = list.map((g) => ({
+    category: g.category,
+    rate: g.category === "S" ? 15 : 0,
+    net: fromHalalas(g.net),
+    vat: fromHalalas(vatOf.get(g) ?? 0),
+    nature: g.nature,
+    usage: opts.usage ?? null,
+  }));
+  return { groups, warnings: [...new Set(warnings)] };
+}
+
+/**
+ * Ejar invoice status under v2 (§9 E7, E26): what Ejar reports PAID becomes
+ * `settled_external` (real rent settled through Ejar, charged at its due date
+ * and settled by E33); a partial payment leaves the row pending, with the
+ * reported figure kept aside (`finance_ejar_settlements`). Nothing becomes
+ * `paid` or `partially_paid` without a collection. The paid/partial tests are
+ * the legacy ones (ejar.module.ts attachEjarInvoices), verbatim.
+ */
+export function mapEjarStatusV2(inv: { status?: string | null; amount?: string | null; remaining?: string | null }):
+  { status: "settled_external" | null; reported: "paid" | "partially_paid" | null; reportedAmount: string | null } {
+  const paid = /paid|مدفوع/i.test(inv.status || "") && !/unpaid|غير مدفوع/i.test(inv.status || "");
+  const remaining = Number(inv.remaining);
+  const partly = !paid && Number.isFinite(remaining) && remaining > 0 && remaining < Number(inv.amount);
+  if (paid) return { status: "settled_external", reported: "paid", reportedAmount: decimalOrNull(inv.amount) };
+  if (partly) {
+    let reportedAmount: string | null = null;
+    try {
+      reportedAmount = fromHalalas(jsonbHalalas(inv.amount).halalas - jsonbHalalas(inv.remaining).halalas);
+    } catch {
+      reportedAmount = null;
+    }
+    return { status: null, reported: "partially_paid", reportedAmount };
+  }
+  return { status: null, reported: null, reportedAmount: null };
+}
+
+function decimalOrNull(v: unknown): string | null {
+  try {
+    return fromHalalas(jsonbHalalas(v).halalas);
+  } catch {
+    return null;
+  }
+}
+
+/** A legacy free-text business date (`expenses.expense_date`, `landlord_payouts.transfer_date`) → YYYY-MM-DD, or null. */
+export function parseBusinessDate(v: unknown): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v ?? "").trim());
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
+}

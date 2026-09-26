@@ -12,6 +12,8 @@ import { PostingEngine } from "./posting.engine";
 import { PostingWorker } from "./posting-worker.service";
 import { PostingErrorsService } from "./posting-errors.service";
 import { LedgerStartService } from "./ledger-start.service";
+import { RecognizerService } from "./recognizer.service";
+import { FinanceV2HooksModule } from "./hooks/hooks.module";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -19,12 +21,12 @@ import { LedgerStartService } from "./ledger-start.service";
  * /api/finance/v2 except /status answers 404 while the flag is off.
  */
 @Module({
-  imports: [FinanceV2CoreModule],
+  imports: [FinanceV2CoreModule, FinanceV2HooksModule],
   controllers: [FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
-    PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService,
+    PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
   ],
-  exports: [PostingEngine, PostingWorker, LedgerStartService],
+  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService],
 })
 export class FinanceV2Module {}

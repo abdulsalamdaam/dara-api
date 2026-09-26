@@ -185,6 +185,7 @@ import {
   type ContractCollectionRow, type ContractDocRow,
 } from "./rebuild";
 import { attachLookupLabels } from "../../common/lookups-resolve";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks and v2 refusals (DESIGN §4.6, §5.1)
 
 const CONTRACT_FIELDS = [
   "tenantId",
@@ -207,6 +208,7 @@ const CONTRACT_FIELDS = [
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 class ContractsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   /**
    * Next per-account contract number: EQ-000001, EQ-000002 …
@@ -1020,6 +1022,7 @@ class ContractsController {
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const p = await this.prepareContract(user, body);
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: resolved before the transaction (§1.2)
     const ownerId = p.ownerId;
 
     // Numbering + insert + unit linking happen inside ONE transaction guarded
@@ -1044,6 +1047,7 @@ class ContractsController {
       // unit as "rented" with no schedule at all, and no way to notice. The
       // rebuild path always did this correctly; create did not.
       const created = await this.materializeContract(tx, row!, p);
+      await this.fv2h?.contractMaterialized({ fv2, userId: ownerId, tx }, row!.id); // finance-v2: dims, advance (E03/E34), deposit (E09)
       return { row, created };
     });
 
@@ -1126,6 +1130,7 @@ class ContractsController {
   @Post(":contractId/collect-deposit")
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async collectDeposit(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E09
     const id = requiredForeignKeyId(contractId, "رقم العقد");
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const ownerId = scopeId(user);
@@ -1152,12 +1157,14 @@ class ContractsController {
     await this.db.update(contractsTable)
       .set({ depositStatus: "collected", depositMethod: method, depositDueDate: contract.depositDueDate || date } as any)
       .where(eq(contractsTable.id, id));
+    await this.fv2h?.depositCollected({ fv2, userId: ownerId }, voucher?.id); // finance-v2:
     return { voucher };
   }
 
   @Post(":contractId/generate-installments")
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async generateInstallments(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Body() body: any) {
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E23
     const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
     const [contract] = await this.db.select().from(contractsTable)
@@ -1172,6 +1179,7 @@ class ContractsController {
     if (existing.some((p) => p.status === "paid" || p.status === "partially_paid")) {
       return { success: false, skipped: true, reason: "has_collected_payments", installmentsCreated: 0 };
     }
+    await this.fv2h?.guardRegenerate(fv2, ownerId, id); // finance-v2: 409 when a row it would delete is charged or invoiced
 
     // Soft-delete the AUTO-generated installments (pending + settled_external)
     // before regenerating — both are rebuilt from the contract terms, so this
@@ -1254,6 +1262,7 @@ class ContractsController {
    */
   private async rebuildContract(user: AuthUser, id: number, body: any) {
     const ownerId = scopeId(user);
+    const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: resolved before the transaction (§1.2)
 
     // Cheap refusals first, so a draft or an ended contract gets its own reason
     // instead of a validation error from a rule set that does not apply to it.
@@ -1384,6 +1393,7 @@ class ContractsController {
       // create cannot slip a second contract onto the unit meanwhile.
       await this.assertNoOverlappingContract(tx, p.unitIds, p.startDate, p.endDate, id);
 
+      await this.fv2h?.beforeRebuildDestroy({ fv2, userId: ownerId, tx }, id, payIds); // finance-v2: E22 reversals, before the hard deletes
       /* ── Destroy everything the previous generation produced ────────── */
       const installmentsRemoved = payIds.length;
       if (payIds.length > 0) {
@@ -1436,6 +1446,7 @@ class ContractsController {
         p.unitIds.map((unitId) => ({ contractId: id, unitId })),
       );
       const installmentsCreated = await this.materializeContract(tx, updated, p);
+      await this.fv2h?.contractMaterialized({ fv2, userId: ownerId, tx }, id, { refreshDims: true }); // finance-v2: re-post the new generation
 
       // A unit dropped from the contract goes back to "available" — but only if
       // nothing else still holds it. The contract's own links are already gone
@@ -1643,6 +1654,9 @@ class ContractsController {
   @RequirePermissions(PERMISSIONS.CONTRACTS_DELETE)
   async remove(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string, @Query("mode") mode?: string) {
     const id = requiredForeignKeyId(contractId, "رقم العقد");
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E25 — "mark as paid" refused (409) before any write
+    this.fv2h?.refuseMarkPaid(fv2, mode); // finance-v2:
+    await this.fv2h?.captureContractDims({ fv2, userId: scopeId(user) }, id); // finance-v2: before contract_units are deleted
     const now = new Date();
     // Cancelling the unpaid installments cancels the contract; otherwise it's a
     // normal termination.
@@ -1686,6 +1700,7 @@ class ContractsController {
           ),
         ));
     }
+    await this.fv2h?.contractRemoved({ fv2, userId: scopeId(user) }, id); // finance-v2: ended_on, E05
     return {
       success: true,
       message: mode === "paid" ? "تم إنهاء العقد واعتبار جميع الأقساط مدفوعة"
@@ -1784,6 +1799,9 @@ class ContractsController {
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
     const today = new Date().toISOString().slice(0, 10);
     const mode = body?.mode as string | undefined;
+    const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: E25 — "mark as paid" refused (409) before any write
+    this.fv2h?.refuseMarkPaid(fv2, mode); // finance-v2:
+    await this.fv2h?.captureContractDims({ fv2, userId: ownerId }, id); // finance-v2: before contract_units are deleted
     // Cancelling the unpaid installments cancels the contract; otherwise it's a
     // normal termination.
     const endStatus = mode === "cancelled" ? "cancelled" : "terminated";
@@ -1902,6 +1920,7 @@ class ContractsController {
         .where(eq(paymentsTable.id, pid));
     }
 
+    await this.fv2h?.contractTerminated({ fv2, userId: ownerId }, id, { mode, deposit: body?.deposit, refundNumber, refundMethod: body?.refundMethod ?? "bank_transfer", depositVoucherIds: buckets.depositVoucherIds }); // finance-v2: ended_on, E04/E05/E10/E11/E12
     return {
       success: true,
       refundNumber,

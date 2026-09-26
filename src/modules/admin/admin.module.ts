@@ -25,6 +25,7 @@ import { SubscriptionModule } from "../subscription/subscription.module";
 import { SubscriptionInvoiceService, subscriptionInvoiceNumber } from "../subscription/subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { normalizeTrialDays } from "../../common/trial";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: account purge hook (DESIGN §2.4.5)
 
 /**
  * Subscription window: starts now; ends after `trialDays`, or at the given
@@ -118,6 +119,7 @@ class AdminController {
     private readonly subscriptionInvoices: SubscriptionInvoiceService,
     private readonly appLog: AppLogService,
   ) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   /**
    * Manual-record-creation policy. Everything is meant to come through Ejar, so
@@ -540,6 +542,7 @@ class AdminController {
     if (uid === admin.id) throw new BadRequestException("لا يمكن حذف حسابك الخاص");
     const [user] = await this.db.delete(usersTable).where(eq(usersTable.id, uid)).returning();
     if (!user) throw new NotFoundException("Not found");
+    await this.fv2h?.purgeAccount(uid); // finance-v2: purge the account's v2 rows after the hard delete (§2.4.5)
     return { success: true };
   }
 
@@ -932,6 +935,7 @@ class AdminController {
     if (id === admin.id) throw new BadRequestException("لا يمكن حذف حسابك الخاص");
     const [user] = await this.db.delete(usersTable).where(eq(usersTable.id, id)).returning();
     if (!user) throw new NotFoundException("Not found");
+    await this.fv2h?.purgeAccount(id); // finance-v2: purge the account's v2 rows after the hard delete (§2.4.5)
     return { success: true };
   }
 

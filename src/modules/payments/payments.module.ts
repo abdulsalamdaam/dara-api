@@ -15,6 +15,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { liveStatus, liveStatusSql } from "../../common/payment-status";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks and v2 guards (DESIGN §5.1, §9 E7)
 
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
 
@@ -26,6 +27,7 @@ const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 class PaymentsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   @Get()
   @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW)
@@ -238,6 +240,8 @@ class PaymentsController {
   @Post()
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E7 — pending only, validated amount
+    if (fv2) body = await this.fv2h!.paymentCreateBody(fv2, scopeId(user), body); // finance-v2:
     const { contractId, amount, dueDate } = body;
     if (!contractId || !amount || !dueDate) throw new BadRequestException("رقم العقد والمبلغ وتاريخ الاستحقاق مطلوبة");
 
@@ -259,6 +263,7 @@ class PaymentsController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async update(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string, @Body() body: any) {
     const id = parseInt(paymentId, 10);
+    await this.fv2h?.guardPaymentPatch((await this.fv2h.resolve(scopeId(user))) === true, scopeId(user), id, body); // finance-v2: E7 money fields locked
     const fields = ["amount", "dueDate", "paidDate", "status", "receiptNumber", "attachmentKey", "notes"];
     const updateData: Record<string, unknown> = {};
     for (const f of fields) if (body[f] !== undefined) updateData[f] = body[f];
@@ -278,6 +283,8 @@ class PaymentsController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async settleExternal(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string) {
     const id = parseInt(paymentId, 10);
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E27
+    await this.fv2h?.guardSettleExternal(fv2, scopeId(user), id); // finance-v2:
     const [p] = await this.db.select().from(paymentsTable)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)));
     if (!p) throw new NotFoundException("Payment not found");
@@ -285,6 +292,7 @@ class PaymentsController {
     const [row] = await this.db.update(paymentsTable)
       .set({ status: "settled_external", paidDate: p.dueDate } as any)
       .where(eq(paymentsTable.id, id)).returning();
+    await this.fv2h?.settledExternal({ fv2, userId: scopeId(user) }, id); // finance-v2: E33 when charged
     return row;
   }
 
@@ -293,12 +301,14 @@ class PaymentsController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async revertExternal(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string) {
     const id = parseInt(paymentId, 10);
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E27
     const [row] = await this.db.update(paymentsTable)
       .set({ status: "pending", paidDate: null } as any)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)),
         eq(paymentsTable.status, "settled_external"), isNull(paymentsTable.deletedAt)))
       .returning();
     if (!row) throw new NotFoundException("Settled-external installment not found");
+    await this.fv2h?.revertedExternal({ fv2, userId: scopeId(user) }, id); // finance-v2: reverse E33
     return row;
   }
 
@@ -518,6 +528,7 @@ class PaymentsController {
   async addCollection(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string, @Body() body: any) {
     const id = parseInt(paymentId, 10);
     if (!Number.isInteger(id)) throw new BadRequestException("رقم القسط غير صالح");
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: resolved before the transaction (§1.2)
     // Read-then-insert with nothing holding the row: eight parallel requests
     // each read "nothing collected yet", each passed the cap, and the same
     // money landed five times. The lock is per installment, held to the end of
@@ -564,6 +575,7 @@ class PaymentsController {
     }).where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user))))
       .returning();
 
+    await this.fv2h?.collectionsAdded({ fv2, userId: scopeId(user), tx }, [collection.id]); // finance-v2: E03/E34 in the source transaction
     return { collection, payment: updated, collectedAmount: collectedAfter, remaining: round2(total - collectedAfter) };
     });
   }

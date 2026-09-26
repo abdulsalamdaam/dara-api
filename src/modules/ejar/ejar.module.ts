@@ -16,6 +16,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
@@ -104,6 +105,7 @@ export class EjarController {
     private readonly logs: EjarLogService,
     private readonly policy: EjarPolicyService,
   ) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   /** Run one whitelisted endpoint; returns the unwrapped Body + the log row. */
   @Post("call")
@@ -329,6 +331,7 @@ export class EjarController {
   ) {
     const src = body?.contract || {};
     const ownerId = scopeId(user);
+    const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: E26
     const num = String(src.ejarContractNumber || src.contractNumber || "").trim();
     if (!num) throw new BadRequestException("رقم عقد إيجار مطلوب للاستيراد");
 
@@ -506,6 +509,8 @@ export class EjarController {
         // schedule was built from. Without this the Payment Log shows generic
         // rows even though Ejar told us the invoice number and whether it was
         // already paid.
+        if (fv2) await this.fv2h!.ejarAttachV2({ fv2, userId: ownerId }, inserted, (body?.invoices || []) as any[]); // finance-v2: v2 replaces the attach step (E7)
+        else // finance-v2: flag off → the legacy attach, unchanged
         await this.attachEjarInvoices(inserted, body?.invoices || []);
       }
     } catch (e) {
