@@ -199,6 +199,19 @@ describe("fv2 tier 3: suppliers, bills and AP, journal export (real Postgres)", 
     assert.deepEqual([sep.opening, sep.lines.length, sep.closing], ["630.00", 0, "630.00"]);
   });
 
+  it("the supplier statement prints the stored dates whatever the server's time zone (Asia/Riyadh is UTC+3)", async () => {
+    const tz = process.env.TZ;
+    process.env.TZ = "Asia/Riyadh";
+    try {
+      const st: any = await ap.supplierStatement(U, s1.id, { from: "2026-08-05", to: "2026-08-31" });
+      assert.deepEqual(st.lines.map((l: any) => [l.number, l.date]), [["BILL-000001", "2026-08-05"], ["BILL-000003", "2026-08-12"], ["PV-000001", "2026-08-20"]]);
+      assert.equal(st.opening, "0.00", "a bill dated on `from` is in the period, not the opening");
+    } finally {
+      if (tz === undefined) delete process.env.TZ;
+      else process.env.TZ = tz;
+    }
+  });
+
   it("the VAT return picks bills up: recoverable input VAT booked, exempt purchases in box 11; a landlord's bill is not the account's", async () => {
     const r: any = await new VatReportService(env.t.pool as any).vatReturn(U, { period: "2026-Q3" });
     assert.equal(r.memo.inputVatBooked, "150.00");

@@ -284,7 +284,7 @@ export class ApService {
     const from = q?.from ? isoDate(q.from, "from") : `${to.slice(0, 4)}-01-01`;
     if (from > to) throw bad("BAD_RANGE", "from must not be after to");
     const moves = (await this.pool.query(
-      `select * from (
+      `select x.*, to_char(x.d, 'YYYY-MM-DD') as d_s from (
          select b.bill_date as d, 'bill' as type, b.id, b.number, b.supplier_invoice_no as ref, b.total as credit, 0::numeric as debit, b.created_at as ts
            from supplier_bills b where b.user_id = $1 and b.supplier_id = $2 and b.approved_at is not null
          union all
@@ -304,7 +304,8 @@ export class ApService {
     let credits = 0;
     let debits = 0;
     for (const r of moves) {
-      const d = r.d instanceof Date ? r.d.toISOString().slice(0, 10) : String(r.d).slice(0, 10);
+      // to_char in SQL: a pg `date` parsed into a JS Date is local midnight, so toISOString() shifts it a day back east of UTC.
+      const d: string = r.d_s;
       const cr = toHalalas(String(r.credit));
       const dr = toHalalas(String(r.debit));
       if (d < from) {
