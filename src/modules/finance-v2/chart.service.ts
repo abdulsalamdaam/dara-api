@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { COA_TEMPLATE } from "./coa-template";
 import { fromHalalas, toHalalas } from "./money";
+import { auditRow } from "./audit";
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 
@@ -138,6 +139,7 @@ export class ChartService {
            values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning ${COLS}`,
           [userId, code, nameAr, nameEn, parent.type, parent.normalBalance, parent.id, description, actorId],
         );
+        await auditRow(c, userId, actorId, "finance_v2_account", r.rows[0].id, "/finance/v2/accounts"); // the interceptor skips POST
         return r.rows[0];
       });
     } catch (err) {

@@ -10,6 +10,7 @@ import { FinanceSetupService } from "../setup.service";
 import { riyadhToday, parseIsoDate, lastDayOfMonth } from "../dates";
 import { fromHalalas, toHalalas } from "../money";
 import { sqlOf } from "../hooks/sql";
+import { auditRow, settingsEvent } from "../audit";
 import { loadSettings, type FinanceSettingsRow } from "../hooks/facts-loader";
 import { SYS, type AccountingMode } from "../rules";
 import { compareEvents, extractEvents, keyOf, rankOf, type ExtractOptions, type Note, type PlannedEvent } from "./extract";
@@ -262,6 +263,11 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
     const since = await this.maxEntryId(this.pool, req.userId);
     let manualJournalId: number | null = null;
     const plan = await withTx(this.pool, async (c) => {
+      if (req.actorUserId > 0) {
+        // A person ran it (0 = the nightly repair sweep): audit it under the TARGET account, as the switch is.
+        await auditRow(c, req.userId, req.actorUserId, "finance_v2_backfill", runId, `/admin/finance-v2/${req.userId}/backfill`);
+        await settingsEvent(c, req.userId, req.actorUserId, "backfill_run", null, { runId, mode: req.mode, cutover: req.cutover ?? null }, `backfill ${req.mode}`);
+      }
       const s = await loadSettings(sqlOf(c), req.userId);
       if (!s) throw new ConflictException({ error: "FINANCE_V2_OFF", message: "Finance v2 is off for this account" });
       if (req.mode === "cutover") {

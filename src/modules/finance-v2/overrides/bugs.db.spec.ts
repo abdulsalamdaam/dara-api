@@ -246,6 +246,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const rr: any = await ctl(on).rentReceipt(req(), { paymentIds: [fOn.p9] });
     assert.equal(rr.kind, "rent_receipt");
     assert.match(rr.number, /^RR-\d{6}$/);
+    assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = $2 and entity_id = $3`, [U, "finance_v2_rent_receipt", String(rr.id)]))[0].n, 1, "audited");
     assert.equal(rr.total, "3000.00");
     const ok: any = await on.billing.approve(user, String(rr.id), {});
     assert.equal(ok.status, "confirmed");
@@ -316,6 +317,8 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.deepEqual([docs[0].status, docs[0].subtotal, docs[0].total], ["draft", "2500.00", "2875.00"]);
     const again: any = await ctl(on).agencyFee(req(), String(c.id));
     assert.equal(again.id, docs[0].id, "idempotent");
+    assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_agency_fee' and entity_id = $2`, [U, String(docs[0].id)]))[0].n, 0,
+      "the idempotent repeat of a draft the contract hook made writes no row");
     const ap: any = await on.billing.approve(user, String(docs[0].id), {});
     assert.equal(ap.status, "confirmed");
     assert.equal(ap.zatca, null);
@@ -333,6 +336,13 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.deepEqual((await entryLines(on, "payment_collection", pc.id, "collected")).map((l: any) => [l.code, l.debit, l.credit]), [
       ["1111", "2875.00", "0.00"], ["1121", "0.00", "2875.00"],
     ]);
+    // A POST that does create the draft (here after the first one is soft-deleted) is audited.
+    await on.q(`update simple_invoices set deleted_at = now() where id = $1`, [docs[0].id]);
+    const fresh: any = await ctl(on).agencyFee(req(), String(c.id));
+    assert.notEqual(fresh.id, docs[0].id);
+    assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_agency_fee' and entity_id = $2`, [U, String(fresh.id)]))[0].n, 1);
+    await on.q(`update simple_invoices set deleted_at = now() where id = $1`, [fresh.id]);
+    await on.q(`update simple_invoices set deleted_at = null where id = $1`, [docs[0].id]);
   });
 
   // ── E7 ───────────────────────────────────────────────────────────────────
@@ -386,6 +396,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
   it("E7: a standalone write-off clears the remaining of a charged installment; mark-as-paid stays refused", async () => {
     const r: any = await ctl(on).writeOffs(req(), { paymentIds: [fOn.p4], reason: "synthetic" });
     assert.deepEqual(r.writeOffs.map((w: any) => [w.paymentId, w.amount]), [[fOn.p4, "3900.00"]]);
+    assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = $2 and entity_id = $3`, [U, "finance_v2_write_off", String(r.writeOffs[0].id)]))[0].n, 1, "audited");
     const again: any = await attempt(() => ctl(on).writeOffs(req(), { paymentIds: [fOn.p4], reason: "synthetic" }));
     assert.equal(again.status, 409, "nothing left to write off");
     await drain(on);

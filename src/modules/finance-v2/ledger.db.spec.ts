@@ -287,6 +287,7 @@ describe("finance v2 migration and ledger triggers (real Postgres)", { skip: fv2
       await assert.rejects(q(`delete from accounts where id = $1`, [acc["5280"]]), /template/);
       const created = await chart.create(U, 1, { parentId: acc["5200"], nameAr: "مصروفات ضيافة", nameEn: "Hospitality" });
       assert.equal(created.code, "520001");
+      assert.equal((await q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_account' and entity_id = $2`, [U, String(created.id)])).rows[0].n, 1, "audited");
       assert.equal(created.type, "expense");
       assert.deepEqual(await chart.remove(U, created.id), { ok: true });
     });

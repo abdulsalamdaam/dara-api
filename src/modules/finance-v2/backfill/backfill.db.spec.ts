@@ -213,6 +213,15 @@ describe("finance v2 backfill (real Postgres, real legacy routes)", { skip: fv2D
     assert.deepEqual(second.trialBalance, first.trialBalance);
   });
 
+  it("a real run leaves an audit_logs row and a settings-history row under the target account; a dry run leaves neither", async () => {
+    const audits = await bf.q(`select entity, entity_id, actor_user_id from audit_logs where owner_user_id = $1 and entity = 'finance_v2_backfill' order by id`, [U]);
+    assert.deepEqual(audits.map((a: any) => [a.entity_id, a.actor_user_id]), [[String(first.runId), U], [String(second.runId), U]]);
+    const hist = await bf.q(`select new_value from finance_settings_events where account_user_id = $1 and field = 'backfill_run' order by id`, [U]);
+    assert.deepEqual(hist.map((h: any) => h.new_value.runId), [first.runId, second.runId]);
+    const dry = await backfill.run({ userId: U, actorUserId: U, mode: "full", dryRun: true, today: TODAY });
+    assert.equal((await bf.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_backfill' and entity_id = $2`, [U, String(dry.runId)]))[0].n, 0);
+  });
+
   it("catch-up repairs a lost enqueue and a lost reversal, and nothing else", async () => {
     const [e] = await bf.q(
       `insert into expenses (user_id, owner_id, property_id, category, amount, expense_date) values ($1, $2, $3, 'صيانة', '40.00', '2026-06-20') returning id`,

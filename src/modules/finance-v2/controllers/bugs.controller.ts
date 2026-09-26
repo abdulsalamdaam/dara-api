@@ -6,6 +6,7 @@ import { scopeId } from "../../../common/scope";
 import { FinanceV2Guard, RequireCapability, type Fv2Request } from "../finance-v2.guard";
 import { FV2_POOL, withTx, type Fv2Pool } from "../db";
 import { sqlOf } from "../hooks/sql";
+import { auditRow } from "../audit";
 import { LedgerEmitter } from "../ledger-emitter.service";
 import { effectiveFeeForProperty, effectiveManagementFee } from "../commission";
 import { contractSummaryV2 } from "../overrides/reads";
@@ -100,6 +101,8 @@ export class FinanceV2BugsController {
     const out = await withTx(this.pool, async (c) => {
       const res = await writeOffInstallments(sqlOf(c as any), scope, body, { id: req.user!.id });
       for (const e of res.events) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
+      // The audit interceptor skips POST: each write-off gets its own row.
+      for (const w of res.writeOffs) await auditRow(c, scope, req.user!.id, "finance_v2_write_off", w.id, "/finance/v2/write-offs");
       return res;
     });
     this.emitter.kick(scope);
@@ -111,7 +114,11 @@ export class FinanceV2BugsController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async rentReceipt(@Req() req: Fv2Request, @Body() body: any) {
     const scope = scopeId(req.user!);
-    return withTx(this.pool, (c) => createRentReceipt(sqlOf(c as any), scope, body));
+    return withTx(this.pool, async (c) => {
+      const doc = await createRentReceipt(sqlOf(c as any), scope, body);
+      await auditRow(c, scope, req.user!.id, "finance_v2_rent_receipt", doc.id, "/finance/v2/rent-receipts");
+      return doc;
+    });
   }
 
   /** E8: the DRAFT brokerage-fee document for a contract with an agency fee (idempotent). */
@@ -119,7 +126,11 @@ export class FinanceV2BugsController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async agencyFee(@Req() req: Fv2Request, @Param("id") id: string) {
     const scope = scopeId(req.user!);
-    const doc = await withTx(this.pool, (c) => ensureAgencyFeeDraft(sqlOf(c as any), scope, idOf(id)));
+    const doc = await withTx(this.pool, async (c) => {
+      const d = await ensureAgencyFeeDraft(sqlOf(c as any), scope, idOf(id));
+      if (d && !d.existing) await auditRow(c, scope, req.user!.id, "finance_v2_agency_fee", d.id, `/finance/v2/contracts/${idOf(id)}/agency-fee-invoice`);
+      return d;
+    });
     if (!doc) throw new NotFoundException({ error: "FINANCE_V2_NO_AGENCY_FEE", message: "لا توجد أتعاب وساطة على العقد · The contract has no agency fee" });
     return doc;
   }
