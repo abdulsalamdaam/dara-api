@@ -160,6 +160,7 @@ export const ledgerOutboxTable = pgTable("ledger_outbox", {
   processedAt: ts("processed_at"),
   dismissedBy: integer("dismissed_by"),
   dismissedReason: text("dismissed_reason"),
+  blockedOn: bigint("blocked_on", { mode: "number" }),
 });
 
 export const bankAccountsTable = pgTable("bank_accounts", {

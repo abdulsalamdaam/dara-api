@@ -7,6 +7,11 @@ import { FinanceV2Guard } from "./finance-v2.guard";
 import { FinanceV2StatusController } from "./controllers/status.controller";
 import { FinanceV2AccountsController } from "./controllers/accounts.controller";
 import { FinanceV2AdminController } from "./controllers/admin.controller";
+import { FinanceV2PostingErrorsController } from "./controllers/posting-errors.controller";
+import { PostingEngine } from "./posting.engine";
+import { PostingWorker } from "./posting-worker.service";
+import { PostingErrorsService } from "./posting-errors.service";
+import { LedgerStartService } from "./ledger-start.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -15,7 +20,11 @@ import { FinanceV2AdminController } from "./controllers/admin.controller";
  */
 @Module({
   imports: [FinanceV2CoreModule],
-  controllers: [FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController],
-  providers: [ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard],
+  controllers: [FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController],
+  providers: [
+    ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
+    PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService,
+  ],
+  exports: [PostingEngine, PostingWorker, LedgerStartService],
 })
 export class FinanceV2Module {}

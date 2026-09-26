@@ -224,6 +224,12 @@ create table if not exists ledger_outbox (
   created_at timestamptz not null default now(), processed_at timestamptz,
   dismissed_by integer, dismissed_reason text
 );
+-- blocked_on (DESIGN §5.3/§5.4): the outbox row this pending row waits for (a
+-- reversal whose original is not posted, or a charge-state event behind an
+-- earlier failed/pending event on the same installment). Added with ALTER so a
+-- database that already ran the first version of this block gains it on the
+-- next boot; ledger_outbox is created above, in this file.
+alter table ledger_outbox add column if not exists blocked_on bigint;
 create unique index if not exists ledger_outbox_idem_uq on ledger_outbox (user_id, source_type, source_id, event);
 create index if not exists ledger_outbox_due_idx on ledger_outbox (status, next_attempt_at) where status = 'pending';
 create index if not exists ledger_outbox_user_idx on ledger_outbox (user_id, status, id);

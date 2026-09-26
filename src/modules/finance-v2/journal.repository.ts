@@ -155,7 +155,10 @@ export class JournalRepository {
    * dated `entryDate`, then mark the original reversed: the one UPDATE the
    * immutability trigger permits.
    */
-  async reverse(c: Fv2Client, userId: number, entryId: number, opts: { entryDate: string; createdBy?: number | null; memo?: string | null }): Promise<PostResult> {
+  async reverse(
+    c: Fv2Client, userId: number, entryId: number,
+    opts: { entryDate: string; createdBy?: number | null; memo?: string | null; originalDate?: string; isLate?: boolean; warnings?: string[]; payload?: unknown },
+  ): Promise<PostResult> {
     const e = await c.query(
       `select id, source_type, source_id, event, status, memo from journal_entries where user_id = $1 and id = $2 for update`,
       [userId, entryId],
@@ -179,6 +182,10 @@ export class JournalRepository {
       memo: opts.memo ?? orig.memo,
       reversalOf: entryId,
       createdBy: opts.createdBy ?? null,
+      originalDate: opts.originalDate,
+      isLate: opts.isLate,
+      warnings: opts.warnings,
+      payload: opts.payload,
       lines: l.rows.map((r: any) => ({
         accountId: r.account_id, debit: toHalalas(r.credit), credit: toHalalas(r.debit), memo: r.memo,
         ownerId: r.owner_id, propertyId: r.property_id, unitId: r.unit_id, tenantId: r.tenant_id, contractId: r.contract_id,
