@@ -47,7 +47,9 @@ export type RecoverReason =
   | "residential_property"
   | "mixed_or_unknown_usage"
   | "overhead_apportioned"
-  | "recoverable";
+  | "recoverable"
+  /** Recoverable by the rules above, but the expense has no supplier VAT number (no tax invoice). */
+  | "no_supplier_vat";
 
 /**
  * Recoverable only if ALL hold: the category is S; the VAT registrant is known

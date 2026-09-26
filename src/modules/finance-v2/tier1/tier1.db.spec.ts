@@ -171,7 +171,7 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const row: any = await env.reports.createExpense(user, { ownerId: s.holder, propertyId: s.propH, category: "كهرباء", amount: 230, expenseDate: today });
     await drain(env);
     assert.deepEqual(codes(await linesOf(env, "expense", row.id, "rev:1")), ["5190 Dr 230", "111001 Cr 230"], "legacy: O, gross; 5190: property expense");
-    const e = await expenses.update(U, user, row.id, { vatCategory: "S", vatRate: 15, vatRecoverable: true });
+    const e = await expenses.update(U, user, row.id, { vatCategory: "S", vatRate: 15, vatRecoverable: true, supplierVatNumber: "300000000000003" });
     assert.equal(e.details!.revision, 2);
     assert.equal(e.details!.net, "200.00");
     await drain(env);
@@ -187,6 +187,14 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const lockedDay = `${Number(today.slice(0, 4)) - 1}-01-15`;
     await env.q(`update fiscal_periods set status = 'locked' where user_id = $1 and starts_on <= $2::date and ends_on >= $2::date`, [U, lockedDay]);
     assert.equal(((await attempt(() => expenses.create(U, user, { ...base, expenseDate: lockedDay }))) as any).body.error, "PERIOD_LOCKED");
+    // Input VAT needs a tax invoice (VAT IR Art. 49): no supplier VAT number, no recovery.
+    const sBase = { ...base, amount: "115", vatCategory: "S", vatRate: 15 };
+    const noVatNo: any = await attempt(() => expenses.create(U, user, { ...sBase, vatRecoverable: true }));
+    assert.deepEqual([noVatNo.status, noVatNo.body.error], [400, "SUPPLIER_VAT_REQUIRED"], "asked to recover with no supplier VAT number");
+    const dflt = await expenses.create(U, user, sBase);
+    assert.equal(dflt.details!.vatRecoverable, false, "the recoverable default drops without a VAT number");
+    await drain(env);
+    assert.deepEqual(codes(await linesOf(env, "expense", dflt.id, "rev:1")), ["5290 Dr 100", "5500 Dr 15", "111001 Cr 115"]);
     // charge to landlord for the AGENT landlord: Dr LP net / Dr LP VAT / Cr bank
     const e = await expenses.create(U, user, { ...base, amount: "115", vatCategory: "S", ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord" });
     assert.equal(e.details!.vatRecoverable, false);

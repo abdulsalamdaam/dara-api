@@ -317,6 +317,15 @@ export class ExpensesV2Service {
     if (supplierVatNumber && !SUPPLIER_VAT_RE.test(supplierVatNumber)) {
       throw new BadRequestException({ error: "BAD_SUPPLIER_VAT", message: "الرقم الضريبي للمورد: 15 رقماً يبدأ وينتهي بـ 3 · The supplier VAT number is 15 digits starting and ending with 3" });
     }
+    // Input VAT is recoverable only against a tax invoice (VAT IR Art. 49), as supplier bills already require (ap.service).
+    let recoverReason: RecoverReason = def.reason;
+    if (vatRecoverable && !supplierVatNumber) {
+      if (body?.vatRecoverable === true) {
+        throw new BadRequestException({ error: "SUPPLIER_VAT_REQUIRED", message: "استرداد ضريبة المدخلات يتطلب الرقم الضريبي للمورد · Recoverable input VAT needs the supplier's VAT number" });
+      }
+      vatRecoverable = false;
+      recoverReason = "no_supplier_vat";
+    }
     const supplierInvoiceDate = body?.supplierInvoiceDate ? isoDate(body.supplierInvoiceDate, "supplierInvoiceDate") : null;
     let attachmentKey: string | null = null;
     if (body?.attachmentKey != null && body.attachmentKey !== "") {
@@ -335,7 +344,7 @@ export class ExpensesV2Service {
     }
     return {
       expenseOn, ownerId: ctx.ownerId, propertyId, category, notes, gross: a.gross, net: a.net, vat: a.vat, rate: a.rate, vatCategory,
-      vatRecoverable, recoverReason: def.reason, recoverOverridden,
+      vatRecoverable, recoverReason, recoverOverridden,
       supplierName: optStr(body?.supplierName, "supplierName", 200), supplierVatNumber,
       supplierInvoiceNo: optStr(body?.supplierInvoiceNo, "supplierInvoiceNo", 100), supplierInvoiceDate, attachmentKey, bankAccountId, chargeTo, glAccountId,
     };
