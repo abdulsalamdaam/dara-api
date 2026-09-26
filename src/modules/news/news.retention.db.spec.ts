@@ -276,6 +276,43 @@ describe("news retention (real Postgres)", { skip }, () => {
     assert.equal(s.last_cleanup_stats.runId, run.id);
   });
 
+  it("a scheduled slot waits out a cleanup holding the lock, but still skips while a real run is going", async () => {
+    const { NewsSchedulerService } = await import("./news.scheduler.service");
+    await dbm.pool.query("insert into news_sources (kind, feed_url) values ('rss', 'https://example.com/feed')");
+    const runner = new Runner(db, appLog, new Cleaner(db, appLog));
+    runner.rssOverride = { fetchFeed: async () => ({ notModified: true, etag: null, lastModified: null, title: null, siteUrl: null, items: [], skipped: 0 }) };
+    runner.aiOverride = rejectingAi();
+    const sched = new NewsSchedulerService(db, runner, new Cleaner(db, appLog));
+    sched.busyRetryMs = 50;
+    const due = () => dbm.pool.query("update news_job_settings set enabled = true, last_cleanup_at = now(), next_run_at = now() - interval '1 minute' where id = 1");
+    const runs = async () => (await dbm.pool.query("select trigger, status, error from news_job_runs order by started_at")).rows;
+    const waitIdle = async () => {
+      for (let i = 0; i < 200 && (await runs()).some((r: any) => r.status === "running"); i++) await new Promise((r) => setTimeout(r, 25));
+    };
+
+    // Another instance's cleanup holds the lock for ~200 ms: the slot runs.
+    await due();
+    const cleanupLock = await lockMod.tryAcquireNewsLock();
+    setTimeout(() => void cleanupLock!.release(), 200);
+    assert.equal(await sched.tick(), "claimed");
+    await waitIdle();
+    assert.deepEqual((await runs()).map((r: any) => `${r.trigger}:${r.status}`), ["schedule:success"]);
+
+    // A real run holds it: skipped at once, as before.
+    await dbm.pool.query("delete from news_job_runs");
+    await due();
+    const runLock = await lockMod.tryAcquireNewsLock();
+    try {
+      await dbm.pool.query("insert into news_job_runs (trigger, status) values ('manual', 'running')");
+      assert.equal(await sched.tick(), "claimed");
+      const r = await runs();
+      assert.equal(r.find((x: any) => x.trigger === "schedule")?.status, "skipped");
+    } finally {
+      await runLock!.release();
+      await dbm.pool.query("update news_job_settings set enabled = false where id = 1");
+    }
+  });
+
   // ── pagination ───────────────────────────────────────────────────────
   it("pages never repeat or skip rows, even when every sort key ties", async () => {
     const { NewsAdminController } = await import("./news-admin.controller");

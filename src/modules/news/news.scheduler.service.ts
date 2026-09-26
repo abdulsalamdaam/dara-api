@@ -9,6 +9,13 @@ import { NewsCleanerService } from "./news.cleaner.service";
 
 const TICK_MS = 60_000;
 const BOOT_DELAY_MS = 20_000;
+/**
+ * A claimed slot that finds the run lock taken by something that is not a run
+ * (a retention cleanup — another instance's hourly one, or "Clean now" — or a
+ * re-score; both take seconds) waits for it instead of skipping the day.
+ */
+export const BUSY_RETRY_MS = 2_000;
+export const BUSY_RETRIES = 15;
 
 /**
  * The daily trigger. In-process, no new infrastructure — a 60-second tick, the
@@ -33,6 +40,8 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
   private boot: NodeJS.Timeout | null = null;
   private ticking = false;
+  /** Tests shorten the wait between busy retries. */
+  busyRetryMs = BUSY_RETRY_MS;
 
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
@@ -142,7 +151,11 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
         .returning({ id: newsJobSettingsTable.id });
       if (!claimed.length) return "lost";
 
-      const res = await this.runner.startRun("schedule", null);
+      let res = await this.runner.startRun("schedule", null);
+      for (let i = 0; i < BUSY_RETRIES && res.kind === "busy" && !(await this.runner.hasRunningRun()); i++) {
+        await new Promise((r) => setTimeout(r, this.busyRetryMs));
+        res = await this.runner.startRun("schedule", null);
+      }
       if (res.kind === "not_configured") {
         // Not a failure: the feature is simply not switched on here yet.
         await this.runner.recordSkipped("schedule", `not configured — missing: ${res.missing.join(", ")}`);

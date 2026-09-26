@@ -142,6 +142,7 @@ describe("retention settings validation", () => {
 describe("pagination", () => {
   it("pageSize is clamped to 100; junk is a 400", () => {
     assert.equal(newsListQuery({ pageSize: "150" }).pageSize, 100);
+    assert.equal(newsListQuery({ pageSize: "1000" }).pageSize, 100, "above the shared 200 cap too");
     assert.equal(newsListQuery({}).pageSize, 25);
     assert.equal(newsListQuery({ page: "3", pageSize: "20" }).page, 3);
     assert.throws(() => newsListQuery({ page: "0" }), /invalid page or pageSize/);

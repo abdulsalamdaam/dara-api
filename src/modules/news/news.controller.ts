@@ -4,7 +4,8 @@ import { and, count, desc, eq, ilike, inArray, max, or, sql, type SQL } from "dr
 import { newsItemsTable, newsJobRunsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
-import { listQuerySchema, type ListQuery } from "../../common/pagination";
+import { DEFAULT_PAGE_SIZE, listQuerySchema, type ListQuery } from "../../common/pagination";
+import { z } from "zod/v4";
 import { NEWS_CATEGORIES } from "./news.types";
 import { readNewsConfig } from "./news.config";
 
@@ -37,8 +38,13 @@ export const NEWS_MAX_PAGE_SIZE = 100;
  * with pageSize clamped to NEWS_MAX_PAGE_SIZE. The response's `pageSize` is the
  * one applied, so a client can trust it for "showing X–Y of Z".
  */
+/** The shared schema caps pageSize at 200 with a 400; news clamps any size instead. */
+const newsListSchema = listQuerySchema.extend({
+  pageSize: z.coerce.number().int().min(1).default(DEFAULT_PAGE_SIZE),
+});
+
 export function newsListQuery(raw: unknown): ListQuery {
-  const p = listQuerySchema.safeParse(raw ?? {});
+  const p = newsListSchema.safeParse(raw ?? {});
   if (!p.success) throw new BadRequestException("invalid page or pageSize");
   return { ...p.data, pageSize: Math.min(p.data.pageSize, NEWS_MAX_PAGE_SIZE) };
 }

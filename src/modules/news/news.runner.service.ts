@@ -150,6 +150,13 @@ export class NewsRunnerService {
     return { kind: "started", runId };
   }
 
+  /** Whether a job run (not a cleanup or re-score) is in progress. */
+  async hasRunningRun(): Promise<boolean> {
+    const [row] = await this.db.select({ id: newsJobRunsTable.id }).from(newsJobRunsTable)
+      .where(eq(newsJobRunsTable.status, "running")).limit(1);
+    return !!row;
+  }
+
   /** A scheduled slot that could not run: recorded, not failed. */
   async recordSkipped(trigger: "schedule" | "manual", reason: string): Promise<void> {
     await this.db.insert(newsJobRunsTable).values({
