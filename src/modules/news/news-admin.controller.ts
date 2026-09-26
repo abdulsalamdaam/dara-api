@@ -72,6 +72,10 @@ export async function parseFeedUrl(body: any, resolve?: (h: string) => Promise<A
   }
 }
 
+/** What an X test says while no X key is set (the account itself is fine). */
+export const X_NO_KEY_MESSAGE =
+  "X key not set — the account is saved and will be fetched once X_BEARER_TOKEN or TWITTERAPI_IO_KEY is added";
+
 /**
  * Super-admin console for the news job — same guard pair as the admin module.
  */
@@ -250,8 +254,13 @@ export class NewsAdminController {
   private async probe(handle: string, userId: string | null) {
     const cfg = this.runner.config();
     const provider = this.runner.providerOverride ?? buildProvider(cfg);
+    // No X key is not a problem with the account: it is saved (or can be) and
+    // will be fetched once a key is added. 200 with a neutral `no_key`, never a 400.
     if (!provider) {
-      throw new BadRequestException("X is not configured — missing: X_BEARER_TOKEN or TWITTERAPI_IO_KEY");
+      return {
+        kind: "x", ok: false, handle, provider: null, profile: null, tweets: [], skipped: 0,
+        error: { kind: "no_key", message: X_NO_KEY_MESSAGE },
+      };
     }
     try {
       const res = await provider.fetchLatest(handle, { max: 5, userId });
