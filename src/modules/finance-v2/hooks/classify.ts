@@ -58,11 +58,27 @@ export interface DocItem {
 const CATS = new Set(["S", "Z", "E", "O"]);
 
 /**
+ * Does a document line's description name one of the covered fee installments?
+ * Either exactly, or the fee name followed by a separator and a qualifier: a
+ * per-installment invoice reads "<fee> — <month>", and a hand-edited line
+ * "<fee> - Q1" or "<fee> (يناير)". A longer word that merely starts with the
+ * fee name is not that fee.
+ */
+function namesFee(desc: string, feeNames: ReadonlySet<string> | undefined): boolean {
+  if (!feeNames?.size) return false;
+  if (feeNames.has(desc)) return true;
+  for (const name of feeNames) {
+    if (name && desc.startsWith(name) && /^\s*[—–\-(:،,|/]/.test(desc.slice(name.length))) return true;
+  }
+  return false;
+}
+
+/**
  * A document's VAT groups, from its own items, subtotal and total (§4.1,
  * §2.1: documents are never re-split). Category per item: `vatCategory`,
  * else the legacy `vat` flag (true → S, false → E; billing.module.ts
  * `LineItem`). Nature: `fee` when the item's description names a covered fee
- * installment, else `rent`. VAT = total − subtotal, all on the S groups
+ * installment (exactly, or followed by a qualifier, `namesFee`), else `rent`. VAT = total − subtotal, all on the S groups
  * (split by their nets). Σ items is reconciled to `subtotal` on the largest
  * group, with a warning, so the entry always posts the document's own figures.
  */
@@ -80,7 +96,7 @@ export function documentGroups(
     const vatFlag = it.vat == null ? true : !!it.vat;
     const category: VatCategory = explicit ?? (vatFlag ? "S" : "E");
     const desc = String(it.description ?? "").trim();
-    const nature: Nature = opts.nature ?? (desc && opts.feeNames?.has(desc) ? "fee" : "rent");
+    const nature: Nature = opts.nature ?? (desc && namesFee(desc, opts.feeNames) ? "fee" : "rent");
     const key = `${category}|${nature}`;
     const b = buckets.get(key) ?? { category, nature, net: 0 };
     b.net += halalas;

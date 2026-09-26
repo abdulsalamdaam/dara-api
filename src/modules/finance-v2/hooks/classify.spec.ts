@@ -51,6 +51,28 @@ describe("finance v2 hooks: pure classification", () => {
     assert.equal(by("O", "rent").vat, "0.00");
   });
 
+  it("document groups: a fee line whose description carries a period suffix is still a fee (E2E: 4,500 stuck in 2131)", () => {
+    // Invoices built per installment read "<fee name> — <month>"; the covered
+    // fee installment's description is the bare fee name. Classifying the line
+    // as rent credits 2131, and the recognizer never releases a fee installment.
+    const fees = new Set(["رسوم خدمات"]);
+    const r = documentGroups(
+      { items: [{ description: "رسوم خدمات — يناير ٢٠٢٦", amount: 1500, vat: true, vatCategory: "S" }], subtotal: "1500.00", total: "1725.00" },
+      { feeNames: fees, usage: "commercial" },
+    );
+    assert.equal(r.groups.length, 1);
+    assert.equal(r.groups[0].nature, "fee");
+    for (const d of ["رسوم خدمات - Q1", "رسوم خدمات (يناير)", "رسوم خدمات"]) {
+      const g = documentGroups({ items: [{ description: d, amount: 100, vat: false }], subtotal: "100.00", total: "100.00" }, { feeNames: fees });
+      assert.equal(g.groups[0].nature, "fee", d);
+    }
+    // A longer word that merely starts with the fee name is not that fee.
+    const other = documentGroups({ items: [{ description: "رسوم خدماتية", amount: 100, vat: false }], subtotal: "100.00", total: "100.00" }, { feeNames: fees });
+    assert.equal(other.groups[0].nature, "rent");
+    const rent = documentGroups({ items: [{ description: "إيجار — يناير ٢٠٢٦", amount: 100, vat: false }], subtotal: "100.00", total: "100.00" }, { feeNames: fees });
+    assert.equal(rent.groups[0].nature, "rent");
+  });
+
   it("document groups: legacy vat:false is E; Σ items reconciled to subtotal with a warning; three-decimal jsonb flagged", () => {
     const a = documentGroups({ items: [{ amount: 1000, vat: false }], subtotal: "1000.00", total: "1000.00" });
     assert.equal(a.groups[0].category, "E");
