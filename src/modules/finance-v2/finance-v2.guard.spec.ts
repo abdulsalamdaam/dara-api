@@ -57,7 +57,10 @@ describe("GET /finance/v2/status", () => {
     assert.equal(s.enabled, true);
     assert.equal(s.mode, "manager");
     assert.ok(s.capabilities.includes("view"));
-    assert.equal(s.betaLabel.en, "Finance v2 (Beta)");
+    // The web's normalizeFinanceV2Status keeps `betaLabel` only when it is a string.
+    assert.equal(typeof s.betaLabel, "string");
+    assert.equal(s.betaLabel, "المالية v2 (تجريبي) · Finance v2 (Beta)");
+    assert.deepEqual(s.betaLabels, { ar: "المالية v2 (تجريبي)", en: "Finance v2 (Beta)" });
     assert.equal(s.ledgerStarted, false);
   });
 });

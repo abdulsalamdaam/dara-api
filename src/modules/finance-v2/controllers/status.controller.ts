@@ -5,7 +5,9 @@ import { FinanceFlagService } from "../flag.service";
 import { capabilities } from "../capabilities";
 import type { Fv2Request } from "../finance-v2.guard";
 
-export const BETA_LABEL = { ar: "المالية v2 (تجريبي)", en: "Finance v2 (Beta)" } as const;
+export const BETA_LABELS = { ar: "المالية v2 (تجريبي)", en: "Finance v2 (Beta)" } as const;
+/** The pill text as one string (DESIGN §1.3), the shape the web's `useFinanceV2Status` reads. */
+export const BETA_LABEL = `${BETA_LABELS.ar} · ${BETA_LABELS.en}`;
 
 /**
  * GET /api/finance/v2/status (DESIGN §1.3). JWT only, never 404, never 503:
@@ -28,6 +30,7 @@ export class FinanceV2StatusController {
       mode: s.mode,
       capabilities: caps,
       betaLabel: BETA_LABEL,
+      betaLabels: BETA_LABELS,
       ledgerStarted: s.ledgerStartedAt != null,
     };
   }

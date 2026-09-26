@@ -31,15 +31,11 @@ function perInstallment(f: DocumentFacts, amount: number): Array<{ paymentId: nu
  * (E34) is netted from AR and VAT (§4.1). E01/E08 reverse-and-replace any
  * active due-date charge and mark the covered installments charged.
  */
-export function chargeDocument(f: DocumentFacts, s: PostState, docClass: DocClass, opts: { replace: boolean }): RuleOutput {
-  const groups = groupsOf(f);
+export function chargeDocument(fIn: DocumentFacts, s: PostState, docClass: DocClass, opts: { replace: boolean }): RuleOutput {
+  let f = fIn;
+  let groups = groupsOf(f);
   const warnings = [...(f.warnings ?? [])];
   const dims = { ...f.dims, documentId: f.documentId };
-  const gross = sum(groups.map((x) => x.net + x.vat));
-  if (gross <= 0) return { lines: [], warnings, skip: "zero_amount", effects: [], date: f.date };
-  const vatTotal = sum(groups.map((x) => x.vat));
-  const sNet = sum(groups.filter((x) => x.g.category === "S").map((x) => x.net));
-  const covered = f.coverage.map((c) => c.paymentId);
   const seller = sellerKeyOf(f.treatment, f.dims.ownerId);
 
   // Cutover (§6.7): a charge marker with no entry was re-created from the
@@ -50,10 +46,25 @@ export function chargeDocument(f: DocumentFacts, s: PostState, docClass: DocClas
     const a = s.charges[p];
     return !!a && a.entryId == null && a.chargedBy !== "document";
   };
-  if (opts.replace && covered.length && covered.every(fromOpening)) {
+  if (opts.replace && f.coverage.length && f.coverage.every((c) => fromOpening(c.paymentId))) {
     return { lines: [], warnings, skip: "covered_by_opening", effects: [], date: f.date };
   }
-  if (opts.replace && covered.some(fromOpening)) warnings.push("partly_covered_by_opening");
+  if (opts.replace && f.coverage.some((c) => fromOpening(c.paymentId))) {
+    // Partly covered: charge only the share of the installments NOT in the
+    // opening (each group split by the coverage amounts, exactly), so the
+    // opening-charged installments are never charged twice.
+    warnings.push("partly_covered_by_opening");
+    const weights = f.coverage.map((c) => toHalalas(c.amount));
+    const keep = f.coverage.map((c) => !fromOpening(c.paymentId));
+    const kept = (amount: number) => sum(allocate(amount, weights).filter((_, i) => keep[i]));
+    groups = groups.map((x) => ({ g: x.g, net: kept(x.net), vat: kept(x.vat) }));
+    f = { ...f, coverage: f.coverage.filter((_, i) => keep[i]) };
+  }
+  const gross = sum(groups.map((x) => x.net + x.vat));
+  if (gross <= 0) return { lines: [], warnings, skip: "zero_amount", effects: [], date: f.date };
+  const vatTotal = sum(groups.map((x) => x.vat));
+  const sNet = sum(groups.filter((x) => x.g.category === "S").map((x) => x.net));
+  const covered = f.coverage.map((c) => c.paymentId);
 
   // Advance VAT netting (only E01/E08 charge installments; a debit note is an extra charge).
   let vb = 0;

@@ -425,3 +425,30 @@ describe("fv2 VAT settlement E37 with the §8.2(b) apportionment", () => {
     ]);
   });
 });
+
+describe("fv2 a document partly covered by the opening balance (§6.7 gap)", () => {
+  const Q = 102;
+  // Two installments of 6,900 (6,000 + 900): P is in the opening balance (marker, no entry), Q is not charged.
+  const twoDoc = (t: Treatment) => ({
+    date: "2026-08-01", treatment: t, dims: DIMS, documentId: 502, deferRent: true,
+    groups: [group("S", 1_380_000)], coverage: [{ paymentId: P, amount: s(690_000) }, { paymentId: Q, amount: s(690_000) }],
+  });
+  const openingP: PostState = {
+    ...EMPTY_STATE,
+    charges: { [P]: { generation: 1, chargedBy: "due", documentId: null, amount: 690_000, vatAmount: 90_000, vatBase: 600_000, entryId: null } },
+  };
+  for (const t of ["principal", "agent"] as Treatment[]) {
+    it(`charges only the share of the installments not in the opening (${t})`, () => {
+      const out = runRule({ rule: "E01", facts: twoDoc(t), paymentIds: [P, Q] }, openingP);
+      assert.equal(out.skip, undefined);
+      assertWellFormed(out.lines, `partly ${t}`, true);
+      const arKey = t === "agent" ? SYS.arAgency : SYS.ar;
+      const ar = out.lines.filter((l) => accKey(l) === arKey).reduce((a, l) => a + l.debit - l.credit, 0);
+      assert.equal(ar, 690_000, "AR is charged once: only Q's 6,900");
+      const vat = out.lines.filter((l) => l.taxRole === "output" && l.vatCategory === "S").reduce((a, l) => a + l.credit - l.debit, 0);
+      assert.equal(vat, 90_000, "VAT only on Q's share");
+      assert.deepEqual(out.effects.filter((e) => e.kind === "charge").map((e: any) => e.paymentId), [Q], "P keeps its opening marker");
+      assert.ok(out.warnings.includes("partly_covered_by_opening"));
+    });
+  }
+});
