@@ -46,6 +46,57 @@ export async function loadSettings(q: Sql, userId: number): Promise<FinanceSetti
 // ─── Contract dimensions (§4.3) ─────────────────────────────────────────────
 
 /**
+ * Landlord fallbacks after the unit chain, id number and name (tier-3 round,
+ * Phase-2 gap "terminated-contract landlord dimension"): a contract terminated
+ * before Finance v2 was enabled has no contract_units left. In order:
+ *  1. the landlord whose VAT number is the contract's landlord VAT number;
+ *  2. the landlord on the ledger's own history of the contract (the most
+ *     recent posted line carrying both, e.g. the opening entry);
+ *  3. the account's only landlord, when it has exactly one.
+ * `c` is the contracts row. A contract resolved without units is flagged
+ * `dimension_inferred` by contractCtx.
+ */
+const LANDLORD_FALLBACK_SQL = `
+  (select o.id from owners o where o.user_id = c.user_id and o.deleted_at is null
+      and nullif(trim(coalesce(c.landlord_tax_number,'')),'') is not null
+      and trim(coalesce(o.tax_number,'')) = trim(c.landlord_tax_number) order by o.id limit 1),
+  (select l.owner_id from journal_lines l join owners o on o.id = l.owner_id and o.user_id = l.user_id
+    where l.user_id = c.user_id and l.contract_id = c.id and l.owner_id is not null order by l.id desc limit 1),
+  (select min(o.id) from owners o where o.user_id = c.user_id and o.deleted_at is null
+    having count(*) = 1)`;
+
+/** Property fallback: the ledger's history of the contract, then the landlord's only property. */
+const PROPERTY_FALLBACK_SQL = `
+  (select l.property_id from journal_lines l join properties p on p.id = l.property_id and p.user_id = l.user_id
+    where l.user_id = c.user_id and l.contract_id = c.id and l.property_id is not null order by l.id desc limit 1)`;
+
+/**
+ * Fill the landlord / property of an existing dims row that has none (never
+ * overwrites a value). Used by contractCtx for rows captured before the
+ * fallbacks above existed, or before the ledger knew the contract.
+ */
+async function fillMissingDims(q: Sql, userId: number, contractId: number): Promise<void> {
+  await q.exec(
+    `update finance_contract_dims d
+        set owner_id = coalesce(d.owner_id, x.owner_id), property_id = coalesce(d.property_id, x.property_id)
+       from (select c.id,
+                    coalesce(
+                      (select o.id from owners o where o.user_id = c.user_id and o.deleted_at is null
+                          and nullif(trim(coalesce(c.landlord_id_number,'')),'') is not null
+                          and trim(coalesce(o.id_number,'')) = trim(c.landlord_id_number) order by o.id limit 1),
+                      (select o.id from owners o where o.user_id = c.user_id and o.deleted_at is null
+                          and nullif(trim(coalesce(c.landlord_name,'')),'') is not null
+                          and lower(trim(o.name)) = lower(trim(c.landlord_name)) order by o.id limit 1),
+                      ${LANDLORD_FALLBACK_SQL}) as owner_id,
+                    ${PROPERTY_FALLBACK_SQL} as property_id
+               from contracts c where c.id = $1 and c.user_id = $2) x
+      where d.contract_id = x.id and d.user_id = $2 and (d.owner_id is null or d.property_id is null)
+        and (x.owner_id is not null or x.property_id is not null)`,
+    [contractId, userId],
+  );
+}
+
+/**
  * Fill `finance_contract_dims` for one contract (or all of an account's when
  * `contractId` is null) from contract → contract_units → unit → property →
  * owner, falling back to the contract's landlord snapshot matched by id number
@@ -68,8 +119,9 @@ export async function captureDims(q: Sql, userId: number, contractId: number | n
                   and trim(coalesce(o.id_number,'')) = trim(c.landlord_id_number) order by o.id limit 1),
               (select o.id from owners o where o.user_id = c.user_id and o.deleted_at is null
                   and nullif(trim(coalesce(c.landlord_name,'')),'') is not null
-                  and lower(trim(o.name)) = lower(trim(c.landlord_name)) order by o.id limit 1)),
-            fu.property_id,
+                  and lower(trim(o.name)) = lower(trim(c.landlord_name)) order by o.id limit 1),
+              ${LANDLORD_FALLBACK_SQL}),
+            coalesce(fu.property_id, ${PROPERTY_FALLBACK_SQL}),
             coalesce(us.ids, '{}'::int[]),
             case when c.status::text in ('terminated','cancelled') then (c.updated_at at time zone 'Asia/Riyadh')::date end
        from contracts c
@@ -108,8 +160,9 @@ export async function contractCtx(q: Sql, userId: number, mode: AccountingMode, 
     [contractId, userId],
   );
   if (!c) return null;
-  if (!c.has_dims) {
-    await captureDims(q, userId, contractId);
+  if (!c.has_dims || c.owner_id == null || c.property_id == null) {
+    if (!c.has_dims) await captureDims(q, userId, contractId);
+    else await fillMissingDims(q, userId, contractId);
     [c] = await q.rows(
       `select c.id, c.tenant_id, c.status::text as status, to_char(c.end_date,'YYYY-MM-DD') as end_date,
               d.owner_id, d.property_id, d.unit_ids, to_char(d.ended_on,'YYYY-MM-DD') as ended_on
@@ -121,6 +174,7 @@ export async function contractCtx(q: Sql, userId: number, mode: AccountingMode, 
   }
   const units: number[] = Array.isArray(c.unit_ids) ? c.unit_ids.map(Number) : [];
   const warnings: string[] = [];
+  if (!units.length && (c.owner_id != null || c.property_id != null)) warnings.push("dimension_inferred");
   if (units.length > 1) {
     const [n] = await q.rows(`select count(distinct property_id)::int as n from units where id = any($1::int[])`, [units]);
     if ((n?.n ?? 0) > 1) warnings.push("dimension_ambiguous");

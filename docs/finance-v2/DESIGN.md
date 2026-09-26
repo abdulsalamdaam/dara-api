@@ -574,6 +574,7 @@ create constraint trigger journal_entries_balanced after insert on journal_entri
 - The check runs at **commit**, after all the lines are in, so an entry and its lines are inserted in any order inside one transaction.
 - The trigger on `journal_entries` catches an entry inserted with no lines.
 - The same check exists in code (`assertBalanced(lines)` before insert), so a bad rule fails fast with a readable error. The trigger is the backstop.
+- **Hardened in build (0068).** The per-transaction marker above could be set by the session itself (`set_config('fv2.chk_<id>','1',true)`), skipping the check. Migration `0068_finance_v2_hardening.sql` replaces the function: the entry's own trigger (one per entry) always checks at commit and consults no setting, and a new `before insert` trigger `journal_lines_same_tx` refuses a line whose entry was posted in an earlier transaction (`posted_at <> transaction_timestamp()`; `posted_at` is immutable). The lines' trigger then has nothing to check for a same-transaction entry. The check stays O(lines) per entry.
 
 #### 2.4.2 Immutability
 
@@ -868,6 +869,7 @@ Why per landlord and not per company: the staging accountant account itself mixe
 - **Dimension resolution** happens at enqueue and is frozen.
   - The path is contract → `contract_units` → unit → property → `owner_id`, falling back to the contract's landlord snapshot matched by id number and then name, as in `reports.module.ts:134-149`.
   - `contract_units` rows are **hard-deleted on terminate and DELETE** (`contracts.module.ts:1663,1803`), so v2 keeps a side table: `finance_contract_dims(contract_id pk, user_id, owner_id, property_id, unit_ids int[], captured_at)`. It is filled for every contract at enable time and at each contract create or rebuild. Resolution reads it first.
+  - **Fallbacks (added in build)** for a contract with no units left (terminated before the flag was enabled): after the unit chain, the landlord id number and the name, the landlord VAT number on the contract, then the landlord and property on the ledger's own history of the contract (e.g. the opening entry), then the account's only landlord. Null dims on an existing row are filled (never overwritten). A contract resolved without units carries the warning `dimension_inferred`.
   - A contract that spans several properties takes the first unit, as the reports do (`reports.module.ts:74-79`), with the warning `dimension_ambiguous`.
 
 ```sql
@@ -1508,6 +1510,7 @@ The landlord statement has one extra rule: an owner-mobile token (`ownerScopeId`
 - **Reopen** needs the settings capability and a reason. It is refused if the period is `locked` or any later period is closed.
 - **Lock** is irreversible. It happens automatically when a VAT return draft is locked (§7.5), or manually.
 - **Year end.** "Close year" runs only when periods 1–11 are closed. It posts a **closing entry** (`origin='closing'`) dated the last day of period 12: revenue and expense balances go to 3300. It then closes period 12. The balance sheet's "unclosed prior years" line is zero after that. The P&L, the TB period columns and current-year profit exclude `origin='closing'` lines (§7.1, §7.3, §7.4), so the closed year's statements still show its results.
+  - **Refresh (added in build).** A manual adjustment approved into a closed month of a year that already has its closing entry would reopen that year's P&L. In the same transaction the journal repository posts `fiscal_year,<fy>,closing:adj:<entryId>` (`origin='closing'`, dated the year's last day) that closes the year's whole P&L residual to 3300. If period 12 is locked the adjustment is refused with 409 `YEAR_CLOSING_LOCKED`.
 - **Audit.** Close, reopen, lock, year close, VAT-return lock, journal approve and reverse, write-off, retry and dismiss are all POST (or PUT) actions, which the audit interceptor does not record (`audit.module.ts:32`). Each handler writes its own `audit_logs` row in the same transaction.
 
 ### 8.2 Tier 1 (this release)

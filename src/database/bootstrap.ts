@@ -595,6 +595,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 tier-2 tables failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0068 ledger hardening (balance check no longer skippable from the session). After 0066, which it overrides.
+    try { // finance-v2:
+      const fv2Hard = findSqlFile(join("drizzle", "0068_finance_v2_hardening.sql")); // finance-v2:
+      if (fv2Hard) await client.query(readFileSync(fv2Hard, "utf8")); // finance-v2:
+      else log.warn("0068_finance_v2_hardening.sql not found — Finance v2 ledger hardening not applied"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 ledger hardening failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

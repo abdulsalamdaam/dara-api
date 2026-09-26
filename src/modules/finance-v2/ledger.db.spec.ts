@@ -136,7 +136,7 @@ describe("finance v2 migration and ledger triggers (real Postgres)", { skip: fv2
       await assert.rejects(withTx(t.pool, async (c) => {
         await c.query(`insert into journal_lines (entry_id, user_id, line_no, entry_date, account_id, debit, credit) values ($1,$2,9,'2026-03-10',$3,5,0),($1,$2,10,'2026-03-10',$4,0,5)`,
           [id, U, acc["1113"], acc["1121"]]);
-      }), /total/);
+      }), /earlier transaction/, "refused at insert since 0068 (lines only in the entry's own transaction)");
     });
     it("the repository refuses an unbalanced entry before SQL", async () => {
       await assert.rejects(post([{ accountId: acc["1113"], debit: 100 }, { accountId: acc["1121"], credit: 99 }]), /unbalanced/);

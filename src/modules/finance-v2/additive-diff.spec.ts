@@ -68,4 +68,18 @@ describe("finance-v2 additive-diff gate (DESIGN §1.4.5)", () => {
     assert.ok(!sql.includes(["fv2", "purge"].join(".")), "the purge switch stays in 0066");
     assert.ok(!/\balter\s+table\b/i.test(sql.replace(/--[^\n]*/g, "")), "no ALTER TABLE at all");
   });
+
+  it("the real 0068 and 0069 alter nothing and never touch the purge switch", () => {
+    const { readFileSync, existsSync } = require("node:fs");
+    const { join } = require("node:path");
+    for (const f of ["0068_finance_v2_hardening.sql", "0069_finance_v2_tier3.sql"]) {
+      const p = join(__dirname, "../../../db/drizzle", f);
+      if (f.startsWith("0068")) assert.ok(existsSync(p), f);
+      if (!existsSync(p)) continue;
+      const sql = readFileSync(p, "utf8");
+      assert.deepEqual(checkMigrationAlters(sql, f), []);
+      assert.ok(!sql.includes(["fv2", "purge"].join(".")), `${f}: the purge switch stays in 0066`);
+      assert.ok(!/\balter\s+table\b/i.test(sql.replace(/--[^\n]*/g, "")), `${f}: no ALTER TABLE at all`);
+    }
+  });
 });

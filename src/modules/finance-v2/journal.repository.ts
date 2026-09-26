@@ -4,6 +4,7 @@ import { fromHalalas, toHalalas } from "./money";
 import { LOCK_KEYS } from "./lock-keys";
 import { PeriodsService } from "./periods.service";
 import type { JournalOrigin } from "../../../db/src/schema/financeV2";
+import { RuleError } from "./rules/types";
 
 export interface LineInput {
   accountId: number;
@@ -147,7 +148,60 @@ export class JournalRepository {
       return `(${ph.join(", ")})`;
     });
     await c.query(`insert into journal_lines (${LINE_COLS.join(", ")}) values ${tuples.join(", ")}`, params);
+    if (input.origin !== "closing") await this.refreshYearClose(c, input.userId, period.fiscalYear, id, input.createdBy ?? null);
     return { id, entryNo, created: true };
+  }
+
+  /**
+   * Year-end close refresh. When an entry lands in a fiscal year that already
+   * has its closing entry (a manual adjustment approved into a closed month,
+   * the only path that can), the year's revenue and expense accounts would no
+   * longer net to zero and 3300 would miss the result. In the same
+   * transaction, post `fiscal_year,<fy>,closing:adj:<entryId>` (origin
+   * `closing`, dated the year's last day) that closes whatever P&L residual
+   * the year now carries to retained earnings. The residual is computed over
+   * the whole year, so the refresh is self-healing. Period 12 locked → the
+   * adjustment is refused (YEAR_CLOSING_LOCKED), rolling back the caller.
+   */
+  private async refreshYearClose(c: Fv2Client, userId: number, fiscalYear: number, entryId: number, createdBy: number | null): Promise<void> {
+    const closed = await c.query(
+      `select 1 from journal_entries where user_id = $1 and source_type = 'fiscal_year' and source_id = $2 and event = 'closing' and status = 'posted'`,
+      [userId, fiscalYear]);
+    if (!closed.rowCount) return;
+    const touches = await c.query(
+      `select 1 from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+        where l.entry_id = $1 and a.type in ('revenue','expense') limit 1`, [entryId]);
+    if (!touches.rowCount) return;
+    const fy = (await c.query(
+      `select to_char(min(starts_on),'YYYY-MM-DD') as s, to_char(max(ends_on),'YYYY-MM-DD') as e,
+              (select status from fiscal_periods where user_id = $1 and fiscal_year = $2 and period_no = 12) as p12
+         from fiscal_periods where user_id = $1 and fiscal_year = $2`, [userId, fiscalYear])).rows[0];
+    const bal = await c.query(
+      `select l.account_id as id, sum(l.debit - l.credit)::text as b
+         from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+        where l.user_id = $1 and a.type in ('revenue','expense') and l.entry_date between $2 and $3
+        group by l.account_id having sum(l.debit - l.credit) <> 0 order by l.account_id`,
+      [userId, fy.s, fy.e]);
+    if (!bal.rows.length) return;
+    if (fy.p12 === "locked") {
+      throw new RuleError("YEAR_CLOSING_LOCKED",
+        `السنة المالية ${fiscalYear} مقفلة نهائياً؛ لا يمكن تحديث قيد الإقفال · Fiscal year ${fiscalYear} is locked; its closing entry cannot be refreshed`, true);
+    }
+    const re = (await c.query(`select id from accounts where user_id = $1 and system_key = 'retained_earnings'`, [userId])).rows[0];
+    if (!re) throw new RuleError("MISSING_ACCOUNT", "the chart has no retained earnings account", true);
+    const lines: LineInput[] = [];
+    let net = 0;
+    for (const r of bal.rows) {
+      const b = toHalalas(r.b);
+      net += b;
+      lines.push(b > 0 ? { accountId: r.id, credit: b, memo: "closing" } : { accountId: r.id, debit: -b, memo: "closing" });
+    }
+    if (net !== 0) lines.push(net > 0 ? { accountId: re.id, debit: net, memo: "profit/loss" } : { accountId: re.id, credit: -net, memo: "profit/loss" });
+    await this.post(c, {
+      userId, entryDate: fy.e, origin: "closing", sourceType: "fiscal_year", sourceId: fiscalYear, event: `closing:adj:${entryId}`,
+      memo: `تحديث إقفال السنة المالية ${fiscalYear} · Year-end close refresh ${fiscalYear}`,
+      payload: { fiscalYear, adjustmentOf: entryId, result: fromHalalas(-net) }, createdBy, lines,
+    });
   }
 
   /**
