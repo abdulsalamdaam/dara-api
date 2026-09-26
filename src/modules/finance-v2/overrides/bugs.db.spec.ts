@@ -325,6 +325,14 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     ]);
     const unbilled: any = await ctl(on).unbilled(req());
     assert.ok(!unbilled.rows.some((r: any) => r.contractId === c.id));
+    // Collected under the agent landlord's contract, the fee is still the account's own: it clears 1121 into cash,
+    // never 1122/2122/2121 (which would pay the landlord the manager's fee).
+    await on.billing.collect(approver, String(docs[0].id), { method: "cash", paidDate: today });
+    await drain(on);
+    const [pc] = await on.q(`select id from payment_collections where invoice_id = $1`, [docs[0].id]);
+    assert.deepEqual((await entryLines(on, "payment_collection", pc.id, "collected")).map((l: any) => [l.code, l.debit, l.credit]), [
+      ["1111", "2875.00", "0.00"], ["1121", "0.00", "2875.00"],
+    ]);
   });
 
   // ── E7 ───────────────────────────────────────────────────────────────────

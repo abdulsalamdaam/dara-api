@@ -256,6 +256,18 @@ describe("fv2 mode resolution and collection classification (§4.2, §4.4.1)", (
     assert.deepEqual([rent.rule, rent.advanceVatCandidate], ["E03", true]);
     assert.equal(classifyCollection({ amount: 5, paymentId: null }).advanceVatCandidate, false);
   });
+
+  it("an agency-fee collection is the account's own money even under an agent contract: principal E03/E04, no advance VAT", () => {
+    const c = classifyCollection({ amount: 1150, documentKind: "agency_fee" });
+    assert.deepEqual([c.rule, c.cls, c.treatment, c.advanceVatCandidate], ["E03", "rent", "principal", false]);
+    const back = classifyCollection({ amount: -1150, documentKind: "agency_fee", paymentId: 9 });
+    assert.deepEqual([back.rule, back.treatment, back.advanceVatCandidate], ["E04", "principal", false]);
+    assert.equal(classifyCollection({ amount: 5, paymentId: 3 }).treatment, undefined, "rent keeps the contract's treatment");
+    // The E17 charge sits on 1121; the collection must clear 1121 into the operating bank, with no 2122 -> 2121 transfer.
+    const lines = RULES.E03({ date: "2026-08-10", treatment: c.treatment!, dims: DIMS, collectionId: 1, amount: "1150.00", cls: "rent", bank: {} }, EMPTY_STATE).lines;
+    assert.deepEqual(lines.map((l) => [accKey(l), l.debit, l.credit]), [["bank_default", 115000, 0], [SYS.ar, 0, 115000]]);
+    assert.equal((lines[0].account as any).bank.agency, false, "the operating bank, never the client trust account");
+  });
 });
 
 describe("fv2 worked example §4.5 (synthetic values)", () => {

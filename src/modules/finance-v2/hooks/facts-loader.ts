@@ -260,8 +260,9 @@ export async function collectionEvents(q: Sql, userId: number, s: FinanceSetting
       if (!ctxCache.has(contractId)) ctxCache.set(contractId, await contractCtx(q, userId, s.mode, contractId));
       ctx = ctxCache.get(contractId) ?? null;
     }
-    const t = ctx ? { treatment: ctx.treatment, warnings: ctx.warnings } : resolveTreatment(s.mode, null);
-    const vat = r.payment_id && nature !== "deposit"
+    const t0 = ctx ? { treatment: ctx.treatment, warnings: ctx.warnings } : resolveTreatment(s.mode, null);
+    const t = cls.treatment ? { ...t0, treatment: cls.treatment } : t0;
+    const vat = r.payment_id && nature !== "deposit" && r.doc_kind !== "agency_fee"
       ? installmentVat({ vatEnabled: r.p_vat === true, usage: ctx?.usage ?? null, sellerRegistered: ctx?.sellerRegistered ?? false })
       : null;
     const facts: CollectionFacts = {

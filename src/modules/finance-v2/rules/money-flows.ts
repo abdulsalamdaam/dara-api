@@ -128,6 +128,13 @@ export interface Classified {
   /** E34 is emitted too when the caller finds an uncharged S installment. */
   advanceVatCandidate: boolean;
   warnings: string[];
+  /**
+   * Overrides the contract's treatment. An agency-fee (السعي) document is the
+   * account's own revenue (E17 books it to 1121 even under an agent contract),
+   * so its collection is principal: Dr the operating bank / Cr 1121, with no
+   * 2122 -> 2121 transfer that would pay the landlord the manager's fee.
+   */
+  treatment?: Treatment;
 }
 
 /** §4.4.1, in order. `rule: null` = the collection posts nothing (its amount is inside the voucher's E09). */
@@ -145,6 +152,7 @@ export function classifyCollection(c: ClassifyInput): Classified {
     return none;
   }
   if (c.documentKind === "commission") return { ...none, rule: "E16", cls: "commission_deduction" };
+  if (c.documentKind === "agency_fee") return { ...none, rule: c.amount < 0 ? "E04" : "E03", cls: "rent", treatment: "principal" };
   if (c.paymentId && c.paymentIsDeposit) return { ...none, rule: "E09C", cls: "deposit_installment" };
   return { ...none, rule: c.amount < 0 ? "E04" : "E03", cls: "rent", advanceVatCandidate: c.amount > 0 && !!c.paymentId };
 }

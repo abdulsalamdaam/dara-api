@@ -938,6 +938,7 @@ A `payment_collections` row is classified in this order. The classifier reads **
    - `payment_id` null and identified as a terminate conversion (meta, or for history the terminate note text and a later date) → E12.
    - `payment_id` null otherwise (a `countAsCollection` remainder on a deposit voucher, `billing.module.ts:1229-1236`) → **nothing**; the amount is part of the voucher's E09.
 3. `invoice_id` points at a commission document → E16.
+   - `invoice_id` points at an `agency_fee` document → E03/E04 with the treatment forced to **principal** whatever the contract's landlord: the fee is the account's own revenue (E17 books it to 1121), so the cash goes to the operating bank and clears 1121, with no 2122 → 2121 transfer. No E34 (E17 already carries the VAT).
 4. `payment_id` on a legacy deposit installment → E09 (collection variant); negative → E04 on DEP.
 5. Otherwise → E03 (positive) or E04 (negative), plus E34 when §4.1's advance-VAT condition holds.
 
