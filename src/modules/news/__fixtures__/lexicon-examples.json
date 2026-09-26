@@ -83,7 +83,7 @@
   "title": "Saudi property: ROSHN opens Riyadh, Jeddah and Makkah homes to foreign buyers - Arabian Business",
   "source": "Arabian Business",
   "desc": "",
-  "score": 76,
+  "score": 82,
   "category": "projects",
   "tags": [
    "foreign-ownership",
@@ -135,7 +135,7 @@
   "title": "استمرارًا لتوجيهات ولي العهد.. إعلان موعد استقبال طلبات السنة الثانية من برنامج التوازن العقاري - عاجل",
   "source": null,
   "desc": "استمرارًا لتوجيهات صاحب السمو الملكي الأمير محمد بن سلمان بن عبدالعزيز آل سعود ولي العهد رئيس مجلس الوزراء، باتخاذ الإجراءات اللازمة لتحقيق التوازن في القطاع العقاري ، أعلنت الهيئة الملكية لمدينة الرياض موعد بدء استقبال طلبات السنة الثانية من برنامج التوازن العقاري . استمرارًا لتنفيذ توجيه ولي العهد — حفظه الله — بتحقيق التوازن في القطاع العقاري في مدينة #الرياض ، تعلن #الهيئة_الملكية_لمدينة_الريا",
-  "score": 66,
+  "score": 70,
   "category": "regulation",
   "tags": [
    "rcrc-balance",
@@ -199,13 +199,13 @@
   "title": "Saudi Arabia plans massive 55,000-home Riyadh development as ROSHN signs deal - Arabian Business",
   "source": "Arabian Business",
   "desc": "",
-  "score": 55,
+  "score": 65,
   "category": "projects",
   "tags": [
    "roshn",
    "development"
   ],
-  "publish": false
+  "publish": true
  },
  {
   "n": "17",
@@ -224,10 +224,11 @@
   "title": "اقتصادي / وزير البلديات والإسكان يفتتح المؤتمر والمعرض الدولي الثالث لإدارة المرافق 2026 - وكالة الأنباء السعودية",
   "source": "وكالة الأنباء السعودية",
   "desc": "",
-  "score": 25,
+  "score": 43,
   "category": "housing",
   "tags": [
-   "momah"
+   "momah",
+   "facility-management"
   ],
   "publish": false
  },
@@ -343,12 +344,12 @@
   "title": "الكويت تدين استهداف السعودية.. ومجلس الوزراء يقر مشروع التمويل العقاري - mubasher.info",
   "source": "mubasher.info",
   "desc": "",
-  "score": 66,
+  "score": 36,
   "category": "finance",
   "tags": [
    "mortgage"
   ],
-  "publish": true
+  "publish": false
  },
  {
   "n": "S1",

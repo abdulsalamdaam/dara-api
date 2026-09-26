@@ -21,8 +21,9 @@ import { RssProvider } from "./providers/rss.provider";
 import { ApifyProvider, APIFY_PRICE_PER_ITEM_USD, type ApifyBudget } from "./providers/apify.provider";
 import { assertPublicHost, checkUrlShape, SafeFetchError } from "./providers/safe-fetch";
 import {
-  NewsValidationError, parseItemPatch, parseSettingsPatch, parseSourceIds, parseSourcePatch, UUID_RE,
+  NewsValidationError, parseItemPatch, parseRescoreBody, parseSettingsPatch, parseSourceIds, parseSourcePatch, UUID_RE,
 } from "./news.validation";
+import { RESCORE_DEFAULT_DAYS, RESCORE_MAX_DAYS } from "./news.rescore";
 
 /** Run a body parser, turning its error into a 400 with the parser's message. */
 function parsed<T>(fn: () => T): T {
@@ -320,6 +321,25 @@ export class NewsAdminController {
     return { runId: res.runId };
   }
 
+  /**
+   * POST /admin/news/rescore `{ days?: 1–60 (default 14), dryRun?: boolean }`
+   * — re-run the current keyword filter over recent items it judged (never
+   * one an admin moderated or pinned) and dedupe what newly publishes against
+   * the feed. 200 `{ dryRun, days, minScore, checked, newlyPublished,
+   * newlyRejected, duplicates, held, changes[], runId }`. A dry run writes
+   * nothing. 409 while a run holds the lock; 400 when the filter is Claude.
+   */
+  @Post("rescore")
+  @HttpCode(200)
+  async rescore(@Body() body: any, @CurrentUser() user: AuthUser) {
+    const { days, dryRun } = parsed(() => parseRescoreBody(body, { days: RESCORE_DEFAULT_DAYS, maxDays: RESCORE_MAX_DAYS }));
+    const res = await this.runner.rescore(days, dryRun, user?.id ?? null);
+    if (res.kind === "busy") throw new ConflictException("a news run is in progress — try again when it finishes");
+    if (res.kind === "ai_filter") throw new BadRequestException("re-score re-runs the keyword filter; the current filter is Claude");
+    const { kind: _kind, ...out } = res;
+    return out;
+  }
+
   /** Newest first, without the log. `?limit=` 1–100, default 20. */
   @Get("runs")
   runs(@Query("limit") limitRaw?: string) {
@@ -384,7 +404,8 @@ export class NewsAdminController {
   @Patch("items/:id")
   async updateItem(@Param("id") id: string, @Body() body: any, @CurrentUser() user: AuthUser) {
     const patch = parsed(() => parseItemPatch(body));
-    const [row] = await this.db.update(newsItemsTable).set(patch)
+    // Any hand edit marks the item moderated: the re-score never touches it again.
+    const [row] = await this.db.update(newsItemsTable).set({ ...patch, moderatedBy: user?.id ?? null, moderatedAt: new Date() })
       .where(eq(newsItemsTable.id, uuidParam(id))).returning();
     if (!row) throw new NotFoundException("item not found");
     this.appLog.record({ level: "log", event: "news_item_moderated", context: "News", userId: user?.id ?? null, meta: { id, ...patch } });

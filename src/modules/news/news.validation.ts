@@ -136,3 +136,12 @@ export function parseSourceIds(body: any): string[] | undefined {
   }
   return raw.length ? [...new Set(raw as string[])] : undefined;
 }
+
+/** POST /admin/news/rescore: `{ days?: 1–60 (default 14), dryRun?: boolean }`. */
+export function parseRescoreBody(body: any, defaults: { days: number; maxDays: number }): { days: number; dryRun: boolean } {
+  const rawDays = pick(body, "days");
+  const days = rawDays == null ? defaults.days : intIn(rawDays, "days", 1, defaults.maxDays);
+  const rawDry = pick(body, "dryRun", "dry_run");
+  const dryRun = rawDry == null ? false : bool(rawDry, "dryRun");
+  return { days, dryRun };
+}

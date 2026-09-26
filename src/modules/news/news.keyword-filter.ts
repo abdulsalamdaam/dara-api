@@ -1,7 +1,7 @@
 import type { AiVerdict, ParsedAiOutput } from "./news.ai";
 import {
   BLOCK_RE_SOURCES, DATA_RE_SOURCE, FOREIGN_GEO, LEX_CATEGORIES, LEX_CATEGORY_ORDER, LEX_SCORING, NEGATIVE,
-  PAGE_RE_SOURCE, SAUDI_GEO, TITLE_PREFIX_RE, type LexTerm,
+  PAGE_RE_SOURCE, SAUDI_GEO, SAUDI_WEAK, TITLE_PREFIX_RE, type LexTerm,
 } from "./news.lexicon";
 import { compilePyRegex, compileTerm, normaliseForMatch } from "./news.text";
 import type { NewsCategory, NormalisedTweet } from "./news.types";
@@ -26,6 +26,7 @@ interface CTerm { re: RegExp; t: string; w: number; tag: string | null; sa: bool
 const CTERMS: CTerm[] = LEX_CATEGORY_ORDER.flatMap((cat) =>
   (LEX_CATEGORIES[cat] ?? []).map((x: LexTerm) => ({ re: compileTerm(x.t), t: x.t, w: x.w, tag: x.tag ?? null, sa: !!x.sa, cat })));
 const SAUDI_P = SAUDI_GEO.map(compileTerm);
+const SAUDI_WEAK_P = SAUDI_WEAK.map(compileTerm);
 const FOREIGN_P = FOREIGN_GEO.map((t) => ({ re: compileTerm(t), t }));
 const NEG_P = NEGATIVE.map(([t, w]) => ({ re: compileTerm(t), t, w }));
 const BLOCK_P = BLOCK_RE_SOURCES.map((src) => ({ re: compilePyRegex(src), src }));
@@ -103,7 +104,10 @@ export function scoreKeywords(title: string, desc = "", source?: string | null):
   const both = `${T} ${D}`;
   const saudi = saudiEntity || SAUDI_P.some((re) => re.test(both));
   const foreign = FOREIGN_P.filter((f) => f.re.test(T)).map((f) => f.t);
-  const G = foreign.length && !saudi ? S.foreignPenalty : saudi ? S.saudiBonus : S.noGeoPenalty;
+  // A weak Saudi signal (the riyal, «البلديات», a Riyadh district…) counts only
+  // when the title names no foreign market.
+  const weakSaudi = !saudi && !foreign.length && SAUDI_WEAK_P.some((re) => re.test(both));
+  const G = foreign.length && !saudi ? S.foreignPenalty : saudi || weakSaudi ? S.saudiBonus : S.noGeoPenalty;
   const data = DATA_P.test(T) ? S.dataBonus : 0;
 
   let N = 0;

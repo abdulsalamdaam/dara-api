@@ -563,8 +563,9 @@ export async function ensureSchema(): Promise<void> {
     // db/drizzle, which — unlike db/sql — the Dockerfile copies into the image.
     // A failure warns and boots anyway: only the news endpoints need these.
     try {
-      // 0062 (RSS sources, filter_kind) builds on 0061, so strictly in order.
-      for (const f of ["0061_re_news.sql", "0062_re_news_rss.sql"]) {
+      // 0062 (RSS sources, filter_kind) builds on 0061, and 0063 (moderated_by/at,
+      // backfilled from app_logs, created above) on both — so strictly in order.
+      for (const f of ["0061_re_news.sql", "0062_re_news_rss.sql", "0063_re_news_moderation.sql"]) {
         const newsSql = findSqlFile(join("drizzle", f));
         if (newsSql) await client.query(readFileSync(newsSql, "utf8"));
         else log.warn(`${f} not found — news tables not ensured`);

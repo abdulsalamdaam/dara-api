@@ -430,18 +430,18 @@ These are real headlines from the feeds on 2026-09-26, apart from S1–S6, which
 | 4 | REGA limits property transactions in Hail, Eastern Province to real estate registry | argaam.com | **98** ✅ | regulation | real-estate-registry, transactions, rega | English, strong entities |
 | 5 | حصر تنفيذ التصرفات العقارية في حائل والشرقية على السجل العقاري | جريدة الرياض | **91** ✅ | regulation | real-estate-registry, rett | registry + transactions + حصر |
 | 6 | Saudi Sakani program to help 140,000 families own their home this year | Arab News | **78** ✅ | housing | sakani, home-ownership | Sakani + data |
-| 7 | Saudi property: ROSHN opens Riyadh, Jeddah and Makkah homes to foreign buyers | Arabian Business | **76** ✅ | projects | foreign-ownership, roshn | foreign-ownership news |
+| 7 | Saudi property: ROSHN opens Riyadh, Jeddah and Makkah homes to foreign buyers | Arabian Business | **82** ✅ | projects | foreign-ownership, roshn | foreign-ownership news |
 | 8 | 5.87 مليار ريال.. حجم التمويل العقاري للأفراد من المصارف خلال يوليو | — (Alyaum RE) | **74** ✅ | finance | mortgage | mortgage volume + figure + desc |
 | 9 | ارتفاع الرقم القياسي لتكاليف البناء في السعودية 2.3% خلال أغسطس | العربية | **72** ✅ | market | construction-costs | official index + figure |
 | 10 | حصري \| عام على تثبيت الإيجارات في الرياض.. من دفع الكلفة ومن كسب المعركة؟ | أريبيان بزنس | **70** ✅ | rental | rent-freeze | one Saudi-only entity alone clears 60 |
-| 11 | استمرارًا لتوجيهات ولي العهد.. إعلان موعد استقبال طلبات السنة الثانية من برنامج التوازن العقاري - عاجل | — (Alyaum RE) | **66** ✅ | regulation | rcrc-balance | Riyadh land programme |
+| 11 | استمرارًا لتوجيهات ولي العهد.. إعلان موعد استقبال طلبات السنة الثانية من برنامج التوازن العقاري - عاجل | — (Alyaum RE) | **70** ✅ | regulation | rcrc-balance | Riyadh land programme |
 | 12 | 45 يوما مهلة تصحيحية لملاك الأراضي الفضاء قبل تطبيق العقوبات | — (Alyaum RE) | **66** ✅ | regulation | white-land, momah | deadline + penalties; MOMAH from desc |
 | 13 | قرارات التوازن تقلص تضخم الإيجارات في الرياض | الاقتصادية | **65** ✅ | market | rent-inflation | rent inflation, Riyadh |
 | 14 | Saudi real estate transactions fall 15% to SAR 24.4B in August | argaam.com | **63** ✅ | market | transactions | market data |
 | 15 | يومان على انتهاء مهلة تسجيل 204 قطع عقارية في مكة المكرمة والشرقية | — (Alyaum RE) | **62** ✅ | regulation | rega, real-estate-registry | entities only in description (half weight) + deadline |
-| 16 | Saudi Arabia plans massive 55,000-home Riyadh development as ROSHN signs deal | Arabian Business | **55** ✗ | projects | roshn, development | **known miss**: a real project with numbers; admin can approve by hand |
+| 16 | Saudi Arabia plans massive 55,000-home Riyadh development as ROSHN signs deal | Arabian Business | **65** ✅ | projects | roshn, development | was a known miss at 55; ROSHN raised to 40 (§9) |
 | 17 | TASI: 10 stocks, 2 REIT fall to historical lows | argaam.com | **35** ✗ | finance | reit | stock-move noise |
-| 18 | اقتصادي / وزير البلديات والإسكان يفتتح المؤتمر والمعرض الدولي الثالث لإدارة المرافق 2026 | وكالة الأنباء السعودية | **25** ✗ | housing | momah | event PR (يفتتح, معرض) |
+| 18 | اقتصادي / وزير البلديات والإسكان يفتتح المؤتمر والمعرض الدولي الثالث لإدارة المرافق 2026 | وكالة الأنباء السعودية | **43** ✗ | housing | momah, facility-management | event PR (يفتتح, معرض) |
 | 19 | ضريبة التصرفات العقارية في مصر.. كيف تستفيد من الإعفاءات المتاحة؟ | al-ain.com | **0** ✗ | regulation | rett | foreign: مصر |
 | 20 | ارتفاع جديد لفائدة التمويل العقاري في أميركا | العربية | **0** ✗ | finance | mortgage | foreign: اميركا |
 | 21 | توحيد عمل أمانات السجل العقاري في جبل لبنان | المركزية | **0** ✗ | regulation | real-estate-registry | foreign: لبنان |
@@ -451,7 +451,7 @@ These are real headlines from the feeds on 2026-09-26, apart from S1–S6, which
 | 25 | عام / نائب أمير الشرقية يستقبل مدير فرع الهيئة العامة لعقارات الدولة بالدمام | وكالة الأنباء السعودية | **0** ✗ | other | real-estate | protocol visit (note: State Properties ≠ REGA) |
 | 26 | السعودية: وفاتان و12 إصابة بسقوط مقذوف على مبنى سكني في الخرج | الشرق الأوسط | **0** ✗ | housing | sakani | crime/attack negatives |
 | 27 | الراجحي ريت - الاخبار | ارقام : … - تاسي | **0** ✗ | other | — | PAGE_RE index page |
-| 28 | الكويت تدين استهداف السعودية.. ومجلس الوزراء يقر مشروع التمويل العقاري | mubasher.info | **66** ⚠ | finance | mortgage | **known false positive**: a Kuwaiti law. «السعودية» appears in an unrelated clause, and Saudi geography overrides the foreign marker |
+| 28 | الكويت تدين استهداف السعودية.. ومجلس الوزراء يقر مشروع التمويل العقاري | mubasher.info | **36** ✗ | finance | mortgage | was a known false positive at 66 (a Kuwaiti law); «تدين» −30 now sinks it (§9) |
 | S1 | فيلا للبيع في حي النرجس بالرياض 3 أدوار السعر 2,500,000 للتواصل 0551234567 | synthetic | **0** ✗ | other | — | BLOCK: phone number |
 | S2 | شقة للإيجار بجدة حي الصفا 4 غرف — احجز الآن واتساب | synthetic | **0** ✗ | other | — | BLOCK: واتساب |
 | S3 | 🎉 مسابقة اليوم الوطني: ريتويت وتابعنا واربح إيجار شهر مجاناً | synthetic | **0** ✗ | other | — | BLOCK: retweet |
@@ -463,7 +463,7 @@ These are real headlines from the feeds on 2026-09-26, apart from S1–S6, which
 
 - **Syndication duplicates.** The same REGA or REDF announcement arrives 10–15 times across Google News. Near-duplicate dedupe (CONTRACT) must collapse them. That is expected, not a filter bug.
 - **Foreign check reads the title only.** A Kuwaiti or Egyptian story whose title names no country slips through when it uses Saudi-sounding terms (see #28, and «مجلس الوزراء يوافق على … التمويل العقاري لمستحقي الرعاية السكنية», where «الرعايه السكنيه» was added as a Kuwaiti marker). Add markers to `FOREIGN_GEO` when admins reject such items.
-- **Project news under-scores** (#16). Giga-project stories need numbers plus the project name, and ROSHN at 30 is deliberately modest. If admins keep approving these, raise `روشن`/`roshn` to 40.
+- **Project news under-scores** (#16). Giga-project stories need numbers plus the project name. ROSHN went from 30 to 40 in the filter tuning (§9), which fixed #16.
 - **Deterministic by design.** Same input, same output, with no stemming library and no network access.
 - **Wrong verdicts.** Fix them by editing weights or adding terms, then add the headline to §6 as a fixture.
 
@@ -475,3 +475,45 @@ These changes are in dara-api `e2ff5c2`, and the specs are in `news.keyword-filt
 - **New market term.** `العقار* السعودي*` has weight 45, tag `market` and `sa: true`. It matches «العقارات السعودية» and «السوق العقاري السعودي». Before it, «الأراضي تبتلع نصف السوق.. «نايت فرانك» ترصد تباطؤ العقارات السعودية» scored 36 and was a false negative. It now scores 61.
 - **New negatives.** `هل نزل` and `متي ينزل` each carry 30. SEO question headlines («هل نزل الدعم السكني اليوم 24 سبتمبر 2026؟») used to publish at exactly 60, repeating a story that the real announcement already carried.
 - **Corpus check.** Against the 607-item corpus in `lexicon-proto/items.json`, the count of items scoring 60 or more went from 120 to 122. Exactly 3 scores changed (38→63, 67→82, 59→68), and all 3 are genuine Saudi real-estate stories. `kw.py` has not been updated; the TS port is now the reference.
+
+## 9. Filter tuning (26 Sep 2026)
+
+Staging had 5 published against 209 rejected, and real Saudi stories were being lost. The fix is in dara-api `news.lexicon.ts` and `news.keyword-filter.ts`. **The TS lexicon is now the reference**; the §5 blocks above are the original v2 spec and no longer list every term.
+
+**Measured on a labelled set** of 260 public headlines (`src/modules/news/__fixtures__/news-eval-labelled.json`, spec `news.eval.spec.ts`): everything staging scored ≥ 15, the 47 new items of the owner's 12:50 UTC run, a sample of the rest, and the 26 Sep feed corpus from 15 up plus samples. 97 positives, 143 negatives, 20 borderline (not counted).
+
+| | precision (published) | recall (positives) |
+|---|---|---|
+| before | 0.929 (52/56) | 0.536 (52/97) |
+| after | **1.000** (84/84) | **0.866** (84/97) |
+
+The spec fails below 0.9 precision or 0.8 recall.
+
+**Scoring change: weak Saudi signals** (`SAUDI_WEAK`). They add the same +10 as `SAUDI_GEO`, but only when the title names no foreign market; a foreign marker wins over them, never the reverse. They are: `ريال*`, `sar`, `البلديات`, `التسجيل العيني`, `ريت`, and Riyadh/Jeddah district names after «حي» (`حي* النرجس`, `حي* العارض`, …). «ريال» in a Qatari headline that names «قطر» stays foreign.
+
+**New or raised terms**
+
+- Saudi REITs by name (`الرياض ريت`, `العزيزيه ريت`, `al aziziah reit`, `mefic reit`, … 30, `sa`), and Saudi developers by name (`دار الاركان`, `رتال`, `اساس العقاريه`, `الماجديه`, `الحبيب العقاريه`, `جبل عمر`, `سينومي`, … 40, `sa`). `روشن`/`roshn` 30 → 40. `طلعت مصطفي` 20.
+- `مشاريع* سكني*` 35 (the broken plural never matched `مشروع* سكني*`, now also 35), `وحده سكنيه` 30, `وحدات سكنيه` 35, `القطاع السكني` 35, `البلديات` 20.
+- Leases: `lease*` 15 → 25, `lease contract*` 30, `rental transactions` 40, `الايجار الشهري` 35.
+- Permits and market: `رخص البناء` / `رخص بناء` / `رخصه بناء` / `building permits` 45, `شهاده اشغال` 35, `انشطه البناء` 30, `اداره المرافق` 30, `محفظه* عقاري*` 30.
+- `التوازن العقاري` 45 → 50, `rcrc` 45 (`sa`), `العقارات البلديه` 40 (`sa`).
+- Modifiers: `اتفاقي*`, `agreement`, `mou` 10.
+- More Saudi cities in `SAUDI_GEO` (جازان, الجبيل, القطيف, الظهران, خميس مشيط, … jubail, dhahran, jazan, taif, …).
+- `DATA_RE` also counts تريليون/trillion, mln/mn/m, «11 مشروعا», «مخطط», and "SAR 11.3M" (a currency before the figure).
+
+**New negatives**
+
+- Events, celebrations and brand posts (Sakani centre, National Day): `مركز سكني` 40, `العرضه` 40, `فعاليات*` / `فرحه*` / `احتفال*` / `ننتظركم` / `حياكم` / `زيارتكم` / `نلتقي بكم` / `نفخر` 30, `زوار*` 25, and the hashtags `اليوم_الوطني*` 35, `عزنا_بطبعنا` 50, `تستثمر_للافضل` 40, `نسكنها_وتسكن_فينا` 50.
+- Promos: `خصم` 25 → 35, `مختارات` / `معروضات` 30, `العروض الحصريه` 40, `عروض` 20.
+- Shares and ownership tables: `سعر سهم` 60, `سهم` 20, `اسهم` 15, `ملكيه المستثمرين` 40, `المستثمرين الاجانب` 30, `كبار الملاك` 40, `راسمال*` / `راس المال` 20, `investingpro` 50.
+- Political statements: `تدين` / `يدين` 30. How-to explainers: `طريقه` 30, `رابط` 30, `خطوات` 20.
+- `سارع` 30 → 20 (a real registry story with a clickbait lead had been sunk by it).
+
+**Decisions on the borderline cases.** «Egypt defeats Saudi real estate investors' mega-claim» stays rejected (30): an arbitration abroad is not Saudi property news for a landlord. The SRC National Day post «من جيل وضع الأساس… نفخر…» is now rejected (19); it was published at 89.
+
+**Still missed (13 of 97)**, all under 60 for lack of a strong term: a Masar land sale, two Jeddah towers, JD Property, a monthly-rent startup, a REIT-fund launch, the NE Riyadh master plan, Argaam's weekly sales table, and similar. Admins can publish these by hand.
+
+**Changed worked examples (§6):** #7 76→82, #11 66→70, #16 55→65 (now publishes), #18 25→43, #28 66→36 (no longer published).
+
+**Stored items keep old verdicts** until an admin runs **Re-score** (Admin → News → Settings, `POST /admin/news/rescore`), which re-runs this filter over the last N days of keyword-judged items, skipping anything moderated by hand. See README "Re-score".

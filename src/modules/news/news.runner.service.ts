@@ -16,6 +16,7 @@ import { detectManipulation, heldReason } from "./news.guard";
 import { tryAcquireNewsLock, type NewsRunLock } from "./news.lock";
 import { KeywordFilter } from "./news.keyword-filter";
 import { RssProvider, type RssFetchResult } from "./providers/rss.provider";
+import { planRescore, type RescoreChange, type RescorePlan } from "./news.rescore";
 
 /** How far back the "same story" comparison and the AI's recent-titles list look. */
 const RECENT_WINDOW_MS = 72 * 3_600_000;
@@ -26,6 +27,25 @@ const RECENT_WINDOW_MS = 72 * 3_600_000;
 const RETRY_WINDOW_MS = 7 * 24 * 3_600_000;
 const RETRY_MAX = 60;
 const LOG_CAP = 500;
+
+export type RescoreResult =
+  | { kind: "busy" }
+  | { kind: "ai_filter" }
+  | {
+      kind: "done";
+      dryRun: boolean;
+      days: number;
+      minScore: number;
+      checked: number;
+      newlyPublished: number;
+      newlyRejected: number;
+      duplicates: number;
+      held: number;
+      /** Items whose status changes (or would, on a dry run). */
+      changes: RescoreChange[];
+      /** The run-history row that records it; null on a dry run. */
+      runId: string | null;
+    };
 
 export type StartRunResult =
   | { kind: "started"; runId: string }
@@ -419,6 +439,85 @@ export class NewsRunnerService {
       this.appLog.record({ level: "error", event: "news_run_failed", context: "News", error: err, meta: { runId } });
     } finally {
       await lock.release();
+    }
+  }
+
+  /**
+   * Re-score (POST /admin/news/rescore): the current keyword filter over the
+   * last `days` of items it judged — never an item an admin moderated or
+   * pinned — plus story dedupe against the feed. `dryRun` computes the same
+   * plan and writes nothing. A real re-score takes the run lock (so it never
+   * races a run) and is recorded in the run history as trigger `rescore`.
+   */
+  async rescore(days: number, dryRun: boolean, userId: number | null): Promise<RescoreResult> {
+    const cfg = await this.readiness();
+    if (cfg.filter !== "keyword") return { kind: "ai_filter" };
+    const lock = dryRun ? null : await tryAcquireNewsLock();
+    if (!dryRun && !lock) return { kind: "busy" };
+    try {
+      const settings = await this.loadSettings();
+      const since = new Date(Date.now() - days * 24 * 3_600_000);
+      const inWindow = gte(sql`coalesce(${newsItemsTable.postedAt}, ${newsItemsTable.createdAt})`, since);
+      const rows = await this.db.select({
+        id: newsItemsTable.id, externalId: newsItemsTable.externalId, text: newsItemsTable.text, url: newsItemsTable.url,
+        authorHandle: newsItemsTable.authorHandle, lang: newsItemsTable.lang, postedAt: newsItemsTable.postedAt,
+        createdAt: newsItemsTable.createdAt, status: newsItemsTable.status, aiScore: newsItemsTable.aiScore,
+        aiCategory: newsItemsTable.aiCategory, aiReason: newsItemsTable.aiReason,
+      }).from(newsItemsTable).where(and(
+        eq(newsItemsTable.filterKind, "keyword"),
+        isNull(newsItemsTable.moderatedAt),
+        eq(newsItemsTable.pinned, false),
+        inWindow,
+      ));
+      const ids = new Set(rows.map((r) => r.id));
+      // The feed the new items are deduped against: everything published in the
+      // window plus the 72 h a run's story clustering looks back, minus the
+      // re-scored rows themselves.
+      const feedRows = await this.db.select({ id: newsItemsTable.id, externalId: newsItemsTable.externalId, text: newsItemsTable.text })
+        .from(newsItemsTable)
+        .where(and(eq(newsItemsTable.status, "published"),
+          gte(sql`coalesce(${newsItemsTable.postedAt}, ${newsItemsTable.createdAt})`, new Date(since.getTime() - RECENT_WINDOW_MS))))
+        .orderBy(desc(newsItemsTable.createdAt)).limit(1000);
+      const plan: RescorePlan = planRescore(rows, feedRows.filter((f) => !ids.has(f.id)), settings.minScore);
+
+      let runId: string | null = null;
+      if (!dryRun) {
+        await this.db.transaction(async (tx) => {
+          for (const u of plan.updates) {
+            const { id, ...set } = u;
+            // Re-checked at write time: a PATCH in the meantime wins.
+            await tx.update(newsItemsTable).set({ ...set, filterKind: "keyword" }).where(and(
+              eq(newsItemsTable.id, id), eq(newsItemsTable.filterKind, "keyword"),
+              isNull(newsItemsTable.moderatedAt), eq(newsItemsTable.pinned, false),
+            ));
+          }
+        });
+        const at = () => new Date().toISOString();
+        const log: NewsRunLogEntry[] = [
+          { at: at(), level: "info", message: `re-score: keyword filter over ${plan.checked} item(s) from the last ${days} day(s), min_score=${settings.minScore} (moderated and pinned items skipped)` },
+          ...plan.changes.slice(0, LOG_CAP - 2).map((ch): NewsRunLogEntry => ({
+            at: at(), level: "info",
+            message: `«${ch.title.slice(0, 120)}» ${ch.from} ${ch.oldScore ?? "–"} → ${ch.to} ${ch.newScore}${ch.duplicateOf ? ` (${ch.reason})` : ""}`,
+          })),
+          { at: at(), level: "info", message: `done: ${plan.checked} checked, ${plan.newlyPublished} newly published, ${plan.newlyRejected} newly rejected, ${plan.duplicates} kept hidden as duplicates${plan.held ? `, ${plan.held} held by the guard` : ""}` },
+        ];
+        const [run] = await this.db.insert(newsJobRunsTable).values({
+          trigger: "rescore", triggeredBy: userId, status: "success", finishedAt: new Date(),
+          published: plan.newlyPublished, rejected: plan.newlyRejected, duplicates: plan.duplicates, log,
+        }).returning({ id: newsJobRunsTable.id });
+        runId = run.id;
+        this.appLog.record({
+          level: "log", event: "news_rescored", context: "News", userId,
+          meta: { runId, days, checked: plan.checked, newlyPublished: plan.newlyPublished, newlyRejected: plan.newlyRejected, duplicates: plan.duplicates },
+        });
+      }
+      return {
+        kind: "done", dryRun, days, minScore: settings.minScore, checked: plan.checked,
+        newlyPublished: plan.newlyPublished, newlyRejected: plan.newlyRejected, duplicates: plan.duplicates, held: plan.held,
+        changes: plan.changes, runId,
+      };
+    } finally {
+      await lock?.release();
     }
   }
 

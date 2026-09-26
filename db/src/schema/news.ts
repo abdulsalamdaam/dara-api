@@ -9,8 +9,8 @@ import { sql } from "drizzle-orm";
  * real-estate ones and titles them, and landlords read the result as a feed.
  *
  * Four tables, all owned by `src/modules/news`. Created by
- * `db/drizzle/0061_re_news.sql` + `0062_re_news_rss.sql`, which `ensureSchema`
- * runs on every boot (both idempotent), so a deploy needs no manual SQL.
+ * `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql` + `0063_re_news_moderation.sql`, which `ensureSchema`
+ * runs on every boot (all idempotent), so a deploy needs no manual SQL.
  */
 
 export type NewsMedia = { type: string; url: string | null; preview_url: string | null };
@@ -104,6 +104,13 @@ export const newsItemsTable = pgTable("news_items", {
   filterKind: text("filter_kind"),
   /** 'published' | 'rejected' | 'hidden' */
   status: text("status").notNull().default("hidden"),
+  /**
+   * Set when an admin changes the item by hand (PATCH: status, pin, category).
+   * The re-score action skips these, so a filter change never undoes a human
+   * decision. Added by 0063 (backfilled from the app log).
+   */
+  moderatedBy: integer("moderated_by"),
+  moderatedAt: timestamp("moderated_at", { withTimezone: true }),
   pinned: boolean("pinned").notNull().default(false),
   runId: uuid("run_id").references(() => newsJobRunsTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

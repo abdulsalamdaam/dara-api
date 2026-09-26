@@ -168,3 +168,19 @@ All paths are under `/api`. Keys are camelCase, as in v1.
   `apify run <id> succeeded: <rows> row(s) for <n> account(s), cost $<usd> (<n> charged)`.
   Over budget: one warn line and X is skipped (not `partial`).
 - An X test with Apify over budget → 200 `ok:false`, `error.kind:'quota'`.
+
+## Filter tuning + re-score addendum (26 Sep 2026)
+- **Lexicon:** see `lexicon.md` §9 (weak Saudi signals, Saudi REITs/developers, events and
+  promo negatives). Labelled set precision 0.929 → 1.000, recall 0.536 → 0.866.
+- **`POST /admin/news/rescore`** (super-admin), body `{ days?: 1–60 (default 14), dryRun?:
+  boolean }` → **200** `{ dryRun, days, minScore, checked, newlyPublished, newlyRejected,
+  duplicates, held, changes: RescoreChange[], runId: string|null }`, where `RescoreChange =
+  { id, title, from, to: 'published'|'rejected'|'hidden', oldScore, newScore, duplicateOf:
+  string|null, reason }`. Errors: 400 `days must be a whole number from 1 to 60` / `dryRun
+  must be true or false` / `re-score re-runs the keyword filter; the current filter is
+  Claude`; 409 while a run holds the lock. A dry run writes nothing and takes no lock.
+- A real re-score adds a `news_job_runs` row with `trigger: 'rescore'` (status `success`,
+  `published`/`rejected`/`duplicates` = the counts, `fetched`/`newItems` 0, one log line per
+  change). The web labels it "Re-score" / «إعادة تقييم».
+- **Admin item rows** gain `moderatedBy` (user id) and `moderatedAt`, set by
+  `PATCH /admin/news/items/:id`. Re-score skips moderated and pinned items.

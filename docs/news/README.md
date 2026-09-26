@@ -32,10 +32,12 @@ real runs are in `QA.md` under "v2 (free mode) QA" and "Apify".
 
 ## Where things are
 - **API** (`dara-api`): `src/modules/news/`, schema `db/src/schema/news.ts`, migrations
-  `db/drizzle/0061_re_news.sql` + `0062_re_news_rss.sql`. Both are idempotent and applied
-  on every boot by `ensureSchema`, so they need no manual SQL.
+  `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql` and `0063_re_news_moderation.sql`.
+  All are idempotent and applied on every boot by `ensureSchema`, so they need no manual SQL.
   - Keyword filter: `news.keyword-filter.ts`, lexicon `news.lexicon.ts`, matching
-    `news.text.ts`.
+    `news.text.ts`. Labelled regression set: `__fixtures__/news-eval-labelled.json` +
+    `news.eval.spec.ts`.
+  - Re-score: `news.rescore.ts` (the plan) + `NewsRunnerService.rescore`.
   - RSS: `providers/rss.provider.ts`, `rss.parse.ts`, and the SSRF-safe fetch
     `safe-fetch.ts`.
   - X: `providers/apify.provider.ts` (free plan), `x-api.provider.ts`,
@@ -190,11 +192,35 @@ is the existing API container.
 ### What free mode cannot do
 - **Rewriting:** it does not rewrite or translate. An Arabic story has no English title,
   and the reverse.
-- **Judging relevance:** it matches words, not meaning. The first staging run judged 108
-  items; 2 false negatives and 1 false positive were found and fixed in the lexicon (see
-  `QA.md`). Expect a few misses, which admins can publish or hide by hand.
+- **Judging relevance:** it matches words, not meaning. After the filter tuning of 26 Sep
+  (`lexicon.md` §9) it scores precision 1.0 and recall 0.87 on a 260-headline labelled set;
+  the misses are stories with no strong term (a land sale, a tower, a startup). Admins can
+  publish or hide by hand.
 - **Lexicon edits:** the lexicon lives in code (`news.lexicon.ts`) with unit tests, and
-  cannot be edited from the admin UI. `extraInstructions` only affects Claude.
+  cannot be edited from the admin UI. `extraInstructions` only affects Claude. After a
+  lexicon change, deploy and use **Re-score** so stored items get the new verdicts.
+
+### Re-score (after a lexicon change)
+`POST /admin/news/rescore { days?: 1–60 (default 14), dryRun?: boolean }`, super-admin only.
+In the UI: Admin → News → Settings → "Re-score recent items" (days, **Preview**, then
+**Re-score** with a confirm and a result toast).
+
+- **What it touches:** items from the last `days` (by posted time, else stored time) that
+  the **keyword filter** judged (`filter_kind = 'keyword'`). Never an item an admin moderated
+  (`moderated_at` set: any PATCH of status, pin or category stamps `moderated_by` /
+  `moderated_at`), never a pinned one, never a Claude verdict. Migration 0063 added the
+  columns and backfilled them from the app log (`news_item_moderated`).
+- **What it does:** the current keyword filter, the schedule's `min_score`, and the
+  untrusted-post guard, exactly as a run. An item that would newly publish is deduped
+  (story clustering, as in a run) against what is on the feed and against the other items
+  this re-score publishes; a match stays `hidden` as "duplicate of <id>". Titles, summaries,
+  tags, category and reason are refreshed too.
+- **Answer:** `{ dryRun, days, minScore, checked, newlyPublished, newlyRejected, duplicates,
+  held, changes: [{ id, title, from, to, oldScore, newScore, duplicateOf, reason }], runId }`.
+  `dryRun: true` computes the same and writes nothing.
+- **Record:** a real re-score takes the run lock (409 while a run is in progress), and
+  writes a run-history row with trigger `rescore` (published / rejected / duplicates
+  counts, one log line per change). 400 when the current filter is Claude.
 
 ## Upgrading later (optional)
 Both upgrades are env vars on `dara-api` alone, plus a redeploy. No code, migration or
@@ -266,10 +292,11 @@ The first log line of a run reads `x=<provider|off (no key)> filter=<keyword|cla
   - **Manage:** Test, toggle, delete. A feed URL cannot be edited; delete the source and
     add it again.
 - **Items:** a Filter column (keyword / Claude), with publish, hide, pin and recategorise.
+  Any of these marks the item moderated, so Re-score leaves it alone.
 - **Runs:** history plus a full log.
 - **Schedule:** enabled, run time (Riyadh), days, lookback, max per source, minimum score,
   and extra AI instructions (Claude only, ≤ 2000 chars; they cannot loosen the safety
-  rules).
+  rules). Below them, **Re-score recent items** (see above).
 
 ## Audience
 Every signed-in account sees the feed, including tenant-package and demo accounts, so

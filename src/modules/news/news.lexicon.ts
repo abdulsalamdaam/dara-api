@@ -90,8 +90,11 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "العقوبات", w: 12 },
     { t: "ملاك الاراضي", w: 25, tag: "white-land" },
     { t: "الاراضي الفضاء", w: 35, tag: "white-land" },
-    { t: "التوازن العقاري", w: 45, tag: "rcrc-balance", sa: true },
-    { t: "real estate balance", w: 45, tag: "rcrc-balance", sa: true },
+    { t: "التوازن العقاري", w: 50, tag: "rcrc-balance", sa: true },
+    { t: "real estate balance", w: 50, tag: "rcrc-balance", sa: true },
+    { t: "rcrc", w: 45, tag: "rcrc-balance", sa: true },
+    // Municipal real estate (Furas) — a MOMAH asset class (filter tuning, 26 Sep 2026).
+    { t: "العقارات البلديه", w: 40, tag: "momah", sa: true },
     { t: "الزام*", w: 10 },
     { t: "استطلاع", w: 6 },
     { t: "regulation*", w: 12 },
@@ -121,7 +124,10 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "rent", w: 20, tag: "rent" },
     { t: "rents", w: 25, tag: "rent" },
     { t: "rental*", w: 25, tag: "rent" },
-    { t: "lease*", w: 15, tag: "lease" },
+    { t: "lease*", w: 25, tag: "lease" },
+    { t: "lease contract*", w: 30, tag: "lease" },
+    { t: "rental transactions", w: 40, tag: "rent" },
+    { t: "الايجار الشهري", w: 35, tag: "rent" },
     { t: "tenant*", w: 25, tag: "tenants" },
     { t: "landlord*", w: 30, tag: "landlords" },
     { t: "rent burden", w: 40, tag: "rent" },
@@ -146,6 +152,14 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "سايبور", w: 25, tag: "saibor", sa: true },
     { t: "saibor", w: 25, tag: "saibor", sa: true },
     { t: "ريت", w: 25, tag: "reit" },
+    // Saudi-listed REITs by name: the fund itself proves the story is Saudi.
+    ...[
+      "الرياض ريت", "جدوي ريت", "دراية ريت", "العزيزيه ريت", "ملكيه ريت", "المعذر ريت", "الاهلي ريت", "سدكو كابيتال ريت",
+      "الخبير ريت", "مشاركه ريت", "بنيان ريت", "تعليم ريت", "الراجحي ريت", "سويكورب وابل ريت", "الانماء ريت", "ميفك ريت",
+      "الجزيره ريت", "al aziziah reit", "aziziah reit", "riyad reit", "jadwa reit", "derayah reit", "alinma reit",
+      "musharaka reit", "sedco capital reit", "bonyan reit", "mulkia reit", "al rajhi reit", "alahli reit", "al maather reit",
+      "taleem reit", "swicorp wabel reit", "alkhabeer reit", "aljazira reit", "mefic reit",
+    ].map((t): LexTerm => ({ t, w: 30, tag: "reit", sa: true })),
     { t: "reit*", w: 25, tag: "reit" },
     { t: "صناديق الاستثمار العقاري", w: 35, tag: "reit" },
     { t: "صندوق عقاري", w: 25, tag: "reit" },
@@ -181,8 +195,13 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "جود الاسكان", w: 20, tag: "developmental-housing" },
     { t: "اسكان", w: 18, tag: "housing" },
     { t: "housing", w: 18, tag: "housing" },
-    { t: "وحده سكنيه", w: 20, tag: "housing" },
-    { t: "وحدات سكنيه", w: 25, tag: "housing" },
+    { t: "وحده سكنيه", w: 30, tag: "housing" },
+    { t: "وحدات سكنيه", w: 35, tag: "housing" },
+    // Broken plural: «مشاريع سكنية» never matched «مشروع* سكني*».
+    { t: "مشاريع* سكني*", w: 35, tag: "development" },
+    { t: "القطاع السكني", w: 35, tag: "housing" },
+    // «البلديات» = MOMAH in Saudi headlines; a weak Saudi signal too (SAUDI_WEAK).
+    { t: "البلديات", w: 20, tag: "momah" },
     { t: "مخطط* سكني*", w: 25, tag: "land" },
     { t: "قطعه ارض", w: 15, tag: "land" },
     { t: "قطع اراض*", w: 15, tag: "land" },
@@ -207,8 +226,18 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "home sales", w: 30, tag: "transactions" },
     { t: "تكاليف البناء", w: 45, tag: "construction-costs" },
     { t: "construction costs", w: 45, tag: "construction-costs" },
-    { t: "رخص البناء", w: 35, tag: "building-permits" },
-    { t: "building permits", w: 35, tag: "building-permits" },
+    { t: "رخص البناء", w: 45, tag: "building-permits" },
+    { t: "رخص بناء", w: 45, tag: "building-permits" },
+    { t: "رخصه بناء", w: 45, tag: "building-permits" },
+    { t: "building permits", w: 45, tag: "building-permits" },
+    { t: "شهاده اشغال", w: 35, tag: "building-permits" },
+    { t: "شهادات اشغال", w: 35, tag: "building-permits" },
+    { t: "انشطه البناء", w: 30, tag: "construction" },
+    { t: "انشطه التشييد", w: 15, tag: "construction" },
+    { t: "اداره المرافق", w: 30, tag: "facility-management" },
+    { t: "facility management", w: 30, tag: "facility-management" },
+    { t: "محفظه* عقاري*", w: 30, tag: "market" },
+    { t: "محفظت* عقاري*", w: 30, tag: "market" },
     { t: "الرقم القياسي", w: 15 },
     { t: "المبيعات العقاريه", w: 35, tag: "transactions" },
     { t: "مبيعات العقارات", w: 30, tag: "transactions" },
@@ -225,8 +254,23 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "gastat", w: 20, tag: "gastat" },
   ],
   projects: [
-    { t: "روشن", w: 30, tag: "roshn", sa: true },
-    { t: "roshn", w: 30, tag: "roshn", sa: true },
+    { t: "روشن", w: 40, tag: "roshn", sa: true },
+    { t: "roshn", w: 40, tag: "roshn", sa: true },
+    // Saudi developers by name (filter tuning, 26 Sep 2026): the company proves
+    // the story is Saudi, and a developer's project news is what landlords read.
+    // A share-price headline is stopped by the «سعر سهم» / «سهم» negatives.
+    ...[
+      "دار الاركان", "رتال", "الاندلس العقاريه", "جبل عمر", "مكه للانشاء", "طيبه للاستثمار", "اعمار المدينه الاقتصاديه",
+      "المراكز العربيه", "سينومي", "الرمز العقاريه", "سمو العقاريه", "ام القري للتنميه", "الماجديه", "الحبيب العقاريه",
+      "اساس العقاريه", "الديار العربيه", "رافال", "الشركه العقاريه السعوديه", "العقاريه السعوديه", "dar al arkan", "retal",
+      "alandalus property", "jabal omar", "emaar economic city", "arabian centres", "cenomi", "alramz", "sumou real estate",
+      "al majdiah", "mohammed al habib real estate", "al diyar al arabia", "rafal real estate", "saudi real estate company",
+    ].map((t): LexTerm => ({ t, w: 40, tag: "developer", sa: true })),
+    { t: "طلعت مصطفي", w: 20, tag: "developer" },
+    { t: "talaat moustafa", w: 20, tag: "developer" },
+    { t: "اتفاقي*", w: 10 },
+    { t: "agreement", w: 10 },
+    { t: "mou", w: 10 },
     { t: "مشروع*", w: 6 },
     { t: "شركه مشتركه", w: 10 },
     { t: "joint venture", w: 10 },
@@ -251,7 +295,7 @@ export const LEX_CATEGORIES: Record<NewsCategory, LexTerm[]> = {
     { t: "جبل عمر", w: 15 },
     { t: "التطوير العقاري", w: 25, tag: "development" },
     { t: "مطور* عقاري*", w: 25, tag: "development" },
-    { t: "مشروع* سكني*", w: 25, tag: "development" },
+    { t: "مشروع* سكني*", w: 35, tag: "development" },
     { t: "real estate develop*", w: 25, tag: "development" },
     { t: "developer", w: 15, tag: "development" },
     { t: "البنيه التحتيه", w: 8 },
@@ -282,6 +326,25 @@ export const SAUDI_GEO: string[] = [
   "الباحه", "الجوف", "الاحساء", "الطايف", "بريده", "الدرعيه", "ينبع", "الخرج", "saudi*", "ksa", "riyadh",
   "jeddah", "makkah", "mecca", "madinah", "dammam", "khobar", "eastern province", "hail", "qassim", "tabuk",
   "diriyah", "tadawul", "tasi", "تاسي",
+  // More Saudi cities (filter tuning, 26 Sep 2026). Only names no other country uses.
+  "جازان", "الجبيل", "القطيف", "حفر الباطن", "عرعر", "سكاكا", "الزلفي", "المجمعه", "عنيزه", "خميس مشيط", "بيشه",
+  "القريات", "رابغ", "الظهران", "الدوادمي", "وادي الدواسر", "الخفجي", "رفحاء", "صبيا", "ابو عريش", "القنفذه", "تيماء",
+  "املج", "jubail", "al khobar", "dhahran", "qatif", "yanbu", "alula", "al ula", "abha", "jazan", "jizan", "najran",
+  "taif", "buraidah", "al ahsa", "hofuf",
+];
+
+/**
+ * Weak Saudi signals: +10 like SAUDI_GEO, but only when the title names no
+ * foreign market (a foreign marker wins over them, never the reverse). Words
+ * Saudi outlets use unqualified but others also can: the riyal, «البلديات»
+ * (MOMAH), «التسجيل العيني», «ريت», SAR, and Riyadh/Jeddah district names
+ * after «حي» (filter tuning, 26 Sep 2026).
+ */
+export const SAUDI_WEAK: string[] = [
+  "ريال*", "sar", "البلديات", "التسجيل العيني", "ريت",
+  ...["النرجس", "العارض", "الملقا", "القيروان", "الياسمين", "حطين", "الصحافه", "المونسيه", "الرمال", "ظهره لبن", "طويق",
+    "السليمانيه", "العليا", "الملز", "النسيم", "الشفا", "السويدي", "العزيزيه", "الحمراء", "الروضه", "الصفا", "الشاطي",
+    "ابحر", "الحمدانيه", "السلامه", "الزهراء", "النعيم", "المروه", "الفيصليه"].map((d) => `حي* ${d}`),
 ];
 
 /** Foreign markers, checked in the TITLE only: without Saudi context → −60. */
@@ -306,9 +369,13 @@ export const NEGATIVE: Array<[term: string, penalty: number]> = [
   ["احجز", 40],
   ["احجز الان", 50],
   ["book now", 50],
-  ["سارع", 30],
+  ["سارع", 20],
   ["عرض خاص", 45],
-  ["خصم", 25],
+  ["خصم", 35],
+  ["مختارات", 30],
+  ["معروضات", 30],
+  ["عروض", 20],
+  ["العروض الحصريه", 40],
   ["تخفيض*", 20],
   ["اكتتاب", 0],
   ["مسابقه", 50],
@@ -327,6 +394,25 @@ export const NEGATIVE: Array<[term: string, penalty: number]> = [
   ["يهني*", 35],
   ["تعزيه", 60],
   ["national day", 35],
+  // Events, celebrations and brand posts (Sakani centre, National Day) — filter tuning, 26 Sep 2026.
+  ["اليوم_الوطني*", 35],
+  ["عزنا_بطبعنا", 50],
+  ["تستثمر_للافضل", 40],
+  ["نسكنها_وتسكن_فينا", 50],
+  ["مركز سكني", 40],
+  ["فعاليات*", 30],
+  ["فرحه*", 30],
+  ["فرحتنا", 30],
+  ["احتفال*", 30],
+  ["يحتفل*", 30],
+  ["العرضه", 40],
+  ["زوار*", 25],
+  ["زيارتكم", 30],
+  ["ننتظركم", 30],
+  ["حياكم", 30],
+  ["نلتقي بكم", 30],
+  ["نفخر", 30],
+  ["شركاونا", 20],
   ["معرض", 15],
   ["تكرم", 40],
   ["خريجي", 40],
@@ -385,6 +471,24 @@ export const NEGATIVE: Array<[term: string, penalty: number]> = [
   ["امطار", 40],
   ["الارصاد", 40],
   ["تداولات المطلعين", 40],
+  // Share prices and ownership tables, not property news.
+  ["سعر سهم", 60],
+  ["سهم", 20],
+  ["اسهم", 15],
+  ["ملكيه المستثمرين", 40],
+  ["المستثمرين الاجانب", 30],
+  ["كبار الملاك", 40],
+  ["راسمال*", 20],
+  ["راس المال", 20],
+  ["investingpro", 50],
+  ["investing com", 40],
+  // Political statements that name Saudi Arabia next to a foreign story.
+  ["تدين", 30],
+  ["يدين", 30],
+  // How-to / eligibility explainers (SEO).
+  ["طريقه", 30],
+  ["خطوات", 20],
+  ["رابط", 30],
   ["محضر اجتماع", 40],
   ["الجمعيه العموميه", 25],
   ["stock price and chart", 80],
@@ -420,7 +524,7 @@ export const BLOCK_RE_SOURCES: string[] = [
 ];
 
 /** A figure with a unit in the title → +8. */
-export const DATA_RE_SOURCE = String.raw`\d[\d\.,]*\s*(?:وحده|اسره|قطعه|homes?|units?|families|%|مليار|مليون|الف|ريال|قطعه|sar|bn|billion|million|pc)|%\s*\d`;
+export const DATA_RE_SOURCE = String.raw`\d[\d\.,]*\s*(?:وحده|اسره|قطعه|homes?|units?|families|%|مليار|مليون|الف|ريال|قطعه|sar|bn|billion|million|pc|تريليون|trillion|mln|mn|m\b|مشروع|مشاريع|مخطط)|%\s*\d|\bsar\s*\d`;
 
 /** End-of-title patterns of index/entity pages, not articles → score 0. */
 export const PAGE_RE_SOURCE = String.raw`(?:الاخبار|الافصاحات|تقارير ارقام|معلومات الشركه|stock price and chart|الوسايط|الهاشتاجات)$`;
