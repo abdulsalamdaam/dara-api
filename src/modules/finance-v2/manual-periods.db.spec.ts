@@ -261,6 +261,13 @@ describe("finance v2 manual journals, opening entry, periods and VAT lock (real 
         documentId: 525252, groups: [{ category: "S", rate: 15, net: "1000.00", vat: "150.00", nature: "other", usage: null }], coverage: [], deferRent: true } },
     });
     await env.worker.runAccount(U);
+    // A landlord of another account is not a seller this account can draft or lock a return for.
+    await env.q(`insert into users (id, email, password_hash, name) values (99992, 'foreign-99992@example.test', 'x', 'Foreign Co')`);
+    const [fo] = await env.q(`insert into owners (user_id, name, type) values (99992, 'Foreign Landlord', 'individual') returning id`);
+    await assert.rejects(vat.put(U, holder, "2026-Q3", { seller: `owner:${fo.id}` }), err("DIMENSION_NOT_FOUND", 404));
+    await assert.rejects(vat.get(U, "2026-Q3", `owner:${fo.id}`), err("DIMENSION_NOT_FOUND", 404));
+    assert.equal((await env.q(`select count(*)::int as n from finance_vat_return_drafts where seller_key = $1`, [`owner:${fo.id}`]))[0].n, 0);
+    assert.equal(((await vat.put(U, holder, "2026-Q3", { seller: `owner:${s.agent}` })) as any).seller, `owner:${s.agent}`, "an own landlord still works");
     const before: any = await vat.get(U, "2026-Q2");
     assert.equal(before.box6Vat, "150.00");
     await assert.rejects(vat.put(U, holder, "2026-Q2", { box14: "5000.01" }), err("BOX14_LIMIT", 400));

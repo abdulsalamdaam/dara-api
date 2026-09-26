@@ -7,6 +7,7 @@ import { PostingEngine } from "./posting.engine";
 import { fromHalalas, toHalalas } from "./money";
 import { vatSettlement } from "./rules/money-flows";
 import { auditRow, mapLedgerError, settingsEvent } from "./audit";
+import { scopedId } from "./reports/common";
 import { VatReportService, parseSeller, parseVatPeriod, type VatComputation, type VatPeriod } from "./reports/vat-report.service";
 
 /** ±5,000 SAR: the corrections box limit (DESIGN §7.5 box 14). */
@@ -41,15 +42,22 @@ export class VatReturnsService {
     this.report = new VatReportService(pool);
   }
 
+  /** parseSeller plus the scope: an `owner:<id>` seller must be a landlord of this account (404 otherwise, as /reports/vat-return). */
+  private async sellerOf(scope: number, raw: unknown): Promise<string> {
+    const seller = parseSeller(raw);
+    if (seller !== "account") await scopedId(this.pool, scope, "ownerId", Number(seller.slice("owner:".length)));
+    return seller;
+  }
+
   async get(scope: number, periodKey: string, sellerRaw?: unknown) {
     const period = parseVatPeriod(periodKey);
-    const seller = parseSeller(sellerRaw);
+    const seller = await this.sellerOf(scope, sellerRaw);
     return this.view(this.pool, scope, period, seller);
   }
 
   async put(scope: number, user: AuthUser, periodKey: string, body: any) {
     const period = parseVatPeriod(periodKey);
-    const seller = parseSeller(body?.seller);
+    const seller = await this.sellerOf(scope, body?.seller);
     const box = (v: unknown, name: string) => {
       if (v == null || v === "") return null;
       try {
