@@ -353,7 +353,9 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
   const feeNames = new Set<string>(cov.filter((p: any) => installmentNature(p.description) === "fee").map((p: any) => String(p.description).trim()));
 
   const commission = kind === "commission" || (d.type === "credit" && ref?.kind === "commission");
-  const { groups, warnings: gw } = documentGroups(d, { feeNames, usage: ctx?.usage ?? null, nature: commission || kind === "agency_fee" ? "other" : undefined });
+  const { groups, warnings: gw } = documentGroups(d, {
+    feeNames, usage: ctx?.usage ?? null, sellerRegistered: ctx?.sellerRegistered ?? false, nature: commission || kind === "agency_fee" ? "other" : undefined,
+  });
   const facts: DocumentFacts = {
     date: d.date, treatment: t.treatment, dims, warnings: [...t.warnings, ...gw], memo: d.number ?? null,
     documentId: d.id, groups, coverage, deferRent: s.deferRent,

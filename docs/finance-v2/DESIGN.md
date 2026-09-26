@@ -823,7 +823,7 @@ What counts as a charge, and in which VAT category:
   - `vat_enabled` gives S at 15%, split per §2.1. If the seller landlord has no VAT number, the category stays S as the contract says, with the warning `vat_unregistered_seller` (the contract is probably wrong; an unregistered person cannot charge VAT).
   - Otherwise, residential usage (`usage-vat.ts`) gives **E when the seller is VAT-registered**, and **O when the seller is not** (only a taxable person makes exempt supplies).
   - Otherwise the category is O, with the warning `commercial_without_vat` when the landlord is VAT-registered.
-- **Documents.** The category comes per item from `items[].vatCategory` / `vat` (`billing.module.ts:47-60`).
+- **Documents.** The category comes per item from `items[].vatCategory` / `vat` (`billing.module.ts:47-60`). A line with `vat: false` and no explicit category follows the installment rule above: E only for a VAT-registered seller's residential rent, otherwise O (with `commercial_without_vat` for a registered seller's commercial rent); a commission or agency-fee line is O.
   - The VAT is `total − subtotal` on the S group.
   - The Z, E and O groups carry net only.
   - A non-tax rent receipt is O throughout, because its seller is not VAT-registered.

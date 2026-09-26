@@ -76,15 +76,16 @@ function namesFee(desc: string, feeNames: ReadonlySet<string> | undefined): bool
 /**
  * A document's VAT groups, from its own items, subtotal and total (§4.1,
  * §2.1: documents are never re-split). Category per item: `vatCategory`,
- * else the legacy `vat` flag (true → S, false → E; billing.module.ts
- * `LineItem`). Nature: `fee` when the item's description names a covered fee
+ * else the legacy `vat` flag (true → S; false → the installment rule of
+ * `installmentVat`: E for a registered seller's residential rent, else O;
+ * O for the account's own fees; billing.module.ts `LineItem`). Nature: `fee` when the item's description names a covered fee
  * installment (exactly, or followed by a qualifier, `namesFee`), else `rent`. VAT = total − subtotal, all on the S groups
  * (split by their nets). Σ items is reconciled to `subtotal` on the largest
  * group, with a warning, so the entry always posts the document's own figures.
  */
 export function documentGroups(
   doc: { items: DocItem[] | null | undefined; subtotal: string; total: string },
-  opts: { feeNames?: ReadonlySet<string>; usage?: Usage | null; nature?: Nature } = {},
+  opts: { feeNames?: ReadonlySet<string>; usage?: Usage | null; nature?: Nature; sellerRegistered?: boolean } = {},
 ): { groups: DocGroup[]; warnings: string[] } {
   const warnings: string[] = [];
   const buckets = new Map<string, { category: VatCategory; nature: Nature; net: number }>();
@@ -94,7 +95,16 @@ export function documentGroups(
     if (rounded) warnings.push("jsonb_precision");
     const explicit = typeof it.vatCategory === "string" && CATS.has(it.vatCategory) ? (it.vatCategory as VatCategory) : null;
     const vatFlag = it.vat == null ? true : !!it.vat;
-    const category: VatCategory = explicit ?? (vatFlag ? "S" : "E");
+    let category: VatCategory;
+    if (explicit) category = explicit;
+    else if (vatFlag) category = "S";
+    else if (opts.nature === "other") category = "O"; // the account's own fee (commission, agency fee): never exempt rent
+    else {
+      // A no-VAT rent or fee line takes the installment rule: E only for a registered seller's residential rent.
+      const v = installmentVat({ vatEnabled: false, usage: opts.usage ?? null, sellerRegistered: opts.sellerRegistered === true });
+      category = v.category;
+      warnings.push(...v.warnings);
+    }
     const desc = String(it.description ?? "").trim();
     const nature: Nature = opts.nature ?? (desc && namesFee(desc, opts.feeNames) ? "fee" : "rent");
     const key = `${category}|${nature}`;

@@ -73,9 +73,17 @@ describe("finance v2 hooks: pure classification", () => {
     assert.equal(rent.groups[0].nature, "rent");
   });
 
-  it("document groups: legacy vat:false is E; Σ items reconciled to subtotal with a warning; three-decimal jsonb flagged", () => {
-    const a = documentGroups({ items: [{ amount: 1000, vat: false }], subtotal: "1000.00", total: "1000.00" });
-    assert.equal(a.groups[0].category, "E");
+  it("document groups: a no-VAT line follows the installment rule (E only for a registered seller's residential rent); Σ items reconciled; three-decimal jsonb flagged", () => {
+    const noVat = (opts: any) => documentGroups({ items: [{ amount: 1000, vat: false }], subtotal: "1000.00", total: "1000.00" }, opts);
+    assert.equal(noVat({ usage: "residential", sellerRegistered: true }).groups[0].category, "E");
+    assert.equal(noVat({ usage: "residential", sellerRegistered: false }).groups[0].category, "O", "an unregistered landlord's rent is out of scope");
+    const com = noVat({ usage: "commercial", sellerRegistered: true });
+    assert.deepEqual([com.groups[0].category, com.warnings], ["O", ["commercial_without_vat"]], "commercial rent is never exempt");
+    assert.equal(noVat({ usage: null, sellerRegistered: false }).groups[0].category, "O");
+    assert.equal(noVat({ usage: "residential", sellerRegistered: true, nature: "other" }).groups[0].category, "O", "a fee of the account's own is not exempt rent");
+    assert.equal(noVat({}).groups[0].category, "O", "no context: out of scope, never a guessed exemption");
+    const explicit = documentGroups({ items: [{ amount: 1000, vat: false, vatCategory: "E" }], subtotal: "1000.00", total: "1000.00" }, { usage: "commercial", sellerRegistered: true });
+    assert.equal(explicit.groups[0].category, "E", "an explicit category wins");
     const b = documentGroups({ items: [{ amount: 333.334, vat: true }, { amount: 666.66, vat: true }], subtotal: "1000.00", total: "1150.00" });
     assert.ok(b.warnings.includes("jsonb_precision"));
     assert.ok(b.warnings.includes("items_subtotal_mismatch"));
