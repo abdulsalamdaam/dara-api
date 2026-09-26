@@ -83,8 +83,11 @@ All paths are under `/api`. Keys are camelCase, as in v1.
    - `tweets` has the same shape as X previews, plus `title` and `summary`; `metrics` is null.
    - Error kinds: `not_found` (404/410, or a blocked URL at fetch time), `rate_limit` (429),
      `other` (timeout, too large, HTML instead of a feed, invalid XML, other HTTP codes).
-   - X tests now include `kind:'x'`. An X test without a key gives 400
-     `X is not configured — missing: X_BEARER_TOKEN or TWITTERAPI_IO_KEY`.
+   - X tests now include `kind:'x'`. An X test without a key gives **200** with `ok:false`,
+     `provider:null`, `tweets:[]` and `error:{kind:'no_key', message:'X key not set — the
+     account is saved and will be fetched once X_BEARER_TOKEN or TWITTERAPI_IO_KEY is added'}`.
+     This changed after QA (dara-api `0cbe3db`); it used to be a 400 "X is not configured".
+     Creating, toggling and deleting X accounts never needs a key.
 4. **Status:** `GET /admin/news/status` adds these fields:
    - `filter: 'keyword'|'ai'`, the filter a run uses now;
    - `filterSetting: 'auto'|'keyword'|'ai'`;
@@ -141,3 +144,13 @@ All paths are under `/api`. Keys are camelCase, as in v1.
    Claude.
 9. **Seed:** `news/seed-rss.sql` (also `docs/news/seed-rss.sql` in dara-api) inserts the 15
    verified feeds from `rss-feeds.json`, idempotently. It has not been run anywhere yet.
+
+## Changes after v2 QA (26 Sep 2026)
+- `GET /news/summary` adds `filter: 'keyword'|'ai'`, the filter runs use now. The portal
+  uses it to pick the disclosure text (dara-api `14acf42`, dara-web `44cd9f1`).
+- X test without a key → 200 `no_key` (see 3 above). The web shows X accounts as "Waiting
+  for X key" (neutral), saves them without a test, and the header reads "X is paused until
+  a key is added … RSS feeds run as normal" (dara-web `a05bfa8`).
+- Lexicon: `*` now works on every word of a phrase, not only the last one. Also new: the
+  term «العقار* السعودي*» (45, sa), and the negatives «هل نزل» / «متى ينزل» (30)
+  (dara-api `e2ff5c2`).

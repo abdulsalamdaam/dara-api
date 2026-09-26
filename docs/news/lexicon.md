@@ -466,3 +466,12 @@ These are real headlines from the feeds on 2026-09-26, apart from S1–S6, which
 - **Project news under-scores** (#16). Giga-project stories need numbers plus the project name, and ROSHN at 30 is deliberately modest. If admins keep approving these, raise `روشن`/`roshn` to 40.
 - **Deterministic by design.** Same input, same output, with no stemming library and no network access.
 - **Wrong verdicts.** Fix them by editing weights or adding terms, then add the headline to §6 as a fixture.
+
+## 8. Changes after the first staging run (QA v2, 26 Sep 2026)
+
+These changes are in dara-api `e2ff5c2`, and the specs are in `news.keyword-filter.spec.ts` › "QA v2 tuning".
+
+- **Matching.** A `*` now applies to the word it ends, anywhere in a phrase. Before this change, `compileTerm` (and `kw.py`) honoured only the final `*` and silently dropped a mid-phrase one. So `مطور* عقاري*`, `مشروع* سكني*`, `مجتمع* سكني*` and `قطع اراض*` never matched plural first words. The proclitic still attaches to the first word only.
+- **New market term.** `العقار* السعودي*` has weight 45, tag `market` and `sa: true`. It matches «العقارات السعودية» and «السوق العقاري السعودي». Before it, «الأراضي تبتلع نصف السوق.. «نايت فرانك» ترصد تباطؤ العقارات السعودية» scored 36 and was a false negative. It now scores 61.
+- **New negatives.** `هل نزل` and `متي ينزل` each carry 30. SEO question headlines («هل نزل الدعم السكني اليوم 24 سبتمبر 2026؟») used to publish at exactly 60, repeating a story that the real announcement already carried.
+- **Corpus check.** Against the 607-item corpus in `lexicon-proto/items.json`, the count of items scoring 60 or more went from 120 to 122. Exactly 3 scores changed (38→63, 67→82, 59→68), and all 3 are genuine Saudi real-estate stories. `kw.py` has not been updated; the TS port is now the reference.
