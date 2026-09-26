@@ -24,6 +24,15 @@ describe("feeLineTreatment", () => {
     assert.deepEqual(feeLineTreatment(fees, "Pass-through"), { vatCategory: "O", exemptionReason: "VATEX-SA-OOS" });
   });
 
+  it("carries an out-of-scope fee's own wording — and only an out-of-scope fee's", () => {
+    const worded = [
+      { name: "Deposit", vatCategory: "O", exemptionReasonText: "  Refundable security\ndeposit  " },
+      { name: "Service", vatCategory: "E", exemptionReason: "VATEX-SA-30", exemptionReasonText: "my own words" },
+    ];
+    assert.deepEqual(feeLineTreatment(worded, "Deposit"), { vatCategory: "O", exemptionReason: "VATEX-SA-OOS", exemptionReasonText: "Refundable security deposit" });
+    assert.deepEqual(feeLineTreatment(worded, "Service"), { vatCategory: "E", exemptionReason: "VATEX-SA-30" });
+  });
+
   it("never guesses: a reason from another category, a legacy fee, or rent say nothing", () => {
     assert.deepEqual(feeLineTreatment(fees, "Wrong ground"), {});
     assert.deepEqual(feeLineTreatment(fees, "Legacy"), {});
