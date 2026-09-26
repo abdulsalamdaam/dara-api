@@ -64,7 +64,7 @@ export class MemLedger {
         const vatLine = out.lines.find((l) => l.taxRole === "output" && l.vatCategory === "S" && l.dims.paymentId === e.paymentId);
         list.push({
           generation: list.length + 1, chargedBy: e.chargedBy, documentId: e.documentId, amount: e.amount, vatAmount: e.vatAmount,
-          vatBase: vatLine?.vatBase ?? null, entryId: null, entryKey: key, reversed: false,
+          vatBase: vatLine?.vatBase ?? null, entryId: this.entries.size, entryKey: key, reversed: false, // non-null: a null entryId means "from the opening balance"
         });
         this.charges.set(e.paymentId, list);
       } else if (e.kind === "uncharge") {

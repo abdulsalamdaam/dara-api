@@ -42,6 +42,19 @@ export function chargeDocument(f: DocumentFacts, s: PostState, docClass: DocClas
   const covered = f.coverage.map((c) => c.paymentId);
   const seller = sellerKeyOf(f.treatment, f.dims.ownerId);
 
+  // Cutover (§6.7): a charge marker with no entry was re-created from the
+  // opening balance, i.e. the installment's AR (and its VAT) is already in the
+  // opening entry. A document covering only such installments must not charge
+  // them again; the backfill skips the same documents (`covered_by_opening`).
+  const fromOpening = (p: number) => {
+    const a = s.charges[p];
+    return !!a && a.entryId == null && a.chargedBy !== "document";
+  };
+  if (opts.replace && covered.length && covered.every(fromOpening)) {
+    return { lines: [], warnings, skip: "covered_by_opening", effects: [], date: f.date };
+  }
+  if (opts.replace && covered.some(fromOpening)) warnings.push("partly_covered_by_opening");
+
   // Advance VAT netting (only E01/E08 charge installments; a debit note is an extra charge).
   let vb = 0;
   let bb = 0;

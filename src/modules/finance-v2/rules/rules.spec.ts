@@ -184,6 +184,12 @@ describe("fv2 posting rules: every rule balances in both modes (§11.1-a, c)", (
     assert.equal(skip("E16", coll("agent", 100, "commission_deduction")), "settled_by_deduction");
     assert.equal(skip("E05", inst("principal", "S", 690000), { ...chargedState("S", 690000), charges: { [P]: { ...chargedState("S", 690000).charges[P]!, chargedBy: "document" } } }), "cancelled_but_invoiced");
     assert.equal(skip("E05", inst("principal", "S", 690000), { ...chargedState("S", 690000), writtenOff: [P] }), "written_off");
+    // Cutover: a marker with no entry came from the opening balance, which already holds the AR.
+    const opening: PostState = { ...chargedState("S", 690000), charges: { [P]: { ...chargedState("S", 690000).charges[P]!, entryId: null } } };
+    for (const t of ["principal", "agent"] as Treatment[]) {
+      assert.equal(skip("E01", doc(t, "S", 690000), opening), "covered_by_opening", t);
+      assert.equal(runRule({ rule: "E01", facts: doc(t, "S", 690000), paymentIds: [P] }, chargedState("S", 690000)).skip, undefined, t);
+    }
     assert.equal(skip("E05", inst("principal", "S", 690000)), "not_charged");
     assert.equal(skip("E02", inst("principal", "S", 690000), chargedState("S", 690000)), "already_charged");
     assert.equal(skip("E34", coll("principal", 100, "rent", "S"), chargedState("S", 690000)), "already_charged");
