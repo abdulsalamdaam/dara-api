@@ -134,7 +134,10 @@ export class ReconciliationService {
 
   // ─── R1 ───
   private async r1(scope: number, asOf: string, mk: any): Promise<Check> {
-    const data = await this.aging.openItems(scope, asOf, "tenant");
+    // The recognizer charges an installment the day AFTER it falls due (§5.6: due_date < today), so on today's
+    // reconciliation an installment due today is not a receivable yet on either side.
+    const today = riyadhToday();
+    const data = await this.aging.openItems(scope, asOf, "tenant", asOf >= today ? { installmentsDueBefore: today } : {});
     const sub = new Map<any, number>();
     for (const it of data.items) add(sub, it.tenantId, it.remaining);
     for (const c of data.credit.values()) add(sub, c.tenantId, c.amount);
@@ -272,6 +275,13 @@ export class ReconciliationService {
                              where cu.contract_id = si.contract_id order by cu.id limit 1) pu on true
         where pc.user_id = $1 and pc.payment_id is null and si.kind = 'agency_fee' group by 1`, [scope]);
     for (const a of agf.rows) if (a.owner_id != null && sub.has(a.owner_id)) add(sub, a.owner_id, -h(a.amt));
+    // The dues report has a row only for landlords with a contract or an expense; a payout to any other landlord
+    // (an advance before the first contract, say) is missing from it. Its `remaining` would be 0 − transferred.
+    const listed = new Set(legacy.landlordDues.map((d) => d.ownerId).filter((x) => x != null));
+    const orphanPayouts = (await this.pool.query(
+      `select owner_id, sum(amount)::text as amt from landlord_payouts where user_id = $1 and deleted_at is null and owner_id is not null group by 1`, [scope]))
+      .rows.filter((x: any) => !listed.has(x.owner_id) && !holders.has(x.owner_id));
+    for (const x of orphanPayouts) add(sub, x.owner_id, -h(x.amt));
     for (const k of holders) ledger.delete(k);
     const byRule = async (rules: string[]) => {
       const r = await this.pool.query(
@@ -302,6 +312,7 @@ export class ReconciliationService {
         expl("owner_expenses_charged_to_company", companyExp.rows.map((x: any) => ({ ownerId: x.owner_id, amount: fromHalalas(h(x.amt)) }))),
         expl("agency_fee_collections_excluded", agf.rows.map((x: any) => ({ ownerId: x.owner_id, amount: fromHalalas(h(x.amt)) }))),
         expl("unresolved_landlords_in_dues_report", unresolved),
+        expl("payouts_missing_from_dues_report", orphanPayouts.map((x: any) => ({ ownerId: x.owner_id, amount: fromHalalas(h(x.amt)) }))),
       ],
       notes: asOf === riyadhToday() ? [] : ["dues_report_is_current_not_as_of"],
     });

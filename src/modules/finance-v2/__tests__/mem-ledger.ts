@@ -62,9 +62,10 @@ export class MemLedger {
       if (e.kind === "charge") {
         const list = this.charges.get(e.paymentId) ?? [];
         const vatLine = out.lines.find((l) => l.taxRole === "output" && l.vatCategory === "S" && l.dims.paymentId === e.paymentId);
+        const urLine = out.lines.find((l) => accKey(l) === SYS.ur && l.credit > 0 && l.dims.paymentId === e.paymentId);
         list.push({
           generation: list.length + 1, chargedBy: e.chargedBy, documentId: e.documentId, amount: e.amount, vatAmount: e.vatAmount,
-          vatBase: vatLine?.vatBase ?? null, entryId: this.entries.size, entryKey: key, reversed: false, // non-null: a null entryId means "from the opening balance"
+          vatBase: vatLine?.vatBase ?? null, category: urLine?.vatCategory ?? null, entryId: this.entries.size, entryKey: key, reversed: false, // non-null: a null entryId means "from the opening balance"
         });
         this.charges.set(e.paymentId, list);
       } else if (e.kind === "uncharge") {

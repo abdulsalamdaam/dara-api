@@ -299,7 +299,10 @@ export class PostingEngine {
       `select c.payment_id, c.generation, c.charged_by, c.document_id, c.amount::text as amount, c.vat_amount::text as vat, c.entry_id,
               (select l.vat_base::text from journal_lines l
                 where l.entry_id = c.entry_id and l.tax_role = 'output' and l.vat_category = 'S' and l.payment_id = c.payment_id
-                order by l.line_no limit 1) as vat_base
+                order by l.line_no limit 1) as vat_base,
+              (select l.vat_category from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+                where l.entry_id = c.entry_id and l.payment_id = c.payment_id and l.credit > 0 and a.system_key = '${SYS.ur}'
+                order by l.line_no limit 1) as category
          from finance_installment_charges c
         where c.user_id = $1 and c.payment_id = any($2::int[]) and c.reversed_at is null`,
       [userId, paymentIds],
@@ -308,7 +311,7 @@ export class PostingEngine {
       state.charges[r.payment_id] = {
         generation: r.generation, chargedBy: r.charged_by, documentId: r.document_id,
         amount: toHalalas(r.amount), vatAmount: toHalalas(r.vat), vatBase: r.vat_base == null ? null : toHalalas(r.vat_base),
-        entryId: r.entry_id == null ? null : Number(r.entry_id),
+        entryId: r.entry_id == null ? null : Number(r.entry_id), category: r.category ?? null,
       };
     }
     const adv = await c.query(
@@ -427,6 +430,24 @@ export class PostingEngine {
            values ($1, $2, $3, $4, $5, $6) on conflict (collection_id) do nothing`,
           [e.collectionId, e.paymentId, userId, fromHalalas(e.vat), e.bookedOn, entryId],
         );
+      } else if (e.kind === "vatUnpoint") {
+        let left = e.vat;
+        const pts = await c.query(
+          `select collection_id, vat_booked::text as v from finance_installment_vat_points
+            where user_id = $1 and payment_id = $2 order by booked_on desc, collection_id desc for update`,
+          [userId, e.paymentId],
+        );
+        for (const r of pts.rows) {
+          if (left <= 0) break;
+          const v = toHalalas(r.v);
+          if (v <= left) {
+            await c.query(`delete from finance_installment_vat_points where user_id = $1 and collection_id = $2`, [userId, r.collection_id]);
+            left -= v;
+          } else {
+            await c.query(`update finance_installment_vat_points set vat_booked = $3 where user_id = $1 and collection_id = $2`, [userId, r.collection_id, fromHalalas(v - left)]);
+            left = 0;
+          }
+        }
       }
     }
   }

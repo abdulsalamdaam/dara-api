@@ -91,6 +91,9 @@ export function advanceVat(f: CollectionFacts, s: PostState): RuleOutput {
     if (s.charges[p]) return skip("already_charged", f);
     ({ vat, net: base } = vatSplit(x, rate));
   } else {
+    // Money refunded on a CHARGED installment is cash and AR only: the charge carries the installment's VAT (the
+    // advance VAT it netted included), and a tax invoice's VAT changes only by a credit note.
+    if (s.charges[p]) return skip("already_charged", f);
     const sp = vatSplit(-x, rate);
     vat = -Math.min(sp.vat, s.vatBooked[p] ?? 0);
     base = -Math.min(sp.net, s.baseBooked[p] ?? 0);
@@ -103,6 +106,7 @@ export function advanceVat(f: CollectionFacts, s: PostState): RuleOutput {
   const r = out(lines, f);
   r.warnings.push("vat_without_tax_invoice");
   if (vat > 0) r.effects.push({ kind: "vatPoint", collectionId: f.collectionId, paymentId: p, vat, bookedOn: f.date });
+  else r.effects.push({ kind: "vatUnpoint", paymentId: p, vat: -vat });
   return r;
 }
 

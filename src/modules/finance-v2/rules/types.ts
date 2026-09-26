@@ -73,6 +73,8 @@ export interface ActiveCharge {
   /** The base on the charge's VAT line (S), halalas; null when none. */
   vatBase: number | null;
   entryId: number | null;
+  /** The VAT category of the charge's own rent line (2131 / revenue), so a release credits the same revenue account. */
+  category?: VatCategory | null;
 }
 
 /** Ledger state read at POST time by the serial worker (§5.1 point 2, §5.3). */
@@ -93,7 +95,9 @@ export const EMPTY_STATE: PostState = Object.freeze({ charges: {}, vatBooked: {}
 export type Effect =
   | { kind: "charge"; paymentId: number; chargedBy: "due" | "document"; documentId: number | null; amount: number; vatAmount: number; chargedOn: string }
   | { kind: "uncharge"; paymentId: number; reason: string }
-  | { kind: "vatPoint"; collectionId: number; paymentId: number; vat: number; bookedOn: string };
+  | { kind: "vatPoint"; collectionId: number; paymentId: number; vat: number; bookedOn: string }
+  /** Advance VAT reversed (a refund on an uncharged installment, or E05 cancelling the charge that netted it): the points shrink, latest first. */
+  | { kind: "vatUnpoint"; paymentId: number; vat: number };
 
 export interface RuleOutput {
   lines: RuleLine[];

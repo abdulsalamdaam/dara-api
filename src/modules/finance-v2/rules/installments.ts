@@ -64,11 +64,25 @@ export function chargeCancelled(f: InstallmentFacts, s: PostState): RuleOutput {
   const c = s.charges[p];
   const skip = (reason: string): RuleOutput => ({ lines: [], warnings, skip: reason, effects: [], date: f.date });
   if (s.writtenOff.includes(p)) return skip("written_off");
-  if (!c) return skip("not_charged");
-  if (c.chargedBy === "document") return skip("cancelled_but_invoiced");
-  const net = c.amount - c.vatAmount;
   const dims = { ...f.dims, paymentId: p };
   const seller = sellerKeyOf(f.treatment, f.dims.ownerId);
+  // The advance VAT booked on the installment (§4.1) — netted into the charge, or still standing when it was never
+  // charged — belongs to the cancelled supply: it is reversed too, so the tenant's payment stays whole as credit and
+  // the outcome does not depend on whether the recognizer charged the installment before the cancellation.
+  const vb = Math.max(0, s.vatBooked[p] ?? 0);
+  const advanceLines = (): RuleLine[] => vb > 0 ? [
+    ...dr(f.treatment === "agent" ? sys(SYS.lpu) : sys(SYS.outputVat), vb, dims, {
+      vatCategory: "S", vatRate: rateStr("S", f.rate), vatBase: -(s.baseBooked[p] ?? 0), taxRole: "output", sellerKey: seller, docClass: "advance",
+    }),
+    ...cr(arOf(f.treatment), vb, dims, { docClass: "advance" }),
+  ] : [];
+  const unpoint = vb > 0 ? [{ kind: "vatUnpoint" as const, paymentId: p, vat: vb }] : [];
+  if (!c) {
+    if (!vb) return skip("not_charged");
+    return { lines: advanceLines(), warnings, date: f.date, memo: f.memo ?? null, effects: unpoint };
+  }
+  if (c.chargedBy === "document") return skip("cancelled_but_invoiced");
+  const net = c.amount - c.vatAmount;
   const report = f.category !== "S";
   const attrs = (amt: number) => ({
     vatCategory: f.category, vatRate: rateStr(f.category, f.rate), sellerKey: seller, docClass: "charge_cancel" as const,
@@ -86,7 +100,8 @@ export function chargeCancelled(f: InstallmentFacts, s: PostState): RuleOutput {
     vatCategory: "S", vatRate: rateStr("S", f.rate), vatBase: -(c.vatBase ?? 0), taxRole: "output", sellerKey: seller, docClass: "charge_cancel",
   }));
   lines.push(...cr(arOf(f.treatment), c.amount, dims, { docClass: "charge_cancel" }));
-  return { lines, warnings, date: f.date, memo: f.memo ?? null, effects: [{ kind: "uncharge", paymentId: p, reason: "cancelled" }] };
+  lines.push(...advanceLines());
+  return { lines, warnings, date: f.date, memo: f.memo ?? null, effects: [{ kind: "uncharge", paymentId: p, reason: "cancelled" }, ...unpoint] };
 }
 
 /**
@@ -148,7 +163,8 @@ export function monthlyRelease(f: ReleaseFacts, s: PostState): RuleOutput {
   const dims = { ...f.dims, paymentId: f.paymentId };
   const lines = [
     ...dr(sys(SYS.ur), r.amount, dims),
-    ...cr(sys(revenueKey("rent", f.usage, f.category)), r.amount, dims),
+    // The revenue of the charge being released: a document's own category may differ from the installment's (§2.1).
+    ...cr(sys(revenueKey("rent", f.usage, s.charges[f.paymentId]?.category ?? f.category)), r.amount, dims),
   ];
   return { lines, warnings, effects: [], date: r.date, memo: f.memo ?? null };
 }

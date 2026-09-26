@@ -190,7 +190,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
 
   // ── Installments: due-date charges (E02), external settlements (E33), releases (E35) ──
   const pays = await q.rows<InstallmentRow & { created: string; doc_date: string | null; collected: string; has_col: boolean;
-    c_status: string; ended: string | null; charge_events: number }>(
+    c_status: string; ended: string | null; charge_events: number; written_off: boolean }>(
     `select ${INSTALLMENT_COLS}, p.created_at::text as created, c.status::text as c_status,
             to_char(coalesce(d.ended_on, case when c.status::text in ('terminated','cancelled') then (c.updated_at at time zone 'Asia/Riyadh')::date end),'YYYY-MM-DD') as ended,
             (select to_char(min(coalesce(si.issue_date, (si.confirmed_at at time zone 'Asia/Riyadh')::date)),'YYYY-MM-DD')
@@ -199,6 +199,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
                 and (si.payment_id = p.id or coalesce(si.payment_ids, '[]'::jsonb) @> jsonb_build_array(p.id))) as doc_date,
             (select coalesce(sum(pc.amount), 0)::text from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as collected,
             exists (select 1 from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as has_col,
+            exists (select 1 from finance_write_offs w where w.user_id = p.user_id and p.id = any(w.payment_ids)) as written_off,
             (select count(*)::int from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment' and o.source_id = p.id
                 and o.event ~ '^charge(:g[0-9]+)?$') as charge_events
        from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
@@ -209,8 +210,29 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
   );
   for (const p of pays) {
     if ((p.description ?? "") === DEPOSIT_DESC || installmentNature(p.description) === "deposit") continue;
-    if (p.status === "cancelled") {
-      if (!p.has_col) note(notes, "cancelled_history", { sourceType: "payment", sourceId: p.id, date: p.due });
+    // A written-off row is stored cancelled, but live posting charged it (E02, or the write-off's own charge) before E24 cleared it.
+    if (p.status === "cancelled" && !p.written_off) {
+      if (!p.has_col) {
+        // Charged at its due date and cancelled when the contract ended nets to nothing: nothing to post.
+        note(notes, "cancelled_history", { sourceType: "payment", sourceId: p.id, date: p.due });
+        continue;
+      }
+      // Money was collected on it before it was cancelled at the contract's end. Live posting charged it at its due
+      // date (so the collection settled AR, with no advance VAT) and reversed the charge at the end (E05), leaving the
+      // money as the tenant's credit. Skipping both would book the collection as an advance, with advance VAT.
+      if (p.ended && !(opts.from && p.due < opts.from)) {
+        const byDoc = p.doc_date != null && p.doc_date <= p.due;
+        const ctx = await ctxOf(p.contract_id);
+        const f = installmentFacts(p, ctx, s, p.due);
+        const fEnd = installmentFacts(p, ctx, s, p.ended);
+        if (f && fEnd && !byDoc) {
+          if (p.due < p.ended && Number(p.charge_events) === 0) {
+            push({ sourceType: "payment", sourceId: p.id, event: "charge", occurredOn: p.due, payload: { rule: "E02", facts: f, paymentIds: [p.id] } }, p.created);
+          }
+          // E05 also reverses advance VAT its collections booked when it was never charged.
+          push({ sourceType: "payment", sourceId: p.id, event: "charge_cancelled", occurredOn: p.ended, payload: { rule: "E05", facts: fEnd, paymentIds: [p.id] } }, p.created);
+        }
+      }
       continue;
     }
     if (p.ended && p.due > p.ended) continue;
@@ -247,6 +269,25 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
         push({ sourceType: "payment", sourceId: p.id, event: `release:${month}`, occurredOn: date, payload: { rule: "E35", facts, paymentIds: [p.id] } }, p.created);
       }
     }
+  }
+
+  // ── Cancelled installments not yet due that carry collections (prepaid, then cancelled at the contract's end):
+  //    live posting's E05 reversed the advance VAT those collections booked ──
+  const laterCancelled = await q.rows<InstallmentRow & { created: string; ended: string | null }>(
+    `select ${INSTALLMENT_COLS}, p.created_at::text as created,
+            to_char(coalesce(d.ended_on, case when c.status::text in ('terminated','cancelled') then (c.updated_at at time zone 'Asia/Riyadh')::date end),'YYYY-MM-DD') as ended
+       from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
+       left join finance_contract_dims d on d.contract_id = c.id and d.user_id = c.user_id
+      where p.user_id = $1 and p.deleted_at is null and c.deleted_at is null and p.due_date >= $2::date and p.status::text = 'cancelled'
+        and exists (select 1 from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id)
+        and not exists (select 1 from finance_write_offs w where w.user_id = p.user_id and p.id = any(w.payment_ids))
+      order by p.due_date, p.id`,
+    [userId, opts.today],
+  );
+  for (const p of laterCancelled) {
+    if (!p.ended || (p.description ?? "") === DEPOSIT_DESC || installmentNature(p.description) === "deposit") continue;
+    const fEnd = installmentFacts(p, await ctxOf(p.contract_id), s, p.ended);
+    if (fEnd) push({ sourceType: "payment", sourceId: p.id, event: "charge_cancelled", occurredOn: p.ended, payload: { rule: "E05", facts: fEnd, paymentIds: [p.id] } }, p.created);
   }
 
   // ── Deposits forfeited with no conversion collection (E11), at an inferred date ──

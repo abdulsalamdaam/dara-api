@@ -307,3 +307,68 @@ describe("finance v2 backfill (real Postgres, real legacy routes)", { skip: fv2D
     assert.equal(n.n, 1, "no second proposal");
   });
 });
+
+/**
+ * Phase 5 integration: a seeded synthetic company whose history was written through the real legacy routes with
+ * Finance v2 OFF, then switched on and backfilled. The resulting balances are computed by hand below (manager mode,
+ * the agent landlord, VAT-able rent), and a second run posts nothing.
+ */
+describe("finance v2 backfill reproduces hand-computed balances (real Postgres, real legacy routes)", { skip: fv2DbSkip }, () => {
+  const V = 6201;
+  const TODAY_H = "2026-03-15";
+  let env: LegacyEnv;
+  let first: BackfillSummary, second: BackfillSummary;
+
+  before(async () => {
+    env = await legacyEnv("wired");
+    const s = await seedAccount(env, V);
+    const user = userOf(V);
+    // 1,000 a month + 15 % VAT = 1,150 per installment, agent landlord (5 % fee, no invoice approved → no commission).
+    const c: any = await env.contracts.create(user, {
+      unitIds: [s.unitA1], tenantId: s.tenant, tenantName: "Synthetic Tenant", startDate: "2026-01-01", endDate: "2026-12-31",
+      monthlyRent: "1000", paymentFrequency: "monthly", vatEnabled: true,
+      depositAmount: "2000", depositStatus: "collected", depositMethod: "bank_transfer", depositDueDate: "2026-01-01",
+      landlordName: "Synthetic Landlord A",
+    });
+    const pay = async (due: string) => Number((await env.q(`select id from payments where contract_id = $1 and due_date = $2`, [c.id, due]))[0].id);
+    await env.payments.addCollection(user, String(await pay("2026-01-01")), { amount: "1150", collectedDate: "2026-01-05", method: "cash" });
+    await env.payments.addCollection(user, String(await pay("2026-02-01")), { amount: "500", collectedDate: "2026-02-10", method: "cash" });
+    await env.reports.createExpense(user, { ownerId: s.agent, propertyId: s.propA, category: "صيانة", amount: 200, expenseDate: "2026-02-15" });
+    await env.reports.createPayout(user, { ownerId: s.agent, amount: 700, transferDate: "2026-03-01", method: "bank_transfer" });
+    await withTx(env.t.pool, async (cl) => {
+      await cl.query(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, enabled_at) values ($1, true, 'manager', now())`, [V]);
+      await env.setup.firstEnable(cl, V, null);
+    });
+    env.flag.invalidate(V);
+    const bf = backfillOf(env);
+    first = await bf.run({ userId: V, actorUserId: V, mode: "full", dryRun: false, today: TODAY_H });
+    second = await bf.run({ userId: V, actorUserId: V, mode: "full", dryRun: false, today: TODAY_H });
+  });
+  after(async () => { await env?.t.drop(); });
+
+  it("every account equals the hand computation", async () => {
+    assert.deepEqual(first.failed, []);
+    // Charges due before 15 March: Jan, Feb, Mar = 3 × 1,150 (agent: Dr 1122 / Cr 2122 net 1,000 + VAT 150).
+    // Collections (cash): 1,150 + 500 → Dr 1111 / Cr 1122, and 2122 → 2121 for the landlord.
+    // Deposit 2,000 by transfer: Dr 1113 / Cr 2141. Landlord's expense 200 and payout 700 from the bank: Dr 2121 / Cr 1113.
+    assert.deepEqual(await balances(env, V), {
+      "1111": "1650.00",                     // 1,150 + 500
+      "1113": "1100.00",                     // 2,000 − 200 − 700
+      "1122": "1800.00",                     // 3,450 − 1,650
+      "2121": "-750.00",                     // −1,650 + 200 + 700
+      "2122": "-1800.00",                    // −3,450 + 1,650 (the mirror of 1122)
+      "2141": "-2000.00",
+    });
+    const [vat] = await env.q(`select sum(l.credit - l.debit)::text as vat, sum(l.vat_base)::text as base from journal_lines l
+                                where l.user_id = $1 and l.tax_role = 'output' and l.vat_category = 'S'`, [V]);
+    assert.deepEqual([vat.vat, vat.base], ["450.00", "3000.00"], "the landlord's output VAT (seller owner:<id>) on 3 charges");
+    const [tb] = await env.q(`select sum(debit)::text as d, sum(credit)::text as c from journal_lines where user_id = $1`, [V]);
+    assert.equal(tb.d, tb.c);
+  });
+
+  it("a second run posts nothing", () => {
+    assert.equal(second.events.new, 0);
+    assert.equal(second.entries.count, 0);
+    assert.deepEqual(second.trialBalance, first.trialBalance);
+  });
+});

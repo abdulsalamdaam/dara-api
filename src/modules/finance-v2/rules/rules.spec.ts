@@ -299,6 +299,23 @@ describe("fv2 worked example §4.5 (synthetic values)", () => {
   });
 });
 
+describe("fv2 a release credits the revenue of the charge it releases", () => {
+  it("an installment charged by a non-VAT invoice (E) releases to the E revenue account its credit note debits, not the installment's own O", () => {
+    // Found by the property run (seed 20260995): usage unknown, vat off → the installment is O (4120) but a legacy
+    // vat:false invoice line is E (4110); releases went to 4120 while the invoice's credit note debited 4110.
+    const m = new MemLedger();
+    const usage = null as any;
+    m.post("simple_invoice,501,confirmed", { rule: "E01", facts: { ...doc("principal", "E", 180000), groups: [{ ...group("E", 180000), usage }] }, paymentIds: [P] });
+    const rel = m.post("payment,101,release:2026-08", { rule: "E35", facts: { date: "2026-08-31", treatment: "principal", dims: DIMS, paymentId: P, month: "2026-08", windowStart: "2026-08-01", windowEnd: "2026-08-31", category: "O", usage }, paymentIds: [P] });
+    assert.equal(accKey(rel.lines.find((l) => l.credit > 0)!), SYS.revResidential);
+    // A due-date charge (O) still releases to its own account.
+    const m2 = new MemLedger();
+    m2.post("payment,101,charge", { rule: "E02", facts: { ...inst("principal", "O", 180000), usage }, paymentIds: [P] });
+    const rel2 = m2.post("payment,101,release:2026-08", { rule: "E35", facts: { date: "2026-08-31", treatment: "principal", dims: DIMS, paymentId: P, month: "2026-08", windowStart: "2026-08-01", windowEnd: "2026-08-31", category: "O", usage }, paymentIds: [P] });
+    assert.equal(accKey(rel2.lines.find((l) => l.credit > 0)!), SYS.revCommercial);
+  });
+});
+
 describe("fv2 straight-line releases sum exactly (§11.1-i)", () => {
   const run = (net: number, windowStart: string, windowEnd: string, creditAfter?: { month: string; amount: number }) => {
     const m = new MemLedger();
@@ -418,9 +435,76 @@ describe("fv2 reverse-and-replace and advance VAT (§11.1-j, §4.1)", () => {
       m.post("simple_invoice,501,confirmed", { rule: "E01", facts: doc(t, "S", 690000), paymentIds: [P] });
       assert.deepEqual(vatReport(m).S, { base: 600000, vat: 90000 }, `${t} after invoice`);
       assert.equal(m.balance(ar), 345000);
-      // A negative collection reverses the matching advance VAT.
+      // Refunding money on a CHARGED installment moves cash and AR only: the charge (here a tax invoice) carries the
+      // installment's whole VAT, so the advance VAT it netted is not reversed (found by the property run, seed 20260964).
       const neg = runRule({ rule: "E34", facts: coll(t, -345000, "rent"), paymentIds: [P] }, m.state([P]));
-      assert.equal(neg.lines.find((l) => l.taxRole)!.debit, 45000);
+      assert.equal(neg.skip, "already_charged", t);
+    }
+  });
+
+  it("a negative collection on an UNCHARGED installment reverses the matching advance VAT", () => {
+    for (const t of ["principal", "agent"] as const) {
+      const m = new MemLedger();
+      m.post("payment_collection,701,collected", { rule: "E03", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment_collection,701,advance_vat", { rule: "E34", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment_collection,702,collected", { rule: "E04", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      m.post("payment_collection,702,advance_vat", { rule: "E34", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      assert.deepEqual(vatReport(m).S, { base: 0, vat: 0 }, t);
+      assert.equal(m.balance(t === "agent" ? SYS.arAgency : SYS.ar), 0, t);
+    }
+  });
+
+  it("E05 on a charge that netted advance VAT reverses the advance VAT too: the tenant keeps the whole payment as credit", () => {
+    for (const t of ["principal", "agent"] as const) {
+      const m = new MemLedger();
+      const ar = t === "agent" ? SYS.arAgency : SYS.ar;
+      m.post("payment_collection,701,collected", { rule: "E03", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment_collection,701,advance_vat", { rule: "E34", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment,101,charge", { rule: "E02", facts: inst(t, "S", 690000), paymentIds: [P] });
+      m.post("payment,101,charge_cancelled", { rule: "E05", facts: { ...inst(t, "S", 690000), date: "2026-09-02" }, paymentIds: [P] });
+      assert.deepEqual(vatReport(m).S, { base: 0, vat: 0 }, `${t}: the cancelled supply carries no VAT`);
+      assert.equal(m.balance(ar), -345000, `${t}: the whole payment is the tenant's credit`);
+      if (t === "agent") assert.equal(m.balance(SYS.lpu), 345000, "the agent mirror holds (1122 = −2122)");
+      // Refunding it afterwards is cash and AR only.
+      m.post("payment_collection,702,collected", { rule: "E04", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      const neg = m.post("payment_collection,702,advance_vat", { rule: "E34", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      assert.equal(neg.skip, "nothing_booked", t);
+      assert.equal(m.balance(ar), 0, t);
+      assert.equal(m.trialBalance().debit, m.trialBalance().credit);
+    }
+  });
+
+  it("E05 on an installment cancelled before it was ever charged reverses the advance VAT its collections booked", () => {
+    // Found by the property run (seed 424509): whether the recognizer happened to charge it before the contract ended
+    // decided whether the cancelled supply kept its advance VAT.
+    for (const t of ["principal", "agent"] as const) {
+      const m = new MemLedger();
+      const ar = t === "agent" ? SYS.arAgency : SYS.ar;
+      m.post("payment_collection,701,collected", { rule: "E03", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment_collection,701,advance_vat", { rule: "E34", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      const out = m.post("payment,101,charge_cancelled", { rule: "E05", facts: { ...inst(t, "S", 690000), date: "2026-09-02" }, paymentIds: [P] });
+      assert.equal(out.skip, undefined, t);
+      assert.deepEqual(vatReport(m).S, { base: 0, vat: 0 }, t);
+      assert.equal(m.balance(ar), -345000, `${t}: the whole payment is the tenant's credit`);
+      // With nothing booked there is still nothing to do.
+      assert.equal(runRule({ rule: "E05", facts: { ...inst(t, "S", 690000), date: "2026-09-03" }, paymentIds: [P] }, m.state([P])).skip, "not_charged");
+    }
+  });
+
+  it("an installment charged, written off and its advance refunded keeps its full VAT (the supply happened)", () => {
+    for (const t of ["principal", "agent"] as const) {
+      const m = new MemLedger();
+      const ar = t === "agent" ? SYS.arAgency : SYS.ar;
+      m.post("payment_collection,701,collected", { rule: "E03", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment_collection,701,advance_vat", { rule: "E34", facts: coll(t, 345000, "rent"), paymentIds: [P] });
+      m.post("payment,101,charge", { rule: "E02", facts: inst(t, "S", 690000), paymentIds: [P] });
+      // The write-off covers the remaining 3,450 plus the 3,450 refunded in the same termination.
+      m.post("write_off,1,posted", { rule: "E24", facts: { date: "2026-09-27", treatment: t, dims: { ...DIMS, paymentId: P }, amount: "6900.00", paymentIds: [P] }, paymentIds: [P] });
+      m.writtenOff.push(P);
+      m.post("payment_collection,702,collected", { rule: "E04", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      m.post("payment_collection,702,advance_vat", { rule: "E34", facts: { ...coll(t, -345000, "rent"), collectionId: 702 }, paymentIds: [P] });
+      assert.deepEqual(vatReport(m).S, { base: 600000, vat: 90000 }, t);
+      assert.equal(m.balance(ar), 0, t);
     }
   });
 

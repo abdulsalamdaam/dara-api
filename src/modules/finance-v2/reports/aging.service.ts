@@ -64,7 +64,7 @@ export class ArAgingService {
   constructor(@Inject(FV2_POOL) private readonly pool: Fv2Pool) {}
 
   /** The open items and unapplied credit as of `asOf` (every tenant; filter afterwards). */
-  async openItems(scope: number, asOf: string, by: "tenant" | "contract" = "tenant"): Promise<AgingData> {
+  async openItems(scope: number, asOf: string, by: "tenant" | "contract" = "tenant", opts: { installmentsDueBefore?: string } = {}): Promise<AgingData> {
     const dims = await contractDims(this.pool, scope);
     const [pays, cols, docs, wos, acts] = await Promise.all([
       this.pool.query(
@@ -81,7 +81,7 @@ export class ArAgingService {
                 to_char(due_date, 'YYYY-MM-DD') as due, deleted_at is not null as deleted
            from simple_invoices where user_id = $1`, [scope]),
       this.pool.query(
-        `select payment_ids, document_ids from finance_write_offs where user_id = $1 and written_off_on <= $2::date`, [scope, asOf]),
+        `select payment_ids, document_ids, amount::text as amount from finance_write_offs where user_id = $1 and written_off_on <= $2::date`, [scope, asOf]),
       this.pool.query(
         `select a.kind, a.tenant_id, a.contract_id, a.amount::text as amount, a.target_document_id, t.target_payment_id
            from tenant_credit_actions a left join tenant_credit_targets t on t.action_id = a.id and t.user_id = a.user_id
@@ -137,6 +137,7 @@ export class ArAgingService {
       if (p.deleted || p.status === "cancelled") return "credit";
       if (c.endedOn && (c.status === "terminated" || c.status === "cancelled") && p.due > c.endedOn) return "credit";
       if (p.due > asOf) return "credit";
+      if (opts.installmentsDueBefore && !(p.due < opts.installmentsDueBefore)) return "credit";
       return "item";
     };
     for (const p of pays.rows) {
@@ -191,6 +192,17 @@ export class ArAgingService {
       const it = target ? items.get(`d:${target.id}`) : undefined;
       if (it) it.credited += h(n.total);
       else if (!(target && writtenDoc.has(target.id))) addCredit(n.tenant_id ?? target?.tenant_id ?? null, n.contract_id ?? target?.contract_id ?? null, -h(n.total));
+    }
+
+    // An installment written off while a confirmed document covers it: E24 cleared that much of the document's AR
+    // (the document itself is not in the write-off), so the document's item is reduced by the amount written off.
+    for (const w of wos.rows) {
+      if ((w.document_ids ?? []).length) continue;
+      const docs = new Set((w.payment_ids ?? []).map((p: number) => coveredBy.get(Number(p))));
+      if (docs.size !== 1) continue;
+      const [d] = [...docs];
+      const it = d != null ? items.get(`d:${d}`) : undefined;
+      if (it) it.credited += h(w.amount);
     }
 
     // Tenant credit applied to a document, or refunded.

@@ -23,6 +23,7 @@ import type { LedgerEvent } from "../ledger-emitter.service";
 import { fromHalalas, toHalalas } from "../money";
 import type { MoneyFacts } from "../rules";
 import { DEPOSIT_DESC } from "./reads";
+import { ADVANCE_NOTE } from "../hooks/classify";
 import type { Sql } from "../hooks/sql";
 
 export type DispositionAction = "collect" | "write_off" | "cancel";
@@ -175,6 +176,10 @@ export async function applyDispositions(
 
   const s = (await loadSettings(q, scope)) as FinanceSettingsRow;
   const cctx = s ? await contractCtx(q, scope, s.mode, contractId) : null;
+  // The legacy terminate refunds the collected buckets AFTER the dispositions (advance: the prepaid-rent rows;
+  // installments: every other row). Money refunded off a row that is being written off re-opens that much of it,
+  // so the write-off covers it too — otherwise the refunded part stays on AR against a cancelled installment.
+  const refundedOn = await refundedByTerminate(q, scope, list.filter((d) => d.action === "write_off").map((d) => d.paymentId), body);
   for (const d of list) {
     const o = openById.get(d.paymentId)!;
     if (d.action === "collect") {
@@ -203,19 +208,38 @@ export async function applyDispositions(
         );
         if (f) out.events.push({ sourceType: "payment", sourceId: d.paymentId, event: g.gen <= 1 ? "charge" : `charge:g${g.gen}`, occurredOn: p.due, payload: { rule: "E02", facts: f, paymentIds: [d.paymentId] } });
       }
+      const amount = fromHalalas(toHalalas(o.remaining) + (refundedOn.get(d.paymentId) ?? 0));
       const [w] = await q.rows(
         `insert into finance_write_offs (user_id, tenant_id, contract_id, owner_id, payment_ids, amount, written_off_on, reason, created_by, approved_by)
          values ($1, $2, $3, $4, $5::int[], $6, $7, $8, $9, $9) returning id`,
-        [scope, c.tenant_id ?? null, contractId, cctx?.ownerId ?? null, [d.paymentId], o.remaining, today,
+        [scope, c.tenant_id ?? null, contractId, cctx?.ownerId ?? null, [d.paymentId], amount, today,
           d.reason || "شطب عند إنهاء العقد · Written off at contract end", actor.id],
       );
       await q.exec(`update payments set status = 'cancelled', updated_at = now() where id = $1 and user_id = $2`, [d.paymentId, scope]);
       out.writtenOff.push(d.paymentId);
-      if (s) out.events.push(writeOffEvent(Number(w.id), o.remaining, today, cctx, s, d.paymentId));
+      if (s) out.events.push(writeOffEvent(Number(w.id), amount, today, cctx, s, d.paymentId));
     } else {
       await q.exec(`update payments set status = 'cancelled', updated_at = now() where id = $1 and user_id = $2`, [d.paymentId, scope]);
       out.cancelled.push(d.paymentId);
     }
+  }
+  return out;
+}
+
+/** Per installment, the halalas the legacy terminate is about to refund off it (its positive collections in the refunded buckets). */
+async function refundedByTerminate(q: Sql, scope: number, paymentIds: number[], body: any): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  const advance = body?.advance === "refund";
+  const installments = body?.installments === "refund";
+  if (!paymentIds.length || !(advance || installments)) return out;
+  const rows = await q.rows(
+    `select payment_id, (notes is not distinct from $3) as adv, sum(amount)::text as amt from payment_collections
+      where user_id = $1 and payment_id = any($2::int[]) and amount > 0 group by 1, 2`,
+    [scope, paymentIds, ADVANCE_NOTE],
+  );
+  for (const r of rows) {
+    if (r.adv ? !advance : !installments) continue;
+    out.set(Number(r.payment_id), (out.get(Number(r.payment_id)) ?? 0) + toHalalas(r.amt));
   }
   return out;
 }
