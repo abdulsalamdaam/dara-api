@@ -308,7 +308,7 @@ describe("finance v2 posting engine (real Postgres)", { skip: fv2DbSkip }, () =>
       await run();
       const ob = await outbox(U, "manual_journal", id, "posted");
       assert.deepEqual([ob.status, ob.last_error_code], ["failed", "PERIOD_CLOSED"]);
-      await q(`update fiscal_periods set status = 'open', vat_locked_at = null where user_id = $1 and starts_on in ('2026-02-01','2026-03-01','2026-04-01')`, [U]);
+      // (Feb stays locked and Mar/Apr VAT-locked: both are irreversible, and nothing later in this file posts there.)
     });
   });
 

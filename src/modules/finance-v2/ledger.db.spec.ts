@@ -163,6 +163,9 @@ describe("finance v2 migration and ledger triggers (real Postgres)", { skip: fv2
       await assert.rejects(q(`update journal_entries set status = 'reversed' where id = $1`, [orig.id]), (e: any) => code(e) === "55000");
       await assert.rejects(q(`update journal_entries set status = 'reversed', reversed_by = $1, memo = 'sneaky' where id = $1`, [orig.id]),
         (e: any) => code(e) === "55000");
+      const other = await post([{ accountId: acc["1113"], debit: 100 }, { accountId: acc["2151"], credit: 100 }]);
+      await assert.rejects(q(`update journal_entries set status = 'reversed', reversed_by = $2, reversed_at = now() where id = $1`, [orig.id, other.id]),
+        (e: any) => code(e) === "55000", "reversed_by must be this entry's own reversal");
       const rev = await withTx(t.pool, (c) => repo.reverse(c, U, orig.id, { entryDate: "2026-03-20" }));
       assert.equal(rev.created, true);
       const s = (await q(`select status, reversed_by from journal_entries where id = $1`, [orig.id])).rows[0];
@@ -230,6 +233,16 @@ describe("finance v2 migration and ledger triggers (real Postgres)", { skip: fv2
       const b = await withTx(t.pool, (c) => periods.ensurePeriod(c, U, "2026-06-30"));
       assert.equal(a.id, b.id);
       assert.deepEqual([a.startsOn, a.endsOn, a.periodNo, a.fiscalYear], ["2026-06-01", "2026-06-30", 6, 2026]);
+    });
+    it("a period's dates are fixed, locked is terminal, a VAT lock is never lifted, and periods are never deleted", async () => {
+      const p = await withTx(t.pool, (c) => periods.ensurePeriod(c, U, "2026-06-10"));
+      await assert.rejects(q(`update fiscal_periods set starts_on = '2026-07-01', ends_on = '2026-07-31' where id = $1`, [p.id]), (e: any) => code(e) === "55000");
+      await assert.rejects(q(`update fiscal_periods set user_id = $2 where id = $1`, [p.id, OTHER]), (e: any) => code(e) === "55000");
+      await assert.rejects(q(`delete from fiscal_periods where id = $1`, [p.id]), (e: any) => code(e) === "55000");
+      await assert.rejects(q(`update fiscal_periods set status = 'open' where user_id = $1 and starts_on = '2025-12-01'`, [U]), /locked/);
+      await assert.rejects(q(`update fiscal_periods set vat_locked_at = null where user_id = $1 and starts_on = '2026-02-01'`, [U]), /VAT-locked/);
+      await q(`update fiscal_periods set status = 'closed' where id = $1`, [p.id]);
+      await q(`update fiscal_periods set status = 'open' where id = $1`, [p.id]);
     });
   });
 

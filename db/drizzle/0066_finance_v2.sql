@@ -422,8 +422,11 @@ begin
     raise exception 'fv2: journal lines are immutable (correct with a reversal)' using errcode = '55000';
   end if;
   if tg_op = 'UPDATE' then
+    -- reversed_by must be THIS entry's reversal (same account, reversal_of = it),
+    -- so an entry cannot be marked reversed by pointing at an unrelated entry.
     if old.status = 'posted' and new.status = 'reversed' and new.reversed_by is not null
-       and (to_jsonb(new) - 'status' - 'reversed_by' - 'reversed_at') = (to_jsonb(old) - 'status' - 'reversed_by' - 'reversed_at') then
+       and (to_jsonb(new) - 'status' - 'reversed_by' - 'reversed_at') = (to_jsonb(old) - 'status' - 'reversed_by' - 'reversed_at')
+       and exists (select 1 from journal_entries r where r.id = new.reversed_by and r.user_id = old.user_id and r.reversal_of = old.id) then
       return new;
     end if;
   end if;
@@ -437,6 +440,33 @@ drop trigger if exists journal_no_truncate on journal_lines;
 create trigger journal_no_truncate before truncate on journal_lines for each statement execute function fv2_ledger_immutable();
 drop trigger if exists journal_entries_no_truncate on journal_entries;
 create trigger journal_entries_no_truncate before truncate on journal_entries for each statement execute function fv2_ledger_immutable();
+
+-- 8.2b Fiscal periods (§2.3.3): a period's identity and dates never change
+-- (entries are validated against them at insert), `locked` is terminal, and a
+-- VAT lock is never lifted.
+create or replace function fv2_periods_guard() returns trigger language plpgsql as $$
+begin
+  if current_setting('fv2.purge', true) = 'on' then
+    if tg_op = 'DELETE' then return old; else return new; end if;
+  end if;
+  if tg_op = 'DELETE' then
+    raise exception 'fv2: fiscal periods cannot be deleted' using errcode = '55000';
+  end if;
+  if new.user_id is distinct from old.user_id or new.fiscal_year is distinct from old.fiscal_year
+     or new.period_no is distinct from old.period_no or new.starts_on is distinct from old.starts_on
+     or new.ends_on is distinct from old.ends_on then
+    raise exception 'fv2: a fiscal period''s account, year, number and dates are fixed' using errcode = '55000';
+  end if;
+  if old.status = 'locked' and new.status is distinct from 'locked' then
+    raise exception 'fv2: period % is locked (irreversible)', old.id using errcode = '55000';
+  end if;
+  if old.vat_locked_at is not null and new.vat_locked_at is distinct from old.vat_locked_at then
+    raise exception 'fv2: period % is VAT-locked (irreversible)', old.id using errcode = '55000';
+  end if;
+  return new;
+end $$;
+drop trigger if exists fiscal_periods_guard on fiscal_periods;
+create trigger fiscal_periods_guard before update or delete on fiscal_periods for each row execute function fv2_periods_guard();
 
 -- 8.3 Postable account (§2.4.3): active, not a group. Also: a line's
 -- entry_date is the entry's (it is a copy kept for index-only scans).
