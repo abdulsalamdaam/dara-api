@@ -337,21 +337,30 @@ export function manualJournal(f: ManualFacts): RuleOutput {
 /**
  * E37: VAT return locked for seller 'account'. Dr 2151 box-6 VAT / Cr 1151
  * input VAT booked / Cr 5500 (or Dr 5500) the §8.2(b) apportionment
- * adjustment / Cr 2152 net payable (or Dr 1152 when a refund), where net =
- * box 6 VAT − (booked + adjustment) = box 13. No tax_role (so it is exempt
- * from the VAT lock).
+ * adjustment / Cr 1152 box 15 (the credit carried forward, used up) / Cr 2152
+ * the position (or Dr 1152 when a refund), where position = box 6 VAT −
+ * (booked + adjustment) − box 15 = box 13 − box 15, so 2152 ends at box 16
+ * when box 14 is zero. Box 14 (corrections) is not posted: its counter-entry
+ * depends on the error, so the entry warns `box14_needs_manual_journal`.
+ * No tax_role (so it is exempt from the VAT lock).
  */
 export function vatSettlement(f: VatSettlementFacts): RuleOutput {
   const o = toHalalas(f.outputVat);
   const i = toHalalas(f.inputVat);
   const adj = f.apportionment == null ? 0 : toHalalas(f.apportionment);
-  const netPayable = o - i - adj;
+  const carried = f.carriedForward == null ? 0 : toHalalas(f.carriedForward);
+  if (carried < 0) throw new RuleError("BAD_FACTS", "box 15 cannot be negative", true);
+  // Box 15 uses up the credit on 1152; the position left is box 13 − box 15 (= box 16 without box 14).
+  const position = o - i - adj - carried;
   const lines = [
     ...signed(sys(SYS.outputVat), o, {}),
     ...signed(sys(SYS.inputVat), -i, {}),
     ...signed(sys(SYS.vatNonRecoverable), -adj, {}),
-    ...(netPayable >= 0 ? signed(sys(SYS.vatSettlement), -netPayable, {}) : signed(sys(SYS.vatRefundable), -netPayable, {})),
+    ...signed(sys(SYS.vatRefundable), -carried, {}),
+    ...(position >= 0 ? signed(sys(SYS.vatSettlement), -position, {}) : signed(sys(SYS.vatRefundable), -position, {})),
   ];
   if (!lines.length) return skip("zero_amount", f);
-  return out(lines, f);
+  const r = out(lines, f);
+  if (f.corrections != null && toHalalas(f.corrections) !== 0) r.warnings.push("box14_needs_manual_journal");
+  return r;
 }

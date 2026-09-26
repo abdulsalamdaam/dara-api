@@ -1,3 +1,4 @@
+import { toHalalas } from "./money";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "./__tests__/with-db";
@@ -263,8 +264,14 @@ describe("finance v2 manual journals, opening entry, periods and VAT lock (real 
     const before: any = await vat.get(U, "2026-Q2");
     assert.equal(before.box6Vat, "150.00");
     await assert.rejects(vat.put(U, holder, "2026-Q2", { box14: "5000.01" }), err("BOX14_LIMIT", 400));
-    const locked: any = await vat.put(U, holder, "2026-Q2", { box14: "0", box15: "0", lock: true });
+    const locked: any = await vat.put(U, holder, "2026-Q2", { box14: "10", box15: "20", lock: true });
     assert.equal(locked.locked, true);
+    assert.deepEqual(locked.warnings, ["box14_needs_manual_journal"]);
+    // 2152 ends at box 16 less the box-14 correction left to a manual journal; box 15 is taken off 1152.
+    const bal = async (key: string) => (await env.q(`select coalesce(sum(l.credit - l.debit), 0)::text as b from journal_lines l join accounts a on a.id = l.account_id
+                                     join journal_entries e on e.id = l.entry_id where l.user_id = $1 and a.system_key = $2 and e.source_type = 'vat_return'`, [U, key]))[0].b;
+    assert.equal(toHalalas(await bal("vat_settlement")), toHalalas(locked.box16) - toHalalas("10"));
+    assert.equal(await bal("vat_refundable"), "20.00");
     const [st] = await env.q(`select e.id, to_char(e.entry_date,'YYYY-MM-DD') as d from journal_entries e where e.user_id = $1 and e.source_type = 'vat_return' and e.event = 'settled'`, [U]);
     assert.equal(st.d, "2026-06-30");
     const [ov] = await env.q(`select coalesce(sum(l.credit - l.debit), 0)::text as b from journal_lines l join accounts a on a.id = l.account_id

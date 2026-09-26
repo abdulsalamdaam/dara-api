@@ -558,6 +558,17 @@ describe("fv2 VAT settlement E37 with the §8.2(b) apportionment", () => {
     ]);
     assert.ok(out.lines.every((l) => !l.taxRole), "no tax_role: the settlement is exempt from the VAT lock");
   });
+  it("box 15 (credit carried forward) is taken off 1152, so 2152 ends at box 16; box 14 is left to a manual journal with a warning", () => {
+    assert.deepEqual(lines({ date: "2026-06-30", outputVat: "1000.00", inputVat: "300.00", carriedForward: "200.00" }), [
+      [SYS.outputVat, 100000, 0], [SYS.inputVat, 0, 30000], [SYS.vatRefundable, 0, 20000], [SYS.vatSettlement, 0, 50000],
+    ]);
+    // A carried credit larger than this period's payable: what is left stays on 1152.
+    assert.deepEqual(lines({ date: "2026-06-30", outputVat: "100.00", inputVat: "0.00", carriedForward: "300.00" }), [
+      [SYS.outputVat, 10000, 0], [SYS.vatRefundable, 0, 30000], [SYS.vatRefundable, 20000, 0],
+    ]);
+    const w = RULES.E37({ date: "2026-06-30", outputVat: "100.00", inputVat: "0.00", corrections: "50.00" }, EMPTY_STATE);
+    assert.ok(w.warnings.includes("box14_needs_manual_journal"));
+  });
   it("a refund position with an adjustment debits 1152", () => {
     assert.deepEqual(lines({ date: "2026-03-31", outputVat: "100.00", inputVat: "300.00", apportionment: "20.00" }), [
       [SYS.outputVat, 10000, 0], [SYS.inputVat, 0, 30000], [SYS.vatNonRecoverable, 0, 2000], [SYS.vatRefundable, 22000, 0],

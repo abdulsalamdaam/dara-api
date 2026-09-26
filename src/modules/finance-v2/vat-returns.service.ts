@@ -24,7 +24,8 @@ export { parseVatPeriod, type VatPeriod };
  *    VAT-bearing lines dated there are then refused, or routed late when
  *    automatic (§4.7). It does NOT set the periods to `locked`.
  *  - posts the VAT settlement E37 for seller `account` (Dr 2151 / Cr 1151 /
- *    ±5500 apportionment / Cr 2152, or Dr 1152), dated the last day of the return.
+ *    ±5500 apportionment / Cr 1152 box 15 / Cr 2152, or Dr 1152), dated the
+ *    last day of the return; box 14 is returned as a warning to journal by hand.
  *  - refuses while VAT-period events are still pending, and in a locked period.
  */
 @Injectable()
@@ -69,6 +70,7 @@ export class VatReturnsService {
         [scope, period.from, period.to]);
       if (pend.rows[0].n > 0) throw new ConflictException({ error: "PENDING_POSTINGS", message: `${pend.rows[0].n} event(s) in this VAT period are pending or failed` });
     }
+    const warnings: string[] = [];
     try {
       return await withTx(this.pool, async (c) => {
         const d = (await c.query(
@@ -91,7 +93,11 @@ export class VatReturnsService {
           const adj = v.apportionment.adjustment;
           let settlement: { id: number; entryNo: string } | null = null;
           if (seller === "account") {
-            const out = vatSettlement({ date: period.to, outputVat: fromHalalas(v.outputVat), inputVat: fromHalalas(v.inputVatBooked), apportionment: fromHalalas(adj) });
+            const out = vatSettlement({
+              date: period.to, outputVat: fromHalalas(v.outputVat), inputVat: fromHalalas(v.inputVatBooked), apportionment: fromHalalas(adj),
+              carriedForward: fromHalalas(v.box15), corrections: fromHalalas(v.box14),
+            });
+            warnings.push(...out.warnings);
             if (!out.skip && out.lines.length >= 2) {
               const { lines } = await this.engine.resolveLines(c, scope, out.lines);
               const res = await this.journal.post(c, {
@@ -100,6 +106,7 @@ export class VatReturnsService {
                 payload: {
                   rule: "E37", period: period.key, outputVat: fromHalalas(v.outputVat), inputVat: fromHalalas(v.inputVatBooked),
                   apportionment: fromHalalas(adj), apportionmentRatio: v.apportionment.ratioPercent,
+                  box14: fromHalalas(v.box14), box15: fromHalalas(v.box15),
                 },
                 createdBy: user.id, lines,
               });
@@ -114,7 +121,8 @@ export class VatReturnsService {
             `VAT return ${period.key} locked`);
           await auditRow(c, scope, user.id, "finance_v2_vat_return", d.id, `/finance/v2/vat-returns/${period.key}`, "PUT");
         }
-        return this.view(c, scope, period, seller);
+        const view = await this.view(c, scope, period, seller);
+        return lock ? { ...view, warnings } : view;
       });
     } catch (err) {
       mapLedgerError(err);

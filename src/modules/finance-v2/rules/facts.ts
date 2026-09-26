@@ -177,4 +177,8 @@ export interface VatSettlementFacts {
    * VAT = inputVat + apportionment.
    */
   apportionment?: string;
+  /** Box 15: VAT credit carried forward from earlier returns (sits on 1152), ≥ 0. */
+  carriedForward?: string;
+  /** Box 14: corrections from previous periods (±5,000). Not posted: its counter-entry depends on the error. */
+  corrections?: string;
 }
