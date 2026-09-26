@@ -146,6 +146,12 @@ export interface VatSettlementFacts {
   date: string;
   /** Box 6 output VAT, signed. */
   outputVat: string;
-  /** Box 12 input VAT, signed. */
+  /** Input VAT booked on 1151 in the period (recoverable), signed. */
   inputVat: string;
+  /**
+   * §8.2(b) apportionment of overhead input VAT, signed: positive = more is
+   * recoverable than was booked (Cr 5500), negative = less (Dr 5500). Box 12
+   * VAT = inputVat + apportionment.
+   */
+  apportionment?: string;
 }

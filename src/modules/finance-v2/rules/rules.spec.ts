@@ -404,3 +404,24 @@ describe("fv2 reverse-and-replace and advance VAT (§11.1-j, §4.1)", () => {
     assert.deepEqual(vatReport(m).S, { base: 0, vat: 0 });
   });
 });
+
+describe("fv2 VAT settlement E37 with the §8.2(b) apportionment", () => {
+  const lines = (f: any) => RULES.E37(f, EMPTY_STATE).lines.map((l) => [accKey(l), l.debit, l.credit]);
+  it("a positive adjustment (more recoverable than booked) credits 5500 and lowers the payable", () => {
+    assert.deepEqual(lines({ date: "2026-03-31", outputVat: "2940.00", inputVat: "210.00", apportionment: "30.00" }), [
+      [SYS.outputVat, 294000, 0], [SYS.inputVat, 0, 21000], [SYS.vatNonRecoverable, 0, 3000], [SYS.vatSettlement, 0, 270000],
+    ]);
+  });
+  it("a negative adjustment expenses the unrecoverable part and raises the payable; still balanced", () => {
+    const out = RULES.E37({ date: "2026-03-31", outputVat: "1000.00", inputVat: "300.00", apportionment: "-50.00" }, EMPTY_STATE);
+    assert.deepEqual(out.lines.map((l) => [accKey(l), l.debit, l.credit]), [
+      [SYS.outputVat, 100000, 0], [SYS.inputVat, 0, 30000], [SYS.vatNonRecoverable, 5000, 0], [SYS.vatSettlement, 0, 75000],
+    ]);
+    assert.ok(out.lines.every((l) => !l.taxRole), "no tax_role: the settlement is exempt from the VAT lock");
+  });
+  it("a refund position with an adjustment debits 1152", () => {
+    assert.deepEqual(lines({ date: "2026-03-31", outputVat: "100.00", inputVat: "300.00", apportionment: "20.00" }), [
+      [SYS.outputVat, 10000, 0], [SYS.inputVat, 0, 30000], [SYS.vatNonRecoverable, 0, 2000], [SYS.vatRefundable, 22000, 0],
+    ]);
+  });
+});

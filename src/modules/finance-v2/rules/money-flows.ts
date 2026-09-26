@@ -268,16 +268,20 @@ export function manualJournal(f: ManualFacts): RuleOutput {
 
 /**
  * E37: VAT return locked for seller 'account'. Dr 2151 box-6 VAT / Cr 1151
- * box-12 VAT / Cr 2152 net payable (or Dr 1152 when a refund). No tax_role
- * (so it is exempt from the VAT lock).
+ * input VAT booked / Cr 5500 (or Dr 5500) the §8.2(b) apportionment
+ * adjustment / Cr 2152 net payable (or Dr 1152 when a refund), where net =
+ * box 6 VAT − (booked + adjustment) = box 13. No tax_role (so it is exempt
+ * from the VAT lock).
  */
 export function vatSettlement(f: VatSettlementFacts): RuleOutput {
   const o = toHalalas(f.outputVat);
   const i = toHalalas(f.inputVat);
-  const netPayable = o - i;
+  const adj = f.apportionment == null ? 0 : toHalalas(f.apportionment);
+  const netPayable = o - i - adj;
   const lines = [
     ...signed(sys(SYS.outputVat), o, {}),
     ...signed(sys(SYS.inputVat), -i, {}),
+    ...signed(sys(SYS.vatNonRecoverable), -adj, {}),
     ...(netPayable >= 0 ? signed(sys(SYS.vatSettlement), -netPayable, {}) : signed(sys(SYS.vatRefundable), -netPayable, {})),
   ];
   if (!lines.length) return skip("zero_amount", f);

@@ -25,6 +25,12 @@ import { FinanceV2PeriodsController } from "./controllers/periods.controller";
 import { FinanceV2VatReturnsController } from "./controllers/vat-returns.controller";
 import { FinanceV2CoreReportsController } from "./controllers/reports-core.controller";
 import { CoreReportsService } from "./reports/core-reports.service";
+import { FinanceV2SubReportsController } from "./controllers/reports-sub.controller";
+import { VatReportService } from "./reports/vat-report.service";
+import { ArAgingService } from "./reports/aging.service";
+import { StatementsService } from "./reports/statements.service";
+import { ReconciliationService } from "./reports/reconciliation.service";
+import { legacyAccountingProvider } from "./reports/legacy-accounting";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -36,13 +42,13 @@ import { CoreReportsService } from "./reports/core-reports.service";
   controllers: [
     FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
-    FinanceV2VatReturnsController, FinanceV2CoreReportsController,
+    FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
-    CoreReportsService,
+    CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
   ],
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
 })
