@@ -29,8 +29,11 @@ type Period = { id: number; fiscalYear: number; periodNo: number; startsOn: stri
  *  - Reopen: a reason; refused when locked, when a later period is closed or
  *    when the year has a closing entry.
  *  - Lock: irreversible, from closed only.
- *  - Close year: periods 1–11 closed; posts the closing entry (P&L to 3300,
- *    origin `closing`) dated the last day of period 12, then closes it.
+ *  - Close refuses period 12 (USE_CLOSE_YEAR): December closes with the year.
+ *  - Close year: the previous year closed if it has P&L (PRIOR_YEAR_OPEN);
+ *    periods 1–11 closed; posts the closing entry (P&L to 3300, origin
+ *    `closing`) dated the last day of period 12, then closes it (a period 12
+ *    already closed as a month still takes the entry; locked is refused).
  * Every action writes an audit_logs row in its transaction.
  */
 @Injectable()
@@ -58,6 +61,10 @@ export class PeriodCloseService {
 
   async close(scope: number, user: AuthUser, id: number, body: any = {}, today = riyadhToday()) {
     const p = await this.load(this.pool, scope, id);
+    if (p.periodNo === 12) {
+      // Closing December as a month would shut the year out of its closing entry (reopen is refused once it is closed).
+      throw new ConflictException({ error: "USE_CLOSE_YEAR", message: "Period 12 closes with the year-end close" });
+    }
     const warnings = await this.closeChecks(scope, p, today);
     try {
       return await withTx(this.pool, async (c) => {
@@ -108,19 +115,30 @@ export class PeriodCloseService {
     const fy = Number(body?.fiscalYear);
     if (!Number.isInteger(fy) || fy < 2000 || fy > 2200) throw new BadRequestException("fiscalYear is required");
     await this.periods.ensureFiscalYear(this.pool, scope, fy);
+    // The previous year's P&L must be closed to retained earnings first, or it sits in "current year" forever.
+    const prior = await this.pool.query(
+      `select 1 from fiscal_periods fp where fp.user_id = $1 and fp.fiscal_year = $2 and fp.period_no = 1
+          and exists (select 1 from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+                        join fiscal_periods p12 on p12.user_id = fp.user_id and p12.fiscal_year = fp.fiscal_year and p12.period_no = 12
+                       where l.user_id = fp.user_id and a.type in ('revenue','expense') and l.entry_date between fp.starts_on and p12.ends_on)
+          and not exists (select 1 from journal_entries e where e.user_id = fp.user_id and e.origin = 'closing' and e.status = 'posted' and e.source_type = 'fiscal_year'
+                             and e.source_id = fp.fiscal_year and e.event = 'closing')`,
+      [scope, fy - 1]);
+    if (prior.rowCount) throw new ConflictException({ error: "PRIOR_YEAR_OPEN", message: `Close fiscal year ${fy - 1} first` });
     const all = (await this.pool.query(`select ${PCOLS} from fiscal_periods where user_id = $1 and fiscal_year = $2 order by period_no`, [scope, fy])).rows as Period[];
     const p12 = all.find((p) => p.periodNo === 12)!;
     if (all.some((p) => p.periodNo < 12 && p.status === "open")) {
       throw new ConflictException({ error: "EARLIER_PERIOD_OPEN", message: "Close periods 1 to 11 first" });
     }
     if (await this.yearClosed(this.pool, scope, fy)) throw new ConflictException({ error: "YEAR_CLOSED", message: "The year is already closed" });
-    if (p12.status !== "open") throw new ConflictException({ error: "PERIOD_NOT_OPEN", message: "Period 12 is not open" });
-    const warnings = await this.closeChecks(scope, p12, today);
+    if (p12.status === "locked") throw new ConflictException({ error: "PERIOD_LOCKED", message: "Period 12 is locked" });
+    // Period 12 may already be closed as an ordinary month (before close() refused it); the closing entry is allowed in a closed period.
+    const warnings = await this.closeChecks(scope, p12, today, p12.status === "closed");
     const start = all.find((p) => p.periodNo === 1)!.startsOn;
     try {
       return await withTx(this.pool, async (c) => {
         const cur = await this.load(c, scope, p12.id, true);
-        if (cur.status !== "open") throw new ConflictException({ error: "PERIOD_NOT_OPEN", message: `Period 12 is ${cur.status}` });
+        if (cur.status === "locked") throw new ConflictException({ error: "PERIOD_LOCKED", message: "Period 12 is locked" });
         const bal = await c.query(
           `select l.account_id as id, sum(l.debit - l.credit)::text as b
              from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
@@ -148,7 +166,7 @@ export class PeriodCloseService {
             entry = { id: res.id, entryNo: res.entryNo };
           }
         }
-        await this.markClosed(c, scope, user, cur, `year-end close ${fy}`);
+        if (cur.status === "open") await this.markClosed(c, scope, user, cur, `year-end close ${fy}`);
         await settingsEvent(c, scope, user.id, "year_close", null, { fiscalYear: fy, closingEntryId: entry?.id ?? null }, `year-end close ${fy}`);
         await auditRow(c, scope, user.id, "finance_v2_fiscal_year", fy, `/finance/v2/periods/close-year`);
         return { fiscalYear: fy, closingEntry: entry, period: await this.load(c, scope, p12.id), warnings };
@@ -161,8 +179,8 @@ export class PeriodCloseService {
   // ── internals ───────────────────────────────────────────────────────────
 
   /** §8.1 close checks, outside any transaction (they run the recognizer and the worker). Returns warnings. */
-  private async closeChecks(scope: number, p: Period, today: string): Promise<Array<{ code: string; count: number }>> {
-    if (p.status !== "open") throw new ConflictException({ error: "PERIOD_NOT_OPEN", message: `The period is ${p.status}` });
+  private async closeChecks(scope: number, p: Period, today: string, alreadyClosed = false): Promise<Array<{ code: string; count: number }>> {
+    if (p.status !== "open" && !alreadyClosed) throw new ConflictException({ error: "PERIOD_NOT_OPEN", message: `The period is ${p.status}` });
     if (p.endsOn >= today) throw new ConflictException({ error: "PERIOD_NOT_ENDED", message: "A period cannot close before it has ended" });
     const earlier = await this.pool.query(`select 1 from fiscal_periods where user_id = $1 and starts_on < $2 and status = 'open' limit 1`, [scope, p.startsOn]);
     if (earlier.rowCount) throw new ConflictException({ error: "EARLIER_PERIOD_OPEN", message: "Close the earlier periods first" });

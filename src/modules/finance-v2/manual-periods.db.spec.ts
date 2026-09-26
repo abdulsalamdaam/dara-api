@@ -187,9 +187,10 @@ describe("finance v2 manual journals, opening entry, periods and VAT lock (real 
     const [p4] = await env.q(`select id from fiscal_periods where user_id = $1 and starts_on = '2026-04-01'`, [U]);
     await assert.rejects(pc.close(U, holder, p4.id, {}, TODAY), err("PERIOD_NOT_ENDED", 409));
     // The previous fiscal year's periods were created by the switch; close them first.
-    for (const r of await env.q(`select id from fiscal_periods where user_id = $1 and starts_on < '2026-01-01' order by starts_on`, [U])) {
+    for (const r of await env.q(`select id from fiscal_periods where user_id = $1 and starts_on < '2026-01-01' and period_no < 12 order by starts_on`, [U])) {
       await pc.close(U, holder, r.id, {}, TODAY);
     }
+    await pc.closeYear(U, holder, { fiscalYear: 2025 }, TODAY); // December closes with the year
     await assert.rejects(pc.close(U, holder, p2.id, {}, TODAY), err("EARLIER_PERIOD_OPEN", 409));
     // A pending outbox row dated in January blocks the close.
     await env.q(`insert into ledger_outbox (user_id, source_type, source_id, event, occurred_on, payload, next_attempt_at)
@@ -293,6 +294,11 @@ describe("finance v2 manual journals, opening entry, periods and VAT lock (real 
     for (const r of await env.q(`select id from fiscal_periods where user_id = $1 and fiscal_year = 2026 and period_no between 2 and 11 and status = 'open' order by starts_on`, [U])) {
       await pc.close(U, holder, r.id, {}, FY_TODAY);
     }
+    await assert.rejects(pc.closeYear(U, holder, { fiscalYear: 2027 }, "2028-02-01"), err("PRIOR_YEAR_OPEN", 409));
+    const [dec] = await env.q(`select id from fiscal_periods where user_id = $1 and fiscal_year = 2026 and period_no = 12`, [U]);
+    await assert.rejects(pc.close(U, holder, dec.id, {}, FY_TODAY), err("USE_CLOSE_YEAR", 409));
+    // A December closed as an ordinary month (before close() refused it) must still take its closing entry.
+    await env.q(`update fiscal_periods set status = 'closed', closed_at = now() where id = $1`, [dec.id]);
     const res: any = await pc.closeYear(U, holder, { fiscalYear: 2026 }, FY_TODAY);
     assert.ok(res.closingEntry?.id);
     assert.equal(res.period.status, "closed");
