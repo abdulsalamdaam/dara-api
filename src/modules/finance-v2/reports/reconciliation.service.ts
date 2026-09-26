@@ -244,7 +244,7 @@ export class ReconciliationService {
         paymentIsDeposit: x.payment_id != null && x.p_desc === DEPOSIT_DESC,
         looksLikeTerminateConversion: x.doc_kind === "deposit" && !x.payment_id && x.notes === CONVERSION_NOTE && !!x.doc_issue && x.d > x.doc_issue,
       });
-      return { id: x.id as number, amount, rule: cls.rule, cls: cls.cls, contractId: (x.p_contract ?? x.doc_contract ?? null) as number | null, method: x.method as string | null, bankAccountId: x.bank_account_id as number | null };
+      return { id: x.id as number, amount, rule: cls.rule, cls: cls.cls, principal: cls.treatment === "principal", contractId: (x.p_contract ?? x.doc_contract ?? null) as number | null, method: x.method as string | null, bankAccountId: x.bank_account_id as number | null };
     });
   }
 
@@ -362,18 +362,20 @@ export class ReconciliationService {
       const ownerId = contractId != null ? dims.get(contractId)?.ownerId ?? null : null;
       return resolveTreatment(mode ?? "manager", ownerId != null ? { id: ownerId, isAccountHolder: holders.has(ownerId) } : null).treatment === "agent";
     };
+    const agentOwner = (ownerId: number | null) =>
+      resolveTreatment(mode ?? "manager", ownerId != null ? { id: ownerId, isAccountHolder: holders.has(ownerId) } : null).treatment === "agent";
     const put = (ref: Parameters<typeof resolve>[0], amt: number) => {
       const acc = resolve(ref);
       if (acc != null) add(sub, acc, amt);
     };
 
     for (const c of await this.collections(scope, asOf)) {
-      if (c.rule === "E03" || c.rule === "E04") put({ bankAccountId: c.bankAccountId, method: c.method, agency: agent(c.contractId) }, c.amount);
-      else if (c.rule === "E09C") put({ bankAccountId: c.bankAccountId, method: c.method }, c.amount);
+      if (c.rule === "E03" || c.rule === "E04") put({ bankAccountId: c.bankAccountId, method: c.method, agency: !c.principal && agent(c.contractId) }, c.amount);
+      else if (c.rule === "E09C") put({ bankAccountId: c.bankAccountId, method: c.method, agency: agent(c.contractId) }, c.amount);
       else if (c.rule === "E16" && c.cls === "commission_cash" && agent(c.contractId)) put({ bankAccountId: c.bankAccountId, method: c.method }, c.amount);
     }
     const vouchers = await this.pool.query(
-      `select v.id, v.status::text as status, v.total::text as total, v.payment_method, c.deposit_status,
+      `select v.id, v.status::text as status, v.total::text as total, v.payment_method, c.deposit_status, v.contract_id, v.client->>'ownerId' as client_owner,
               to_char(coalesce(v.paid_date, v.issue_date, (v.confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as d,
               to_char((v.updated_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as upd,
               (select coalesce(sum(pc.amount), 0) from payment_collections pc where pc.user_id = v.user_id and pc.invoice_id = v.id and pc.payment_id is not null)::text as linked,
@@ -383,25 +385,27 @@ export class ReconciliationService {
           and (v.status = 'confirmed' or (v.status = 'cancelled' and c.deposit_status = 'returned'))`, [scope]);
     for (const v of vouchers.rows) {
       const unlinked = Math.max(0, h(v.total) - h(v.linked));
-      if (v.d && v.d <= asOf) put({ method: v.payment_method }, unlinked);
-      if (v.status === "cancelled" && !v.v2_refund && v.upd <= asOf) put({ method: v.payment_method }, -unlinked);
+      const co = Number(v.client_owner);
+      const agency = v.contract_id != null ? agent(v.contract_id) : agentOwner(Number.isInteger(co) && co > 0 ? co : null);
+      if (v.d && v.d <= asOf) put({ method: v.payment_method, agency }, unlinked);
+      if (v.status === "cancelled" && !v.v2_refund && v.upd <= asOf) put({ method: v.payment_method, agency: v.contract_id != null && agent(v.contract_id) }, -unlinked);
     }
     for (const r of (await this.pool.query(
-      `select amount::text as amount, bank_account_id, method from finance_deposit_refunds where user_id = $1 and refunded_on <= $2::date`, [scope, asOf])).rows) {
-      put({ bankAccountId: r.bank_account_id, method: r.method }, -h(r.amount));
+      `select amount::text as amount, bank_account_id, method, contract_id from finance_deposit_refunds where user_id = $1 and refunded_on <= $2::date`, [scope, asOf])).rows) {
+      put({ bankAccountId: r.bank_account_id, method: r.method, agency: agent(r.contract_id) }, -h(r.amount));
     }
     for (const r of (await this.pool.query(
-      `select amount::text as amount, bank_account_id, method from tenant_credit_actions where user_id = $1 and kind = 'refund' and status = 'posted' and action_on <= $2::date`,
+      `select amount::text as amount, bank_account_id, method, contract_id from tenant_credit_actions where user_id = $1 and kind = 'refund' and status = 'posted' and action_on <= $2::date`,
       [scope, asOf])).rows) {
-      put({ bankAccountId: r.bank_account_id, method: r.method }, -h(r.amount));
+      put({ bankAccountId: r.bank_account_id, method: r.method, agency: r.contract_id != null && agent(r.contract_id) }, -h(r.amount));
     }
     for (const p of (await this.pool.query(
-      `select lp.amount::text as amount, lp.method, lp.transfer_date, to_char((lp.created_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as created,
+      `select lp.amount::text as amount, lp.method, lp.transfer_date, lp.owner_id, to_char((lp.created_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as created,
               to_char(m.paid_on, 'YYYY-MM-DD') as paid_on, m.bank_account_id
          from landlord_payouts lp left join finance_payout_meta m on m.payout_id = lp.id and m.user_id = lp.user_id
         where lp.user_id = $1 and lp.deleted_at is null`, [scope])).rows) {
       const d = p.paid_on ?? parseBusinessDate(p.transfer_date) ?? p.created;
-      if (d <= asOf) put({ bankAccountId: p.bank_account_id, method: p.method }, -h(p.amount));
+      if (d <= asOf) put({ bankAccountId: p.bank_account_id, method: p.method, agency: agentOwner(p.owner_id ?? null) }, -h(p.amount));
     }
     for (const e of (await this.pool.query(
       `select e.amount::text as amount, e.expense_date, to_char((e.created_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as created,

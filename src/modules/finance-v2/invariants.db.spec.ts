@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "./__tests__/with-db";
+import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { enableV2, legacyEnv, seedAccount, userOf, type LegacyEnv, type Seed } from "./__tests__/legacy-env";
 import { BackfillService } from "./backfill/backfill.service";
 import { LedgerStartService } from "./ledger-start.service";
@@ -155,6 +156,13 @@ async function runSequence(env: LegacyEnv, backfill: BackfillService, rec: Recon
     }
   });
   stats.byMode[mode] = (stats.byMode[mode] ?? 0) + 1;
+  if (seed % 4 === 0) {
+    // Every other manager-mode sequence keeps client money in a default trust account (agency_collections_to_trust):
+    // agent collections, deposits, credit refunds and payouts must all use it, and R4 must agree account by account.
+    await new BankAccountsService(env.t.pool as any).create(U, U, { kind: "bank", nameAr: "حساب العملاء", nameEn: "Client trust", isTrust: true, isDefault: true });
+    await env.q(`update finance_settings set agency_collections_to_trust = true where account_user_id = $1`, [U]);
+    stats.byMode.trust = (stats.byMode.trust ?? 0) + 1;
+  }
 
   const tick = () => settle(env, U);
 

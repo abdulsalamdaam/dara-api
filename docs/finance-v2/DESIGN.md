@@ -775,7 +775,7 @@ That is 116 accounts, of which 30 are groups.
 - **Cash or bank** comes from the collection's `bank_account_id`, if `finance_collection_meta` has one. Otherwise it follows the method:
   - `cash` goes to `default_cash_account_id`
   - anything else goes to `default_bank_account_id`
-  - in Manager mode with `agency_collections_to_trust`, agent collections go to the default *trust* bank account
+  - in Manager mode with `agency_collections_to_trust`, agent client money uses the default *trust* bank account, both ways: collections and tenant refunds (E03/E04), deposits received, collected and refunded (E09, E09 collection, E10), tenant credit refunds (E20) and payouts to agent landlords (E19). Commission cash (E16) and agency-fee collections are the account's own money and use the operating account. R4 resolves each record the same way.
 - **Expenses** use `finance_expense_details.gl_account_id`, then `finance_expense_category_map`, then 5190 when the expense has a property, then 5290.
 
 Unused template accounts cost nothing and can be deactivated.

@@ -270,6 +270,20 @@ describe("fv2 mode resolution and collection classification (§4.2, §4.4.1)", (
   });
 });
 
+describe("fv2 client money under agency uses the trust account (agency_collections_to_trust)", () => {
+  const bankRefs = (rule: RuleCode, facts: any) => RULES[rule](facts, EMPTY_STATE).lines.filter((l) => "bank" in l.account).map((l) => (l.account as any).bank.agency);
+  const money = (t: Treatment) => ({ date: "2026-08-01", treatment: t, dims: DIMS, documentId: 601, collectionId: 701, paymentId: P, amount: "500.00", cls: "deposit_installment", bank: { method: "bank_transfer" } });
+  for (const rule of ["E09", "E09C", "E10", "E19", "E20"] as RuleCode[]) {
+    it(`${rule}: agent flows ask for the trust account, principal flows never do`, () => {
+      assert.deepEqual(bankRefs(rule, money("agent")), [true]);
+      assert.deepEqual(bankRefs(rule, money("principal")), [false]);
+    });
+  }
+  it("E16 commission cash is the account's own fee: the operating account", () => {
+    assert.deepEqual(bankRefs("E16", { ...money("agent"), cls: "commission_cash" }).map(Boolean), [false]);
+  });
+});
+
 describe("fv2 worked example §4.5 (synthetic values)", () => {
   const inv = (t: Treatment) => ({ date: "2026-08-01", treatment: t, dims: DIMS, documentId: 1, groups: [{ category: "S", rate: 15, net: "6000.00", vat: "900.00", nature: "rent", usage: "commercial" }], coverage: [{ paymentId: P, amount: "6900.00" }], deferRent: true });
   const com = { date: "2026-08-01", treatment: "agent", dims: DIMS, documentId: 2, groups: [{ category: "S", rate: 15, net: "300.00", vat: "45.00", nature: "other" }], coverage: [], deferRent: true };

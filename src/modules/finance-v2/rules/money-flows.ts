@@ -12,7 +12,7 @@ import type {
 } from "./facts";
 import { arOf, cr, dr, rateStr, sellerKeyOf, sys, signed } from "./lines";
 import { SYS } from "./system-keys";
-import { RuleError, type Dims, type PostState, type RuleLine, type RuleOutput, type Treatment } from "./types";
+import { RuleError, type BankRef, type Dims, type PostState, type RuleLine, type RuleOutput, type Treatment } from "./types";
 
 const out = (lines: RuleLine[], f: { date: string; warnings?: string[]; memo?: string | null }, extra: Partial<RuleOutput> = {}): RuleOutput =>
   ({ lines, warnings: [...(f.warnings ?? [])], effects: [], date: f.date, memo: f.memo ?? null, ...extra });
@@ -30,6 +30,13 @@ function tenantCash(t: Treatment, x: number, cash: RuleLine[], dims: Dims): Rule
   return lines;
 }
 
+/**
+ * A bank line for client money: under agency it asks for the default trust
+ * account (used only when `agency_collections_to_trust` is on and no account
+ * was chosen), so what flows into trust also flows out of it.
+ */
+const clientBank = (b: BankRef | undefined, t: Treatment): { bank: BankRef } => ({ bank: { ...(b ?? {}), agency: t === "agent" } });
+
 // ─── Collections ────────────────────────────────────────────────────────────
 
 /** E03 (X > 0) / E04 (X < 0): Dr BANK / Cr AR, agent also Dr 2122 / Cr LP. */
@@ -37,7 +44,7 @@ export function collection(f: CollectionFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x === 0) return skip("zero_amount", f);
   const dims = { ...f.dims, paymentId: f.paymentId ?? f.dims.paymentId ?? null };
-  const bank = signed({ bank: { ...f.bank, agency: f.treatment === "agent" } }, x, dims);
+  const bank = signed(clientBank(f.bank, f.treatment), x, dims);
   return out(tenantCash(f.treatment, x, bank, dims), f);
 }
 
@@ -46,7 +53,7 @@ export function depositInstallmentCollection(f: CollectionFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x === 0) return skip("zero_amount", f);
   const dims = { ...f.dims, paymentId: f.paymentId ?? null };
-  return out([...signed({ bank: f.bank }, x, dims), ...signed(sys(SYS.dep), -x, dims)], f);
+  return out([...signed(clientBank(f.bank, f.treatment), x, dims), ...signed(sys(SYS.dep), -x, dims)], f);
 }
 
 /** E12b: deposit applied to arrears. Dr DEP / Cr AR (agent: plus Dr 2122 / Cr LP). */
@@ -164,7 +171,7 @@ export function depositReceived(f: DepositMoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("fully_linked", f);
   const dims = { ...f.dims, documentId: f.documentId };
-  return out([...dr({ bank: f.bank }, x, dims), ...cr(sys(SYS.dep), x, dims)], f);
+  return out([...dr(clientBank(f.bank, f.treatment), x, dims), ...cr(sys(SYS.dep), x, dims)], f);
 }
 
 /** E10: deposit refunded. Dr DEP / Cr BANK. */
@@ -172,7 +179,7 @@ export function depositRefunded(f: DepositMoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("zero_amount", f);
   const dims = { ...f.dims, documentId: f.documentId };
-  const r = out([...dr(sys(SYS.dep), x, dims), ...cr({ bank: f.bank }, x, dims)], f);
+  const r = out([...dr(sys(SYS.dep), x, dims), ...cr(clientBank(f.bank, f.treatment), x, dims)], f);
   if (f.inferredDate) r.warnings.push("inferred_date");
   return r;
 }
@@ -276,14 +283,14 @@ export function supplierPayment(f: MoneyFacts): RuleOutput {
 export function landlordPayout(f: MoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("zero_amount", f);
-  return out([...dr(sys(f.treatment === "agent" ? SYS.lp : SYS.drawings), x, f.dims), ...cr({ bank: f.bank ?? {} }, x, f.dims)], f);
+  return out([...dr(sys(f.treatment === "agent" ? SYS.lp : SYS.drawings), x, f.dims), ...cr(clientBank(f.bank, f.treatment), x, f.dims)], f);
 }
 
 /** E20: tenant credit refunded. Dr AR / Cr BANK (agent: plus Dr LP / Cr 2122). */
 export function creditRefund(f: MoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("zero_amount", f);
-  return out(tenantCash(f.treatment, -x, cr({ bank: f.bank ?? {} }, x, f.dims), f.dims), f);
+  return out(tenantCash(f.treatment, -x, cr(clientBank(f.bank, f.treatment), x, f.dims), f.dims), f);
 }
 
 /**
