@@ -154,3 +154,17 @@ All paths are under `/api`. Keys are camelCase, as in v1.
 - Lexicon: `*` now works on every word of a phrase, not only the last one. Also new: the
   term «العقار* السعودي*» (45, sa), and the negatives «هل نزل» / «متى ينزل» (30)
   (dara-api `e2ff5c2`).
+
+## Apify addendum (26 Sep 2026)
+- `provider` can be `'apify'` (label "Apify"). It is chosen by `NEWS_SOURCE_PROVIDER=apify`,
+  or automatically when `APIFY_TOKEN` is the only X key set.
+- `GET /admin/news/status` adds `apify: { budgetUsd, spentUsd, limitUsd, remainingUsd,
+  cycleStartAt, cycleEndAt, overBudget, maxItemsPerRun, pricePerItemUsd, error } | null`
+  (null unless the provider is apify). When `overBudget`, `warnings` gets "Apify budget
+  reached … X accounts are skipped until the cycle resets … RSS runs as normal."
+  `sources.x.configured` stays true while over budget.
+- The X no-key message and `missing` now name `APIFY_TOKEN` too.
+- Run log: `Apify: $<spent> of $<budget> spent this cycle`, then
+  `apify run <id> succeeded: <rows> row(s) for <n> account(s), cost $<usd> (<n> charged)`.
+  Over budget: one warn line and X is skipped (not `partial`).
+- An X test with Apify over budget → 200 `ok:false`, `error.kind:'quota'`.

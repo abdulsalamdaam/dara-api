@@ -93,7 +93,7 @@ describe("Apify windows", () => {
 describe("Apify provider (fake API)", () => {
   it("one run for every handle; token only in the Authorization header; results mapped back per source", async () => {
     const f = fakeApify();
-    const p = new ApifyProvider(TOKEN, { maxItemsPerRun: 300 }, f.impl, 5_000);
+    const p = new ApifyProvider(TOKEN, { maxItemsPerRun: 300 }, f.impl, 5_000, 0);
     const since = new Date("2026-09-19T00:00:00Z");
     const res = await p.fetchMany([
       { handle: "ejar_sa", since, sinceId: "2101654884990788058", lastFetchedAt: null },
@@ -128,7 +128,7 @@ describe("Apify provider (fake API)", () => {
 
   it("caps the run at NEWS_APIFY_MAX_ITEMS_PER_RUN", async () => {
     const f = fakeApify({ dataset: [] });
-    const p = new ApifyProvider(TOKEN, { maxItemsPerRun: 30 }, f.impl, 5_000);
+    const p = new ApifyProvider(TOKEN, { maxItemsPerRun: 30 }, f.impl, 5_000, 0);
     const targets = Array.from({ length: 20 }, (_, i) => ({ handle: `acct${i}`, since: new Date(), sinceId: null }));
     await p.fetchMany(targets, { maxPerTarget: 20 });
     const start = f.calls.find((c) => c.method === "POST")!;
@@ -138,14 +138,14 @@ describe("Apify provider (fake API)", () => {
 
   it("an auth failure is a ProviderError('auth')", async () => {
     const f = fakeApify({ startStatus: 401 });
-    const p = new ApifyProvider(TOKEN, {}, f.impl, 5_000);
+    const p = new ApifyProvider(TOKEN, {}, f.impl, 5_000, 0);
     await assert.rejects(p.fetchMany([{ handle: "a", since: null, sinceId: null }], { maxPerTarget: 5 }),
       (e: unknown) => e instanceof ProviderError && e.kind === "auth" && !e.message.includes(TOKEN));
   });
 
   it("the test endpoint path (fetchLatest) runs one handle, no window", async () => {
     const f = fakeApify();
-    const p = new ApifyProvider(TOKEN, {}, f.impl, 5_000);
+    const p = new ApifyProvider(TOKEN, {}, f.impl, 5_000, 0);
     const r = await p.fetchLatest("rega_ksa", { max: 5 });
     assert.equal(r.tweets.length, 2);
     const start = f.calls.find((c) => c.method === "POST")!;
@@ -170,7 +170,7 @@ describe("Apify budget guard", () => {
 
   it("reads usage from /users/me/limits; over budget, the test fetch refuses to spend (quota)", async () => {
     const f = fakeApify({ spent: 4.6 });
-    const p = new ApifyProvider(TOKEN, { budgetUsd: 4.5 }, f.impl, 5_000);
+    const p = new ApifyProvider(TOKEN, { budgetUsd: 4.5 }, f.impl, 5_000, 0);
     const b = await p.budget();
     assert.equal(b.overBudget, true);
     assert.equal(b.usage?.cycleEndAt, "2026-10-25T23:59:59.999Z");

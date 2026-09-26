@@ -11,8 +11,9 @@ keys, no paid API and no AI. Claude (as the filter) and X (as a source) are opti
 upgrades, switched on by env vars alone (see "Upgrading" below).
 
 **Status (26 Sep 2026):** staging only (`master`). Not on `main` or production. Staging
-runs in free mode: 15 RSS feeds are enabled, and the 18 enabled X accounts are skipped
-because no X key is set. The first real runs are in `QA.md` under "v2 (free mode) QA".
+runs in free mode: 15 RSS feeds plus the 19 enabled X accounts, which are fetched through
+**Apify** (`APIFY_TOKEN`, free plan, about $0.30–0.50 a month; see "X via Apify"). The
+real runs are in `QA.md` under "v2 (free mode) QA" and "Apify".
 
 ## Files in this folder
 | file | what |
@@ -37,6 +38,8 @@ because no X key is set. The first real runs are in `QA.md` under "v2 (free mode
     `news.text.ts`.
   - RSS: `providers/rss.provider.ts`, `rss.parse.ts`, and the SSRF-safe fetch
     `safe-fetch.ts`.
+  - X: `providers/apify.provider.ts` (free plan), `x-api.provider.ts`,
+    `twitterapiio.provider.ts`.
 - **Web** (`dara-web`): portal `components/dashboard/NewsView.tsx` + `components/news/*`.
   Admin `components/admin/tabs/NewsTab.tsx` + `components/admin/tabs/news/*`. Hooks are
   in `lib/api-hooks.ts` and `admin-hooks.ts`, strings under `news.*` / `admin.news.*`.
@@ -90,6 +93,60 @@ X accounts are a normal source kind, and they can be managed with or without a k
   still succeeds on RSS.
 - **After a key is set:** the next run fetches every enabled X account next to the feeds,
   with no other change.
+
+### X via Apify (the free X source)
+Apify's free plan gives **$5 of credit per usage cycle** (it does not roll over). Set
+`APIFY_TOKEN` on the API and X accounts are fetched with no other change.
+
+- **Actor:** `xquik~x-tweet-scraper` (Xquik "X Tweet Scraper"). It was picked after
+  measuring the candidates with a real token on `rega_ksa`, `ejar_sa` and `raga_ksa`:
+
+  | actor | price per tweet (free plan) | per-run overhead | 3 handles, 3 real tweets |
+  |---|---|---|---|
+  | **xquik/x-tweet-scraper** | $0.00015 | no start fee; ~$0.0001–0.0002 platform | **$0.00063** |
+  | kaitoeasyapi/…-cheapest | $0.00025 | pads a thin query to 15 rows with paid `mock_tweet` rows | $0.00375 (15 charged, 12 fake) |
+  | apidojo/tweet-scraper | $0.0004 | — (2.7× xquik's price, not run) | — |
+
+  An empty xquik run (nothing new) cost $0.00008–0.0003.
+- **One actor run per job** for every enabled X handle: `mode: profileTweets`,
+  `twitterHandles: [...]`, replies and reposts excluded by the actor (so they are not paid
+  for) and again in the normaliser. The run is started, then polled (60 s long-polls) up
+  to a 240 s deadline, after which it is aborted and the rows it has are used. The dataset
+  is mapped back to each source by handle (then by X user id) for `last_seen_tweet_id`,
+  `last_fetched_at`, `last_error`, name and avatar.
+- **Paying only for new posts:** each account's window is the latest of the lookback,
+  its last seen post (decoded from the tweet id) and its last fetch minus 1 h. The run
+  asks for the earliest of those, and older rows are trimmed per account. A second run
+  minutes later cost $0.0003 and added nothing.
+- **Caps:** `maxItemsPerTarget` = the schedule's max per source (20);
+  `maxItems` = `NEWS_APIFY_MAX_ITEMS_PER_RUN` (300) or accounts × 20, whichever is
+  smaller; `maxTotalChargeUsd` on the run = the budget left, so Apify itself stops a run
+  that would overspend.
+- **Budget guard:** before any X spend, the run reads the current usage cycle from
+  `GET /v2/users/me/limits` (`current.monthlyUsageUsd`, `limits.maxMonthlyUsageUsd`,
+  `monthlyUsageCycle`). At or over `NEWS_APIFY_MONTHLY_BUDGET_USD` (default 4.5, and never
+  above Apify's own cap) X is skipped with a warning line ("X account(s) skipped — Apify
+  budget reached …, resets <date>"), the status gets a warning, and RSS carries the run
+  as normal. The Apify cycle is the account's billing cycle (currently the 26th to the
+  25th), not the calendar month. If usage cannot be read the run still fetches, capped by
+  Apify's own limit, and says so in the log.
+- **Status / admin:** `GET /admin/news/status` has `provider: "apify"` and an `apify`
+  block: `{ budgetUsd, spentUsd, limitUsd, remainingUsd, cycleStartAt, cycleEndAt,
+  overBudget, maxItemsPerRun, pricePerItemUsd, error }` (cached 60 s). The admin header
+  reads "X: Apify · $0.02 of $4.50 this month · resets 25 Oct". Over budget, X rows show
+  "Paused — budget". The Test button works (one handle, latest 5 posts, about $0.001).
+- **The token** is sent only as an `Authorization: Bearer` header, never in a URL, and
+  never logged. It is set on `dara-api-staging` only.
+- **Estimate, 20 accounts daily:** the first staging run (36 h lookback, 19 accounts)
+  returned 94 tweets for $0.0142. News outlets (Argaam, Aleqt, Asharq) hit the 20-per-
+  account cap; the government accounts post 0–4 a day. A daily run sees about 24 h of
+  posts, so expect 60–100 tweets a day: **$0.01–0.015 a day, about $0.30–0.50 a month**,
+  roughly a tenth of the free credit. The worst case (300 tweets every day) is $1.40 a
+  month. Running more often costs little more, because each run pays only for posts it
+  has not seen.
+- **Limits:** a handle that does not exist returns nothing (no error), so "Test" shows
+  0 posts rather than "not found". A renamed account returns nothing until its handle is
+  updated. X's view counts are included; metrics are as of the fetch.
 
 ### Filter: keyword scoring
 - **What it is:** a 0–100 score from Arabic and English lexicon terms, weighted per
@@ -147,7 +204,7 @@ data change is needed, and both can be switched off again by removing the var.
 |---|---|---|
 | **Claude as the filter** | `ANTHROPIC_API_KEY` (and optionally `NEWS_AI_MODEL`, default `claude-sonnet-5`) | With `NEWS_FILTER=auto` (the default), runs switch to Claude. It writes an Arabic **and** English title and summary, applies the BUSINESS.md rubric plus the admin's extra instructions, and is capped by `NEWS_MAX_AI_ITEMS_PER_RUN` (150). Existing items keep their keyword verdicts, and the portal disclosure switches to the AI wording. This is paid per token. |
 | **Force a filter** | `NEWS_FILTER=keyword` or `ai` | `keyword` stays free even with a key set. `ai` without a key blocks runs ("missing ANTHROPIC_API_KEY"). |
-| **X accounts as sources** | `X_BEARER_TOKEN` (official X API, paid tier) **or** `TWITTERAPI_IO_KEY` (cheaper third party); optional `NEWS_SOURCE_PROVIDER=x`/`twitterapiio` | The X rows already in Sources (18 enabled) start being fetched next to the RSS feeds. Without a key they are skipped with one info line, which does not make a run `partial`. |
+| **X accounts as sources** | `APIFY_TOKEN` (free plan, see "X via Apify"), **or** `X_BEARER_TOKEN` (official X API, paid tier), **or** `TWITTERAPI_IO_KEY` (cheaper third party); optional `NEWS_SOURCE_PROVIDER=apify`/`x`/`twitterapiio` | The X rows already in Sources start being fetched next to the RSS feeds. Without a key they are skipped with one info line, which does not make a run `partial`. |
 
 **To set a var on staging:** set it on `dara-api-staging` (uuid
 `rg2fzzvc8wnxd8njnyi1bqxu`) through Coolify's own tinker, because the REST token on this
@@ -167,6 +224,8 @@ shows the filter mode, and Run now shows the effect in the run log.
    - **X accounts:** fetched only when a key is set. Posts come since
      `last_seen_tweet_id`, excluding retweets and replies. Rate-limit, quota or auth
      errors stop X.
+     With Apify, every X account is fetched in one actor run first, after the budget
+     check.
 3. **Dedupe:** by `external_id` (sha256 of guid or link for RSS), then by story
    clustering (see above).
 4. **Filter:** keyword (free) or Claude (batches of 10, structured output checked with
@@ -192,8 +251,11 @@ The first log line of a run reads `x=<provider|off (no key)> filter=<keyword|cla
 | `NEWS_AI_MODEL` | default `claude-sonnet-5` |
 | `NEWS_MAX_AI_ITEMS_PER_RUN` | default 150, max 2000 |
 | `X_BEARER_TOKEN` | optional: official X API v2 (paid tier with read access to user timelines) |
-| `TWITTERAPI_IO_KEY` | optional: twitterapi.io. X needs **one** of these two; without either, X rows are skipped |
-| `NEWS_SOURCE_PROVIDER` | `x` / `twitterapiio`. Blank means whichever key is set, X first |
+| `TWITTERAPI_IO_KEY` | optional: twitterapi.io |
+| `APIFY_TOKEN` | optional: Apify (free plan). X needs **one** of these three; without any, X rows are skipped |
+| `NEWS_SOURCE_PROVIDER` | `x` / `twitterapiio` / `apify`. Blank means whichever key is set, in the order X_BEARER_TOKEN, TWITTERAPI_IO_KEY, APIFY_TOKEN (a paid key set on purpose wins) |
+| `NEWS_APIFY_MONTHLY_BUDGET_USD` | default 4.5. X is skipped once the Apify cycle's spend reaches it |
+| `NEWS_APIFY_MAX_ITEMS_PER_RUN` | default 300 (max 5000). Tweets one Apify run may return |
 | `NEWS_SCHEDULER_DISABLED` | `1` = no in-process tick (local dev) |
 
 ## Admin (Admin → News)
@@ -216,8 +278,11 @@ super-admin only.
 
 ## Known / open
 - **X before its first live run:** check the X API's `since_id` + `start_time`
-  behaviour, since the docs say `since_id` wins. Neither X provider has run against live
-  keys.
+  behaviour, since the docs say `since_id` wins. The official X and twitterapi.io
+  providers have not run against live keys; Apify has (see `QA.md`).
+- **`raga_ksa`:** the X row `raga_ksa` added by the owner is a typo of `rega_ksa` (which
+  is already a source). `raga_ksa` is an unrelated personal account whose last post is
+  from 2023, so it yields nothing and costs nothing. Delete or disable it.
 - **Keyword filter limits:** see "What free mode cannot do" and `QA.md` (v2).
 - **Sidebar position:** "News" sits second. BUSINESS.md suggested placing it above
   Settings; this is a product call.

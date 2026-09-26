@@ -114,6 +114,7 @@ export class ApifyProvider implements SourceProvider {
     private readonly opts: { budgetUsd?: number; maxItemsPerRun?: number } = {},
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly deadlineMs = RUN_DEADLINE_MS,
+    private readonly settleDelayMs = 2_000,
   ) {}
 
   get budgetUsd(): number {
@@ -206,8 +207,15 @@ export class ApifyProvider implements SourceProvider {
     const list: any[] = Array.isArray(rows) ? rows : [];
     const byHandle = normaliseApify(list);
 
-    // The charge settles a moment after the run; one re-read for the log.
-    const final = await this.request("GET", `/actor-runs/${run.id}`, undefined, 20_000).then((b) => b?.data).catch(() => null);
+    // Per-row charges settle a few seconds after the run ends: re-read (briefly)
+    // until every delivered row shows as charged, so the log states the real cost.
+    let final: any = null;
+    for (let i = 0; i < 4; i++) {
+      final = await this.request("GET", `/actor-runs/${run.id}`, undefined, 20_000).then((x) => x?.data).catch(() => null);
+      const charged = Number(final?.chargedEventCounts?.["apify-default-dataset-item"] ?? 0);
+      if (!final || charged >= list.length || this.settleDelayMs <= 0) break;
+      await new Promise((r) => setTimeout(r, this.settleDelayMs));
+    }
     this.lastRun = {
       runId: String(run.id),
       status: String(run.status),
