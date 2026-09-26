@@ -575,6 +575,19 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure news tables failed: ${err?.message || err}`);
     }
 
+    // finance-v2: Finance v2 (beta) ledger tables (docs/finance-v2/DESIGN.md §2.2).
+    // Idempotent and additive only: it creates new tables, triggers and functions
+    // and alters nothing that exists. One simple-query message, so it applies
+    // atomically. If it fails, finance_settings is absent and the flag reads
+    // off for every account, which is exactly master's behaviour.
+    try {
+      const fv2Sql = findSqlFile(join("drizzle", "0066_finance_v2.sql"));
+      if (fv2Sql) await client.query(readFileSync(fv2Sql, "utf8"));
+      else log.warn("0066_finance_v2.sql not found — Finance v2 tables not ensured");
+    } catch (err: any) {
+      log.warn(`ensure finance v2 tables failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
