@@ -8,7 +8,7 @@
  */
 import { toHalalas, vatSplit } from "../money";
 import type {
-  CollectionClass, CollectionFacts, CreditApplyFacts, DepositMoneyFacts, ExpenseFacts, ForfeitFacts, ManualFacts, MoneyFacts, VatSettlementFacts,
+  BillFacts, CollectionClass, CollectionFacts, CreditApplyFacts, DepositMoneyFacts, ExpenseFacts, ForfeitFacts, ManualFacts, MoneyFacts, VatSettlementFacts,
 } from "./facts";
 import { arOf, cr, dr, rateStr, sellerKeyOf, sys, signed } from "./lines";
 import { SYS } from "./system-keys";
@@ -214,6 +214,50 @@ export function expense(f: ExpenseFacts): RuleOutput {
     ...cr({ bank: f.bank }, gross, f.dims),
   ];
   return out(lines, f);
+}
+
+/**
+ * E38: supplier bill approved (tier 3, DESIGN §8.4). Per line: Dr expense
+ * (or asset) net and Dr input VAT (1151 recoverable, 5500 not); Cr 2111 AP
+ * for the bill total. Charged to an agent landlord: every line's net + VAT is
+ * Dr LP instead (the landlord bears it; VAT attributes on the landlord's
+ * seller key, as E18). VAT attributes follow the E18 convention so the VAT
+ * return picks the bill up with no special case.
+ */
+export function supplierBill(f: BillFacts): RuleOutput {
+  const landlord = f.chargeTo === "landlord" && f.treatment === "agent";
+  const seller = landlord ? sellerKeyOf("agent", f.dims.ownerId) : "account";
+  const lines: RuleLine[] = [];
+  let total = 0;
+  for (const [i, l] of f.lines.entries()) {
+    const net = toHalalas(l.net);
+    const vat = toHalalas(l.vat);
+    if (net < 0 || vat < 0) throw new RuleError("BAD_FACTS", `bill ${f.billId} line ${i + 1}: negative amount`, true);
+    if (l.category !== "S" && vat !== 0) throw new RuleError("BAD_FACTS", `bill ${f.billId} line ${i + 1}: VAT on a ${l.category} line`, true);
+    total += net + vat;
+    const role = l.recoverable ? ("input" as const) : ("input_nonrecoverable" as const);
+    const report = l.category !== "S";
+    lines.push(
+      ...dr(landlord ? sys(SYS.lp) : l.account, net, f.dims, {
+        memo: l.memo ?? null, vatCategory: l.category, vatRate: rateStr(l.category, l.rate), sellerKey: seller, docClass: "expense",
+        ...(report ? { taxRole: role, vatBase: net } : {}),
+      }),
+      ...dr(landlord ? sys(SYS.lp) : sys(l.recoverable ? SYS.inputVat : SYS.vatNonRecoverable), vat, f.dims, {
+        memo: l.memo ?? null, vatCategory: "S", vatRate: rateStr("S", l.rate), vatBase: net, taxRole: role, sellerKey: seller, docClass: "expense",
+      }),
+    );
+  }
+  if (total !== toHalalas(f.total)) throw new RuleError("BAD_FACTS", `bill ${f.billId}: lines ${total} <> total ${toHalalas(f.total)} halalas`, true);
+  if (total <= 0) return skip("zero_amount", f);
+  lines.push(...cr(sys(SYS.ap), total, f.dims, { memo: f.memo ?? null }));
+  return out(lines, f);
+}
+
+/** E39: supplier payment (payment voucher). Dr 2111 AP / Cr BANK. */
+export function supplierPayment(f: MoneyFacts): RuleOutput {
+  const x = toHalalas(f.amount);
+  if (x <= 0) return skip("zero_amount", f);
+  return out([...dr(sys(SYS.ap), x, f.dims), ...cr({ bank: f.bank ?? {} }, x, f.dims)], f);
 }
 
 /** E19: landlord payout. Principal: Dr 3400 drawings; agent: Dr LP. Cr BANK. */

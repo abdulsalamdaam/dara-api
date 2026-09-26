@@ -119,7 +119,30 @@ export interface ExpenseFacts extends Base {
   bank: BankRef;
 }
 
-/** E19, E20, E24. */
+/** One line of a supplier bill (E38). */
+export interface BillLineFacts {
+  /** Resolved at enqueue: line override → supplier default → 5190 (with a property) / 5290. */
+  account: AccountRef;
+  net: string;
+  vat: string;
+  category: VatCategory;
+  /** Integer percent; 0 unless S. */
+  rate: number;
+  recoverable: boolean;
+  memo?: string | null;
+}
+
+/** E38: supplier bill approved (tier 3, DESIGN §8.4). */
+export interface BillFacts extends Base {
+  billId: number;
+  supplierId: number;
+  chargeTo: "company" | "landlord";
+  /** Σ (net + vat) of the lines. */
+  total: string;
+  lines: BillLineFacts[];
+}
+
+/** E19, E20, E24, E39. */
 export interface MoneyFacts extends Base {
   amount: string;
   bank?: BankRef;

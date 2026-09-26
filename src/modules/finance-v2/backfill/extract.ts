@@ -24,6 +24,7 @@ import { coverageWindow, monthsBetween } from "../recognizer.service";
 import type { ReleaseFacts, RuleCode } from "../rules";
 import { depositForfeitEvent } from "../hooks/facts-loader";
 import { creditActionEvents, writeOffEvents } from "../tier1/credit-events";
+import { billEvents, supplierPaymentEvents } from "../tier3/ap-events";
 
 export interface PlannedEvent extends LedgerEvent {
   /** §6.4 rank within a business date. */
@@ -61,7 +62,8 @@ export interface ExtractResult {
  * 1 charges (documents, then due-date charges, then external settlements),
  * 2 deposits received, 3 collections (+ their advance VAT), 4 notes,
  * 5 commission, 6 refunds, 7 conversions, forfeits and charge cancellations,
- * 8 expenses, payouts and reversals, 9 releases and the VAT settlement.
+ * 8 expenses, payouts, supplier bills and reversals (supplier payments just after,
+ * 8.5), 9 releases and the VAT settlement.
  * The fractional part orders the three kinds of charge within rank 1.
  */
 export function rankOf(code: string): number {
@@ -75,7 +77,8 @@ export function rankOf(code: string): number {
     case "E15": case "E16": return 5;
     case "E04": case "E10": case "E20": return 6;
     case "E05": case "E11": case "E12": case "E24": return 7;
-    case "E14": case "E18": case "E19": case "E21": case "E28": case "reversal": return 8;
+    case "E14": case "E18": case "E19": case "E21": case "E28": case "E38": case "reversal": return 8;
+    case "E39": return 8.5;
     case "E35": case "E37": return 9;
     default: return 8;
   }
@@ -285,6 +288,18 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
     for (const e of r?.events ?? []) push(e, r!.createdAt);
   }
 
+  // ── Tier 3 AP (§8.4): approved supplier bills (E38) and supplier payments (E39), with the reversal of a voided one ──
+  if (await hasTable(q, "supplier_bills")) {
+    for (const x of await q.rows(`select id from supplier_bills where user_id = $1 and approved_at is not null order by id`, [userId])) {
+      const r = await billEvents(q, userId, s, Number(x.id));
+      for (const e of r?.events ?? []) push(e, r!.createdAt);
+    }
+    for (const x of await q.rows(`select id from supplier_payments where user_id = $1 order by id`, [userId])) {
+      const r = await supplierPaymentEvents(q, userId, s, Number(x.id));
+      for (const e of r?.events ?? []) push(e, r!.createdAt);
+    }
+  }
+
   // ── Deleted sources whose entry is posted and not reversed: the missing reversal (catch-up, §6.3) ──
   const orphans = await q.rows(
     `select e.source_type, e.source_id::int as source_id, e.event, coalesce(x.deleted_on, to_char(e.entry_date,'YYYY-MM-DD')) as date,
@@ -312,6 +327,12 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
 
   events.sort(compareEvents);
   return { events, notes };
+}
+
+/** Whether an (optional, later-migration) table exists in the search path. */
+async function hasTable(q: Sql, name: string): Promise<boolean> {
+  const [r] = await q.rows(`select to_regclass($1) is not null as ok`, [name]);
+  return r?.ok === true;
 }
 
 /** Amount formatting helper for reports. */

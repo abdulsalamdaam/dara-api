@@ -27,6 +27,7 @@ const DEPOSIT_TYPES: Record<string, string> = {
 const LANDLORD_TYPES: Record<string, string> = {
   E03: "rent_collected", E04: "tenant_refund", E20: "tenant_refund", E12: "deposit_converted", E11: "deposit_forfeited", E12B: "deposit_applied",
   E15: "commission", E36: "commission_credit", E16: "commission_cash", E18: "expense", E19: "payout", E28: "manual",
+  E38: "expense",
 };
 
 interface Movement {
@@ -236,6 +237,7 @@ export class StatementsService {
     const ref = await this.references(scope, ms);
     const split = await this.vatSplit(scope, ms.map((m) => m.entryId));
     const exp = await this.expenseDetails(scope, ms.filter((m) => m.sourceType === "expense").map((m) => m.sourceId));
+    const bills = await this.billDetails(scope, ms.filter((m) => m.sourceType === "supplier_bill").map((m) => m.sourceId));
     const props = await namesOf(this.pool, scope, "properties", ms.map((m) => m.propertyId!).filter((x) => x != null));
     const tenants = await namesOf(this.pool, scope, "tenants", ms.map((m) => m.tenantId!).filter((x) => x != null));
 
@@ -249,7 +251,7 @@ export class StatementsService {
       summary[type] = (summary[type] ?? 0) + amt;
       if (type === "rent_collected") byProperty.set(m.propertyId, (byProperty.get(m.propertyId) ?? 0) + amt);
       const v = split.get(m.entryId);
-      const e = m.sourceType === "expense" ? exp.get(m.sourceId) : undefined;
+      const e = m.sourceType === "expense" ? exp.get(m.sourceId) : m.sourceType === "supplier_bill" ? bills.get(m.sourceId) : undefined;
       const gross = Math.abs(amt);
       const vat = type === "commission" || type === "commission_credit" ? v?.commissionVat ?? 0 : type === "expense" ? v?.inputVat ?? 0 : 0;
       return {
@@ -320,6 +322,16 @@ export class StatementsService {
         where l.user_id = $1 and l.entry_id = any($2::bigint[]) group by l.entry_id`, [scope, entryIds]);
     for (const x of r.rows) out.set(x.id, { commissionVat: h(x.cvat), inputVat: h(x.ivat) });
     return out;
+  }
+
+  /** Tier 3: a supplier bill charged to the landlord shows its supplier like an expense does. */
+  private async billDetails(scope: number, ids: number[]) {
+    if (!ids.length) return new Map<number, any>();
+    const r = await this.pool.query(
+      `select b.id, s.name_ar as supplier_name, b.supplier_invoice_no, s.vat_number as supplier_vat_number
+         from supplier_bills b join suppliers s on s.id = b.supplier_id and s.user_id = b.user_id where b.user_id = $1 and b.id = any($2::int[])`,
+      [scope, ids]);
+    return new Map<number, any>(r.rows.map((x: any) => [x.id, x]));
   }
 
   private async expenseDetails(scope: number, ids: number[]) {

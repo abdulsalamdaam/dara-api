@@ -925,6 +925,8 @@ Keys are `(source_type, source_id, event)`. Amounts are gross unless marked *net
 | E35 | Monthly rent release (recognizer) | `payment,id,release:YYYY-MM` | Dr UR / Cr REV (pro-rated by days over the coverage window, §4.1) | — (agent rent is never deferred) | month-end (or window end) | Only when `defer_rent_straight_line` is on. |
 | E36 | Commission credit note (v2): created as a **draft** when a credit note on a rent invoice with a confirmed COM document is approved; its approval posts | `simple_invoice,id,confirmed` | skip `self_commission` | Dr 4210 *net* / Dr VAT / Cr LP *gross* (the rent-proportional share of the COM document) | `issue_date` | Not sent to ZATCA, like every commission document (`billing.module.ts:1642-1645`). Write-offs: Q24. |
 | E37 | VAT return locked for `seller_key='account'` (§7.5) | `vat_return,id,settled` | Dr 2151 *box 6 VAT (signed)* / Cr 1151 *box 12 VAT* / Cr 2152 *net payable* (or Dr 1152 when the net is a refund) | — (agent VAT belongs to the landlord's own return) | the return's period end (VAT-lock exempt: it carries no `tax_role`) | Box 14 and 15 amounts are posted by a manual journal the accountant approves. The ZATCA payment is a manual template: Dr 2152 / Cr bank. |
+| E38 | Supplier bill approved (tier 3, §8.4) | `supplier_bill,id,approved` | Per line: Dr expense or asset *net* (line account → supplier default → 5190 with a property / 5290) / Dr 1151 *recoverable VAT* or Dr 5500 *non-recoverable VAT*; Cr 2111 *total* | Same; **charged to an agent landlord**: Dr LP *net + VAT* (seller key `owner:<id>`) / Cr 2111 | `bill_date` | VAT attributes as E18, so the VAT return needs no special case. Void (no posted payments) → `reversal:approved` at the void date. |
+| E39 | Supplier payment (payment voucher PV-######, tier 3) | `supplier_payment,id,paid` | Dr 2111 / Cr BANK | Dr 2111 / Cr BANK | `paid_on` | Allocated to bills (Σ allocations = amount, each ≤ the bill's open amount, under the AP lock). Void → `reversal:paid`. |
 
 #### 4.4.1 Classifying a collection (live posting and catch-up use the same function)
 
@@ -1616,12 +1618,19 @@ create unique index if not exists bank_matches_jl_once on bank_matches (journal_
 - **Tests** spy on `TaqnyatService` and the push service and assert **zero calls**.
 - **UI:** a disabled toggle marked "قريباً / Coming soon", with a preview of which installments *would* be reminded tomorrow (the dry-run list).
 
-### 8.4 Tier 3: needs approval before any work
+### 8.4 Tier 3 (approved by the account holder; built)
 
-- **Suppliers and bills (AP):** a `suppliers` table, bills with lines, input VAT and attachments, bill approval, payment vouchers, AP aging and supplier statements. Expenses would then become "bill + payment" or a direct expense. Postings: Dr expense / Dr input VAT / Cr 2111, then Dr 2111 / Cr bank.
-- **Accounting-software export:** a documented journal CSV (UTF-8 with BOM), with columns `date, entry_no, account_code, account_name_ar, account_name_en, debit, credit, memo, owner, property, unit, tenant, contract, source_type, source_ref`, plus mapping presets for common Saudi packages.
+**Suppliers and bills (AP).** Tables in `0069_finance_v2_tier3.sql` (additive, no FK to legacy tables): `suppliers`, `supplier_bills`, `supplier_bill_lines`, `supplier_payments`, `supplier_payment_allocations`.
+- **Supplier master:** Arabic/English name, VAT number (15 digits, 3…3; unique per account), CR, IBAN, contact, payment terms (days, default 30), a default GL account (an expense leaf or a non-control asset leaf), active flag. A supplier with bills or payments is deactivated, not deleted.
+- **Bills:** `BILL-######` per account; the supplier's own invoice number is unique per supplier (unless voided). Draft → approved → void. Only a draft is edited or deleted. Lines carry description, account, net, VAT category/rate/amount and recoverability; amounts are entered net or gross, and a VAT figure copied from the tax invoice is accepted within 0.10 SAR of the computed one. Landlord/property dimension and "charge to landlord" follow the expense rules (§8.2 b; agent landlords in Manager mode only).
+- **Input VAT:** recoverable per the §8.2 b default **and only when the supplier's VAT number is on file** (a tax invoice, VAT IR Art. 49); an explicit recoverable flag without it is refused (400 `SUPPLIER_VAT_REQUIRED`).
+- **Payments:** payment vouchers in the account's single PV-###### series (shared with tenant refunds and v2 deposit refunds), paid from a bank account or cash box, allocated to one or more approved bills of the same supplier. Σ allocations = amount; each allocation ≤ the bill's open amount, checked under the per-account AP lock (a concurrent overpayment is refused). On-account payments and supplier advances (1132) are not built.
+- **Postings:** E38 and E39 (§4.4). Voids post the reversal at the void date; a bill with posted payments cannot be voided.
+- **Reports:** AP aging by due date (the due date is day 0; before it "not due"), per supplier with the bills, and a control check of 2111 against the sub-ledger (a difference is shown with the count of pending AP postings). Supplier statement from the sub-ledger with a running balance; voids appear as their own lines at the void date.
+- **Backfill / catch-up** extracts both keys (and the reversals of voided records) with the live keys.
+- Bills do not write the legacy `expenses` table, so legacy screens do not show them (v2 only). A bill charged to a landlord appears on the landlord statement as an expense with its supplier.
 
-**Not started. The brief requires a stop and ask.**
+**Accounting-software export.** `GET /finance/v2/journal-export`: the general journal as a documented CSV, one row per journal line (UTF-8 with BOM, RFC 4180, CRLF), presets `standard` (all columns) and `simple`, Arabic or English account names, ISO or dd/mm/yyyy dates, optional exclusion of reversed entries, a CSV-injection guard, control totals in response headers, and a JSON preview. The format is specified in `docs/finance-v2/JOURNAL-EXPORT.md`. Vendor-specific mapping presets for Saudi accounting packages are **not** built (their import formats were not verified); the `simple` preset is the lowest common denominator.
 
 ---
 
@@ -1876,6 +1885,10 @@ Conventions:
 | POST `/finance/v2/landlords/:ownerId/commission-run` | `invoices.write` | E1 collected basis |
 | Tier 2: `/finance/v2/bank-statements[/:id]`, `/bank-statements/import`, `/bank-statements/:id/{auto-match,match,unmatch,complete}`, `/bank-import-profiles` | view / money / settings | §8.3 (a) |
 | Tier 2: GET / PATCH `/finance/v2/reminders` (enable refused while the env gate is off), GET `/reminders/preview` | view / settings | §8.3 (b) |
+| Tier 3: `/finance/v2/suppliers[/:id]` (GET, POST, PATCH, DELETE), GET `/suppliers/:id/statement` | view / expenses | §8.4 |
+| Tier 3: `/finance/v2/bills[/:id]` (GET, POST, PATCH, DELETE draft), POST `/bills/:id/approve`, POST `/bills/:id/void` | view / expenses / approve | §8.4 |
+| Tier 3: `/finance/v2/supplier-payments[/:id]` (GET, POST), POST `/supplier-payments/:id/void` | view / money / approve | §8.4 |
+| Tier 3: GET `/finance/v2/reports/ap-aging`, GET `/finance/v2/journal-export` | view | §8.4, JOURNAL-EXPORT.md |
 | **Admin:** GET `/admin/finance-v2/accounts` | SuperAdmin | Flag state per customer account |
 | **Admin:** PATCH `/admin/finance-v2/:accountUserId` | SuperAdmin | The switch (§1.5) |
 | **Admin:** POST `/admin/finance-v2/:accountUserId/backfill` | SuperAdmin | §6 (dry-run by default; a dry-run is allowed while the flag is off) |
@@ -2044,7 +2057,7 @@ Four separate reviewer agents look at correctness, accounting soundness (SOCPA, 
 
 **Phase 4:** web.
 
-**Tier 2** only after tier 1 is green. **Tier 3** only after approval.
+**Tier 2** only after tier 1 is green. **Tier 3** only after approval (given; built, §8.4).
 
 ### 12.2 Risks
 

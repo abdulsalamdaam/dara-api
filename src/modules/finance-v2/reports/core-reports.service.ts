@@ -389,6 +389,8 @@ export class CoreReportsService {
     const cons = new Map((await fetch(src("contract"), `select id, contract_number from contracts where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const exps = new Set((await fetch(src("expense"), `select id from expenses where user_id = $1 and id = any($2::int[])`)).map((r: any) => r.id));
     const pos = new Set((await fetch(src("landlord_payout"), `select id from landlord_payouts where user_id = $1 and id = any($2::int[])`)).map((r: any) => r.id));
+    const bills = new Map((await fetch(src("supplier_bill"), `select id, number from supplier_bills where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
+    const spays = new Map((await fetch(src("supplier_payment"), `select id, number from supplier_payments where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const source = rows.map((r) => {
       const type = r.sourceType as string;
       const id = r.sourceId as number;
@@ -414,6 +416,14 @@ export class CoreReportsService {
           return exps.has(id) ? { type, id, number: null, route: `/dashboard/reports/expenses?id=${id}`, exists: true } : miss;
         case "landlord_payout":
           return pos.has(id) ? { type, id, number: null, route: `/dashboard/reports/payouts?id=${id}`, exists: true } : miss;
+        case "supplier_bill": {
+          const x = bills.get(id);
+          return x ? { type, id, number: x.number, route: `/dashboard/accounting/bills?id=${id}`, exists: true } : miss;
+        }
+        case "supplier_payment": {
+          const x = spays.get(id);
+          return x ? { type, id, number: x.number, route: `/dashboard/accounting/supplier-payments?id=${id}`, exists: true } : miss;
+        }
         case "manual_journal":
         case "opening_balance":
           return { type, id, number: null, route: `/dashboard/accounting/manual-journals/${id}`, exists: true };

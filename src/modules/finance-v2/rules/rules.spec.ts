@@ -74,7 +74,17 @@ function cases(rule: RuleCode, t: Treatment, cat: VatCategory, amt: number): Cas
         rate: cat === "S" ? 15 : 0, recoverable, chargeTo, expenseAccount: { sys: SYS.expensePropertyOther }, bank: { bankAccountId: 3 },
       })));
     }
-    case "E19": case "E20": case "E24": return [pay({ date: "2026-08-01", treatment: t, dims: DIMS, amount: s(amt), bank: {} })];
+    case "E19": case "E20": case "E24": case "E39": return [pay({ date: "2026-08-01", treatment: t, dims: DIMS, amount: s(amt), bank: {} })];
+    case "E38": {
+      const { net, vat } = cat === "S" ? vatSplit(amt) : { net: amt, vat: 0 };
+      return [false, true].flatMap((recoverable) => (["company", "landlord"] as const).map((chargeTo) => pay({
+        date: "2026-08-01", treatment: t, dims: DIMS, billId: 901, supplierId: 31, chargeTo, total: s(amt + 250),
+        lines: [
+          { account: { sys: SYS.expensePropertyOther }, net: s(net), vat: s(vat), category: cat, rate: cat === "S" ? 15 : 0, recoverable: recoverable && cat === "S" },
+          { account: { id: 77 }, net: s(250), vat: "0.00", category: "O", rate: 0, recoverable: false, memo: "fee" },
+        ],
+      })));
+    }
     case "E21": return [pay({ date: "2026-08-01", treatment: t, dims: DIMS, amount: s(amt), targetDims: { ...DIMS, contractId: 14 }, sameContract: false, sameLandlord: true })];
     case "E14": return [pay({ date: "2026-08-01" })];
     case "E28": return [pay({ date: "2026-08-01", lines: [{ accountId: 1, debit: s(amt), credit: "0" }, { accountId: 2, debit: "0", credit: s(amt) }] }, EMPTY_STATE, false)];
@@ -124,8 +134,8 @@ function assertReversalNetsZero(lines: RuleLine[], label: string) {
 describe("fv2 posting rules: every rule balances in both modes (§11.1-a, c)", () => {
   const codes = Object.keys(RULES) as RuleCode[];
 
-  it("covers every posting row of §4.4 (E01–E37), and lists the non-posting ones", () => {
-    const all = ["E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08", "E09", "E10", "E11", "E12", "E12b", "E13", "E14", "E15", "E16", "E17", "E18", "E19", "E20", "E21", "E22", "E23", "E24", "E25", "E26", "E27", "E28", "E29", "E30", "E31", "E32", "E33", "E34", "E35", "E36", "E37"];
+  it("covers every posting row of §4.4 (E01–E39), and lists the non-posting ones", () => {
+    const all = ["E38", "E39", "E01", "E02", "E03", "E04", "E05", "E06", "E07", "E08", "E09", "E10", "E11", "E12", "E12b", "E13", "E14", "E15", "E16", "E17", "E18", "E19", "E20", "E21", "E22", "E23", "E24", "E25", "E26", "E27", "E28", "E29", "E30", "E31", "E32", "E33", "E34", "E35", "E36", "E37"];
     for (const e of all) {
       const covered = (RULES as any)[e.toUpperCase()] || NON_POSTING[e] || e === "E13"; // E13 posts as E03 per collection
       assert.ok(covered, `§4.4 row ${e} has no rule and no non-posting reason`);
@@ -470,4 +480,49 @@ describe("fv2 a document partly covered by the opening balance (§6.7 gap)", () 
       assert.ok(out.warnings.includes("partly_covered_by_opening"));
     });
   }
+});
+
+describe("fv2 tier 3 AP rules: E38 supplier bill, E39 supplier payment (DESIGN §8.4)", () => {
+  const acct = (l: RuleLine) => ("sys" in l.account ? l.account.sys : "id" in l.account ? `id:${l.account.id}` : "bank");
+  const bill = (over: any = {}) => ({
+    date: "2026-08-05", treatment: "principal" as Treatment, dims: { ownerId: null, propertyId: 3 }, billId: 900, supplierId: 30, chargeTo: "company",
+    total: "1400.00",
+    lines: [
+      { account: { id: 51 }, net: "1000.00", vat: "150.00", category: "S", rate: 15, recoverable: true, memo: "maintenance" },
+      { account: { id: 52 }, net: "250.00", vat: "0.00", category: "E", rate: 0, recoverable: false },
+    ],
+    ...over,
+  });
+
+  it("E38 company bill: Dr expense net, Dr 1151 recoverable VAT, Cr 2111 total; VAT report attributes on the right lines", () => {
+    const out = runRule({ rule: "E38", facts: bill() }, EMPTY_STATE);
+    assert.deepEqual(out.lines.map((l) => [acct(l), l.debit, l.credit]), [
+      ["id:51", 100000, 0], ["input_vat", 15000, 0], ["id:52", 25000, 0], ["accounts_payable", 0, 140000],
+    ]);
+    const vatLine = out.lines[1];
+    assert.deepEqual([vatLine.taxRole, vatLine.vatCategory, vatLine.vatBase, vatLine.sellerKey], ["input", "S", 100000, "account"]);
+    assert.equal(out.lines[0].taxRole, undefined, "an S net line carries no role (base not counted twice)");
+    assert.deepEqual([out.lines[2].taxRole, out.lines[2].vatCategory, out.lines[2].vatBase], ["input_nonrecoverable", "E", 25000]);
+  });
+
+  it("E38 non-recoverable VAT goes to 5500; an agent landlord's bill is Dr LP for net + VAT on the landlord's seller key", () => {
+    const nr = runRule({ rule: "E38", facts: bill({ lines: [{ account: { id: 51 }, net: "100.00", vat: "15.00", category: "S", rate: 15, recoverable: false }], total: "115.00" }) }, EMPTY_STATE);
+    assert.deepEqual(nr.lines.map((l) => [acct(l), l.debit, l.credit]), [["id:51", 10000, 0], ["vat_non_recoverable", 1500, 0], ["accounts_payable", 0, 11500]]);
+    const ag = runRule({ rule: "E38", facts: bill({ treatment: "agent", chargeTo: "landlord", dims: { ownerId: 7, propertyId: 3 },
+      lines: [{ account: { id: 51 }, net: "100.00", vat: "15.00", category: "S", rate: 15, recoverable: false }], total: "115.00" }) }, EMPTY_STATE);
+    assert.deepEqual(ag.lines.map((l) => [acct(l), l.debit, l.credit, l.sellerKey ?? null]), [
+      ["landlord_payable", 10000, 0, "owner:7"], ["landlord_payable", 1500, 0, "owner:7"], ["accounts_payable", 0, 11500, null],
+    ]);
+  });
+
+  it("E38 refuses facts whose lines do not add up to the total, and VAT on a non-S line", () => {
+    assert.throws(() => runRule({ rule: "E38", facts: bill({ total: "1399.99" }) }, EMPTY_STATE), /lines .* total/);
+    assert.throws(() => runRule({ rule: "E38", facts: bill({ total: "115.00", lines: [{ account: { id: 51 }, net: "100.00", vat: "15.00", category: "Z", rate: 0, recoverable: false }] }) }, EMPTY_STATE), /VAT on a Z line/);
+  });
+
+  it("E39: Dr 2111 / Cr the paying bank account", () => {
+    const out = runRule({ rule: "E39", facts: { date: "2026-08-20", treatment: "principal", dims: {}, amount: "700.00", bank: { bankAccountId: 4 } } }, EMPTY_STATE);
+    assert.deepEqual(out.lines.map((l) => [acct(l), l.debit, l.credit]), [["accounts_payable", 70000, 0], ["bank", 0, 70000]]);
+    assert.deepEqual((out.lines[1].account as any).bank, { bankAccountId: 4 });
+  });
 });

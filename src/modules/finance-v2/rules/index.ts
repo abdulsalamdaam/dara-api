@@ -9,13 +9,14 @@ import { agencyFee, chargeDocument, commissionDocument, creditNote } from "./doc
 import { chargeCancelled, dueCharge, monthlyRelease, settledExternal } from "./installments";
 import {
   advanceVat, collection, commissionCollected, creditApply, creditRefund, depositForfeited, depositInstallmentCollection, depositOffset,
-  depositReceived, depositRefunded, expense, landlordPayout, manualJournal, vatSettlement, writeOff,
+  depositReceived, depositRefunded, expense, landlordPayout, manualJournal, supplierBill, supplierPayment, vatSettlement, writeOff,
 } from "./money-flows";
 import { RuleError, type AccountingMode, type PostState, type RuleOutput, type Treatment } from "./types";
 
 export type RuleCode =
   | "E01" | "E02" | "E03" | "E04" | "E05" | "E06" | "E07" | "E08" | "E09" | "E09C" | "E10" | "E11" | "E12" | "E12B"
-  | "E14" | "E15" | "E16" | "E17" | "E18" | "E19" | "E20" | "E21" | "E24" | "E28" | "E33" | "E34" | "E35" | "E36" | "E37";
+  | "E14" | "E15" | "E16" | "E17" | "E18" | "E19" | "E20" | "E21" | "E24" | "E28" | "E33" | "E34" | "E35" | "E36" | "E37"
+  | "E38" | "E39";
 
 export interface OutboxPayload {
   rule: RuleCode;
@@ -69,6 +70,8 @@ export const RULES: Record<RuleCode, RuleFn> = {
   E35: monthlyRelease,
   E36: (f) => commissionDocument(f, true),
   E37: vatSettlement,
+  E38: supplierBill,
+  E39: supplierPayment,
 };
 
 /** §4.4 rows that never produce an outbox event, and why. */

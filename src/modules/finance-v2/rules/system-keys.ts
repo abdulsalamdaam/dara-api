@@ -35,6 +35,8 @@ export const SYS = {
   expenseGeneralOther: "expense_general_other",
   badDebt: "bad_debt_expense",
   vatNonRecoverable: "vat_non_recoverable",
+  /** AP, suppliers (2111), tier 3 */
+  ap: "accounts_payable",
 } as const;
 
 export type SystemKey = (typeof SYS)[keyof typeof SYS];

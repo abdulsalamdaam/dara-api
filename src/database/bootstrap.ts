@@ -603,6 +603,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 ledger hardening failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0069 tier 3 tables (suppliers, bills, supplier payments). After 0068, same rules.
+    try { // finance-v2:
+      const fv2Tier3 = findSqlFile(join("drizzle", "0069_finance_v2_tier3.sql")); // finance-v2:
+      if (fv2Tier3) await client.query(readFileSync(fv2Tier3, "utf8")); // finance-v2:
+      else log.warn("0069_finance_v2_tier3.sql not found — Finance v2 tier-3 tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 tier-3 tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

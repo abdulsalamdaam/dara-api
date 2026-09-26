@@ -13,6 +13,7 @@ import { BankAccountsService } from "./bank-accounts.service";
 import { creditActionEvents } from "./credit-events";
 import { asciiDigits } from "./iban";
 import { DEPOSIT_DESC } from "../hooks/classify";
+import { nextPvNumber } from "../pv-number";
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 
@@ -438,13 +439,7 @@ export class TenantCreditsService {
 
   /** PV-###### per account, across tenant refunds and deposit refunds (§2.3.7), under the PV lock. */
   private async nextPv(c: Fv2Client, scope: number): Promise<string> {
-    await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.PV]);
-    const [r] = (await c.query(
-      `select coalesce(max(n), 0) as m from (
-         select cast(substring(number from '^PV-([0-9]+)$') as integer) as n from tenant_credit_actions where user_id = $1 and number ~ '^PV-[0-9]+$'
-         union all select cast(substring(number from '^PV-([0-9]+)$') as integer) from finance_deposit_refunds where user_id = $1 and number ~ '^PV-[0-9]+$') x`,
-      [scope])).rows;
-    return `PV-${String(Number(r?.m ?? 0) + 1).padStart(6, "0")}`;
+    return nextPvNumber(c, scope);
   }
 
   private async tenantNames(scope: number, ids: number[]) {

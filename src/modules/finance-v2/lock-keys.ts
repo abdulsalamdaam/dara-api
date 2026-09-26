@@ -27,6 +27,10 @@ export const LOCK_KEYS = {
   BANK_REC: -108,
   /** Tenant credit refund / apply: the credit-sufficiency check and the write, serialised per account. */
   TENANT_CREDIT: -109,
+  /** BILL- supplier bill numbers (tier 3). */
+  BILL: -110,
+  /** Supplier payment allocation: the bill open-amount check and the write, serialised per account (tier 3). */
+  AP: -111,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];
