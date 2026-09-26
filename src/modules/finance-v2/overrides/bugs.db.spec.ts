@@ -361,6 +361,22 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.equal(noCap.status, 403, "write-off needs the approve capability");
   });
 
+  it("E7: two terminate requests at once (a double-click) collect each open installment once", async () => {
+    const [u] = await on.q(`insert into units (property_id, unit_number) values ($1, 'R1') returning id`, [fOn.s.propA]);
+    const c: any = await on.contracts.create(user, {
+      unitIds: [u.id], tenantId: fOn.s.tenant, tenantName: "Synthetic Tenant", startDate: firstOf(-3), endDate: lastOf(2),
+      monthlyRent: "1000", paymentFrequency: "monthly", vatEnabled: false,
+    });
+    const open = await on.q(`select id from payments where contract_id = $1 and deleted_at is null order by due_date`, [c.id]);
+    const body = () => ({ dispositions: open.map((p: any) => ({ paymentId: p.id, action: "collect", method: "cash", date: today })) });
+    for (let round = 0; round < 3; round++) {
+      await Promise.allSettled([on.contracts.terminate(approver, String(c.id), body()), on.contracts.terminate(approver, String(c.id), body())]);
+    }
+    const per = await on.q(`select p.id, count(pc.id)::int as n, coalesce(sum(pc.amount), 0)::text as amt from payments p
+                              left join payment_collections pc on pc.payment_id = p.id where p.contract_id = $1 and p.deleted_at is null group by p.id order by p.id`, [c.id]);
+    assert.deepEqual(per.map((r: any) => [r.n, r.amt]), open.map(() => [1, "1000.00"]), "never collected twice");
+  });
+
   it("E7: write off / collect / cancel, then the deposit refund is recorded as a payment voucher", async () => {
     const [p0, p1, ...rest] = fOn.p7;
     const res: any = await on.contracts.terminate(approver, String(fOn.c7), {

@@ -116,6 +116,12 @@ export async function applyDispositions(
 ): Promise<DispositionResult> {
   const [c] = await q.rows(`select id, tenant_id from contracts where id = $1 and user_id = $2 and deleted_at is null`, [contractId, scope]);
   if (!c) throw new NotFoundException("Contract not found");
+  // Two terminates at once (a double-click), or a collect alongside one, would both read the same remaining amount
+  // and both collect it. Take the legacy per-installment lock (scope, paymentId) — the one addCollection holds —
+  // on every installment of the contract, in id order, then read the open installments under it.
+  for (const p of await q.rows(`select id from payments where user_id = $1 and contract_id = $2 and deleted_at is null order by id`, [scope, contractId])) {
+    await q.rows(`select pg_advisory_xact_lock($1::int, $2::int)`, [scope, Number(p.id)]);
+  }
   const today = riyadhTodayV2();
   const open = await openInstallments(q, scope, contractId, today);
   const out: DispositionResult = { collected: [], writtenOff: [], cancelled: [], events: [] };
