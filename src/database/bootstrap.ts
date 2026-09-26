@@ -564,8 +564,9 @@ export async function ensureSchema(): Promise<void> {
     // A failure warns and boots anyway: only the news endpoints need these.
     try {
       // 0062 (RSS sources, filter_kind) builds on 0061, and 0063 (moderated_by/at,
-      // backfilled from app_logs, created above) on both — so strictly in order.
-      for (const f of ["0061_re_news.sql", "0062_re_news_rss.sql", "0063_re_news_moderation.sql"]) {
+      // backfilled from app_logs, created above) on both, and 0064 (news_seen,
+      // retention settings) backfills from news_items — so strictly in order.
+      for (const f of ["0061_re_news.sql", "0062_re_news_rss.sql", "0063_re_news_moderation.sql", "0064_re_news_retention.sql"]) {
         const newsSql = findSqlFile(join("drizzle", f));
         if (newsSql) await client.query(readFileSync(newsSql, "utf8"));
         else log.warn(`${f} not found — news tables not ensured`);

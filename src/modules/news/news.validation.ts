@@ -1,5 +1,6 @@
 import { NEWS_CATEGORIES, NEWS_ITEM_STATUSES, type NewsCategory, type NewsItemStatus } from "./news.types";
 import { parseDaysOfWeek, RUN_TIME_RE } from "./news.schedule";
+import { minSeenRetentionDays, RETENTION_BOUNDS, SEEN_MARGIN_HOURS } from "./news.cleaner";
 
 /**
  * Request-body parsing for the admin endpoints. Bodies arrive as `any` (the
@@ -49,6 +50,11 @@ export interface SettingsPatch {
   maxPerAccount?: number;
   minScore?: number;
   extraInstructions?: string | null;
+  rejectedRetentionHours?: number;
+  purgeDuplicates?: boolean;
+  hiddenRetentionDays?: number;
+  runsRetentionDays?: number;
+  seenRetentionDays?: number;
 }
 
 export function parseSettingsPatch(body: any): SettingsPatch {
@@ -79,8 +85,41 @@ export function parseSettingsPatch(body: any): SettingsPatch {
   const extra = pick(body, "extraInstructions", "extra_instructions");
   if (extra !== undefined) p.extraInstructions = optText(extra, "extraInstructions", 2000);
 
+  // Retention (v3). Ranges from RETENTION_BOUNDS; the seen window is also
+  // checked against the lookback by checkRetention once merged with the row.
+  const rrh = pick(body, "rejectedRetentionHours", "rejected_retention_hours");
+  if (rrh !== undefined) p.rejectedRetentionHours = intIn(rrh, "rejectedRetentionHours", ...RETENTION_BOUNDS.rejectedRetentionHours);
+  const pd = pick(body, "purgeDuplicates", "purge_duplicates");
+  if (pd !== undefined) p.purgeDuplicates = bool(pd, "purgeDuplicates");
+  const hrd = pick(body, "hiddenRetentionDays", "hidden_retention_days");
+  if (hrd !== undefined) p.hiddenRetentionDays = intIn(hrd, "hiddenRetentionDays", ...RETENTION_BOUNDS.hiddenRetentionDays);
+  const rud = pick(body, "runsRetentionDays", "runs_retention_days");
+  if (rud !== undefined) p.runsRetentionDays = intIn(rud, "runsRetentionDays", ...RETENTION_BOUNDS.runsRetentionDays);
+  const srd = pick(body, "seenRetentionDays", "seen_retention_days");
+  if (srd !== undefined) p.seenRetentionDays = intIn(srd, "seenRetentionDays", ...RETENTION_BOUNDS.seenRetentionDays);
+
   if (!Object.keys(p).length) throw new NewsValidationError("nothing to update");
   return p;
+}
+
+/**
+ * Cross-field check on the settings as they would be after a PATCH: the ids
+ * of deleted items must be remembered for longer than a run looks back, or a
+ * feed that still lists a purged item would store and judge it again.
+ */
+export function checkRetention(merged: { lookbackHours: number; seenRetentionDays: number }): void {
+  const min = minSeenRetentionDays(merged.lookbackHours);
+  if (merged.seenRetentionDays < min) {
+    throw new NewsValidationError(
+      `seenRetentionDays must cover the lookback window plus ${SEEN_MARGIN_HOURS / 24} days — with lookbackHours ${merged.lookbackHours} it must be at least ${min}`,
+    );
+  }
+}
+
+/** POST /admin/news/cleanup: `{ dryRun?: boolean }` (default false). */
+export function parseCleanupBody(body: any): { dryRun: boolean } {
+  const raw = pick(body, "dryRun", "dry_run");
+  return { dryRun: raw == null ? false : bool(raw, "dryRun") };
 }
 
 export interface SourcePatch {

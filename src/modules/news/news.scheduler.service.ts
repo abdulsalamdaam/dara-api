@@ -5,6 +5,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { computeNextRunAt, NEWS_TZ } from "./news.schedule";
 import { NewsRunnerService } from "./news.runner.service";
 import { tryAcquireNewsLock } from "./news.lock";
+import { NewsCleanerService } from "./news.cleaner.service";
 
 const TICK_MS = 60_000;
 const BOOT_DELAY_MS = 20_000;
@@ -19,6 +20,11 @@ const BOOT_DELAY_MS = 20_000;
  * both win the same slot. The run then also takes the advisory lock,
  * which covers the manual "run now" path too.
  *
+ * The same tick runs the retention cleaner at most once an hour
+ * (`NewsCleanerService.hourly`: the run lock, then an atomic claim on
+ * `last_cleanup_at`) — also while the job itself is disabled — but not on a
+ * tick that just started a run: that run cleans up when it finishes.
+ *
  * `NEWS_SCHEDULER_DISABLED=1` turns the tick off (local dev, one-off scripts).
  */
 @Injectable()
@@ -31,6 +37,7 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly runner: NewsRunnerService,
+    private readonly cleaner: NewsCleanerService,
   ) {}
 
   onModuleInit(): void {
@@ -100,6 +107,18 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
     this.ticking = true;
     try {
       await this.recoverOrphanedRuns().catch((err) => this.logger.warn(`news orphan check failed: ${(err as Error)?.message ?? err}`));
+      const res = await this.tickRun(now);
+      if (res !== "claimed") {
+        await this.cleaner.hourly(now).catch((err) => this.logger.warn(`news cleanup tick failed: ${(err as Error)?.message ?? err}`));
+      }
+      return res;
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async tickRun(now: Date): Promise<"idle" | "claimed" | "lost"> {
+    try {
       const s = await this.runner.loadSettings();
       if (!s || !s.enabled) return "idle";
       if (!s.nextRunAt) {
@@ -134,8 +153,6 @@ export class NewsSchedulerService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.warn(`news tick failed: ${(err as Error)?.message ?? err}`);
       return "idle";
-    } finally {
-      this.ticking = false;
     }
   }
 }

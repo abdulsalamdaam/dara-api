@@ -3,6 +3,7 @@ import { NewsController } from "./news.controller";
 import { NewsAdminController } from "./news-admin.controller";
 import { NewsRunnerService } from "./news.runner.service";
 import { NewsSchedulerService } from "./news.scheduler.service";
+import { NewsCleanerService } from "./news.cleaner.service";
 
 /**
  * Real-estate news: X accounts → Claude filter → a landlord feed.
@@ -10,6 +11,6 @@ import { NewsSchedulerService } from "./news.scheduler.service";
  */
 @Module({
   controllers: [NewsController, NewsAdminController],
-  providers: [NewsRunnerService, NewsSchedulerService],
+  providers: [NewsRunnerService, NewsSchedulerService, NewsCleanerService],
 })
 export class NewsModule {}

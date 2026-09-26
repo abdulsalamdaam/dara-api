@@ -1,10 +1,10 @@
 import { BadRequestException, Controller, Get, Inject, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
-import { and, count, desc, eq, ilike, inArray, max, or, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, ilike, inArray, max, or, sql, type SQL } from "drizzle-orm";
 import { newsItemsTable, newsJobRunsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
-import { listQuerySchema } from "../../common/pagination";
+import { listQuerySchema, type ListQuery } from "../../common/pagination";
 import { NEWS_CATEGORIES } from "./news.types";
 import { readNewsConfig } from "./news.config";
 
@@ -28,6 +28,20 @@ export const PUBLIC_ITEM_COLUMNS = {
   tags: newsItemsTable.aiTags,
   pinned: newsItemsTable.pinned,
 };
+
+/** Largest page any news list returns (a bigger `pageSize` is clamped to it). */
+export const NEWS_MAX_PAGE_SIZE = 100;
+
+/**
+ * `page` / `pageSize` for every news list: the shared schema (400 on junk),
+ * with pageSize clamped to NEWS_MAX_PAGE_SIZE. The response's `pageSize` is the
+ * one applied, so a client can trust it for "showing X–Y of Z".
+ */
+export function newsListQuery(raw: unknown): ListQuery {
+  const p = listQuerySchema.safeParse(raw ?? {});
+  if (!p.success) throw new BadRequestException("invalid page or pageSize");
+  return { ...p.data, pageSize: Math.min(p.data.pageSize, NEWS_MAX_PAGE_SIZE) };
+}
 
 export function searchCondition(q: string): SQL | undefined {
   const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -58,9 +72,7 @@ export class NewsController {
    */
   @Get()
   async list(@Query() raw: any) {
-    const parsed = listQuerySchema.safeParse(raw ?? {});
-    if (!parsed.success) throw new BadRequestException("invalid page or pageSize");
-    const query = parsed.data;
+    const query = newsListQuery(raw);
     const conds: SQL[] = [eq(newsItemsTable.status, "published")];
     const category = typeof raw?.category === "string" ? raw.category.trim() : "";
     if (category) {
@@ -73,7 +85,8 @@ export class NewsController {
 
     const [rows, total] = await Promise.all([
       this.db.select(PUBLIC_ITEM_COLUMNS).from(newsItemsTable).where(where)
-        .orderBy(desc(newsItemsTable.pinned), desc(newsItemsTable.postedAt), desc(newsItemsTable.id))
+        // Stable: pinned, newest (undated last), then id — pages never repeat or skip.
+        .orderBy(desc(newsItemsTable.pinned), sql`${newsItemsTable.postedAt} desc nulls last`, desc(newsItemsTable.id))
         .limit(query.pageSize).offset((query.page - 1) * query.pageSize),
       this.db.select({ n: count() }).from(newsItemsTable).where(where),
     ]);

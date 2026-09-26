@@ -52,3 +52,10 @@ export async function tryAcquireNewsLock(): Promise<NewsRunLock | null> {
     },
   };
 }
+
+/** Tests only: close the lock pool so the process can exit. */
+export async function closeNewsLockPool(): Promise<void> {
+  const p = lockPool;
+  lockPool = null;
+  await p?.end();
+}

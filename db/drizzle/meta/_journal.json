@@ -449,6 +449,13 @@
       "when": 1779141720000,
       "tag": "0063_re_news_moderation",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1779141780000,
+      "tag": "0064_re_news_retention",
+      "breakpoints": true
     }
   ]
 }

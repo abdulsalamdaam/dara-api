@@ -8,9 +8,10 @@ import { sql } from "drizzle-orm";
  * RSS/Atom feeds, a filter (Claude, or the free keyword lexicon) keeps the Saudi
  * real-estate ones and titles them, and landlords read the result as a feed.
  *
- * Four tables, all owned by `src/modules/news`. Created by
- * `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql` + `0063_re_news_moderation.sql`, which `ensureSchema`
- * runs on every boot (all idempotent), so a deploy needs no manual SQL.
+ * Five tables, all owned by `src/modules/news`. Created by
+ * `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql`, `0063_re_news_moderation.sql` +
+ * `0064_re_news_retention.sql`, which `ensureSchema` runs on every boot (all
+ * idempotent), so a deploy needs no manual SQL.
  */
 
 export type NewsMedia = { type: string; url: string | null; preview_url: string | null };
@@ -120,6 +121,7 @@ export const newsItemsTable = pgTable("news_items", {
   byFeed: index("news_items_feed_idx").on(t.status, t.pinned, t.postedAt),
   byCategory: index("news_items_category_idx").on(t.aiCategory),
   bySource: index("news_items_source_idx").on(t.sourceId),
+  byCreated: index("news_items_created_idx").on(t.createdAt, t.id),
 }));
 
 /** Single row, id = 1. */
@@ -137,9 +139,47 @@ export const newsJobSettingsTable = pgTable("news_job_settings", {
   nextRunAt: timestamp("next_run_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   updatedBy: integer("updated_by"),
+  // ── retention (0064) — see news.cleaner.ts ──
+  /** Rejected items (and, with purgeDuplicates, stored duplicates) are deleted after this many hours. 1–168. */
+  rejectedRetentionHours: integer("rejected_retention_hours").notNull().default(24),
+  purgeDuplicates: boolean("purge_duplicates").notNull().default(true),
+  /** Other hidden items (guard-held, AI gave up, admin-unmoderated) are deleted after this many days. 1–90. */
+  hiddenRetentionDays: integer("hidden_retention_days").notNull().default(14),
+  /** Run history rows (with their logs) are deleted after this many days. 7–365. */
+  runsRetentionDays: integer("runs_retention_days").notNull().default(90),
+  /** news_seen rows are kept this long after their item is gone. 7–180, ≥ lookback + 2 days. */
+  seenRetentionDays: integer("seen_retention_days").notNull().default(30),
+  lastCleanupAt: timestamp("last_cleanup_at", { withTimezone: true }),
+  lastCleanupStats: jsonb("last_cleanup_stats").$type<NewsCleanupStats>(),
+});
+
+/** What the last cleanup removed (news_job_settings.last_cleanup_stats). */
+export type NewsCleanupStats = {
+  trigger: "hourly" | "run" | "manual";
+  deleted: { rejected: number; duplicates: number; hidden: number; seen: number; runs: number };
+  ms: number;
+  /** trigger 'run': the run it followed. */
+  runId?: string | null;
+  error?: string | null;
+};
+
+/**
+ * Every external_id the job has stored — kept after the item itself is
+ * deleted, so the next run's dedupe still knows it. A purged rejected item is
+ * therefore never stored, judged or counted again. See 0064.
+ */
+export const newsSeenTable = pgTable("news_seen", {
+  externalId: text("external_id").primaryKey(),
+  sourceId: uuid("source_id"),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** 'stored' | 'duplicate' at insert; the cleaner sets 'rejected' | 'duplicate' | 'hidden'. */
+  verdict: text("verdict"),
+  /** When the cleaner deleted the item (null while it is stored). */
+  purgedAt: timestamp("purged_at", { withTimezone: true }),
 });
 
 export type NewsSource = typeof newsSourcesTable.$inferSelect;
 export type NewsItem = typeof newsItemsTable.$inferSelect;
 export type NewsJobRun = typeof newsJobRunsTable.$inferSelect;
 export type NewsJobSettings = typeof newsJobSettingsTable.$inferSelect;
+export type NewsSeen = typeof newsSeenTable.$inferSelect;

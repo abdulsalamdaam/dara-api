@@ -1,7 +1,7 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { and, count, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import {
-  newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable,
+  newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSeenTable, newsSourcesTable,
   type NewsJobSettings, type NewsRunLogEntry, type NewsSource,
 } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -17,6 +17,7 @@ import { tryAcquireNewsLock, type NewsRunLock } from "./news.lock";
 import { KeywordFilter } from "./news.keyword-filter";
 import { RssProvider, type RssFetchResult } from "./providers/rss.provider";
 import { planRescore, type RescoreChange, type RescorePlan } from "./news.rescore";
+import { NewsCleanerService } from "./news.cleaner.service";
 
 /** How far back the "same story" comparison and the AI's recent-titles list look. */
 const RECENT_WINDOW_MS = 72 * 3_600_000;
@@ -78,7 +79,24 @@ export class NewsRunnerService {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly appLog: AppLogService,
+    /** Runs the retention cleanup at the end of every job run (inside its lock). */
+    @Optional() private readonly cleaner?: NewsCleanerService,
   ) {}
+
+  /**
+   * Which of these external ids the job has already seen: stored in
+   * news_items, or remembered in news_seen after the cleaner deleted the item.
+   * Either way the run must not store, judge or count it again.
+   */
+  async knownIds(ids: string[]): Promise<{ stored: Set<string>; purged: Set<string> }> {
+    if (!ids.length) return { stored: new Set(), purged: new Set() };
+    const [items, seen] = await Promise.all([
+      this.db.select({ id: newsItemsTable.externalId }).from(newsItemsTable).where(inArray(newsItemsTable.externalId, ids)),
+      this.db.select({ id: newsSeenTable.externalId }).from(newsSeenTable).where(inArray(newsSeenTable.externalId, ids)),
+    ]);
+    const stored = new Set(items.map((r) => r.id));
+    return { stored, purged: new Set(seen.map((r) => r.id).filter((id) => !stored.has(id))) };
+  }
 
   /** Env-only view (does not know about RSS rows) — prefer `readiness()`. */
   config(): NewsConfig {
@@ -279,9 +297,9 @@ export class NewsRunnerService {
 
       // ── 3. dedupe ──────────────────────────────────────────────────────
       const ids = [...new Set(fetched.map((t) => t.id))];
-      const existing = ids.length
-        ? await this.db.select({ id: newsItemsTable.externalId }).from(newsItemsTable).where(inArray(newsItemsTable.externalId, ids))
-        : [];
+      // Seen = stored, or stored once and since deleted by the retention
+      // cleaner (news_seen). A purged rejected item is never stored or judged again.
+      const known = await this.knownIds(ids);
       const recentRows = await this.db
         .select({
           externalId: newsItemsTable.externalId, text: newsItemsTable.text, status: newsItemsTable.status,
@@ -296,13 +314,15 @@ export class NewsRunnerService {
         ))
         .orderBy(desc(newsItemsTable.createdAt))
         .limit(500);
-      const existingIds = new Set(existing.map((e) => e.id));
+      const existingIds = new Set([...known.stored, ...known.purged]);
       const d = dedupeTweets(fetched, existingIds, recentRows.map((r) => ({ id: r.externalId, text: r.text })));
       // Items stored by an earlier run are the norm for feeds (a feed lists its
       // last N items every time) — logged, not counted as duplicates.
-      const alreadyStored = d.exactDuplicates.filter((t) => existingIds.has(t.id)).length;
-      c.duplicates += d.exactDuplicates.length - alreadyStored + d.nearDuplicates.length;
+      const alreadyStored = d.exactDuplicates.filter((t) => known.stored.has(t.id)).length;
+      const alreadyPurged = d.exactDuplicates.filter((t) => known.purged.has(t.id)).length;
+      c.duplicates += d.exactDuplicates.length - alreadyStored - alreadyPurged + d.nearDuplicates.length;
       if (alreadyStored) push("info", `${alreadyStored} already stored — skipped`);
+      if (alreadyPurged) push("info", `${alreadyPurged} seen before and removed by the cleaner — skipped`);
       for (const n of d.nearDuplicates) push("info", `${n.tweet.id} kept hidden: same story as ${n.duplicateOf} (${n.rule})`, n.tweet.authorHandle);
 
       // ── 4. store as hidden/unjudged ────────────────────────────────────
@@ -312,8 +332,12 @@ export class NewsRunnerService {
       const toStore = d.kept as Array<NormalisedTweet>;
       const nearDupReason = new Map(d.nearDuplicates.map((n) => [n.tweet.id, `duplicate of ${n.duplicateOf}`]));
       const rowsToStore = [...toStore, ...d.nearDuplicates.map((n) => n.tweet)];
+      // news_seen is written in the same transaction: every stored id is
+      // remembered, so the cleaner can later delete the item and the id still
+      // blocks a re-insert.
       const inserted = rowsToStore.length
-        ? await this.db.insert(newsItemsTable).values(rowsToStore.map((t) => ({
+        ? await this.db.transaction(async (tx) => {
+          const rows = await tx.insert(newsItemsTable).values(rowsToStore.map((t) => ({
             sourceId: bySourceId.get(t.id) ?? null,
             externalId: t.id,
             url: t.url,
@@ -330,7 +354,15 @@ export class NewsRunnerService {
               ? { aiRelevant: false, aiReason: nearDupReason.get(t.id)! }
               : { aiReason: "awaiting AI review" }),
             runId,
-          }))).onConflictDoNothing({ target: newsItemsTable.externalId }).returning({ id: newsItemsTable.id, externalId: newsItemsTable.externalId })
+          }))).onConflictDoNothing({ target: newsItemsTable.externalId }).returning({ id: newsItemsTable.id, externalId: newsItemsTable.externalId });
+          if (rows.length) {
+            await tx.insert(newsSeenTable).values(rows.map((r) => ({
+              externalId: r.externalId, sourceId: bySourceId.get(r.externalId) ?? null,
+              verdict: nearDupReason.has(r.externalId) ? "duplicate" : "stored",
+            }))).onConflictDoNothing({ target: newsSeenTable.externalId });
+          }
+          return rows;
+        })
         : [];
       const insertedIds = new Set(inserted.map((r) => r.externalId));
       const keptInserted = toStore.filter((t) => insertedIds.has(t.id)).length;
@@ -422,6 +454,16 @@ export class NewsRunnerService {
       const status = c.accountsTotal > 0 && c.accountsOk === 0 ? "failed" : partial ? "partial" : "success";
       push(status === "success" ? "info" : "warn",
         `done: ${c.accountsOk}/${c.accountsTotal} sources, ${c.fetched} fetched, ${c.newItems} new, ${c.published} published, ${c.rejected} rejected, ${c.duplicates} duplicates`);
+
+      // ── 7. retention cleanup, still under this run's lock ─────────────
+      // Its failure is logged and never changes the run's status.
+      if (this.cleaner) {
+        try {
+          await this.cleaner.clean({ dryRun: false, trigger: "run", runId, log: (level, message) => push(level, message) });
+        } catch (err) {
+          push("warn", `cleanup failed: ${(err as Error)?.message ?? err}`);
+        }
+      }
       await this.db.update(newsJobRunsTable).set({
         ...c, status, finishedAt: new Date(), log,
         error: status === "failed" ? "every account failed — see log" : null,
@@ -448,6 +490,11 @@ export class NewsRunnerService {
    * pinned — plus story dedupe against the feed. `dryRun` computes the same
    * plan and writes nothing. A real re-score takes the run lock (so it never
    * races a run) and is recorded in the run history as trigger `rescore`.
+   *
+   * It works on what is still stored: rejected items (and stored duplicates)
+   * older than `rejected_retention_hours` have been deleted by the retention
+   * cleaner and can no longer be re-scored — nor are they fetched again, since
+   * news_seen remembers them.
    */
   async rescore(days: number, dryRun: boolean, userId: number | null): Promise<RescoreResult> {
     const cfg = await this.readiness();
