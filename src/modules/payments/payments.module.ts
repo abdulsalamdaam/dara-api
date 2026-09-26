@@ -32,6 +32,7 @@ class PaymentsController {
   @Get()
   @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW)
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    if ((await this.fv2h?.resolve(scopeId(user))) === true) return this.fv2h!.paymentsList(scopeId(user), rawQuery); // finance-v2: E4 — one status definition (DESIGN §9)
     const status: string | undefined =
       typeof rawQuery?.status === "string" && PAYMENT_STATUSES.includes(rawQuery.status)
         ? rawQuery.status

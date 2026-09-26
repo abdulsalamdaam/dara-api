@@ -1802,6 +1802,7 @@ class ContractsController {
     const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: E25 — "mark as paid" refused (409) before any write
     this.fv2h?.refuseMarkPaid(fv2, mode); // finance-v2:
     await this.fv2h?.captureContractDims({ fv2, userId: ownerId }, id); // finance-v2: before contract_units are deleted
+    await this.fv2h?.terminateDispositions({ fv2, userId: ownerId }, id, body, user); // finance-v2: E7 — every open installment gets a disposition (collect / write off / cancel) before any legacy write
     // Cancelling the unpaid installments cancels the contract; otherwise it's a
     // normal termination.
     const endStatus = mode === "cancelled" ? "cancelled" : "terminated";
@@ -1920,7 +1921,7 @@ class ContractsController {
         .where(eq(paymentsTable.id, pid));
     }
 
-    await this.fv2h?.contractTerminated({ fv2, userId: ownerId }, id, { mode, deposit: body?.deposit, refundNumber, refundMethod: body?.refundMethod ?? "bank_transfer", depositVoucherIds: buckets.depositVoucherIds }); // finance-v2: ended_on, E04/E05/E10/E11/E12
+    await this.fv2h?.contractTerminated({ fv2, userId: ownerId }, id, { mode, deposit: body?.deposit, refundNumber, refundMethod: body?.refundMethod ?? "bank_transfer", depositVoucherIds: buckets.depositVoucherIds, actorId: user.id }); // finance-v2: ended_on, E04/E05/E10/E11/E12
     return {
       success: true,
       refundNumber,

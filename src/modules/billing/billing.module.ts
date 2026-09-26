@@ -37,6 +37,7 @@ import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.ser
 import { clearedInvoiceQr } from "../../common/zatca-qr";
 import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acceptance";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
+import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -1342,6 +1343,8 @@ class SimpleInvoicesController {
       .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
+    if (fv2 && isV2DocKind(doc.kind)) return this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); // finance-v2: E8/E9 — their own approve, never ZATCA
+    refuseV2KindOnLegacyApprove(doc.kind); // finance-v2: EX-4 — a v2 kind never takes the tax-invoice path (flag off)
 
     // Approval is where a draft becomes a real, issued document — the copy the
     // buyer keeps and the one mirrored to ZATCA. Everything the create path
@@ -1479,6 +1482,7 @@ class SimpleInvoicesController {
       await this.fv2h?.documentConfirmed({ fv2, userId: uid }, updated.id); // finance-v2:
       // Mirror the note to ZATCA under the landlord's seller (best-effort).
       const zatcaNote = await this.submitApprovedDocToZatca(uid, updated);
+      await this.fv2h?.afterNoteApproved({ fv2, userId: uid }, updated); // finance-v2: E36 — the commission credit note draft
       return { ...updated, zatca: zatcaNote };
     }
 
@@ -1498,6 +1502,7 @@ class SimpleInvoicesController {
     // actually-issued rent invoice and is linked to it via billingReference.
     // Best-effort: never block the approval if the commission step fails.
     let commission: any = null;
+    if (fv2) return { ...updated, commission: await this.fv2h!.commissionOnApprove({ fv2, userId: uid }, this.db, doc), zatca }; // finance-v2: E1 — the effective rate; the legacy step below never runs under v2
     if (doc.kind !== "commission" && doc.contractId && ((doc.paymentIds && doc.paymentIds.length) || doc.paymentId)) {
       try { commission = await this.maybeCreateCommissionInvoice(uid, doc, Number(doc.contractId)); }
       catch { /* ignore — rent invoice already approved */ }
@@ -1648,6 +1653,7 @@ class SimpleInvoicesController {
    */
   private async runZatcaSubmission(uid: number, doc: any): Promise<ZatcaSubmitOutcome> {
     try {
+      if (isV2DocKind(doc?.kind)) return V2_KIND_ZATCA_SKIP; // finance-v2: EX-4 — rent receipts and agency fees never reach ZATCA
       // Commission invoices (فاتورة عمولة) are intentionally NOT sent to ZATCA.
       if (doc.kind === "commission") {
         return { submitted: false, code: "skipped", reason: "Commission invoices are not sent to ZATCA" };

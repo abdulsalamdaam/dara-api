@@ -31,6 +31,7 @@ import { ArAgingService } from "./reports/aging.service";
 import { StatementsService } from "./reports/statements.service";
 import { ReconciliationService } from "./reports/reconciliation.service";
 import { legacyAccountingProvider } from "./reports/legacy-accounting";
+import { FinanceV2BugsController } from "./controllers/bugs.controller";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -43,6 +44,7 @@ import { legacyAccountingProvider } from "./reports/legacy-accounting";
     FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
+    FinanceV2BugsController,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,

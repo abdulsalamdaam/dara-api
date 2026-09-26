@@ -140,14 +140,23 @@ async function scenario(env: LegacyEnv, s: Seed): Promise<Run> {
   }));
 
   await step("terminate_c1_paid", () => env.contracts.terminate(user, String(c1.id), { mode: "paid" }));
-  await step("terminate_c1", () => env.contracts.terminate(user, String(c1.id), { mode: "cancelled", deposit: "refund", advance: "refund" }));
-  await step("terminate_c2_revenue", () => env.contracts.terminate(user, String(c2.id), { deposit: "revenue" }));
+  // §4.6 / E7: under v2 every open installment needs a disposition. Legacy ignores `dispositions`.
+  const openIds = async (cid: number) => (await env.q(
+    `select id from payments where contract_id = $1 and deleted_at is null and status::text in ('pending','overdue','partially_paid')
+        and coalesce(description, '') <> 'تأمين (وديعة)' order by id`, [cid])).map((r: any) => Number(r.id));
+  await step("terminate_c1", () => env.contracts.terminate(user, String(c1.id), {
+    mode: "cancelled", deposit: "refund", advance: "refund",
+    dispositions: [{ paymentId: run.ids.p3, action: "cancel" }, { paymentId: run.ids.p4, action: "collect", date: "2026-06-20", method: "cash" }],
+  }));
+  const c2Open = await openIds(c2.id);
+  await step("terminate_c2_revenue", () => env.contracts.terminate(user, String(c2.id), { deposit: "revenue", dispositions: c2Open.map((paymentId) => ({ paymentId, action: "cancel" })) }));
   const c4: any = await step("create_c4", () => env.contracts.create(user, {
     unitIds: [s.unitH1], tenantId: s.tenant, tenantName: "Synthetic Tenant", startDate: "2026-07-01", endDate: "2026-12-31",
     monthlyRent: "2000", paymentFrequency: "monthly", vatEnabled: false, depositAmount: "2000", depositStatus: "collected", depositDueDate: "2026-07-01",
   }));
   run.ids.c4 = c4.id;
-  await step("terminate_c4_forfeit", () => env.contracts.terminate(user, String(c4.id), { deposit: "forfeit" }));
+  const c4Open = await openIds(c4.id);
+  await step("terminate_c4_forfeit", () => env.contracts.terminate(user, String(c4.id), { deposit: "forfeit", dispositions: c4Open.map((paymentId) => ({ paymentId, action: "cancel" })) }));
   await step("delete_c3_paid", () => env.contracts.remove(user, String(c3.id), "paid"));
   await step("delete_c3", () => env.contracts.remove(user, String(c3.id), "cancelled"));
   await step("tick_final", () => tick("2026-06-12"));
@@ -354,8 +363,9 @@ describe("finance v2 hooks on the real legacy routes (real Postgres)", { skip: f
     assert.ok(conv.every((e) => e.event === "deposit_converted"));
     const [m] = await on.q(`select count(*)::int as n from finance_collection_meta where classification = 'deposit_conversion'`);
     assert.equal(m.n, 2);
-    assert.deepEqual(keys("terminate_c4_forfeit"), ["contract,deposit_forfeited,E11"]);
-    assert.equal(ev("terminate_c4_forfeit")[0].payload.facts.amount, "2000.00");
+    // The v2 dispositions cancel c4's open rows (E05, skipped at post while uncharged); the deposit is E11.
+    assert.deepEqual(keys("terminate_c4_forfeit").filter((k) => !k.endsWith(",E05")), ["contract,deposit_forfeited,E11"]);
+    assert.equal(ev("terminate_c4_forfeit").find((e) => e.rule === "E11")!.payload.facts.amount, "2000.00");
     assert.ok(ev("delete_c3").every((e) => e.rule === "E05"));
   });
 
@@ -399,7 +409,8 @@ describe("finance v2 hooks on the real legacy routes (real Postgres)", { skip: f
   });
 
   it("hooks never throw into the caller: a broken outbox is swallowed and the flag-off hook is a no-op", async () => {
-    const [p] = await on.q(`select id from payments where contract_id = $1 and status = 'pending' and deleted_at is null order by due_date limit 1`, [rOn.ids.c4]);
+    // c4's rows were all dispositioned at termination (E7); a fresh pending row stands in.
+    const [p] = await on.q(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 100, '2026-08-01', 'pending') returning id`, [U, rOn.ids.c4]);
     await on.q(`alter table ledger_outbox rename to ledger_outbox_x`);
     try {
       await on.hooks.expenseCreated({ fv2: true, userId: U }, rOn.ids.e2);

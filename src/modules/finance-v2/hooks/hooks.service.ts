@@ -9,6 +9,16 @@ import {
   installmentFacts, installmentRows, loadSettings, payoutEvent, reversalEvent, today, voucherUnlinked, type FinanceSettingsRow,
 } from "./facts-loader";
 import { CONVERSION_NOTE, mapEjarStatusV2 } from "./classify";
+import { withTx } from "../db";
+import { and, eq } from "drizzle-orm";
+import { simpleInvoicesTable } from "@dara/database";
+import { capabilities } from "../capabilities";
+import { createCommissionCreditV2, createCommissionV2 } from "../commission";
+import { paymentsListV2 } from "../overrides/payments-list";
+import { accountingV2, dashboardV2 } from "../overrides/reads";
+import { approveV2Kind, ensureAgencyFeeDraft } from "../overrides/documents-v2";
+import { applyDispositions } from "../overrides/terminate";
+import { fromHalalas } from "../money";
 
 /** What a legacy handler passes: the flag resolved at handler entry, the scope, and its transaction if it has one. */
 export interface HookCtx {
@@ -205,6 +215,8 @@ export class FinanceV2Hooks {
       );
       const out: LedgerEvent[] = await collectionEvents(q, ctx.userId, s, cols.map((r: any) => Number(r.id)));
       for (const v of vouchers) out.push(...(await documentEvents(q, ctx.userId, s, Number(v.id))));
+      // E8: a contract with an agency fee gets its DRAFT brokerage-fee document (idempotent).
+      await ensureAgencyFeeDraft(q, ctx.userId, contractId);
       return out;
     });
   }
@@ -258,7 +270,7 @@ export class FinanceV2Hooks {
    * forfeit or conversion, and a `charge_cancelled` per cancelled installment.
    */
   async contractTerminated(ctx: HookCtx, contractId: number, info: {
-    mode?: string; deposit?: string; refundNumber?: string | null; refundMethod?: string | null; depositVoucherIds?: number[];
+    mode?: string; deposit?: string; refundNumber?: string | null; refundMethod?: string | null; depositVoucherIds?: number[]; actorId?: number | null;
   }): Promise<void> {
     await this.run(ctx, "terminate", async (q, s) => {
       const date = today();
@@ -277,7 +289,24 @@ export class FinanceV2Hooks {
       const vids = (info.depositVoucherIds ?? []).filter((n) => Number.isInteger(n));
       if (info.deposit === "refund" && vids.length) {
         const unlinked = await voucherUnlinked(q, ctx.userId, vids);
-        for (const [vid, amt] of unlinked) if (amt > 0) out.push(depositRefundedEvent(vid, amt, cctx, date, info.refundMethod ?? null, s));
+        const refunded = [...unlinked.entries()].filter(([, amt]) => amt > 0);
+        // E10: the v2 refund record — one payment voucher (سند صرف) per refund, listing its deposit vouchers.
+        let pv: string | null = null;
+        if (refunded.length) {
+          const [c] = await q.rows(`select tenant_id from contracts where id = $1 and user_id = $2`, [contractId, ctx.userId]);
+          pv = info.refundNumber ?? (await this.nextRefundNumber(q, ctx.userId));
+          await q.exec(
+            `insert into finance_deposit_refunds (user_id, contract_id, tenant_id, owner_id, voucher_ids, amount, refunded_on, method, number, created_by)
+             values ($1, $2, $3, $4, $5::int[], $6, $7, $8, $9, $10) on conflict (user_id, number) do nothing`,
+            [ctx.userId, contractId, c?.tenant_id ?? null, cctx?.ownerId ?? null, refunded.map(([vid]) => vid),
+              fromHalalas(refunded.reduce((a, [, amt]) => a + amt, 0)), date, info.refundMethod ?? null, pv, info.actorId ?? null],
+          );
+        }
+        for (const [vid, amt] of refunded) {
+          const e = depositRefundedEvent(vid, amt, cctx, date, info.refundMethod ?? null, s);
+          (e.payload as any).facts.memo = pv ? `سند صرف ${pv} · Payment voucher ${pv}` : undefined;
+          out.push(e);
+        }
       }
       if (info.deposit === "forfeit" && cctx) {
         const e = await depositForfeitEvent(q, ctx.userId, s, cctx, date);
@@ -441,6 +470,92 @@ export class FinanceV2Hooks {
     } catch (err: any) {
       if (err?.code !== "42883" && err?.code !== "42P01") this.fail("purge", userId, err);
     }
+  }
+
+  // ─── v2 forks: the legacy shape with the v2 values (flag on only) ────────
+  // Unlike the hooks these are replacement read/write paths: their errors
+  // reach the caller (they run only for flag-on accounts).
+
+  /** E4: GET /payments. */
+  async paymentsList(scope: number, rawQuery: any): Promise<any> {
+    return paymentsListV2(this.sqlPool(), scope, rawQuery);
+  }
+
+  /** E2/E4: GET /dashboard/summary — v2 values over the legacy result. */
+  async dashboardSummary(scope: number, legacy: any): Promise<any> {
+    return dashboardV2(this.sqlPool(), scope, legacy);
+  }
+
+  /** E3/E4/E1: GET /reports/accounting — v2 values over the legacy result. */
+  async accounting(scope: number, legacy: any): Promise<any> {
+    return accountingV2(this.sqlPool(), scope, legacy);
+  }
+
+  /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA. `db` is the legacy Drizzle handle (same row shape). */
+  async approveV2Kind(ctx: HookCtx, db: any, doc: any): Promise<any> {
+    return approveV2Kind(this.sqlPool(), db, ctx.userId, doc, (id) => this.documentConfirmed(ctx, id));
+  }
+
+  /**
+   * E1: the v2 commission for an approved rent invoice (replaces the legacy
+   * commission step for flag-on accounts): the effective rate (property, else
+   * landlord), none for a principal landlord, VAT only if the account is
+   * VAT-registered. Returns the new draft row (legacy shape) or null.
+   */
+  async commissionOnApprove(ctx: HookCtx, db: any, doc: any): Promise<any> {
+    if (!ctx.fv2 || doc?.kind === "commission" || !doc?.contractId) return null;
+    const payIds: number[] = Array.isArray(doc.paymentIds) && doc.paymentIds.length ? doc.paymentIds.map(Number) : doc.paymentId ? [Number(doc.paymentId)] : [];
+    if (!payIds.length) return null;
+    try {
+      const id = await createCommissionV2(this.sqlPool(), ctx.userId, {
+        id: doc.id, number: doc.number, contractId: Number(doc.contractId), paymentId: doc.paymentId ?? null, paymentIds: payIds, dueDate: doc.dueDate ?? null,
+      });
+      if (!id) return null;
+      const [row] = await db.select().from(simpleInvoicesTable).where(and(eq(simpleInvoicesTable.id, id), eq(simpleInvoicesTable.userId, ctx.userId)));
+      return row ?? null;
+    } catch (err) {
+      this.fail("commission", ctx.userId, err); // best-effort, like the legacy step: never blocks the approval
+      return null;
+    }
+  }
+
+  /** E36: after a credit note is approved under v2, the draft commission credit note (best-effort). */
+  async afterNoteApproved(ctx: HookCtx, note: any): Promise<void> {
+    if (!ctx.fv2 || note?.type !== "credit") return;
+    try {
+      await createCommissionCreditV2(this.sqlPool(), ctx.userId, {
+        id: note.id, number: note.number, type: note.type, billingReference: note.billingReference ?? null, subtotal: String(note.subtotal ?? "0"),
+      });
+    } catch (err) {
+      this.fail("commission_credit", ctx.userId, err);
+    }
+  }
+
+  /**
+   * E7 (§4.6): the dispositions of every open installment, applied BEFORE
+   * the legacy terminate writes (flag on only). Refuses (400/403/409) an
+   * incomplete or disallowed body with nothing written.
+   */
+  async terminateDispositions(ctx: HookCtx, contractId: number, body: any, user: any): Promise<void> {
+    if (!ctx.fv2) return;
+    const events = await withTx(this.pool, async (c) => {
+      const q = sqlOf(c as any);
+      const res = await applyDispositions(q, ctx.userId, contractId, body, { id: Number(user?.id ?? ctx.userId), canApprove: capabilities(user ?? {}).includes("approve") });
+      for (const e of res.events) await this.emitter.emit({ fv2: true, userId: ctx.userId, tx: c as any }, e);
+      return res.events.length;
+    });
+    if (events) this.emitter.kick(ctx.userId);
+  }
+
+  /** Next RFND-#### across legacy refund collections and v2 deposit refunds. */
+  private async nextRefundNumber(q: Sql, userId: number): Promise<string> {
+    const [r] = await q.rows(
+      `select coalesce(max(n), 0) as m from (
+         select cast(substring(receipt_number from 'RFND-([0-9]+)') as integer) as n from payment_collections where user_id = $1 and receipt_number ilike 'RFND-%'
+         union all select cast(substring(number from 'RFND-([0-9]+)') as integer) from finance_deposit_refunds where user_id = $1 and number ilike 'RFND-%') x`,
+      [userId],
+    );
+    return `RFND-${String(Number(r?.m ?? 0) + 1).padStart(4, "0")}`;
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────

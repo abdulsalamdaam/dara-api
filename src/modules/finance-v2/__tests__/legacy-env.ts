@@ -5,6 +5,7 @@ import { PaymentsModule } from "../../payments/payments.module";
 import { BillingModule } from "../../billing/billing.module";
 import { ContractsModule } from "../../contracts/contracts.module";
 import { ReportsModule } from "../../reports/reports.module";
+import { DashboardModule } from "../../dashboard/dashboard.module";
 import { FinanceFlagService } from "../flag.service";
 import { LedgerEmitter } from "../ledger-emitter.service";
 import { FinanceV2Hooks } from "../hooks/hooks.service";
@@ -44,6 +45,7 @@ export interface LegacyEnv {
   billing: any;
   contracts: any;
   reports: any;
+  dashboard: any;
   q: (sql: string, p?: unknown[]) => Promise<any[]>;
 }
 
@@ -75,9 +77,10 @@ export async function legacyEnv(hooked: Hooked): Promise<LegacyEnv> {
   billing.submitApprovedDocToZatca = async () => ({ submitted: false, code: "skipped", reason: "fv2 spec: ZATCA stubbed" });
   const contracts = new Contracts(db);
   const reports = new Reports(db);
-  if (hooked === "wired") for (const c of [payments, billing, contracts, reports]) c.fv2h = hooks;
+  const dashboard = new (ctl(DashboardModule))(db);
+  if (hooked === "wired") for (const c of [payments, billing, contracts, reports, dashboard]) c.fv2h = hooks;
   const q = async (sql: string, p: unknown[] = []) => (await t.pool.query(sql, p)).rows;
-  return { t, db, hooks, flag, emitter, engine, worker, recognizer, setup, payments, billing, contracts, reports, q };
+  return { t, db, hooks, flag, emitter, engine, worker, recognizer, setup, payments, billing, contracts, reports, dashboard, q };
 }
 
 /** Switch Finance v2 on for an account the way the admin toggle does (seed chart, periods, banks), and start its ledger. */
