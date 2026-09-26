@@ -1,0 +1,5 @@
+# Finance v2: reviewed exceptions to the "added lines only" rule for protected
+# legacy files (docs/finance-v2/DESIGN.md §1.4 point 5). One entry per line:
+#   <file><TAB><hunk hash><TAB><one-line reason>
+# scripts/finance-v2-additive-diff.ts prints the exact line for a failing hunk.
+# This list is presented for approval at the merge gate, next to EX-1..EX-4.

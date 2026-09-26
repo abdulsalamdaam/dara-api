@@ -39,6 +39,9 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        # finance-v2: full history, so the additive-diff gate can diff against origin/master.
+        with:
+          fetch-depth: 0
 
       # openssl is already on ubuntu-latest; xmllint (libxml2-utils) and
       # xsltproc are NOT, and the ZATCA signing suite SKIPS ITSELF when any of
@@ -65,9 +68,21 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit -p tsconfig.json
 
+      # finance-v2: protected legacy files may only GAIN marked lines (removed
+      # lines need a reviewed allowlist entry); no pre-existing schema file
+      # changes; the v2 migrations alter no existing table; `fv2.purge` stays
+      # inside 0066. docs/finance-v2/DESIGN.md §1.4.
+      - name: Finance v2 additive-diff gate
+        run: |
+          git fetch --no-tags origin master:refs/remotes/origin/master || true
+          pnpm exec tsx scripts/finance-v2-additive-diff.ts
+
       - name: Test — and hold the skip and pass counts to their baselines
         env:
           NEWS_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/news_test
+          # finance-v2: the ledger DB specs share the throwaway service; each run
+          # works in its own fv2_test_<rand> schema and drops it afterwards.
+          FV2_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/news_test
         run: |
           set -euo pipefail
 
