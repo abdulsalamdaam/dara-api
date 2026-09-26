@@ -21,14 +21,15 @@ real runs are in `QA.md` under "v2 (free mode) QA" and "Apify".
 | `README.md` | this runbook |
 | `CONTRACT.md` | v1 API contract plus the "Backend deviations" (what actually shipped) |
 | `CONTRACT-v2-FREE.md` | v2 addendum (RSS + keyword filter) plus the v2 backend deviations |
+| `CONTRACT-v3-CLEANER.md` | v3 addendum (retention cleaner + pagination) plus the v3 backend deviations |
 | `BUSINESS.md` | audience, AI relevance rubric, categories, style guide, defaults, edge cases |
 | `lexicon.md` | the keyword filter: normalisation, matching, scoring, lexicon and worked examples (API repo, and web repo from v2 QA) |
 | `rss-feeds.json` | the 15 verified RSS feeds (URL, publisher, why chosen) |
 | `seed-rss.sql` | an idempotent insert of those feeds (API repo only) |
 | `seed-accounts.json` | the 20 verified X accounts (used only once an X key is set) |
 | `DESIGN.md` | screen spec: wireframes, components, states, i18n keys (web repo only) |
-| `QA.md` | QA reports from staging, v1 and v2, with the bugs fixed (web repo only) |
-| `qa/*.png` | QA screenshots; `v2-*.png` are free mode (web repo only) |
+| `QA.md` | QA reports from staging, v1 to v3, with the bugs fixed (web repo only) |
+| `qa/*.png` | QA screenshots; `v2-*.png` are free mode, `v3-*.png` pagination and retention (web repo only) |
 
 ## Where things are
 - **API** (`dara-api`): `src/modules/news/`, schema `db/src/schema/news.ts`, migrations
@@ -222,6 +223,60 @@ In the UI: Admin → News → Settings → "Re-score recent items" (days, **Prev
   writes a run-history row with trigger `rescore` (published / rejected / duplicates
   counts, one log line per change). 400 when the current filter is Claude.
 
+## Data retention
+The owner does not want rejected news kept for more than a day. A cleaner deletes it, and
+remembers what it deleted so the post is never stored, judged or paid for again.
+
+**What goes** (rules in `news.cleaner.ts`, applied by `NewsCleanerService`):
+| rows | deleted after | setting (Admin → News → Schedule → Data retention) |
+|---|---|---|
+| `rejected` items (keyword or Claude; AI-flagged duplicates stored as rejected too) | 24 h | `rejectedRetentionHours` 1–168 |
+| `hidden` "duplicate of …" items | the same 24 h; with the switch off, the hidden window below | `purgeDuplicates` (on) |
+| other `hidden` items: held by the guard, AI gave up, never judged | 14 days, but an item still waiting for an AI retry is kept for its 7-day retry window | `hiddenRetentionDays` 1–90 |
+| `news_seen` ids of deleted items | 30 days after the delete; must cover the lookback + 2 days (7 days for lookback ≤ 120 h) | `seenRetentionDays` 7–180 |
+| `news_job_runs` (the logs are the heavy part) | 90 days, never a `running` row | `runsRetentionDays` 7–365 |
+
+**Never deleted:** published items, pinned items, and anything an admin moderated by hand
+(`moderated_at` set by any publish / hide / pin / recategorise). Ages count from
+`created_at`, the time the item was stored.
+
+**`news_seen`** (migration `0064`, applied by `ensureSchema` on every boot, with a backfill
+from `news_items` each boot): every stored `external_id` is written there in the same
+transaction as the item, and a run's dedupe treats an id found there as already seen. A
+purged post that a feed or X lists again is logged as "N seen before and removed by the
+cleaner — skipped", is not stored, judged or counted, and costs no Claude call.
+
+**When it runs:**
+- at the end of every job run, under the run's lock, as one `cleanup: deleted …` line in
+  that run's log (a cleanup failure is a warn line and never changes the run's status);
+- from the 60 s tick at most once an hour, also while the job is disabled. It takes the run
+  lock, then an atomic claim on `last_cleanup_at`, so with several instances only one
+  cleans each hour; it is skipped while a run holds the lock;
+- by hand: **Clean now** in the Data retention card runs a **dry run** first and shows what
+  would go; only **Delete** in that dialog deletes.
+
+A scheduled run whose slot finds the lock held by a cleanup or re-score waits for it (every
+2 s, up to 30 s) instead of skipping the day; a real run in progress still skips it.
+
+**API** (super-admin): `POST /admin/news/cleanup { dryRun?: boolean }` → `{ dryRun, deleted:
+{ rejected, duplicates, hidden, seen, runs }, settings, at, ms }`; 409 while a run holds the
+lock (real cleanup only; a dry run takes no lock and writes nothing).
+`GET /admin/news/status` adds `lastCleanupAt`, `lastCleanupStats` (`trigger`, `deleted`,
+`ms`, `runId`, `error`) and `itemCounts`. Settings are on `GET/PATCH /admin/news/settings`.
+
+**Consequences:**
+- **Re-score** only sees what is still stored: a rejected item older than the window is
+  gone and can no longer be re-scored (or re-fetched). Publish a borderline item by hand
+  within a day to keep it.
+- An item stored days ago and judged only now (an AI retry) is deleted by the same run's
+  cleanup if rejected, since its age counts from when it was stored.
+
+**Pagination.** Every news list answers `{ data, page, pageSize, total }`; a `pageSize` above
+100 is clamped to 100, and a bad `page`/`pageSize` is a 400. Orders end with `id` so pages
+never repeat or skip a row. `GET /admin/news/runs` and `/admin/news/sources` give the envelope
+only with `page`/`pageSize` (a bare array otherwise). `GET /admin/news/items/counts` gives the
+per-status tab counts for the current filters.
+
 ## Upgrading later (optional)
 Both upgrades are env vars on `dara-api` alone, plus a redeploy. No code, migration or
 data change is needed, and both can be switched off again by removing the var.
@@ -291,12 +346,15 @@ The first log line of a run reads `x=<provider|off (no key)> filter=<keyword|cla
   - **Add:** an X handle, or an RSS URL with Preview.
   - **Manage:** Test, toggle, delete. A feed URL cannot be edited; delete the source and
     add it again.
-- **Items:** a Filter column (keyword / Claude), with publish, hide, pin and recategorise.
-  Any of these marks the item moderated, so Re-score leaves it alone.
-- **Runs:** history plus a full log.
+- **Items:** status tabs with counts, a Filter column (keyword / Claude), with publish, hide,
+  pin and recategorise. Any of these marks the item moderated, so Re-score and the cleaner
+  leave it alone. A paginator (page numbers, 20/50/100 per page, "Showing X–Y of Z"); the
+  page and size are in the URL (`?page=&size=`) and any filter change goes back to page 1.
+- **Runs:** history plus a full log, with the same paginator (Sources too).
 - **Schedule:** enabled, run time (Riyadh), days, lookback, max per source, minimum score,
   and extra AI instructions (Claude only, ≤ 2000 chars; they cannot loosen the safety
-  rules). Below them, **Re-score recent items** (see above).
+  rules). Below them, **Re-score recent items** (see above) and **Data retention** (the five
+  settings, the last cleanup, and Clean now; see "Data retention").
 
 ## Audience
 Every signed-in account sees the feed, including tenant-package and demo accounts, so
