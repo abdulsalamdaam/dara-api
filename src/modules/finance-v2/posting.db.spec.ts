@@ -2,7 +2,8 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { fv2DbSkip, withDb, type TestDb } from "./__tests__/with-db";
+import pg from "pg";
+import { FV2_URL, fv2DbSkip, withDb, type TestDb } from "./__tests__/with-db";
 import { withTx } from "./db";
 import { FinanceFlagService } from "./flag.service";
 import { PeriodsService } from "./periods.service";
@@ -87,6 +88,28 @@ describe("finance v2 posting engine (real Postgres)", { skip: fv2DbSkip }, () =>
   after(async () => {
     delete process.env.FINANCE_V2_WORKER_DISABLED;
     await t?.drop();
+  });
+
+  describe("lock pools (§5.3)", () => {
+    it("long-held account locks (backfills) never starve the posting tick of a lock client", async () => {
+      const w = new PostingWorker(t.pool, engine, emitter); // no lockPool injected: the worker makes its own pools
+      const made: Array<{ label: string; pool: pg.Pool }> = [];
+      w.poolFactory = (max, label) => {
+        const pool = new pg.Pool({ connectionString: FV2_URL, max, options: `-c search_path=${t.schema}` });
+        made.push({ label, pool });
+        return pool;
+      };
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      // Three backfills at once (the nightly sweep plus two admins), each holding its lock until released.
+      const long = [9201, 9202, 9203].map((u) => w.withAccountLock(u, () => held));
+      await new Promise((r) => setTimeout(r, 150));
+      const tick = await Promise.race([w.runAccount(U), new Promise((r) => setTimeout(() => r("starved"), 3000))]);
+      release();
+      await Promise.all(long);
+      assert.notEqual(tick, "starved", "the tick got a lock client while three backfills held theirs");
+      for (const m of made) await m.pool.end();
+    });
   });
 
   describe("enqueue (§5.1)", () => {

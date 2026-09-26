@@ -29,6 +29,24 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
   private kicked = new Set<number>();
   /** Injected by tests (a pool on their throwaway schema); lazily the aux pool otherwise. */
   lockPool: LockPool | null = null;
+  /** How the lazy pools are made (tests point it at their schema). */
+  poolFactory: (max: number, label: string) => LockPool = createAuxPool;
+  private tickPool: LockPool | null = null;
+  private longPool: LockPool | null = null;
+
+  /** The tick's try-lock clients: held for one batch only. */
+  private tickLocks(): LockPool {
+    return this.lockPool ?? (this.tickPool ??= this.poolFactory(2, "finance-v2 worker lock pool"));
+  }
+
+  /**
+   * Long-held locks (a backfill run, the nightly sweep, proposeOpening) come from a SEPARATE pool: with one
+   * shared pool of 2, two backfills held both clients and every tick waited on connect() until one ended,
+   * which froze posting for every account. Extra concurrent backfills queue here, never in front of the tick.
+   */
+  private longLocks(): LockPool {
+    return this.lockPool ?? (this.longPool ??= this.poolFactory(3, "finance-v2 backfill lock pool"));
+  }
 
   constructor(
     @Inject(FV2_POOL) private readonly pool: Fv2Pool,
@@ -90,7 +108,7 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
    * client from the lock pool and released on that same client.
    */
   async withAccountLock<T>(userId: number, fn: () => Promise<T>): Promise<T> {
-    const lp = (this.lockPool ??= createAuxPool(2, "finance-v2 worker lock pool"));
+    const lp = this.longLocks();
     const client = await lp.connect();
     let got = false;
     try {
@@ -112,7 +130,7 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
 
   /** Post one account's due rows under its session lock. Returns null when another worker holds it. */
   async runAccount(userId: number, limit = 200) {
-    const lp = (this.lockPool ??= createAuxPool(2, "finance-v2 worker lock pool"));
+    const lp = this.tickLocks();
     const client = await lp.connect();
     let got = false;
     try {
