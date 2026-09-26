@@ -18,7 +18,7 @@ const URL_ = process.env.NEWS_TEST_DATABASE_URL ?? "";
 const LOCAL = /^postgres(ql)?:\/\/([^@/]*@)?(localhost|127\.0\.0\.1)(:\d+)?\//.test(URL_);
 const skip = !URL_ ? "NEWS_TEST_DATABASE_URL not set" : !LOCAL ? "NEWS_TEST_DATABASE_URL must point at localhost" : false;
 
-const MIGRATIONS = ["0061_re_news.sql", "0062_re_news_rss.sql", "0063_re_news_moderation.sql", "0064_re_news_retention.sql"];
+const MIGRATIONS = ["0061_re_news.sql", "0062_re_news_rss.sql", "0063_re_news_moderation.sql", "0064_re_news_retention.sql", "0065_re_news_judged_at.sql"];
 const HOUR = 3_600_000;
 
 describe("news retention (real Postgres)", { skip }, () => {
@@ -113,7 +113,7 @@ describe("news retention (real Postgres)", { skip }, () => {
     assert.deepEqual(st.map((r: any) => r.status), ["rejected"]);
 
     // Two days later the cleaner deletes them — and remembers them.
-    await dbm.pool.query("update news_items set created_at = now() - interval '2 days'");
+    await dbm.pool.query("update news_items set created_at = now() - interval '2 days', judged_at = now() - interval '2 days'");
     const cleaner = new Cleaner(db, appLog);
     const res = await cleaner.cleanNow(false);
     assert.equal(res.kind, "done");
@@ -235,6 +235,97 @@ describe("news retention (real Postgres)", { skip }, () => {
     assert.ok(s.last_cleanup_at);
     assert.deepEqual(s.last_cleanup_stats.deleted, expected);
     assert.equal(s.last_cleanup_stats.trigger, "manual");
+  });
+
+  it("ages by judged_at: stored 5 d ago but rejected 1 h ago is kept, rejected 25 h ago is purged", async () => {
+    await dbm.pool.query(`insert into news_items (external_id, text, status, ai_relevant, ai_reason, created_at, judged_at) values
+      ('late-rej', 't', 'rejected', false, 'r', now() - interval '5 days', now() - interval '1 hour'),
+      ('old-rej', 't', 'rejected', false, 'r', now() - interval '5 days', now() - interval '25 hours'),
+      ('late-dup', 't', 'hidden', false, 'duplicate of a', now() - interval '5 days', now() - interval '1 hour'),
+      ('legacy-rej', 't', 'rejected', false, 'r', now() - interval '2 days', null)`);
+    const cleaner = new Cleaner(db, appLog);
+    const dry = await cleaner.cleanNow(true);
+    assert.deepEqual((dry as any).deleted, { rejected: 2, duplicates: 0, hidden: 0, seen: 0, runs: 0 });
+    const real = await cleaner.cleanNow(false);
+    assert.deepEqual((real as any).deleted, { rejected: 2, duplicates: 0, hidden: 0, seen: 0, runs: 0 });
+    assert.deepEqual(await itemIds(), ["late-dup", "late-rej"]);
+    // The scan can use the partial index.
+    await dbm.pool.query("set enable_seqscan = off");
+    try {
+      const { rows } = await dbm.pool.query(`explain select id from news_items where status in ('rejected', 'hidden')
+        and moderated_at is null and pinned = false and coalesce(judged_at, created_at) < now() - interval '1 day'
+        order by coalesce(judged_at, created_at), id limit 20000`);
+      assert.match(rows.map((r: any) => r["QUERY PLAN"]).join("\n"), /news_items_retention_age_idx/);
+    } finally {
+      await dbm.pool.query("reset enable_seqscan");
+    }
+  });
+
+  it("0065 backfills judged_at for judged rows only, and is idempotent", async () => {
+    await dbm.pool.query(`insert into news_items (external_id, text, status, ai_relevant, ai_attempts, created_at, updated_at) values
+      ('b-rej', 't', 'rejected', false, 0, now() - interval '5 days', now() - interval '2 hours'),
+      ('b-wait', 't', 'hidden', null, 1, now() - interval '5 days', now() - interval '2 hours'),
+      ('b-gaveup', 't', 'hidden', null, 3, now() - interval '5 days', now() - interval '3 hours')`);
+    const sqlText = readFileSync(join(__dirname, "../../../db/drizzle/0065_re_news_judged_at.sql"), "utf8");
+    await dbm.pool.query(sqlText);
+    await dbm.pool.query(sqlText);
+    const { rows } = await dbm.pool.query("select external_id, judged_at = updated_at as eq, judged_at is null as none from news_items order by external_id");
+    assert.deepEqual(rows.map((r: any) => `${r.external_id}:${r.none ? "null" : r.eq}`), ["b-gaveup:true", "b-rej:true", "b-wait:null"]);
+  });
+
+  it("re-score sets judged_at on the rows it re-judges", async () => {
+    const prevKey = process.env.ANTHROPIC_API_KEY, prevFilter = process.env.NEWS_FILTER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.NEWS_FILTER = "keyword";
+    try {
+      await dbm.pool.query(`insert into news_items (external_id, text, status, ai_relevant, ai_score, filter_kind, created_at, judged_at) values
+        ('rs-1', 'مباراة كرة القدم اليوم', 'published', true, 90, 'keyword', now() - interval '3 days', now() - interval '3 days')`);
+      const runner = new Runner(db, appLog, new Cleaner(db, appLog));
+      const dry: any = await runner.rescore(14, true, null);
+      assert.equal(dry.kind, "done");
+      assert.ok(dry.changes.length >= 1, JSON.stringify(dry));
+      const before = (await dbm.pool.query("select judged_at from news_items where external_id = 'rs-1'")).rows[0].judged_at;
+      const res: any = await runner.rescore(14, false, null);
+      assert.equal(res.kind, "done");
+      const row = (await dbm.pool.query("select status, judged_at from news_items where external_id = 'rs-1'")).rows[0];
+      assert.equal(row.status, "rejected");
+      assert.ok(row.judged_at.getTime() > before.getTime() && Date.now() - row.judged_at.getTime() < 60_000, "judged just now");
+      // So the cleaner keeps it for the full window.
+      const c: any = await new Cleaner(db, appLog).cleanNow(true);
+      assert.equal(c.deleted.rejected, 0);
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevFilter === undefined) delete process.env.NEWS_FILTER; else process.env.NEWS_FILTER = prevFilter;
+    }
+  });
+
+  it("runner verdicts, AI give-up and admin status changes set judged_at", async () => {
+    await dbm.pool.query("insert into news_sources (kind, feed_url, display_name) values ('rss', 'https://example.com/feed', 'Example')");
+    const runner = new Runner(db, appLog, new Cleaner(db, appLog));
+    runner.rssOverride = {
+      fetchFeed: async () => ({ notModified: false, etag: null, lastModified: null, title: "Example", siteUrl: null,
+        items: [tweet("j-a", "example.com", "سعر الذهب يرتفع")], skipped: 0 }),
+    };
+    runner.aiOverride = rejectingAi();
+    await runOnce(runner);
+    const r = (await dbm.pool.query("select id, status, judged_at from news_items where external_id = 'j-a'")).rows[0];
+    assert.equal(r.status, "rejected");
+    assert.ok(r.judged_at, "the AI/keyword verdict sets judged_at");
+    await dbm.pool.query("update news_items set judged_at = now() - interval '3 days' where id = $1", [r.id]);
+    const { NewsAdminController } = await import("./news-admin.controller");
+    const admin = new NewsAdminController(db, runner, appLog);
+    const pinOnly: any = await admin.updateItem(r.id, { pinned: false }, { id: 1 } as any);
+    assert.ok(Date.now() - pinOnly.judgedAt.getTime() > 2 * 86_400_000, "a pin-only PATCH is not a verdict");
+    const patched: any = await admin.updateItem(r.id, { status: "hidden" }, { id: 1 } as any);
+    assert.ok(Date.now() - patched.judgedAt.getTime() < 60_000, "an admin status change is a verdict");
+
+    // AI give-up is a verdict; a failure that will be retried is not.
+    await dbm.pool.query(`insert into news_items (external_id, text, status, ai_attempts, created_at) values
+      ('g-1', 't', 'hidden', 2, now() - interval '5 days'), ('g-2', 't', 'hidden', 0, now() - interval '5 days')`);
+    await (runner as any).markAiFailure(["g-1", "g-2"], "boom", true);
+    const g = (await dbm.pool.query("select external_id, judged_at from news_items where external_id like 'g-%' order by external_id")).rows;
+    assert.ok(g[0].judged_at && Date.now() - g[0].judged_at.getTime() < 60_000, "given up now");
+    assert.equal(g[1].judged_at, null, "still waiting for a retry");
   });
 
   it("purgeDuplicates=false keeps a duplicate until the hidden window", async () => {

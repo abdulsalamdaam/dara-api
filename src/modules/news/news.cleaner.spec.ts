@@ -18,7 +18,7 @@ function item(over: Partial<PurgeCandidate> & { hoursOld: number }): PurgeCandid
   const { hoursOld, ...rest } = over;
   return {
     status: "rejected", aiReason: "keyword 10: matched: –", aiRelevant: false, aiAttempts: 0,
-    moderatedAt: null, pinned: false, createdAt: new Date(NOW.getTime() - hoursOld * HOUR_MS), ...rest,
+    moderatedAt: null, pinned: false, createdAt: new Date(NOW.getTime() - hoursOld * HOUR_MS), judgedAt: null, ...rest,
   };
 }
 
@@ -27,6 +27,21 @@ describe("purgeKind — the retention rules", () => {
     assert.equal(purgeKind(item({ hoursOld: 23 }), S, NOW), null);
     assert.equal(purgeKind(item({ hoursOld: 25 }), S, NOW), "rejected");
     assert.equal(purgeKind(item({ hoursOld: 3 }), { ...S, rejectedRetentionHours: 2 }, NOW), "rejected");
+  });
+
+  it("windows count from the verdict (judged_at), not from when the item was stored", () => {
+    const judged = (h: number) => new Date(NOW.getTime() - h * HOUR_MS);
+    assert.equal(purgeKind(item({ hoursOld: 5 * 24, judgedAt: judged(1) }), S, NOW), null, "stored 5 d ago, rejected 1 h ago: kept");
+    assert.equal(purgeKind(item({ hoursOld: 5 * 24, judgedAt: judged(25) }), S, NOW), "rejected", "rejected 25 h ago: purged");
+    const dup = { status: "hidden", aiReason: "duplicate of 1" };
+    assert.equal(purgeKind(item({ ...dup, hoursOld: 5 * 24, judgedAt: judged(1) }), S, NOW), null);
+    assert.equal(purgeKind(item({ ...dup, hoursOld: 5 * 24, judgedAt: judged(25) }), S, NOW), "duplicates");
+    const gaveUp = { status: "hidden", aiRelevant: null, aiAttempts: 3, aiReason: "AI gave up after 3 attempts" };
+    assert.equal(purgeKind(item({ ...gaveUp, hoursOld: 20 * 24, judgedAt: judged(24) }), S, NOW), null, "gave up 1 d ago: hidden window from then");
+    assert.equal(purgeKind(item({ ...gaveUp, hoursOld: 20 * 24, judgedAt: judged(15 * 24) }), S, NOW), "hidden");
+    // The AI-retry window stays on created_at.
+    const waiting = { status: "hidden", aiRelevant: null, aiAttempts: 1, aiReason: "AI failed (will retry next run)" };
+    assert.equal(purgeKind(item({ ...waiting, hoursOld: 3 * 24 }), { ...S, hiddenRetentionDays: 1 }, NOW), null);
   });
 
   it("never an item an admin moderated, whatever its status or age", () => {

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
-import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   newsItemsTable, newsJobSettingsTable, newsSeenTable,
   type NewsCleanupStats, type NewsJobSettings, type NewsRunLogEntry,
@@ -82,18 +82,20 @@ export class NewsCleanerService {
     const s = retentionOf(row);
     const deleted = emptyDeleted();
 
-    // ── news_items: candidates are old, unmoderated, unpinned, not published.
+    // ── news_items: candidates are old (by verdict time), unmoderated,
+    // unpinned, not published. The WHERE matches the partial index
+    // news_items_retention_age_idx (0065) literally, so the scan uses it.
     // The rules themselves are decided in JS (purgeKind) — one tested source.
+    const age = sql`coalesce(${newsItemsTable.judgedAt}, ${newsItemsTable.createdAt})`;
     const candidates = await this.db.select({
       id: newsItemsTable.id, status: newsItemsTable.status, aiReason: newsItemsTable.aiReason,
       aiRelevant: newsItemsTable.aiRelevant, aiAttempts: newsItemsTable.aiAttempts,
-      moderatedAt: newsItemsTable.moderatedAt, pinned: newsItemsTable.pinned, createdAt: newsItemsTable.createdAt,
+      moderatedAt: newsItemsTable.moderatedAt, pinned: newsItemsTable.pinned,
+      createdAt: newsItemsTable.createdAt, judgedAt: newsItemsTable.judgedAt,
     }).from(newsItemsTable).where(and(
-      inArray(newsItemsTable.status, ["rejected", "hidden"]),
-      isNull(newsItemsTable.moderatedAt),
-      eq(newsItemsTable.pinned, false),
-      lt(newsItemsTable.createdAt, candidateCutoff(s, now)),
-    )).orderBy(asc(newsItemsTable.createdAt), asc(newsItemsTable.id)).limit(SCAN_CAP);
+      sql`${newsItemsTable.status} in ('rejected', 'hidden') and ${newsItemsTable.moderatedAt} is null and ${newsItemsTable.pinned} = false`,
+      sql`${age} < ${candidateCutoff(s, now).toISOString()}::timestamptz`,
+    )).orderBy(asc(age), asc(newsItemsTable.id)).limit(SCAN_CAP);
 
     const byKind: Record<PurgeKind, string[]> = { rejected: [], duplicates: [], hidden: [] };
     for (const c of candidates) {

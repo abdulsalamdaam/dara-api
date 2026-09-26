@@ -9,8 +9,8 @@ import { sql } from "drizzle-orm";
  * real-estate ones and titles them, and landlords read the result as a feed.
  *
  * Five tables, all owned by `src/modules/news`. Created by
- * `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql`, `0063_re_news_moderation.sql` +
- * `0064_re_news_retention.sql`, which `ensureSchema` runs on every boot (all
+ * `db/drizzle/0061_re_news.sql`, `0062_re_news_rss.sql`, `0063_re_news_moderation.sql`,
+ * `0064_re_news_retention.sql` + `0065_re_news_judged_at.sql`, which `ensureSchema` runs on every boot (all
  * idempotent), so a deploy needs no manual SQL.
  */
 
@@ -113,6 +113,13 @@ export const newsItemsTable = pgTable("news_items", {
   moderatedBy: integer("moderated_by"),
   moderatedAt: timestamp("moderated_at", { withTimezone: true }),
   pinned: boolean("pinned").notNull().default(false),
+  /**
+   * When the item got its current verdict/status (filter, guard, AI give-up,
+   * duplicate, re-score or admin). The cleaner ages rejected / duplicate /
+   * hidden items from `coalesce(judged_at, created_at)`. NULL = not judged
+   * yet. Added by 0065 (backfilled from updated_at).
+   */
+  judgedAt: timestamp("judged_at", { withTimezone: true }),
   runId: uuid("run_id").references(() => newsJobRunsTable.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
@@ -122,6 +129,8 @@ export const newsItemsTable = pgTable("news_items", {
   byCategory: index("news_items_category_idx").on(t.aiCategory),
   bySource: index("news_items_source_idx").on(t.sourceId),
   byCreated: index("news_items_created_idx").on(t.createdAt, t.id),
+  byRetentionAge: index("news_items_retention_age_idx").on(sql`(coalesce(${t.judgedAt}, ${t.createdAt}))`, t.id)
+    .where(sql`${t.status} in ('rejected', 'hidden') and ${t.moderatedAt} is null and ${t.pinned} = false`),
 }));
 
 /** Single row, id = 1. */

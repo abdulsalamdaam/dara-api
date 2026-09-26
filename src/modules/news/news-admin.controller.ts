@@ -489,7 +489,11 @@ export class NewsAdminController {
   async updateItem(@Param("id") id: string, @Body() body: any, @CurrentUser() user: AuthUser) {
     const patch = parsed(() => parseItemPatch(body));
     // Any hand edit marks the item moderated: the re-score never touches it again.
-    const [row] = await this.db.update(newsItemsTable).set({ ...patch, moderatedBy: user?.id ?? null, moderatedAt: new Date() })
+    // A status change is a verdict: it restarts the retention clock (judged_at).
+    const now = new Date();
+    const [row] = await this.db.update(newsItemsTable).set({
+      ...patch, moderatedBy: user?.id ?? null, moderatedAt: now, ...(patch.status ? { judgedAt: now } : {}),
+    })
       .where(eq(newsItemsTable.id, uuidParam(id))).returning();
     if (!row) throw new NotFoundException("item not found");
     this.appLog.record({ level: "log", event: "news_item_moderated", context: "News", userId: user?.id ?? null, meta: { id, ...patch } });

@@ -14,6 +14,12 @@
  *    after `hiddenRetentionDays` (default 14). An item still waiting for an AI
  *    retry is never cut short: it is also kept for the whole retry window.
  *
+ * Every window counts from the verdict (`judged_at`, falling back to
+ * `created_at` for rows never judged), not from when the item was stored: an
+ * item stored days ago and only rejected now (an AI retry, a re-score) gets
+ * its full window. The AI-retry window alone stays on `created_at` — that is
+ * the runner's own retry rule.
+ *
  * Deleted items stay in `news_seen`, so the next run never stores or judges
  * them again. `news_seen` rows are dropped `seenRetentionDays` after their item
  * is gone; `news_job_runs` rows after `runsRetentionDays`.
@@ -69,6 +75,13 @@ export interface PurgeCandidate {
   moderatedAt: Date | null;
   pinned: boolean;
   createdAt: Date;
+  /** When the current verdict/status was written; null = never judged. */
+  judgedAt: Date | null;
+}
+
+/** What the retention windows count from: the verdict, else the insert. */
+export function retentionAge(r: Pick<PurgeCandidate, "createdAt" | "judgedAt">, now: Date): number {
+  return now.getTime() - (r.judgedAt ?? r.createdAt).getTime();
 }
 
 export function isStoredDuplicate(r: Pick<PurgeCandidate, "status" | "aiReason">): boolean {
@@ -86,7 +99,7 @@ function awaitingAiRetry(r: PurgeCandidate, maxAttempts: number, now: number): b
  */
 export function purgeKind(r: PurgeCandidate, s: RetentionSettings, now: Date, maxAttempts = 3): PurgeKind | null {
   if (r.pinned || r.moderatedAt || r.status === "published") return null;
-  const age = now.getTime() - r.createdAt.getTime();
+  const age = retentionAge(r, now);
   const shortWindow = s.rejectedRetentionHours * HOUR_MS;
   if (r.status === "rejected") return age > shortWindow ? "rejected" : null;
   if (r.status !== "hidden") return null;
@@ -96,8 +109,8 @@ export function purgeKind(r: PurgeCandidate, s: RetentionSettings, now: Date, ma
 }
 
 /**
- * The oldest `created_at` the candidate scan can skip: nothing younger than the
- * shortest window can be deleted.
+ * The candidate scan only reads rows whose `coalesce(judged_at, created_at)`
+ * is older than this: nothing younger than the shortest window can be deleted.
  */
 export function candidateCutoff(s: RetentionSettings, now: Date): Date {
   const shortest = Math.min(s.rejectedRetentionHours * HOUR_MS, s.hiddenRetentionDays * DAY_MS);

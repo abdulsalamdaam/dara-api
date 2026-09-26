@@ -237,8 +237,8 @@ remembers what it deleted so the post is never stored, judged or paid for again.
 | `news_job_runs` (the logs are the heavy part) | 90 days, never a `running` row | `runsRetentionDays` 7–365 |
 
 **Never deleted:** published items, pinned items, and anything an admin moderated by hand
-(`moderated_at` set by any publish / hide / pin / recategorise). Ages count from
-`created_at`, the time the item was stored.
+(`moderated_at` set by any publish / hide / pin / recategorise).
+Ages count from `judged_at` (`0065`: set by every verdict — filter, guard, AI give-up, duplicate, re-score, admin status change; backfilled from `updated_at`), else `created_at`; only the AI-retry window stays on `created_at`.
 
 **`news_seen`** (migration `0064`, applied by `ensureSchema` on every boot, with a backfill
 from `news_items` each boot): every stored `external_id` is written there in the same

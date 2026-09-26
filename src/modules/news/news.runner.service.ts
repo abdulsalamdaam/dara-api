@@ -358,7 +358,8 @@ export class NewsRunnerService {
             metrics: t.metrics,
             status: "hidden",
             ...(nearDupReason.has(t.id)
-              ? { aiRelevant: false, aiReason: nearDupReason.get(t.id)! }
+              // A stored near-duplicate is judged here, at insert.
+              ? { aiRelevant: false, aiReason: nearDupReason.get(t.id)!, judgedAt: new Date() }
               : { aiReason: "awaiting AI review" }),
             runId,
           }))).onConflictDoNothing({ target: newsItemsTable.externalId }).returning({ id: newsItemsTable.id, externalId: newsItemsTable.externalId });
@@ -442,7 +443,7 @@ export class NewsRunnerService {
               aiRelevant: v.relevant, aiScore: v.score, aiCategory: v.category,
               aiTitleAr: v.titleAr || null, aiTitleEn: v.titleEn || null,
               aiSummaryAr: v.summaryAr || null, aiSummaryEn: v.summaryEn || null,
-              aiTags: v.tags, aiReason: reason, status, filterKind,
+              aiTags: v.tags, aiReason: reason, status, filterKind, judgedAt: new Date(),
             }).where(and(eq(newsItemsTable.externalId, id), isNull(newsItemsTable.aiRelevant)));
             if (status === "published") recentTitles.unshift({ externalId: id, title: v.titleEn || v.titleAr });
           }
@@ -540,7 +541,7 @@ export class NewsRunnerService {
           for (const u of plan.updates) {
             const { id, ...set } = u;
             // Re-checked at write time: a PATCH in the meantime wins.
-            await tx.update(newsItemsTable).set({ ...set, filterKind: "keyword" }).where(and(
+            await tx.update(newsItemsTable).set({ ...set, filterKind: "keyword", judgedAt: new Date() }).where(and(
               eq(newsItemsTable.id, id), eq(newsItemsTable.filterKind, "keyword"),
               isNull(newsItemsTable.moderatedAt), eq(newsItemsTable.pinned, false),
             ));
@@ -628,6 +629,8 @@ export class NewsRunnerService {
           aiReason: sql`case when ${newsItemsTable.aiAttempts} + 1 >= ${AI_MAX_ATTEMPTS}
             then ${`AI gave up after ${AI_MAX_ATTEMPTS} attempts — review manually. Last error: ${r}`}
             else ${`${r} (will retry next run)`} end`,
+          // Giving up is the verdict: the hidden window counts from here.
+          judgedAt: sql`case when ${newsItemsTable.aiAttempts} + 1 >= ${AI_MAX_ATTEMPTS} then now() else ${newsItemsTable.judgedAt} end`,
         }
       : { aiReason: r };
     await this.db.update(newsItemsTable).set(set)
