@@ -233,6 +233,11 @@ export function creditRefund(f: MoneyFacts): RuleOutput {
 /**
  * E21: tenant credit carried to another contract. Same contract and
  * landlord: allocation only. Across landlords under agency: refused.
+ * The credit sits on the SOURCE as a negative AR; applying it debits the
+ * source (its credit shrinks) and credits the target (its debt shrinks):
+ * Dr AR (source dims) / Cr AR (target dims); agent also Cr 2122 (source) /
+ * Dr 2122 (target), keeping 1122 = −2122 per contract. (DESIGN §4.4 row E21
+ * printed the sides the other way round, which would have doubled the credit.)
  */
 export function creditApply(f: CreditApplyFacts): RuleOutput {
   if (f.sameContract && f.sameLandlord) return skip("allocation_only", f);
@@ -242,8 +247,8 @@ export function creditApply(f: CreditApplyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("zero_amount", f);
   const ar = arOf(f.treatment);
-  const lines = [...dr(ar, x, f.targetDims), ...cr(ar, x, f.dims)];
-  if (f.treatment === "agent") lines.push(...dr(sys(SYS.lpu), x, f.dims), ...cr(sys(SYS.lpu), x, f.targetDims));
+  const lines = [...dr(ar, x, f.dims), ...cr(ar, x, f.targetDims)];
+  if (f.treatment === "agent") lines.push(...cr(sys(SYS.lpu), x, f.dims), ...dr(sys(SYS.lpu), x, f.targetDims));
   return out(lines, f);
 }
 

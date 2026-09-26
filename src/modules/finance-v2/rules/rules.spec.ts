@@ -178,6 +178,25 @@ describe("fv2 posting rules: every rule balances in both modes (§11.1-a, c)", (
     assert.throws(() => runRule({ rule: "E21", facts: { date: "2026-08-01", treatment: "agent", dims: DIMS, amount: "1.00", targetDims: DIMS, sameContract: false, sameLandlord: false } }, EMPTY_STATE), /between landlords/);
   });
 
+  it("E21 moves the credit FROM the source contract TO the target: source AR up (less credit), target AR down (debt settled)", () => {
+    // Source contract 13 holds the tenant's credit (AR −1,000); target contract 14 owes 300. Applying 300
+    // must leave source −700 and target 0, i.e. Dr AR(source) / Cr AR(target), with 2122 mirroring it (agent).
+    for (const t of ["principal", "agent"] as const) {
+      const out = runRule({ rule: "E21", facts: { date: "2026-08-01", treatment: t, dims: { ...DIMS, contractId: 13 }, amount: "300.00",
+        targetDims: { ...DIMS, contractId: 14 }, sameContract: false, sameLandlord: true } }, EMPTY_STATE);
+      const ar = t === "agent" ? "tenant_receivable_agency" : "tenant_receivable";
+      const net = (key: string, contract: number) => out.lines
+        .filter((l) => "sys" in l.account && l.account.sys === key && l.dims.contractId === contract)
+        .reduce((a, l) => a + l.debit - l.credit, 0);
+      assert.equal(net(ar, 13), 30000, `${t}: the source's credit shrinks`);
+      assert.equal(net(ar, 14), -30000, `${t}: the target's debt shrinks`);
+      if (t === "agent") {
+        assert.equal(net("landlord_payable_uncollected", 13), -30000, "2122 mirrors 1122 on the source");
+        assert.equal(net("landlord_payable_uncollected", 14), 30000, "2122 mirrors 1122 on the target");
+      }
+    }
+  });
+
   it("skips with reasons where §4.4 says skip", () => {
     const skip = (rule: RuleCode, facts: any, st: PostState = EMPTY_STATE) => runRule({ rule, facts, paymentIds: [P] }, st).skip;
     assert.equal(skip("E15", doc("principal", "S", 34500, "other")), "self_commission");
