@@ -23,6 +23,8 @@ import { FinanceV2JournalController } from "./controllers/journal.controller";
 import { FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController } from "./controllers/manual-journals.controller";
 import { FinanceV2PeriodsController } from "./controllers/periods.controller";
 import { FinanceV2VatReturnsController } from "./controllers/vat-returns.controller";
+import { FinanceV2CoreReportsController } from "./controllers/reports-core.controller";
+import { CoreReportsService } from "./reports/core-reports.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -34,12 +36,13 @@ import { FinanceV2VatReturnsController } from "./controllers/vat-returns.control
   controllers: [
     FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
-    FinanceV2VatReturnsController,
+    FinanceV2VatReturnsController, FinanceV2CoreReportsController,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
+    CoreReportsService,
   ],
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
 })
