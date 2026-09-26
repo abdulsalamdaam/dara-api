@@ -576,7 +576,7 @@ class PaymentsController {
     }).where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user))))
       .returning();
 
-    await this.fv2h?.collectionsAdded({ fv2, userId: scopeId(user), tx }, [collection.id]); // finance-v2: E03/E34 in the source transaction
+    await this.fv2h?.collectionsAdded({ fv2, userId: scopeId(user), tx }, [collection.id], { bankAccountId: body?.bankAccountId }); // finance-v2: E03/E34 in the source transaction; tier 1 "received into"
     return { collection, payment: updated, collectedAmount: collectedAfter, remaining: round2(total - collectedAfter) };
     });
   }

@@ -1157,7 +1157,7 @@ class ContractsController {
     await this.db.update(contractsTable)
       .set({ depositStatus: "collected", depositMethod: method, depositDueDate: contract.depositDueDate || date } as any)
       .where(eq(contractsTable.id, id));
-    await this.fv2h?.depositCollected({ fv2, userId: ownerId }, voucher?.id); // finance-v2:
+    await this.fv2h?.depositCollected({ fv2, userId: ownerId }, voucher?.id, { bankAccountId: body?.bankAccountId }); // finance-v2: tier 1 "received into"
     return { voucher };
   }
 
@@ -1921,7 +1921,7 @@ class ContractsController {
         .where(eq(paymentsTable.id, pid));
     }
 
-    await this.fv2h?.contractTerminated({ fv2, userId: ownerId }, id, { mode, deposit: body?.deposit, refundNumber, refundMethod: body?.refundMethod ?? "bank_transfer", depositVoucherIds: buckets.depositVoucherIds, actorId: user.id }); // finance-v2: ended_on, E04/E05/E10/E11/E12
+    await this.fv2h?.contractTerminated({ fv2, userId: ownerId }, id, { mode, deposit: body?.deposit, refundNumber, refundMethod: body?.refundMethod ?? "bank_transfer", refundBankAccountId: body?.refundBankAccountId, depositVoucherIds: buckets.depositVoucherIds, actorId: user.id }); // finance-v2: ended_on, E04/E05/E10/E11/E12
     return {
       success: true,
       refundNumber,

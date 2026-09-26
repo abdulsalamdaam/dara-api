@@ -83,8 +83,9 @@ export class ArAgingService {
       this.pool.query(
         `select payment_ids, document_ids from finance_write_offs where user_id = $1 and written_off_on <= $2::date`, [scope, asOf]),
       this.pool.query(
-        `select kind, tenant_id, contract_id, amount::text as amount, target_document_id from tenant_credit_actions
-          where user_id = $1 and status = 'posted' and action_on <= $2::date`, [scope, asOf]),
+        `select a.kind, a.tenant_id, a.contract_id, a.amount::text as amount, a.target_document_id, t.target_payment_id
+           from tenant_credit_actions a left join tenant_credit_targets t on t.action_id = a.id and t.user_id = a.user_id
+          where a.user_id = $1 and a.status = 'posted' and a.action_on <= $2::date`, [scope, asOf]),
     ]);
 
     const payById = new Map<number, any>(pays.rows.map((p: any) => [p.id, p]));
@@ -196,7 +197,10 @@ export class ArAgingService {
     for (const a of acts.rows) {
       const amt = h(a.amount);
       if (a.kind === "apply") {
-        const it = a.target_document_id != null ? items.get(`d:${a.target_document_id}`) : undefined;
+        // A target installment is its own item, or the document covering it; a not-yet-due one is no item (the credit waits).
+        const tp = a.target_payment_id != null ? Number(a.target_payment_id) : null;
+        const it = a.target_document_id != null ? items.get(`d:${a.target_document_id}`)
+          : tp != null ? items.get(`p:${tp}`) ?? (coveredBy.has(tp) ? items.get(`d:${coveredBy.get(tp)}`) : undefined) : undefined;
         if (it) it.credited += amt;
         addCredit(a.tenant_id, a.contract_id, amt);
       } else {

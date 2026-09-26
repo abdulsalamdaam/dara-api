@@ -8,7 +8,7 @@ import {
   captureDims, collectionEvents, contractCtx, depositForfeitEvent, depositRefundedEvent, documentEvents, expenseEvent, expenseRevision,
   installmentFacts, installmentRows, loadSettings, payoutEvent, reversalEvent, today, voucherUnlinked, type FinanceSettingsRow,
 } from "./facts-loader";
-import { CONVERSION_NOTE, mapEjarStatusV2 } from "./classify";
+import { CONVERSION_NOTE, mapEjarStatusV2, parseBusinessDate } from "./classify";
 import { withTx } from "../db";
 import { and, eq } from "drizzle-orm";
 import { simpleInvoicesTable } from "@dara/database";
@@ -19,6 +19,11 @@ import { accountingV2, dashboardV2 } from "../overrides/reads";
 import { approveV2Kind, ensureAgencyFeeDraft } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
+
+/** Tier 1 (§8.2 a): the optional "received into / paid from" account a legacy money route's body names. */
+export interface MoneyMeta {
+  bankAccountId?: unknown;
+}
 
 /** What a legacy handler passes: the flag resolved at handler entry, the scope, and its transaction if it has one. */
 export interface HookCtx {
@@ -148,17 +153,22 @@ export class FinanceV2Hooks {
   // ─── Hooks: enqueue, never throw ────────────────────────────────────────
 
   /** POST /payments/:id/collections (inside its transaction), and any path that knows its new collection ids. */
-  async collectionsAdded(ctx: HookCtx, collectionIds: number[]): Promise<void> {
-    await this.run(ctx, "collections", (q, s) => collectionEvents(q, ctx.userId, s, collectionIds.filter((n) => Number.isInteger(n))));
+  async collectionsAdded(ctx: HookCtx, collectionIds: number[], money: MoneyMeta = {}): Promise<void> {
+    await this.run(ctx, "collections", async (q, s) => {
+      const ids = collectionIds.filter((n) => Number.isInteger(n));
+      await this.collectionBank(q, ctx.userId, ids, money.bankAccountId);
+      return collectionEvents(q, ctx.userId, s, ids);
+    });
   }
 
   /** POST /simple-invoices/:id/collect (inside its transaction): the collections this transaction wrote. */
-  async invoiceCollected(ctx: HookCtx, documentId: number): Promise<void> {
+  async invoiceCollected(ctx: HookCtx, documentId: number, money: MoneyMeta = {}): Promise<void> {
     await this.run(ctx, "invoice_collect", async (q, s) => {
       const rows = await q.rows(
         `select id from payment_collections where user_id = $1 and invoice_id = $2 and created_at = now() order by id`,
         [ctx.userId, documentId],
       );
+      await this.collectionBank(q, ctx.userId, rows.map((r: any) => Number(r.id)), money.bankAccountId);
       return collectionEvents(q, ctx.userId, s, rows.map((r: any) => Number(r.id)));
     });
   }
@@ -169,9 +179,11 @@ export class FinanceV2Hooks {
   }
 
   /** POST /simple-invoices/receipt-voucher, after its last write: the voucher's collections, and E09 for a deposit voucher. */
-  async voucherIssued(ctx: HookCtx, voucherId: number): Promise<void> {
+  async voucherIssued(ctx: HookCtx, voucherId: number, money: MoneyMeta = {}): Promise<void> {
     await this.run(ctx, "voucher", async (q, s) => {
       const rows = await q.rows(`select id from payment_collections where user_id = $1 and invoice_id = $2 order by id`, [ctx.userId, voucherId]);
+      await this.collectionBank(q, ctx.userId, rows.map((r: any) => Number(r.id)), money.bankAccountId);
+      await this.documentBank(q, ctx.userId, voucherId, money.bankAccountId);
       return [
         ...(await collectionEvents(q, ctx.userId, s, rows.map((r: any) => Number(r.id)))),
         ...(await documentEvents(q, ctx.userId, s, voucherId)),
@@ -180,9 +192,12 @@ export class FinanceV2Hooks {
   }
 
   /** POST /contracts/:id/collect-deposit: the new deposit voucher (E09). */
-  async depositCollected(ctx: HookCtx, voucherId: number | null | undefined): Promise<void> {
+  async depositCollected(ctx: HookCtx, voucherId: number | null | undefined, money: MoneyMeta = {}): Promise<void> {
     if (!voucherId) return;
-    await this.run(ctx, "deposit_collected", (q, s) => documentEvents(q, ctx.userId, s, voucherId));
+    await this.run(ctx, "deposit_collected", async (q, s) => {
+      await this.documentBank(q, ctx.userId, voucherId, money.bankAccountId);
+      return documentEvents(q, ctx.userId, s, voucherId);
+    });
   }
 
   /** POST /simple-invoices: advance collections re-pointed to the new invoice (E14, always skipped: informative). */
@@ -271,6 +286,7 @@ export class FinanceV2Hooks {
    */
   async contractTerminated(ctx: HookCtx, contractId: number, info: {
     mode?: string; deposit?: string; refundNumber?: string | null; refundMethod?: string | null; depositVoucherIds?: number[]; actorId?: number | null;
+    refundBankAccountId?: unknown;
   }): Promise<void> {
     await this.run(ctx, "terminate", async (q, s) => {
       const date = today();
@@ -287,6 +303,7 @@ export class FinanceV2Hooks {
         out.push(...(await collectionEvents(q, ctx.userId, s, rows.map((r: any) => Number(r.id)))));
       }
       const vids = (info.depositVoucherIds ?? []).filter((n) => Number.isInteger(n));
+      const refundBank = await this.usableBank(q, ctx.userId, info.refundBankAccountId);
       if (info.deposit === "refund" && vids.length) {
         const unlinked = await voucherUnlinked(q, ctx.userId, vids);
         const refunded = [...unlinked.entries()].filter(([, amt]) => amt > 0);
@@ -296,14 +313,14 @@ export class FinanceV2Hooks {
           const [c] = await q.rows(`select tenant_id from contracts where id = $1 and user_id = $2`, [contractId, ctx.userId]);
           pv = info.refundNumber ?? (await this.nextRefundNumber(q, ctx.userId));
           await q.exec(
-            `insert into finance_deposit_refunds (user_id, contract_id, tenant_id, owner_id, voucher_ids, amount, refunded_on, method, number, created_by)
-             values ($1, $2, $3, $4, $5::int[], $6, $7, $8, $9, $10) on conflict (user_id, number) do nothing`,
+            `insert into finance_deposit_refunds (user_id, contract_id, tenant_id, owner_id, voucher_ids, amount, refunded_on, method, number, created_by, bank_account_id)
+             values ($1, $2, $3, $4, $5::int[], $6, $7, $8, $9, $10, $11) on conflict (user_id, number) do nothing`,
             [ctx.userId, contractId, c?.tenant_id ?? null, cctx?.ownerId ?? null, refunded.map(([vid]) => vid),
-              fromHalalas(refunded.reduce((a, [, amt]) => a + amt, 0)), date, info.refundMethod ?? null, pv, info.actorId ?? null],
+              fromHalalas(refunded.reduce((a, [, amt]) => a + amt, 0)), date, info.refundMethod ?? null, pv, info.actorId ?? null, refundBank],
           );
         }
         for (const [vid, amt] of refunded) {
-          const e = depositRefundedEvent(vid, amt, cctx, date, info.refundMethod ?? null, s);
+          const e = depositRefundedEvent(vid, amt, cctx, date, info.refundMethod ?? null, s, refundBank);
           (e.payload as any).facts.memo = pv ? `سند صرف ${pv} · Payment voucher ${pv}` : undefined;
           out.push(e);
         }
@@ -396,8 +413,18 @@ export class FinanceV2Hooks {
   }
 
   /** POST /reports/landlord-payouts (E19). */
-  async payoutCreated(ctx: HookCtx, payoutId: number): Promise<void> {
+  async payoutCreated(ctx: HookCtx, payoutId: number, money: MoneyMeta & { transferDate?: unknown } = {}): Promise<void> {
     await this.run(ctx, "payout", async (q, s) => {
+      const bank = await this.usableBank(q, ctx.userId, money.bankAccountId);
+      const paidOn = parseBusinessDate(money.transferDate);
+      if (bank != null || paidOn) {
+        await q.exec(
+          `insert into finance_payout_meta (payout_id, user_id, paid_on, bank_account_id) values ($1, $2, $3, $4)
+           on conflict (payout_id) do update set paid_on = excluded.paid_on, bank_account_id = excluded.bank_account_id
+            where finance_payout_meta.user_id = excluded.user_id`,
+          [payoutId, ctx.userId, paidOn, bank],
+        );
+      }
       const e = await payoutEvent(q, ctx.userId, s, payoutId);
       return e ? [e] : [];
     });
@@ -469,6 +496,19 @@ export class FinanceV2Hooks {
       await this.pool.query(`select fv2_purge_account($1)`, [userId]);
     } catch (err: any) {
       if (err?.code !== "42883" && err?.code !== "42P01") this.fail("purge", userId, err);
+    }
+    // 0067 tables (no immutability triggers, so plain deletes; each table on its own so one missing table skips only itself).
+    for (const t of ["bank_matches", "bank_statement_lines", "bank_statements", "bank_import_profiles", "reminder_log", "tenant_credit_targets", "finance_document_meta"]) {
+      try {
+        await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);
+      } catch (err: any) {
+        if (err?.code !== "42P01") this.fail(`purge ${t}`, userId, err);
+      }
+    }
+    try {
+      await this.pool.query(`delete from reminder_settings where user_id = $1`, [userId]);
+    } catch (err: any) {
+      if (err?.code !== "42P01") this.fail("purge reminder_settings", userId, err);
     }
   }
 
@@ -559,6 +599,40 @@ export class FinanceV2Hooks {
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────
+
+  /** A bank account id from a request body, if it is an ACTIVE account of this scope; else null (the engine then uses the default). */
+  private async usableBank(q: Sql, userId: number, raw: unknown): Promise<number | null> {
+    if (raw === undefined || raw === null || raw === "") return null;
+    const id = Number(raw);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const [r] = await q.rows(`select id from bank_accounts where id = $1 and user_id = $2 and is_active`, [id, userId]);
+    if (!r) this.log.warn(`finance_v2.bank_account_ignored (scope ${userId}): ${id} is not an active bank account of the scope`);
+    return r ? id : null;
+  }
+
+  /** Tier 1: record which cash/bank account the new collections used (finance_collection_meta), keeping any classification. */
+  private async collectionBank(q: Sql, userId: number, ids: number[], raw: unknown): Promise<void> {
+    const bank = await this.usableBank(q, userId, raw);
+    if (bank == null || !ids.length) return;
+    await q.exec(
+      `insert into finance_collection_meta (collection_id, user_id, bank_account_id)
+       select pc.id, pc.user_id, $3 from payment_collections pc where pc.user_id = $1 and pc.id = any($2::int[])
+       on conflict (collection_id) do update set bank_account_id = excluded.bank_account_id where finance_collection_meta.user_id = excluded.user_id`,
+      [userId, ids, bank],
+    );
+  }
+
+  /** Tier 1: which cash/bank account a voucher's money used (E09 posts the voucher itself). */
+  private async documentBank(q: Sql, userId: number, documentId: number, raw: unknown): Promise<void> {
+    const bank = await this.usableBank(q, userId, raw);
+    if (bank == null) return;
+    await q.exec(
+      `insert into finance_document_meta (document_id, user_id, bank_account_id)
+       select si.id, si.user_id, $3 from simple_invoices si where si.id = $2 and si.user_id = $1
+       on conflict (document_id) do update set bank_account_id = excluded.bank_account_id where finance_document_meta.user_id = excluded.user_id`,
+      [userId, documentId, bank],
+    );
+  }
 
   private sqlPool(): Sql {
     return sqlOf(this.pool as any);

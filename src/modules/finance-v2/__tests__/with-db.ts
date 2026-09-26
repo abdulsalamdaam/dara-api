@@ -27,6 +27,7 @@ export const fv2DbSkip: string | false = !FV2_URL
       : false;
 
 export const MIGRATION_0066 = join(__dirname, "../../../../db/drizzle/0066_finance_v2.sql");
+export const MIGRATION_0067 = join(__dirname, "../../../../db/drizzle/0067_finance_v2_tier2.sql");
 export const LEGACY_MIN = join(__dirname, "legacy-min.sql");
 /** The full legacy schema (schema only, generated from db/src/schema), for the hook specs that run real legacy handlers. */
 export const LEGACY_FULL = join(__dirname, "legacy-schema.sql");
@@ -53,7 +54,10 @@ export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolea
   };
   if (opts.legacy === "full") await apply(LEGACY_FULL);
   else if (opts.legacy !== false) await apply(LEGACY_MIN);
-  if (opts.migrate !== false) await apply(MIGRATION_0066);
+  if (opts.migrate !== false) {
+    await apply(MIGRATION_0066);
+    await apply(MIGRATION_0067);
+  }
   return {
     pool,
     schema,

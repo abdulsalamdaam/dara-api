@@ -467,7 +467,7 @@ class ReportsController {
       transferDate: body?.transferDate ?? null, method: body?.method ?? null,
       reference: body?.reference ?? null, notes: body?.notes ?? null,
     } as any).returning();
-    await this.fv2h?.payoutCreated({ fv2, userId: scopeId(user) }, row.id); // finance-v2:
+    await this.fv2h?.payoutCreated({ fv2, userId: scopeId(user) }, row.id, { bankAccountId: body?.bankAccountId, transferDate: body?.transferDate }); // finance-v2: tier 1 "paid from"
     return row;
   }
 

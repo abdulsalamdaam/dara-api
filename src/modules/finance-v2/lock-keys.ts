@@ -21,6 +21,12 @@ export const LOCK_KEYS = {
   ENTRY_NO: -105,
   /** First-enable setup (chart seed, periods, default bank accounts). */
   SETUP: -106,
+  /** Bank account create (the next free 1110xx GL code). */
+  BANK_ACCOUNT: -107,
+  /** Bank statement import and matching, per account. */
+  BANK_REC: -108,
+  /** Tenant credit refund / apply: the credit-sufficiency check and the write, serialised per account. */
+  TENANT_CREDIT: -109,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];

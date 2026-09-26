@@ -1243,7 +1243,7 @@ class SimpleInvoicesController {
         } as any);
       }
     }
-    await this.fv2h?.voucherIssued({ fv2, userId: uid }, doc.id); // finance-v2:
+    await this.fv2h?.voucherIssued({ fv2, userId: uid }, doc.id, { bankAccountId: body?.bankAccountId }); // finance-v2: tier 1 "received into"
     return doc;
   }
 
@@ -2083,7 +2083,7 @@ class SimpleInvoicesController {
       paymentMethod: method,
       attachmentKey: body?.attachmentKey ?? doc.attachmentKey,
     }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
-    await this.fv2h?.invoiceCollected({ fv2, userId: uid, tx }, doc.id); // finance-v2: E03/E16/E34 in the source transaction
+    await this.fv2h?.invoiceCollected({ fv2, userId: uid, tx }, doc.id, { bankAccountId: body?.bankAccountId }); // finance-v2: E03/E16/E34 in the source transaction; tier 1 "received into"
     return updated;
     });
   }

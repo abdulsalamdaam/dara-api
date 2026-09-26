@@ -242,7 +242,8 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
     `select id, type::text as type, kind, status::text as status, items, subtotal::text as subtotal, total::text as total,
             to_char(coalesce(issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date),'YYYY-MM-DD') as date,
             to_char(coalesce(paid_date, issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date),'YYYY-MM-DD') as paid_on,
-            contract_id, payment_id, payment_ids, tenant_id, number, billing_reference, client, payment_method
+            contract_id, payment_id, payment_ids, tenant_id, number, billing_reference, client, payment_method,
+            (select m.bank_account_id from finance_document_meta m where m.document_id = simple_invoices.id and m.user_id = simple_invoices.user_id) as bank_account_id
        from simple_invoices where id = $1 and user_id = $2 and deleted_at is null`,
     [docId, userId],
   );
@@ -266,7 +267,8 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
     const unlinked = toHalalas(d.total) - toHalalas(linked.s);
     const facts: DepositMoneyFacts = {
       date: d.paid_on, treatment: t.treatment, dims, warnings: t.warnings,
-      documentId: d.id, amount: fromHalalas(Math.max(0, unlinked)), bank: { method: d.payment_method ?? null },
+      documentId: d.id, amount: fromHalalas(Math.max(0, unlinked)),
+      bank: d.bank_account_id != null ? { bankAccountId: Number(d.bank_account_id), method: d.payment_method ?? null } : { method: d.payment_method ?? null },
     };
     return [ev("simple_invoice", d.id, "deposit_received", { rule: "E09", facts })];
   }
@@ -438,11 +440,12 @@ export async function voucherUnlinked(q: Sql, userId: number, voucherIds: number
   return out;
 }
 
-export function depositRefundedEvent(voucherId: number, amount: number, ctx: ContractCtx | null, date: string, method: string | null, s: FinanceSettingsRow): LedgerEvent {
+export function depositRefundedEvent(voucherId: number, amount: number, ctx: ContractCtx | null, date: string, method: string | null, s: FinanceSettingsRow,
+  bankAccountId: number | null = null): LedgerEvent {
   const t = ctx ? { treatment: ctx.treatment, warnings: ctx.warnings } : resolveTreatment(s.mode, null);
   const facts: DepositMoneyFacts = {
     date, treatment: t.treatment, dims: dimsOf(ctx), warnings: t.warnings,
-    documentId: voucherId, amount: fromHalalas(amount), bank: { method },
+    documentId: voucherId, amount: fromHalalas(amount), bank: bankAccountId != null ? { bankAccountId, method } : { method },
   };
   return ev("simple_invoice", voucherId, "deposit_refunded", { rule: "E10", facts });
 }

@@ -23,6 +23,7 @@ import { DEPOSIT_DESC, installmentNature, installmentVat } from "../hooks/classi
 import { coverageWindow, monthsBetween } from "../recognizer.service";
 import type { ReleaseFacts, RuleCode } from "../rules";
 import { depositForfeitEvent } from "../hooks/facts-loader";
+import { creditActionEvents, writeOffEvents } from "../tier1/credit-events";
 
 export interface PlannedEvent extends LedgerEvent {
   /** §6.4 rank within a business date. */
@@ -148,7 +149,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
       if (unlinked <= 0) continue;
       const ctx = await ctxOf(d.contract_id);
       const [ref] = await q.rows(
-        `select amount::text as amount, to_char(refunded_on,'YYYY-MM-DD') as on, method, cardinality(voucher_ids) as n
+        `select amount::text as amount, to_char(refunded_on,'YYYY-MM-DD') as on, method, cardinality(voucher_ids) as n, bank_account_id
            from finance_deposit_refunds where user_id = $1 and $2 = any(voucher_ids) order by id limit 1`,
         [userId, Number(d.id)],
       );
@@ -162,7 +163,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
         date = ctx?.endedOn ?? d.contract_updated;
         warn.push("inferred_date");
       }
-      const e = depositRefundedEvent(Number(d.id), amount, ctx, date, ref?.method ?? null, s);
+      const e = depositRefundedEvent(Number(d.id), amount, ctx, date, ref?.method ?? null, s, ref?.bank_account_id ?? null);
       (e.payload as any).facts.warnings = [...((e.payload as any).facts.warnings ?? []), ...warn];
       push(e, d.created);
     }
@@ -272,6 +273,16 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
   for (const x of await q.rows(`select id, created_at::text as created from landlord_payouts where user_id = $1 and deleted_at is null order by id`, [userId])) {
     const e = await payoutEvent(q, userId, s, Number(x.id));
     if (e) push(e, x.created);
+  }
+
+  // ── v2-only money records (§6.3 "v2 tables"): write-offs (E24) and tenant credit refunds / applications (E20 / E21) ──
+  for (const x of await q.rows(`select id from finance_write_offs where user_id = $1 order by id`, [userId])) {
+    const r = await writeOffEvents(q, userId, s, Number(x.id));
+    for (const e of r?.events ?? []) push(e, r!.createdAt);
+  }
+  for (const x of await q.rows(`select id from tenant_credit_actions where user_id = $1 order by id`, [userId])) {
+    const r = await creditActionEvents(q, userId, s, Number(x.id));
+    for (const e of r?.events ?? []) push(e, r!.createdAt);
   }
 
   // ── Deleted sources whose entry is posted and not reversed: the missing reversal (catch-up, §6.3) ──

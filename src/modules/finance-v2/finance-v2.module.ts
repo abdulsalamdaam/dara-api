@@ -32,6 +32,10 @@ import { StatementsService } from "./reports/statements.service";
 import { ReconciliationService } from "./reports/reconciliation.service";
 import { legacyAccountingProvider } from "./reports/legacy-accounting";
 import { FinanceV2BugsController } from "./controllers/bugs.controller";
+import { FinanceV2Tier1Controller } from "./controllers/tier1.controller";
+import { BankAccountsService } from "./tier1/bank-accounts.service";
+import { ExpensesV2Service } from "./tier1/expenses-v2.service";
+import { TenantCreditsService } from "./tier1/tenant-credits.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -44,13 +48,14 @@ import { FinanceV2BugsController } from "./controllers/bugs.controller";
     FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
-    FinanceV2BugsController,
+    FinanceV2BugsController, FinanceV2Tier1Controller,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
+    BankAccountsService, ExpensesV2Service, TenantCreditsService,
   ],
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
 })
