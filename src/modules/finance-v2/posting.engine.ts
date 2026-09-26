@@ -78,6 +78,30 @@ export class PostingEngine {
     }
   }
 
+  /**
+   * Process one row on the CALLER's transaction, inside a savepoint (the
+   * backfill dry run: everything is rolled back at the end). A failure rolls
+   * back only the savepoint and marks the row `failed` in that same
+   * transaction, with its code, so the dry run can report it; no retry.
+   */
+  async processRowOn(c: Fv2Client, userId: number, outboxId: number): Promise<Outcome> {
+    await c.query("savepoint fv2_row");
+    try {
+      const out = await this.processInTx(c, userId, outboxId);
+      await c.query("release savepoint fv2_row");
+      return out;
+    } catch (err) {
+      await c.query("rollback to savepoint fv2_row");
+      const { code } = errorCode(err);
+      await c.query(
+        `update ledger_outbox set status = 'failed', attempts = attempts + 1, last_error = $3, last_error_code = $4
+          where id = $1 and user_id = $2`,
+        [outboxId, userId, String((err as any)?.message ?? err).slice(0, 2000), code],
+      );
+      return "failed";
+    }
+  }
+
   private async processInTx(c: Fv2Client, userId: number, outboxId: number): Promise<Outcome> {
     const r = await c.query(
       `select id, user_id, source_type, source_id, event, to_char(occurred_on,'YYYY-MM-DD') as occurred_on, origin, payload, attempts

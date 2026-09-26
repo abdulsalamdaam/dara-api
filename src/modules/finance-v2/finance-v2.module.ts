@@ -14,6 +14,15 @@ import { PostingErrorsService } from "./posting-errors.service";
 import { LedgerStartService } from "./ledger-start.service";
 import { RecognizerService } from "./recognizer.service";
 import { FinanceV2HooksModule } from "./hooks/hooks.module";
+import { BackfillService } from "./backfill/backfill.service";
+import { ManualJournalsService } from "./manual-journals.service";
+import { JournalQueryService } from "./journal-query.service";
+import { PeriodCloseService } from "./period-close.service";
+import { VatReturnsService } from "./vat-returns.service";
+import { FinanceV2JournalController } from "./controllers/journal.controller";
+import { FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController } from "./controllers/manual-journals.controller";
+import { FinanceV2PeriodsController } from "./controllers/periods.controller";
+import { FinanceV2VatReturnsController } from "./controllers/vat-returns.controller";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -22,11 +31,16 @@ import { FinanceV2HooksModule } from "./hooks/hooks.module";
  */
 @Module({
   imports: [FinanceV2CoreModule, FinanceV2HooksModule],
-  controllers: [FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController],
+  controllers: [
+    FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
+    FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
+    FinanceV2VatReturnsController,
+  ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
+    BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
   ],
-  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService],
+  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
 })
 export class FinanceV2Module {}

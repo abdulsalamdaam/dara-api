@@ -236,7 +236,8 @@ export async function collectionEvents(q: Sql, userId: number, s: FinanceSetting
 
 const CHARGE_KINDS = new Set(["invoice", "manual"]);
 
-export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsRow, docId: number): Promise<LedgerEvent[]> {
+export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsRow, docId: number,
+  opts: { includeReturnedDeposit?: boolean } = {}): Promise<LedgerEvent[]> {
   const [d] = await q.rows(
     `select id, type::text as type, kind, status::text as status, items, subtotal::text as subtotal, total::text as total,
             to_char(coalesce(issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date),'YYYY-MM-DD') as date,
@@ -245,7 +246,9 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
        from simple_invoices where id = $1 and user_id = $2 and deleted_at is null`,
     [docId, userId],
   );
-  if (!d || d.status !== "confirmed") return [];
+  // The backfill (§6.3) also posts the E09 of a deposit voucher that was later cancelled by a refund.
+  const returnedDeposit = opts.includeReturnedDeposit === true && d?.kind === "deposit" && d?.status === "cancelled";
+  if (!d || (d.status !== "confirmed" && !returnedDeposit)) return [];
   const kind: string = d.kind ?? "invoice";
   const ctx = d.contract_id ? await contractCtx(q, userId, s.mode, Number(d.contract_id)) : null;
   const clientOwner = Number(d.client?.ownerId);

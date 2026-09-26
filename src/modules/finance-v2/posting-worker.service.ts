@@ -83,6 +83,33 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Run `fn` holding the account's session lock (the same key as the posting
+   * tick), WAITING for it rather than skipping: the backfill (DESIGN §6.1)
+   * pauses live posting for the account while it runs. Held on a dedicated
+   * client from the lock pool and released on that same client.
+   */
+  async withAccountLock<T>(userId: number, fn: () => Promise<T>): Promise<T> {
+    const lp = (this.lockPool ??= createAuxPool(2, "finance-v2 worker lock pool"));
+    const client = await lp.connect();
+    let got = false;
+    try {
+      await client.query("select pg_advisory_lock(hashtextextended($1, 0))", [`fv2:${userId}`]);
+      got = true;
+      return await fn();
+    } finally {
+      let broken = false;
+      if (got) {
+        try {
+          await client.query("select pg_advisory_unlock(hashtextextended($1, 0))", [`fv2:${userId}`]);
+        } catch {
+          broken = true;
+        }
+      }
+      client.release(broken || undefined);
+    }
+  }
+
   /** Post one account's due rows under its session lock. Returns null when another worker holds it. */
   async runAccount(userId: number, limit = 200) {
     const lp = (this.lockPool ??= createAuxPool(2, "finance-v2 worker lock pool"));

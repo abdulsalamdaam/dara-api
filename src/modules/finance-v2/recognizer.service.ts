@@ -130,6 +130,8 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
           const monthEnd = `${month}-${String(lastDayOfMonth(y, m)).padStart(2, "0")}`;
           const date = monthEnd < window.end ? monthEnd : window.end;
           if (!(date < today)) break;
+          // Cutover (§6.2): months before the go-live date are in the opening entry's 2131 balance.
+          if (s.goLive && date < s.goLive) continue;
           const facts: ReleaseFacts = {
             date, treatment: "principal", dims: { ...dimsFor(ctx), paymentId: r.id }, warnings: ctx.warnings,
             paymentId: r.id, month, windowStart: window.start, windowEnd: window.end,
@@ -183,24 +185,29 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /**
-   * The coverage window of an installment (§4.1): its due date to the day
-   * before the contract's next RENT installment; the last one ends at the
-   * contract end, or `ended_on` when the contract ended early.
-   */
-  private async coverageWindow(q: Sql, userId: number, p: InstallmentRow, ctx: ContractCtx): Promise<{ start: string; end: string } | null> {
-    if (installmentNature(p.description) !== "rent") return null;
-    const rows = await q.rows(
-      `select to_char(due_date,'YYYY-MM-DD') as due, description from payments
-        where user_id = $1 and contract_id = $2 and deleted_at is null and due_date > $3::date order by due_date, id`,
-      [userId, p.contract_id, p.due],
-    );
-    const next = rows.find((r: any) => installmentNature(r.description) === "rent");
-    let end = next ? dayBefore(next.due) : (ctx.endDate ?? p.due);
-    if (ctx.endedOn && ctx.endedOn < end) end = ctx.endedOn;
-    if (end < p.due) end = p.due;
-    return { start: p.due, end };
+  private coverageWindow(q: Sql, userId: number, p: InstallmentRow, ctx: ContractCtx): Promise<{ start: string; end: string } | null> {
+    return coverageWindow(q, userId, p, ctx);
   }
+}
+
+/**
+ * The coverage window of an installment (§4.1): its due date to the day
+ * before the contract's next RENT installment; the last one ends at the
+ * contract end, or `ended_on` when the contract ended early. Shared with the
+ * backfill, so its release keys and windows equal the recognizer's.
+ */
+export async function coverageWindow(q: Sql, userId: number, p: InstallmentRow, ctx: ContractCtx): Promise<{ start: string; end: string } | null> {
+  if (installmentNature(p.description) !== "rent") return null;
+  const rows = await q.rows(
+    `select to_char(due_date,'YYYY-MM-DD') as due, description from payments
+      where user_id = $1 and contract_id = $2 and deleted_at is null and due_date > $3::date order by due_date, id`,
+    [userId, p.contract_id, p.due],
+  );
+  const next = rows.find((r: any) => installmentNature(r.description) === "rent");
+  let end = next ? dayBefore(next.due) : (ctx.endDate ?? p.due);
+  if (ctx.endedOn && ctx.endedOn < end) end = ctx.endedOn;
+  if (end < p.due) end = p.due;
+  return { start: p.due, end };
 }
 
 function dimsFor(ctx: ContractCtx) {
