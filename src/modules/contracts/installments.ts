@@ -1,4 +1,4 @@
-import { exemptionReasonFor, isVatCategory, type VatCategory } from "../../common/vat-exemption";
+import { acceptsCustomExemptionText, exemptionReasonFor, isVatCategory, normalizeExemptionReasonText, type VatCategory } from "../../common/vat-exemption";
 export type FeeEntry = {
   id: string; name: string; amount: string; recurrence: string; dueDate: string; paymentMethod: string;
   // Used when recurrence === "custom": a hand-built list of {dueDate, amount}.
@@ -9,6 +9,8 @@ export type FeeEntry = {
   // the BT-121 reason. Stored as sent; invoices raised from the fee inherit it.
   vatCategory?: string;
   exemptionReason?: string;
+  /** An out-of-scope fee's own BT-120 wording; kept only for `O`. */
+  exemptionReasonText?: string;
 };
 
 /**
@@ -20,14 +22,17 @@ export type FeeEntry = {
  */
 export function feeLineTreatment(
   fees: unknown, description: string | null | undefined,
-): { vatCategory?: VatCategory; exemptionReason?: string } {
+): { vatCategory?: VatCategory; exemptionReason?: string; exemptionReasonText?: string } {
   const name = (description ?? "").trim();
   if (!name || !Array.isArray(fees)) return {};
   // A nameless fee's installments are written as "رسوم" — match it the same way.
   const fee = (fees as FeeEntry[]).find((f) => (String(f?.name ?? "").trim() || "رسوم") === name);
   if (!fee || !isVatCategory(fee.vatCategory) || fee.vatCategory === "S") return {};
   const reason = exemptionReasonFor(fee.vatCategory, fee.exemptionReason);
-  return reason ? { vatCategory: fee.vatCategory, exemptionReason: reason } : {};
+  if (!reason) return {};
+  // An out-of-scope fee may say why in the landlord's words; its invoices say it too.
+  const text = acceptsCustomExemptionText(fee.vatCategory) ? normalizeExemptionReasonText(fee.exemptionReasonText) : undefined;
+  return { vatCategory: fee.vatCategory, exemptionReason: reason, ...(text ? { exemptionReasonText: text } : {}) };
 }
 /** Per-year rent override — `year` is 1-based (year 1, 2, 3, …). */
 export type RentTerm = { year: number; amount: number };

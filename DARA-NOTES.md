@@ -458,6 +458,15 @@ guidance (residential utilities follow the rent as SA-30; a deposit, a
 pass-through or a penalty is OOS) is the usual reading of the rules, not a
 ruling: the facts decide, so point landlords to their accountant.
 
+**Contract fees carry the wording too** (web 77b1769, api e91a41c). The
+shared `VatTreatmentPicker` itself offers the optional box whenever a
+treatment is `O`, so the contract wizard's fees, the Ejar-import fees step
+and the invoice editor all ask the same way. A fee stores
+`exemptionReasonText` (O only — `reasonTextField` on the web). Invoices from
+its installments inherit it: `contractLineExemption` on the web prefill, and
+`feeLineTreatment` on a tenant's payment confirmation, which cleans it with
+`normalizeExemptionReasonText`. SDK run 36243244424 on master: PASSED.
+
 **The CI validator is pinned to SDK R3.4.8** (`aashahin/zatca-sdk` mirror,
 commit + jar SHA-256), not R3.2.7 — R3.2.7 (Dec 2023) predates the format rules
 BR-KSA-F-07…F-13, BR-KSA-99 and the three newest Z codes. Two traps in R3.4.x:

@@ -404,6 +404,8 @@ export class EjarController {
         // The fee's ZATCA treatment, as the fees step chose it.
         ...(typeof f?.vatCategory === "string" ? { vatCategory: f.vatCategory } : {}),
         ...(typeof f?.exemptionReason === "string" && f.exemptionReason ? { exemptionReason: f.exemptionReason } : {}),
+        ...(f?.vatCategory === "O" && typeof f?.exemptionReasonText === "string" && f.exemptionReasonText.trim()
+          ? { exemptionReasonText: f.exemptionReasonText.trim().slice(0, 300) } : {}),
         ...(f?.recurrence === "custom" && Array.isArray(f?.customSchedule)
           ? {
               customSchedule: (f.customSchedule as Array<{ dueDate?: unknown; amount?: unknown }>)
