@@ -13,8 +13,9 @@
  *     (new files are exempt: they cannot change legacy behaviour);
  *  3. a pre-existing Drizzle schema file changed (`db/src/schema/*.ts`);
  *  4. a Finance v2 migration contains ALTER TABLE on a table it did not create;
- *  5. the string `fv2.purge` appears outside the 0066 migration, or 0066 turns
- *     it on more than once (only fv2_purge_account may).
+ *  5. the string `fv2.purge` appears outside the 0066 migration (specs, which
+ *     run on throwaway schemas, are exempt), or 0066 turns it on more than
+ *     once (only fv2_purge_account may).
  *
  * The web repo reuses the same logic with `--profile web` (protected:
  * src/components/dashboard/**, src/lib/**; checks 3–5 do not apply there).
@@ -188,10 +189,11 @@ function main(): void {
       const p = join(cwd, f);
       if (existsSync(p)) problems.push(...checkMigrationAlters(readFileSync(p, "utf8"), f));
     }
-    // 5. fv2.purge confined to the 0066 migration
+    // 5. fv2.purge confined to the 0066 migration. Specs are exempt: they run on a throwaway schema, and the property
+    // test clears one account's ledger to rebuild it by backfill (fv2_purge_account would also drop the chart and meta).
     let hits = "";
     try {
-      hits = git(["grep", "-l", "-F", "fv2.purge", "--", "src", "db", ":!db/drizzle/0066_finance_v2.sql"], cwd);
+      hits = git(["grep", "-l", "-F", "fv2.purge", "--", "src", "db", ":!db/drizzle/0066_finance_v2.sql", ":!*.spec.ts"], cwd);
     } catch {
       hits = ""; // git grep exits 1 when nothing matches
     }
