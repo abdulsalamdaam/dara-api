@@ -7,7 +7,7 @@ import { NewsRunnerService } from "./news.runner.service";
  * X stays a first-class source without a key: an admin can add, test, toggle
  * and delete X accounts; the test says "saved, waiting for a key" (200), not 400.
  */
-const KEYS = ["X_BEARER_TOKEN", "TWITTERAPI_IO_KEY", "NEWS_SOURCE_PROVIDER"] as const;
+const KEYS = ["X_BEARER_TOKEN", "TWITTERAPI_IO_KEY", "APIFY_TOKEN", "NEWS_SOURCE_PROVIDER"] as const;
 
 function fakeDb(existing: Record<string, any>[] = []) {
   const rows = [...existing];

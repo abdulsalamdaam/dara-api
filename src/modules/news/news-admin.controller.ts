@@ -11,13 +11,14 @@ import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { listQuerySchema } from "../../common/pagination";
 import { AppLogService } from "../../common/logging/app-log.service";
-import { buildProvider } from "./news.config";
+import { buildProvider, type NewsConfig } from "./news.config";
 import { normaliseHandle } from "./news.handles";
 import { computeNextRunAt, NEWS_TZ } from "./news.schedule";
 import { NewsRunnerService } from "./news.runner.service";
 import { searchCondition } from "./news.controller";
 import { NEWS_CATEGORIES, NEWS_ITEM_STATUSES, ProviderError } from "./news.types";
 import { RssProvider } from "./providers/rss.provider";
+import { ApifyProvider, APIFY_PRICE_PER_ITEM_USD, type ApifyBudget } from "./providers/apify.provider";
 import { assertPublicHost, checkUrlShape, SafeFetchError } from "./providers/safe-fetch";
 import {
   NewsValidationError, parseItemPatch, parseSettingsPatch, parseSourceIds, parseSourcePatch, UUID_RE,
@@ -74,7 +75,7 @@ export async function parseFeedUrl(body: any, resolve?: (h: string) => Promise<A
 
 /** What an X test says while no X key is set (the account itself is fine). */
 export const X_NO_KEY_MESSAGE =
-  "X key not set — the account is saved and will be fetched once X_BEARER_TOKEN or TWITTERAPI_IO_KEY is added";
+  "X key not set — the account is saved and will be fetched once X_BEARER_TOKEN, TWITTERAPI_IO_KEY or APIFY_TOKEN is added";
 
 /**
  * Super-admin console for the news job — same guard pair as the admin module.
@@ -102,9 +103,16 @@ export class NewsAdminController {
         .where(eq(newsJobRunsTable.status, "running")).orderBy(desc(newsJobRunsTable.startedAt)).limit(1),
       this.db.select(RUN_SUMMARY_COLUMNS).from(newsJobRunsTable).orderBy(desc(newsJobRunsTable.startedAt)).limit(1),
     ]);
+    const apify = await this.apifyStatus(cfg);
+    const warnings = [...cfg.warnings];
+    if (apify?.overBudget) {
+      warnings.push(`Apify budget reached ($${apify.spentUsd?.toFixed(2)} of $${apify.budgetUsd.toFixed(2)}) — X accounts are skipped until the cycle resets${apify.cycleEndAt ? ` (${apify.cycleEndAt.slice(0, 10)})` : ""}. RSS runs as normal.`);
+    } else if (apify?.error) warnings.push(`Could not read Apify usage: ${apify.error}`);
     return {
       configured: cfg.configured,
       provider: cfg.provider,
+      /** Apify only: this cycle's spend against NEWS_APIFY_MONTHLY_BUDGET_USD. */
+      apify,
       /** The filter a run uses now; `filterSetting` is NEWS_FILTER as read. */
       filter: cfg.filter,
       filterSetting: cfg.filterSetting,
@@ -112,13 +120,41 @@ export class NewsAdminController {
         x: { configured: cfg.xConfigured, count: counts.x.count, enabled: counts.x.enabled },
         rss: { count: counts.rss.count, enabled: counts.rss.enabled },
       },
-      warnings: cfg.warnings,
+      warnings,
       model: cfg.filter === "ai" ? cfg.model : null,
       timezone: NEWS_TZ,
       runningRunId: running[0]?.id ?? null,
       settings,
       nextRunAt: settings?.enabled ? settings.nextRunAt : null,
       lastRun: last[0] ?? null,
+    };
+  }
+
+  /** Apify spend, cached for a minute (the status is polled while a run is going). */
+  private apifyCache: { at: number; key: string; value: ApifyBudget } | null = null;
+
+  private async apifyStatus(cfg: NewsConfig) {
+    if (cfg.provider !== "apify") return null;
+    const provider = this.runner.providerOverride instanceof ApifyProvider
+      ? this.runner.providerOverride : buildProvider(cfg) as ApifyProvider | null;
+    if (!provider) return null;
+    const key = `${cfg.apify.budgetUsd}`;
+    let b = this.apifyCache && this.apifyCache.key === key && Date.now() - this.apifyCache.at < 60_000 ? this.apifyCache.value : null;
+    if (!b) {
+      b = await provider.budget();
+      this.apifyCache = { at: Date.now(), key, value: b };
+    }
+    return {
+      budgetUsd: b.effectiveBudgetUsd,
+      spentUsd: b.usage?.spentUsd ?? null,
+      limitUsd: b.usage?.limitUsd ?? null,
+      remainingUsd: b.remainingUsd,
+      cycleStartAt: b.usage?.cycleStartAt ?? null,
+      cycleEndAt: b.usage?.cycleEndAt ?? null,
+      overBudget: b.overBudget,
+      maxItemsPerRun: cfg.apify.maxItemsPerRun,
+      pricePerItemUsd: APIFY_PRICE_PER_ITEM_USD,
+      error: b.error,
     };
   }
 

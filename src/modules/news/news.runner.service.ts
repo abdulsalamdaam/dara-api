@@ -7,7 +7,8 @@ import {
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { buildProvider, readNewsConfig, type FilterKind, type NewsConfig } from "./news.config";
-import { compareTweetIds, ProviderError, type NormalisedTweet, type SourceProvider } from "./news.types";
+import { compareTweetIds, ProviderError, type FetchResult, type NormalisedTweet, type SourceProvider } from "./news.types";
+import { ApifyProvider } from "./providers/apify.provider";
 import { dedupeTweets } from "./news.dedupe";
 import { decideStatus, NewsAiFilter } from "./news.ai";
 import { AI_MAX_ATTEMPTS, capQueue, processAiQueue } from "./news.batches";
@@ -148,8 +149,25 @@ export class NewsRunnerService {
       // X rows need a key. Without one they are skipped — logged, not an error —
       // and the run carries on with RSS.
       const xRows = all.filter((s) => s.kind !== "rss");
-      const sources = provider ? all : all.filter((s) => s.kind === "rss");
-      if (!provider && xRows.length) push("info", `${xRows.length} X account(s) skipped — no X key set (X_BEARER_TOKEN / TWITTERAPI_IO_KEY)`);
+      // Apify: the month's budget is checked before any X spend. Over it, X is
+      // skipped like "no key" (a warning, not a failure) and RSS carries the run.
+      let xOn = !!provider;
+      let maxChargeUsd: number | null = null;
+      if (provider instanceof ApifyProvider && xRows.length) {
+        const b = await provider.budget();
+        if (b.overBudget) {
+          xOn = false;
+          push("warn", `${xRows.length} X account(s) skipped — Apify budget reached: $${b.usage!.spentUsd.toFixed(2)} of $${b.effectiveBudgetUsd.toFixed(2)} this cycle (NEWS_APIFY_MONTHLY_BUDGET_USD)${b.usage?.cycleEndAt ? `, resets ${b.usage.cycleEndAt.slice(0, 10)}` : ""}`);
+          this.logger.warn(`news run ${runId}: Apify budget reached ($${b.usage!.spentUsd.toFixed(4)} of $${b.effectiveBudgetUsd}) — X skipped`);
+        } else if (b.error) {
+          push("warn", `could not read Apify usage (${b.error}) — fetching anyway; Apify's own monthly cap still applies`);
+        } else {
+          maxChargeUsd = b.remainingUsd;
+          push("info", `Apify: $${b.usage!.spentUsd.toFixed(4)} of $${b.effectiveBudgetUsd.toFixed(2)} spent this cycle`);
+        }
+      }
+      const sources = xOn ? all : all.filter((s) => s.kind === "rss");
+      if (!provider && xRows.length) push("info", `${xRows.length} X account(s) skipped — no X key set (X_BEARER_TOKEN / TWITTERAPI_IO_KEY / APIFY_TOKEN)`);
       c.accountsTotal = sources.length;
       if (!all.length) push("warn", sourceIds?.length ? "none of the requested sources exist" : "no enabled sources");
 
@@ -157,6 +175,27 @@ export class NewsRunnerService {
       const since = new Date(Date.now() - settings.lookbackHours * 3_600_000);
       const fetched: Array<NormalisedTweet & { sourceId: string }> = [];
       let stopReason: string | null = null;
+
+      // A batch provider (Apify) fetches every X account in ONE call, up front;
+      // the loop below then does the per-source bookkeeping from its results.
+      let batch: Map<string, FetchResult | { error: ProviderError }> | null = null;
+      const xToFetch = sources.filter((s) => s.kind !== "rss" && s.handle);
+      if (xOn && provider?.fetchMany && xToFetch.length) {
+        try {
+          const res = await provider.fetchMany(
+            xToFetch.map((s) => ({ handle: s.handle!, since, sinceId: s.lastSeenTweetId, userId: s.xUserId, lastFetchedAt: s.lastFetchedAt })),
+            { maxPerTarget: settings.maxPerAccount, maxChargeUsd },
+          );
+          batch = res.results;
+          const r = res.run;
+          if (r) push("info", `${provider.name} run ${r.runId} ${r.status.toLowerCase()}: ${r.items} row(s) for ${xToFetch.length} account(s)${r.costUsd != null ? `, cost $${r.costUsd.toFixed(4)}` : ""}${r.chargedItems != null ? ` (${r.chargedItems} charged)` : ""}`);
+          if (res.unmatched) push("warn", `${res.unmatched} post(s) matched no account (renamed handle?) — dropped`);
+        } catch (err) {
+          const pe = err instanceof ProviderError ? err : new ProviderError("other", (err as Error)?.message ?? String(err));
+          batch = new Map(xToFetch.map((s) => [s.handle!.toLowerCase(), { error: pe }]));
+        }
+        await flush();
+      }
 
       for (const src of sources) {
         const label = sourceLabel(src);
@@ -182,15 +221,19 @@ export class NewsRunnerService {
           await flush();
           continue;
         }
-        if (!provider) continue;
+        if (!provider || !xOn) continue;
         if (stopReason) {
           push("warn", `skipped: ${stopReason}`, label);
           continue;
         }
         try {
-          const res = await provider.fetchLatest(src.handle!, {
-            sinceId: src.lastSeenTweetId, since, max: settings.maxPerAccount, userId: src.xUserId,
-          });
+          const hit = batch?.get(src.handle!.toLowerCase());
+          if (batch && hit && "error" in hit) throw hit.error;
+          const res = batch
+            ? (hit as FetchResult | undefined) ?? { profile: { userId: src.xUserId, name: null, avatarUrl: null }, tweets: [], skipped: 0 }
+            : await provider.fetchLatest(src.handle!, {
+              sinceId: src.lastSeenTweetId, since, max: settings.maxPerAccount, userId: src.xUserId,
+            });
           c.accountsOk++;
           c.fetched += res.tweets.length;
           fetched.push(...res.tweets.map((t) => ({ ...t, sourceId: src.id })));

@@ -70,9 +70,31 @@ export class ProviderError extends Error {
   }
 }
 
+/** One X source in a batch fetch (providers that fetch every handle in one call). */
+export interface BatchTarget {
+  handle: string;
+  /** Lookback start. */
+  since: Date | null;
+  sinceId: string | null;
+  userId?: string | null;
+  /** When this source was last fetched — lets a batch provider skip what it already has. */
+  lastFetchedAt?: Date | null;
+}
+
+export interface BatchFetchResult {
+  /** Per lowercase handle: its posts, or the error that source hit. */
+  results: Map<string, FetchResult | { error: ProviderError }>;
+  /** Posts whose author matched no target (e.g. a renamed account). */
+  unmatched: number;
+  /** Provider run info for the log (Apify: run id, cost). */
+  run: { runId: string; status: string; costUsd: number | null; chargedItems: number | null; items: number } | null;
+}
+
 export interface SourceProvider {
-  readonly name: "x" | "twitterapiio";
+  readonly name: "x" | "twitterapiio" | "apify";
   fetchLatest(handle: string, opts: FetchOptions): Promise<FetchResult>;
+  /** Optional: every handle in one call (Apify: one actor run per job). */
+  fetchMany?(targets: BatchTarget[], opts: { maxPerTarget: number; maxChargeUsd?: number | null }): Promise<BatchFetchResult>;
 }
 
 /** Compare two numeric tweet id strings (snowflakes exceed 2^53). */
