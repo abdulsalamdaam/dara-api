@@ -345,6 +345,25 @@ describe("finance v2 posting engine (real Postgres)", { skip: fv2DbSkip }, () =>
       assert.deepEqual([after.status, after.skip_reason], ["skipped", "not_charged"]);
     });
 
+    it("rows blocked behind a failed or backing-off row do not stall the account: a batch reaches the rows after them", async () => {
+      const p = sid();
+      const cancel = (d: string) => ({ rule: "E05", paymentIds: [p], facts: { date: d, treatment: "principal", dims: DIMS, paymentId: p, gross: "100.00", category: "O", rate: 0, nature: "rent", deferRent: true } });
+      for (const [status, next] of [["failed", "now()"], ["pending", "now() + interval '6 hours'"]] as const) {
+        const [blocker] = (await q(`insert into ledger_outbox (user_id, source_type, source_id, event, occurred_on, payload, status, attempts, next_attempt_at)
+                                    values ($1, 'payment', $2, $3, '2026-08-01', $4, $5, 3, ${next}) returning id`,
+          [U, p, `settled_external:${status}`, JSON.stringify(cancel("2026-08-01")), status])).rows;
+        // 210 rows already found blocked behind it (more than one batch of 200), then an unrelated payout.
+        await q(`insert into ledger_outbox (user_id, source_type, source_id, event, occurred_on, payload, blocked_on)
+                 select $1, 'payment', $2, $3 || g, '2026-08-02', $4, $5 from generate_series(1, 210) g`,
+          [U, p, `charge_cancelled:${status}:`, JSON.stringify(cancel("2026-08-02")), blocker.id]);
+        const id = sid();
+        await emit(U, "landlord_payout", id, "created", payout("2026-08-03", "7.00"));
+        await engine.processAccount(U, 200);
+        assert.equal((await outbox(U, "landlord_payout", id, "created")).status, "posted", `behind a ${status} blocker`);
+        await q(`update ledger_outbox set status = 'dismissed' where user_id = $1 and source_id = $2 and status in ('pending','failed')`, [U, p]);
+      }
+    });
+
     it("a reversal waits for its failed original, which posts after Retry; then the reversal posts", async () => {
       const id = sid();
       await q(`update accounts set is_active = false where user_id = $1 and system_key = $2`, [U, SYS.drawings]);

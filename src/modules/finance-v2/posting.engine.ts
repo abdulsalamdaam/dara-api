@@ -59,11 +59,21 @@ export class PostingEngine {
     private readonly periods: PeriodsService,
   ) {}
 
-  /** Process up to `limit` due rows of one account in id order. The caller holds the account lock. */
+  /**
+   * Process up to `limit` due rows of one account in id order. The caller holds the account lock.
+   * A row already found blocked is left out while its blocker cannot post in this batch (failed, or pending
+   * and backing off): otherwise a few hundred rows blocked behind one failed charge fill every batch and the
+   * rows after them (other installments too) are never reached. A blocker that is due is in the same batch,
+   * before the row (lower id), so the row still posts right after it.
+   */
   async processAccount(userId: number, limit = 200): Promise<Record<Outcome, number>> {
     const counts: Record<Outcome, number> = { posted: 0, skipped: 0, blocked: 0, retry: 0, failed: 0, noop: 0 };
     const ids = await this.pool.query(
-      `select id from ledger_outbox where user_id = $1 and status = 'pending' and next_attempt_at <= now() order by id limit $2`,
+      `select o.id from ledger_outbox o
+        where o.user_id = $1 and o.status = 'pending' and o.next_attempt_at <= now()
+          and not exists (select 1 from ledger_outbox b where b.id = o.blocked_on and b.user_id = o.user_id
+                            and (b.status = 'failed' or (b.status = 'pending' and b.next_attempt_at > now())))
+        order by o.id limit $2`,
       [userId, limit],
     );
     for (const r of ids.rows) counts[await this.processRow(userId, Number(r.id))]++;
