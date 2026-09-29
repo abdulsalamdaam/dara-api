@@ -18,6 +18,8 @@ import { scopeId } from "../../common/scope";
 import {
   listQuerySchema, parseDateBound, parseIdList, wantsPagination,
 } from "../../common/pagination";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
+import { asLegacyCall, assertOwnScope, isLegacyCall } from "../finance-v2/legacy-call"; // finance-v2: E3/E4/E1 fork, EX-3
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const DEPOSIT_DESC = "تأمين (وديعة)";
@@ -28,6 +30,7 @@ const DEPOSIT_DESC = "تأمين (وديعة)";
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 class ReportsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   /**
    * The accountant reports, computed in one pass from the account's data:
@@ -37,6 +40,7 @@ class ReportsController {
   @Get("accounting")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
   async accounting(@CurrentUser() user: AuthUser) {
+    if (!isLegacyCall(user) && (await this.fv2h?.resolve(scopeId(user))) === true) return this.fv2h!.accounting(scopeId(user), await this.accounting(asLegacyCall(user))); // finance-v2: E3/E4/E1 values over the legacy result
     const uid = scopeId(user);
     const live = isNull as any; // brevity
 
@@ -363,9 +367,11 @@ class ReportsController {
   @Post("expenses")
   @RequirePermissions(PERMISSIONS.EXPENSES_WRITE)
   async createExpense(@CurrentUser() user: AuthUser, @Body() body: any) {
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E18
     const amount = round2(Number(body?.amount));
     if (body?.ownerId == null) throw new BadRequestException("المؤجر مطلوب");
     if (body?.propertyId == null) throw new BadRequestException("العقار مطلوب");
+    await assertOwnScope(this.db, scopeId(user), { ownerId: body.ownerId, propertyId: body.propertyId }); // finance-v2: EX-3 — no foreign landlord/property ids
     if (!body?.category || !String(body.category).trim()) throw new BadRequestException("البند مطلوب");
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("المبلغ غير صالح");
     const [row] = await this.db.insert(expensesTable).values({
@@ -377,6 +383,7 @@ class ReportsController {
       expenseDate: body?.expenseDate ?? null,
       notes: body?.notes ?? null,
     } as any).returning();
+    await this.fv2h?.expenseCreated({ fv2, userId: scopeId(user) }, row.id); // finance-v2:
     return row;
   }
 
@@ -385,6 +392,7 @@ class ReportsController {
   async deleteExpense(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     await this.db.update(expensesTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(expensesTable.id, parseInt(id, 10)), eq(expensesTable.userId, scopeId(user))));
+    await this.fv2h?.expenseDeleted({ fv2: (await this.fv2h.resolve(scopeId(user))) === true, userId: scopeId(user) }, parseInt(id, 10)); // finance-v2: E18 reversal
     return { ok: true };
   }
 
@@ -448,15 +456,18 @@ class ReportsController {
   @Post("landlord-payouts")
   @RequirePermissions(PERMISSIONS.EXPENSES_WRITE)
   async createPayout(@CurrentUser() user: AuthUser, @Body() body: any) {
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E19
     const amount = round2(Number(body?.amount));
     const ownerId = Number(body?.ownerId);
     if (!Number.isFinite(ownerId)) throw new BadRequestException("المؤجر مطلوب");
+    await assertOwnScope(this.db, scopeId(user), { ownerId }); // finance-v2: EX-3 — no foreign landlord id
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("المبلغ غير صالح");
     const [row] = await this.db.insert(landlordPayoutsTable).values({
       userId: scopeId(user), ownerId, amount: amount.toFixed(2),
       transferDate: body?.transferDate ?? null, method: body?.method ?? null,
       reference: body?.reference ?? null, notes: body?.notes ?? null,
     } as any).returning();
+    await this.fv2h?.payoutCreated({ fv2, userId: scopeId(user) }, row.id, { bankAccountId: body?.bankAccountId, transferDate: body?.transferDate }); // finance-v2: tier 1 "paid from"
     return row;
   }
 
@@ -465,6 +476,7 @@ class ReportsController {
   async deletePayout(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     await this.db.update(landlordPayoutsTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(landlordPayoutsTable.id, parseInt(id, 10)), eq(landlordPayoutsTable.userId, scopeId(user))));
+    await this.fv2h?.payoutDeleted({ fv2: (await this.fv2h.resolve(scopeId(user))) === true, userId: scopeId(user) }, parseInt(id, 10)); // finance-v2: E19 reversal
     return { ok: true };
   }
 }

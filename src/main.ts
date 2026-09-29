@@ -6,6 +6,7 @@ import { AppModule } from "./app.module";
 import { ZodExceptionFilter } from "./common/zod-exception.filter";
 import { StructuredLogger } from "./common/logging/logger";
 import { ensureSchema } from "./database/bootstrap";
+import { fv2StatementBody } from "./modules/finance-v2/tier2/statement-body"; // finance-v2: statement upload body limit
 
 /**
  * Installed before anything else so `ensureSchema`'s own warnings come out in
@@ -46,6 +47,8 @@ async function bootstrap() {
 
   app.setGlobalPrefix("api");
   app.enableCors({ origin: true, credentials: true });
+  // finance-v2: bank-statement uploads carry up to 2 MB of CSV; only these two routes get a 3 MB JSON limit (after CORS, so its 413/400 carry the headers).
+  app.use(fv2StatementBody);
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

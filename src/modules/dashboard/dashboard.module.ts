@@ -8,6 +8,8 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { liveStatus, riyadhToday } from "../../common/payment-status";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E2/E4 fork (DESIGN §9)
+import { asLegacyCall, isLegacyCall } from "../finance-v2/legacy-call"; // finance-v2:
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -17,9 +19,11 @@ const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 @UseGuards(JwtAuthGuard)
 class DashboardController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   @Get("summary")
   async summary(@CurrentUser() user: AuthUser) {
+    if (!isLegacyCall(user) && (await this.fv2h?.resolve(scopeId(user))) === true) return this.fv2h!.dashboardSummary(scopeId(user), await this.summary(asLegacyCall(user))); // finance-v2: E2/E4 values over the legacy result
     // scopeId so employees see their owner's data — same scope the rest
     // of the app uses; user.id alone would show empty stats for employees.
     const userId = scopeId(user);

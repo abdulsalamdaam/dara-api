@@ -36,6 +36,8 @@ import { ACCEPTED_NOT_RECORDED_NOTE } from "../invoice/services/chain-head";
 import { ZatcaOnboardingService } from "../invoice/services/zatca-onboarding.service";
 import { clearedInvoiceQr } from "../../common/zatca-qr";
 import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acceptance";
+import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
+import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -269,6 +271,7 @@ class SimpleInvoicesController {
     private readonly uploads: UploadsService,
     private readonly appLog: AppLogService,
   ) {}
+  @Inject(FinanceV2Hooks) private readonly fv2h?: FinanceV2Hooks; // finance-v2: property-injected, so the constructor is untouched
 
   /**
    * GET /simple-invoices/:id/pdfa3
@@ -764,6 +767,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const type = DOC_TYPES.includes(body?.type) ? body.type : "invoice";
+    const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E14 (re-pointed advance, informative)
     const items = normalizeItems(body?.items);
     const subtotal = round2(items.reduce((s, it) => s + it.amount, 0));
     const total = body?.total != null ? round2(Number(body.total)) : subtotal;
@@ -985,6 +989,7 @@ class SimpleInvoicesController {
     // ZATCA yet, the same payload with that single blocker still standing. Same
     // shape GET /simple-invoices/readiness returns, so the UI renders it with
     // the same panel — as a heads-up about approval, not a failure to save.
+    await this.fv2h?.invoiceCreated({ fv2, userId: scopeId(user) }, doc.id); // finance-v2:
     return { ...doc, readiness };
   }
 
@@ -1102,6 +1107,7 @@ class SimpleInvoicesController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   async createReceiptVoucher(@CurrentUser() user: AuthUser, @Body() body: any) {
     const uid = scopeId(user);
+    const fv2 = (await this.fv2h?.resolve(uid)) === true; // finance-v2: E03/E09 after the last write (§5.1)
     // Kind, line items and total — all of it refused up front, before a number
     // is minted or a contract is touched. See `validateReceiptVoucher`.
     const { kind: voucherKind, items, amount, subtotal } = validateReceiptVoucher(body);
@@ -1237,6 +1243,7 @@ class SimpleInvoicesController {
         } as any);
       }
     }
+    await this.fv2h?.voucherIssued({ fv2, userId: uid }, doc.id, { bankAccountId: body?.bankAccountId }); // finance-v2: tier 1 "received into"
     return doc;
   }
 
@@ -1331,10 +1338,13 @@ class SimpleInvoicesController {
   async approve(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     void body;
     const uid = scopeId(user);
+    const fv2 = (await this.fv2h?.resolve(uid)) === true; // finance-v2: E01/E06/E07/E15 at the confirm, before ZATCA
     const [doc] = await this.db.select().from(simpleInvoicesTable)
       .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
+    if (fv2 && isV2DocKind(doc.kind)) return this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); // finance-v2: E8/E9 — their own approve, never ZATCA
+    refuseV2KindOnLegacyApprove(doc.kind); // finance-v2: EX-4 — a v2 kind never takes the tax-invoice path (flag off)
 
     // Approval is where a draft becomes a real, issued document — the copy the
     // buyer keeps and the one mirrored to ZATCA. Everything the create path
@@ -1469,8 +1479,10 @@ class SimpleInvoicesController {
       const [updated] = await this.db.update(simpleInvoicesTable).set({
         status: "confirmed", confirmedAt: new Date(),
       }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
+      await this.fv2h?.documentConfirmed({ fv2, userId: uid }, updated.id); // finance-v2:
       // Mirror the note to ZATCA under the landlord's seller (best-effort).
       const zatcaNote = await this.submitApprovedDocToZatca(uid, updated);
+      await this.fv2h?.afterNoteApproved({ fv2, userId: uid }, updated); // finance-v2: E36 — the commission credit note draft
       return { ...updated, zatca: zatcaNote };
     }
 
@@ -1479,6 +1491,7 @@ class SimpleInvoicesController {
       status: "confirmed", confirmedAt: new Date(),
     }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
 
+    await this.fv2h?.documentConfirmed({ fv2, userId: uid }, updated.id); // finance-v2:
     // When the landlord (the seller) is linked to ZATCA, mirror this invoice to
     // ZATCA on approval — clearance for B2B, reporting for B2C. Best-effort:
     // never blocks the approval (see submitApprovedDocToZatca).
@@ -1489,6 +1502,7 @@ class SimpleInvoicesController {
     // actually-issued rent invoice and is linked to it via billingReference.
     // Best-effort: never block the approval if the commission step fails.
     let commission: any = null;
+    if (fv2) return { ...updated, commission: await this.fv2h!.commissionOnApprove({ fv2, userId: uid }, this.db, doc), zatca }; // finance-v2: E1 — the effective rate; the legacy step below never runs under v2
     if (doc.kind !== "commission" && doc.contractId && ((doc.paymentIds && doc.paymentIds.length) || doc.paymentId)) {
       try { commission = await this.maybeCreateCommissionInvoice(uid, doc, Number(doc.contractId)); }
       catch { /* ignore — rent invoice already approved */ }
@@ -1639,6 +1653,7 @@ class SimpleInvoicesController {
    */
   private async runZatcaSubmission(uid: number, doc: any): Promise<ZatcaSubmitOutcome> {
     try {
+      if (isV2DocKind(doc?.kind)) return V2_KIND_ZATCA_SKIP; // finance-v2: EX-4 — rent receipts and agency fees never reach ZATCA
       // Commission invoices (فاتورة عمولة) are intentionally NOT sent to ZATCA.
       if (doc.kind === "commission") {
         return { submitted: false, code: "skipped", reason: "Commission invoices are not sent to ZATCA" };
@@ -1962,6 +1977,7 @@ class SimpleInvoicesController {
     const uid = scopeId(user);
     const docId = requiredForeignKeyId(id, "رقم المستند");
     if (!Number.isInteger(docId)) throw new BadRequestException("رقم المستند غير صالح");
+    const fv2 = (await this.fv2h?.resolve(uid)) === true; // finance-v2: resolved before the transaction (§1.2)
     // Everything below reads what has been collected so far and then writes.
     // With no lock, parallel requests all read "nothing yet", all pass the cap,
     // and the same money lands several times — a 1,000 invoice was measured
@@ -2067,6 +2083,7 @@ class SimpleInvoicesController {
       paymentMethod: method,
       attachmentKey: body?.attachmentKey ?? doc.attachmentKey,
     }).where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, uid))).returning();
+    await this.fv2h?.invoiceCollected({ fv2, userId: uid, tx }, doc.id, { bankAccountId: body?.bankAccountId }); // finance-v2: E03/E16/E34 in the source transaction; tier 1 "received into"
     return updated;
     });
   }

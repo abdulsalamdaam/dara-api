@@ -575,6 +575,43 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure news tables failed: ${err?.message || err}`);
     }
 
+    // finance-v2: Finance v2 (beta) ledger tables (docs/finance-v2/DESIGN.md §2.2).
+    // Idempotent and additive only: it creates new tables, triggers and functions
+    // and alters nothing that exists. One simple-query message, so it applies
+    // atomically. If it fails, finance_settings is absent and the flag reads
+    // off for every account, which is exactly master's behaviour.
+    try {
+      const fv2Sql = findSqlFile(join("drizzle", "0066_finance_v2.sql"));
+      if (fv2Sql) await client.query(readFileSync(fv2Sql, "utf8"));
+      else log.warn("0066_finance_v2.sql not found — Finance v2 tables not ensured");
+    } catch (err: any) {
+      log.warn(`ensure finance v2 tables failed: ${err?.message || err}`);
+    }
+    // finance-v2: tier 1/2 tables (0067: bank reconciliation, reminders built disabled). After 0066, same rules.
+    try { // finance-v2:
+      const fv2Tier2 = findSqlFile(join("drizzle", "0067_finance_v2_tier2.sql")); // finance-v2:
+      if (fv2Tier2) await client.query(readFileSync(fv2Tier2, "utf8")); // finance-v2:
+      else log.warn("0067_finance_v2_tier2.sql not found — Finance v2 tier-2 tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 tier-2 tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+    // finance-v2: 0068 ledger hardening (balance check no longer skippable from the session). After 0066, which it overrides.
+    try { // finance-v2:
+      const fv2Hard = findSqlFile(join("drizzle", "0068_finance_v2_hardening.sql")); // finance-v2:
+      if (fv2Hard) await client.query(readFileSync(fv2Hard, "utf8")); // finance-v2:
+      else log.warn("0068_finance_v2_hardening.sql not found — Finance v2 ledger hardening not applied"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 ledger hardening failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+    // finance-v2: 0069 tier 3 tables (suppliers, bills, supplier payments). After 0068, same rules.
+    try { // finance-v2:
+      const fv2Tier3 = findSqlFile(join("drizzle", "0069_finance_v2_tier3.sql")); // finance-v2:
+      if (fv2Tier3) await client.query(readFileSync(fv2Tier3, "utf8")); // finance-v2:
+      else log.warn("0069_finance_v2_tier3.sql not found — Finance v2 tier-3 tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 tier-3 tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
