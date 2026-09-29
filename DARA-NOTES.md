@@ -1297,3 +1297,76 @@ branch in both repos, merged to `master` only.
 - **Full runbook, spec, design and QA:** `docs/news/README.md`. The full set is
   in `dara-web`; `dara-api` (public) carries the runbook, contract and business
   spec.
+
+---
+
+## 10. Finance v2 (beta) — double-entry ledger (staging only, Sep 2026)
+
+A full ledger (chart of accounts, journal, periods, 26 reports, bank/cash,
+expenses, bank reconciliation, AP) behind a **per-account flag**, merged to
+`master` (staging) in both repos. On for one synthetic staging test account
+only; off for everyone else. Not on `main`.
+
+- **The flag:** `finance_settings.finance_v2_enabled`, one row per account
+  (`account_user_id` = scope). **A missing row means off.** The API reads it via
+  `FinanceFlagService` (pool, never the caller's tx; 15 s cache; stale-if-error),
+  resolved once per request. `/api/finance/v2/*` returns **404** when off; the
+  web asks `GET /api/finance/v2/status` and treats loading/error as off.
+- **Toggle:** super-admin only — admin console → Companies → "Finance v2 (Beta)",
+  or `PATCH /api/admin/finance-v2/:accountUserId {enabled, accountingMode, reason}`.
+  Reason is required; each change writes `finance_settings_events` plus an
+  `audit_logs` row under the target account (visible in its activity log). The
+  first enable seeds the chart, two years of periods, and a cash + bank account.
+- **Two switches.** The flag turns on UI, forks and enqueueing; nothing posts
+  until `finance_settings.ledger_started_at` is set by the first **real**
+  backfill. Until then reports show "ledger not started".
+- **Schema:** migrations `0066`–`0069`, applied at boot by `bootstrap.ts` (each
+  in its own try/catch; a failure reads as flag off). 35 new tables, **no
+  existing table or schema file altered** — v2 attributes live in 1:1 side
+  tables so no legacy JSON body changes. Never `pnpm db:push`.
+- **Posting engine** (`src/modules/finance-v2/`): an outbox + per-account serial
+  worker (5 s tick, retries, posting-errors list; a failure never reaches the
+  user action), a due-date **recognizer** (00:10 Riyadh), and a nightly
+  **repair** sweep (catch-up backfill, 03:30 Riyadh). All act only on accounts
+  with `ledger_started_at`. Kill switches (value `1`):
+  `FINANCE_V2_WORKER_DISABLED` (all three), `FINANCE_V2_RECOGNIZER_DISABLED`,
+  `FINANCE_V2_REPAIR_DISABLED`. Set them for any local run.
+- **`FINANCE_REMINDERS_ENABLED` must stay unset** everywhere. Rent reminders are
+  built disabled and the only sender is a dry-run one.
+- **Additive-diff CI gate:** `scripts/finance-v2-additive-diff.ts` (in
+  `ci.yml`, needs `fetch-depth: 0`). Protected legacy files may only gain lines
+  carrying a `// finance-v2:` marker; any removed line fails unless its hunk is
+  in `scripts/finance-v2-removed-lines.allow`. Web has its own allowlist and is
+  checked by the same script with `--profile web` (not wired into web CI). Behaviour changes fork at the handler top into
+  `finance-v2/overrides/`; the legacy body is not edited.
+- **Enable an account:** (1) toggle on with a reason and a mode (Manager is
+  the default; Owner is refused if the account has third-party landlords); (2) **dry-run** backfill (Customer-360
+  drawer → Backfill, or `POST /api/admin/finance-v2/:id/backfill
+  {"mode":"full","dryRun":true}`) — must balance with 0 failures; (3) the same
+  with `"dryRun":false` (sets `ledger_started_at`); (4) check the trial balance
+  balances, Reconciliation R1–R8 are all 0, and posting errors
+  (`GET /api/admin/finance-v2/:id/posting-errors`) is empty. A second dry run
+  should find 0 new events. CLI equivalent: `scripts/finance-v2-backfill.ts`
+  (never loads `.env`; refuses port 4000; real run needs `--yes`).
+- **Turn off:** the same PATCH with `enabled:false` + reason. Every v2 row is
+  kept; re-enabling shows "ledger behind by N" until a `catchup` backfill runs.
+- **Changes that apply with the flag OFF** (approved at the merge gate):
+  - **EX-1** (web): billing and receipts Excel exports page through 200 rows
+    (`fetchAllPages`) — `pageSize=1000` was a 400 for everyone.
+  - **EX-2** (web): ZATCA settings integrated-row actions wrap
+    (`flex-wrap justify-end`); the table overflowed at 1440 px.
+  - **EX-3** (api): `POST /reports/expenses` and `/reports/landlord-payouts`
+    refuse another account's landlord/property ids (400) — a cross-account
+    reference bug.
+  - **EX-4** (api): legacy approve refuses the v2-only `rent_receipt` /
+    `agency_fee` kinds (409) and ZATCA submission skips them, so a non-tax
+    document never reaches ZATCA, even after a flag flip-back. The four signing
+    files are untouched.
+  - Also structural: one extra `GET /status` per portal load; a 3 MB body limit
+    on the two v2 bank-statement routes only; admin hard-delete also purges v2
+    rows.
+- **Docs:** `docs/finance-v2/DESIGN.md` (flag mechanics, schema, posting rules
+  E01–E37, backfill, report definitions, bug decisions E1–E9, open accountant
+  questions), `DISCOVERY.md` (the legacy finance surface as found),
+  `TEST-REPORT.md` (tests, flag-off snapshot proof, reviews),
+  `JOURNAL-EXPORT.md` (journal CSV format).
