@@ -611,6 +611,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 tier-3 tables failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0071 control-check runs (the accountant's control checks). After 0069, same rules.
+    try { // finance-v2:
+      const fv2Controls = findSqlFile(join("drizzle", "0071_finance_v2_controls.sql")); // finance-v2:
+      if (fv2Controls) await client.query(readFileSync(fv2Controls, "utf8")); // finance-v2:
+      else log.warn("0071_finance_v2_controls.sql not found — Finance v2 control-run table not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 control-run table failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

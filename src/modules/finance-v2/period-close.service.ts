@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { JournalRepository, type LineInput } from "./journal.repository";
@@ -10,6 +10,7 @@ import { BackfillService } from "./backfill/backfill.service";
 import { riyadhToday } from "./dates";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, mapLedgerError, requireReason, settingsEvent } from "./audit";
+import { ControlChecksService } from "./controls.service";
 
 const PCOLS = `id, fiscal_year as "fiscalYear", period_no as "periodNo", to_char(starts_on,'YYYY-MM-DD') as "startsOn",
   to_char(ends_on,'YYYY-MM-DD') as "endsOn", status, vat_locked_at as "vatLockedAt", closed_at as "closedAt", closed_by as "closedBy",
@@ -30,6 +31,9 @@ type Period = { id: number; fiscalYear: number; periodNo: number; startsOn: stri
  *    when the year has a closing entry.
  *  - Lock: irreversible, from closed only.
  *  - Close refuses period 12 (USE_CLOSE_YEAR): December closes with the year.
+ *  - Close and year close then run the control checks as of the period end
+ *    (controls.service.ts) and refuse (CONTROL_CHECKS_FAILED) while one fails,
+ *    unless a finance admin overrides with a written reason (audited).
  *  - Close year: the previous year closed if it has P&L (PRIOR_YEAR_OPEN);
  *    periods 1–11 closed; posts the closing entry (P&L to 3300, origin
  *    `closing`) dated the last day of period 12, then closes it (a period 12
@@ -45,6 +49,7 @@ export class PeriodCloseService {
     private readonly worker: PostingWorker,
     private readonly recognizer: RecognizerService,
     private readonly backfill: BackfillService,
+    @Optional() private readonly controls?: ControlChecksService,
   ) {}
 
   async list(scope: number, q: { fiscalYear?: string | number } = {}) {
@@ -66,12 +71,14 @@ export class PeriodCloseService {
       throw new ConflictException({ error: "USE_CLOSE_YEAR", message: "Period 12 closes with the year-end close" });
     }
     const warnings = await this.closeChecks(scope, p, today);
+    const gate = this.controls ? await this.controls.gate(scope, user, p, body, today) : null;
     try {
       return await withTx(this.pool, async (c) => {
         const cur = await this.load(c, scope, id, true);
         if (cur.status !== "open") throw new ConflictException({ error: "PERIOD_NOT_OPEN", message: `The period is ${cur.status}` });
         await this.markClosed(c, scope, user, cur, typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim().slice(0, 500) : "period close");
-        return { period: await this.load(c, scope, id), warnings };
+        const controls = gate ? await this.controls!.recordGate(c, scope, user, cur, gate, `/finance/v2/periods/${id}/close`) : undefined;
+        return { period: await this.load(c, scope, id), warnings, ...(controls ? { controls } : {}) };
       });
     } catch (err) {
       mapLedgerError(err);
@@ -134,6 +141,7 @@ export class PeriodCloseService {
     if (p12.status === "locked") throw new ConflictException({ error: "PERIOD_LOCKED", message: "Period 12 is locked" });
     // Period 12 may already be closed as an ordinary month (before close() refused it); the closing entry is allowed in a closed period.
     const warnings = await this.closeChecks(scope, p12, today, p12.status === "closed");
+    const gate = this.controls ? await this.controls.gate(scope, user, p12, body, today) : null;
     const start = all.find((p) => p.periodNo === 1)!.startsOn;
     try {
       return await withTx(this.pool, async (c) => {
@@ -169,7 +177,8 @@ export class PeriodCloseService {
         if (cur.status === "open") await this.markClosed(c, scope, user, cur, `year-end close ${fy}`);
         await settingsEvent(c, scope, user.id, "year_close", null, { fiscalYear: fy, closingEntryId: entry?.id ?? null }, `year-end close ${fy}`);
         await auditRow(c, scope, user.id, "finance_v2_fiscal_year", fy, `/finance/v2/periods/close-year`);
-        return { fiscalYear: fy, closingEntry: entry, period: await this.load(c, scope, p12.id), warnings };
+        const controls = gate ? await this.controls!.recordGate(c, scope, user, cur, gate, `/finance/v2/periods/close-year`) : undefined;
+        return { fiscalYear: fy, closingEntry: entry, period: await this.load(c, scope, p12.id), warnings, ...(controls ? { controls } : {}) };
       });
     } catch (err) {
       mapLedgerError(err);

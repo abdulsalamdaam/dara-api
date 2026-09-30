@@ -512,7 +512,8 @@ export class FinanceV2Hooks {
     }
     // 0067 tables (no immutability triggers, so plain deletes; each table on its own so one missing table skips only itself).
     for (const t of ["bank_matches", "bank_statement_lines", "bank_statements", "bank_import_profiles", "reminder_log", "tenant_credit_targets", "finance_document_meta",
-      "supplier_payment_allocations", "supplier_bill_lines", "supplier_payments", "supplier_bills", "suppliers"]) { // 0069 in FK order
+      "supplier_payment_allocations", "supplier_bill_lines", "supplier_payments", "supplier_bills", "suppliers", // 0069 in FK order
+      "finance_control_runs"]) { // 0071
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);
       } catch (err: any) {
