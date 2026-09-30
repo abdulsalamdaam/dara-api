@@ -11,7 +11,7 @@ import { safeGet, SafeFetchError, type SafeFetchOptions } from "./safe-fetch";
  * newest first. There is no "since id" for feeds; items already stored are
  * dropped by the runner's external_id dedupe.
  */
-export const RSS_USER_AGENT = "Mozilla/5.0 (compatible; DaraNewsBot/1.0; +https://dara-sa.net)";
+export const RSS_USER_AGENT = "Mozilla/5.0 (compatible; DaraNewsBot/1.0; +https://dara-sa.com)";
 export const RSS_TIMEOUT_MS = 15_000;
 export const RSS_MAX_BYTES = 2 * 1024 * 1024;
 

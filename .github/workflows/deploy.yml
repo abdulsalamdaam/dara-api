@@ -1,7 +1,7 @@
 # Branch -> environment. Coolify's GitHub App stopped delivering push events, so
 # this calls Coolify's deploy API directly instead; it needs nothing from the App.
-#   main   -> production   (dara-sa.net / api.dara-sa.net)
-#   master -> staging      (staging.dara-sa.net / api-staging.dara-sa.net)
+#   main   -> production   (dara-sa.com / api.dara-sa.com)
+#   master -> staging      (staging.dara-sa.com / api-staging.dara-sa.com)
 # COOLIFY_TOKEN is a repository secret.
 # NOT gated on ci.yml yet — deliberately: nobody has seen that job green, and a
 # red CI must not be the first thing that ever blocks a deploy. Gate it once it

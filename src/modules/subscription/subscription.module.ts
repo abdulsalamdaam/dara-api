@@ -16,7 +16,7 @@ import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
 
-const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.net").replace(/\/$/, "");
+const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
 type SubscriptionPaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
 

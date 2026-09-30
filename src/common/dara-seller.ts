@@ -9,7 +9,7 @@
  * environment rather than in a literal.
  */
 
-const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.net";
+const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.com";
 
 export interface DaraSellerIdentity {
   /**
