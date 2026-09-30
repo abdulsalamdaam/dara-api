@@ -5,7 +5,8 @@ import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { riyadhNow } from "../reports/core-math";
 import { langOf } from "../reports/common";
-import { journalCsv, PRESETS, type DateFormat, type ExportLine, type Preset } from "./journal-csv";
+import { journalCsv, journalXlsxRows, PRESETS, type DateFormat, type ExportLine, type Preset } from "./journal-csv";
+import { xlsxWorkbook } from "./xlsx";
 
 /** A bigger export is refused (400 EXPORT_TOO_LARGE): narrow the range instead. */
 export const EXPORT_MAX_LINES = 200_000;
@@ -44,6 +45,8 @@ export class JournalExportService {
   }
 
   async lines(scope: number, p: ExportParams, limit?: number): Promise<{ lines: ExportLine[]; count: number; debit: number; credit: number }> {
+    // The external-code side table (0074) is optional: without it the column is empty.
+    const ext = (await this.pool.query(`select to_regclass('account_external_codes') is not null as ok`)).rows[0]?.ok === true;
     const where = `e.user_id = $1 and e.entry_date between $2::date and $3::date${p.excludeReversed ? " and e.status = 'posted' and e.reversal_of is null" : ""}`;
     const [agg] = (await this.pool.query(
       `select count(*)::int as n, coalesce(sum(l.debit), 0)::text as d, coalesce(sum(l.credit), 0)::text as c
@@ -59,6 +62,7 @@ export class JournalExportService {
               o.name as owner, p.name as property, u.unit_number as unit, t.name as tenant, c.contract_number as contract,
               e.source_type, e.source_id::text as source_id, e.origin, e.status, to_char(e.original_date,'YYYY-MM-DD') as original_date,
               l.vat_category, rtrim(rtrim(l.vat_rate::text, '0'), '.') as vat_rate, l.tax_role,
+              ${ext ? "(select x.external_code from account_external_codes x where x.account_id = a.id)" : "null::text"} as ext_code,
               case e.source_type
                 when 'simple_invoice' then (select si.number from simple_invoices si where si.id = e.source_id and si.user_id = e.user_id)
                 when 'payment_collection' then (select pc.receipt_number from payment_collections pc where pc.id = e.source_id and pc.user_id = e.user_id)
@@ -66,6 +70,7 @@ export class JournalExportService {
                 when 'tenant_credit_action' then (select x.number from tenant_credit_actions x where x.id = e.source_id and x.user_id = e.user_id)
                 when 'supplier_bill' then (select x.number from supplier_bills x where x.id = e.source_id and x.user_id = e.user_id)
                 when 'supplier_payment' then (select x.number from supplier_payments x where x.id = e.source_id and x.user_id = e.user_id)
+                when 'fixed_asset' then (select x.number from fixed_assets x where x.id = e.source_id and x.user_id = e.user_id)
                 when 'fiscal_year' then 'FY' || e.source_id::text
               end as source_ref
          from journal_entries e
@@ -89,6 +94,7 @@ export class JournalExportService {
         owner: r.owner ?? null, property: r.property ?? null, unit: r.unit ?? null, tenant: r.tenant ?? null, contract: r.contract ?? null,
         sourceType: r.source_type, sourceRef: r.source_ref ?? `${r.source_type}#${r.source_id}`, origin: r.origin, status: r.status,
         originalDate: r.original_date, vatCategory: r.vat_category ?? null, vatRate: r.vat_rate ?? null, taxRole: r.tax_role ?? null,
+        accountCodeExternal: r.ext_code ?? null,
       })),
     };
   }
@@ -100,6 +106,17 @@ export class JournalExportService {
     return {
       body: journalCsv(r.lines, { preset: p.preset, lang: p.lang, dateFormat: p.dateFormat }),
       filename: `dara-journal_${p.from}_${p.to}.csv`, rows: r.count, debit: fromHalalas(r.debit), credit: fromHalalas(r.credit),
+    };
+  }
+
+  /** `format=xlsx`: the same columns as the CSV in an Excel workbook (amounts as numbers). */
+  async xlsx(scope: number, q: any): Promise<{ body: Buffer; filename: string; rows: number; debit: string; credit: string }> {
+    const p = this.params(q);
+    const r = await this.lines(scope, p);
+    const t = journalXlsxRows(r.lines, { preset: p.preset, lang: p.lang, dateFormat: p.dateFormat });
+    return {
+      body: xlsxWorkbook(p.lang === "en" ? "Journal" : "القيود", t.header, t.rows),
+      filename: `dara-journal_${p.from}_${p.to}.xlsx`, rows: r.count, debit: fromHalalas(r.debit), credit: fromHalalas(r.credit),
     };
   }
 

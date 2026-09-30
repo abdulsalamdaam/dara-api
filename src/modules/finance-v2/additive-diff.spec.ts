@@ -72,7 +72,7 @@ describe("finance-v2 additive-diff gate (DESIGN §1.4.5)", () => {
   it("the real 0068 and 0069 alter nothing and never touch the purge switch", () => {
     const { readFileSync, existsSync } = require("node:fs");
     const { join } = require("node:path");
-    for (const f of ["0068_finance_v2_hardening.sql", "0069_finance_v2_tier3.sql", "0071_finance_v2_controls.sql", "0073_finance_v2_autoinvoice.sql"]) {
+    for (const f of ["0068_finance_v2_hardening.sql", "0069_finance_v2_tier3.sql", "0071_finance_v2_controls.sql", "0073_finance_v2_autoinvoice.sql", "0074_finance_v2_assets.sql"]) {
       const p = join(__dirname, "../../../db/drizzle", f);
       if (f.startsWith("0068")) assert.ok(existsSync(p), f);
       if (!existsSync(p)) continue;

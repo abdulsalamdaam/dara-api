@@ -111,6 +111,10 @@ export class JournalQueryService {
         const r = await one(`select number from supplier_payments where id = $1 and user_id = $2`);
         return r ? { type, id, number: r.number, route: `/dashboard/accounting/supplier-payments?id=${id}` } : null;
       }
+      case "fixed_asset": {
+        const r = await one(`select number from fixed_assets where id = $1 and user_id = $2`);
+        return r ? { type, id, number: r.number, route: `/dashboard/accounting/fixed-assets?id=${id}` } : null;
+      }
       case "manual_journal":
       case "opening_balance":
         return { type, id, number: null, route: `/dashboard/accounting/manual-journals/${payload?.manualJournalId ?? id}` };

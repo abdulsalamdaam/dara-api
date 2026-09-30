@@ -25,6 +25,7 @@ import type { ReleaseFacts, RuleCode } from "../rules";
 import { depositForfeitEvent } from "../hooks/facts-loader";
 import { creditActionEvents, writeOffEvents } from "../tier1/credit-events";
 import { billEvents, supplierPaymentEvents } from "../tier3/ap-events";
+import { assetEvents } from "../assets/asset-events";
 
 export interface PlannedEvent extends LedgerEvent {
   /** §6.4 rank within a business date. */
@@ -79,6 +80,9 @@ export function rankOf(code: string): number {
     case "E05": case "E11": case "E12": case "E24": return 7;
     case "E14": case "E18": case "E19": case "E21": case "E28": case "E38": case "reversal": return 8;
     case "E39": return 8.5;
+    case "FA01": return 8; // fixed-asset acquisition
+    case "FA03": return 8.7; // disposal: after the reversals of that day
+    case "FA02": return 9; // depreciation at the month end, with the releases
     case "E35": case "E37": return 9;
     default: return 8;
   }
@@ -349,6 +353,14 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
     }
     for (const x of await q.rows(`select id from supplier_payments where user_id = $1 order by id`, [userId])) {
       const r = await supplierPaymentEvents(q, userId, s, Number(x.id));
+      for (const e of r?.events ?? []) push(e, r!.createdAt);
+    }
+  }
+
+  // ── Fixed assets (§8.5): acquisition (FA01), depreciation through the last ended month (FA02), disposal (FA03), void reversals ──
+  if (await hasTable(q, "fixed_assets")) {
+    for (const x of await q.rows(`select id from fixed_assets where user_id = $1 order by id`, [userId])) {
+      const r = await assetEvents(q, userId, Number(x.id), opts.today);
       for (const e of r?.events ?? []) push(e, r!.createdAt);
     }
   }

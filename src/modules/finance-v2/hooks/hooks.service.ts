@@ -514,7 +514,8 @@ export class FinanceV2Hooks {
     for (const t of ["bank_matches", "bank_statement_lines", "bank_statements", "bank_import_profiles", "reminder_log", "tenant_credit_targets", "finance_document_meta",
       "supplier_payment_allocations", "supplier_bill_lines", "supplier_payments", "supplier_bills", "suppliers", // 0069 in FK order
       "finance_control_runs", // 0071
-      "finance_auto_invoice_links", "finance_auto_invoice_settings"]) { // 0073
+      "finance_auto_invoice_links", "finance_auto_invoice_settings", // 0073
+      "fixed_asset_dep_runs", "fixed_assets", "account_external_codes"]) { // 0074
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);
       } catch (err: any) {

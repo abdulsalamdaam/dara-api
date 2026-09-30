@@ -3,7 +3,8 @@
  * for a Saudi property manager or landlord, seeded per account on the first
  * enable of `finance_v2` (§1.5) by `ChartService.seedChart`.
  *
- * This list is the design's §3 table verbatim (116 accounts, 30 groups);
+ * This list is the design's §3 table verbatim (116 accounts, 30 groups),
+ * plus the three fixed-asset accounts of §8.5 (1224, 5340, 5350: 119 in all);
  * `coa-template.spec.ts` holds it to that count and checks the hierarchy.
  * Contra accounts (1124, 1213, 1229, 1239) carry a normal balance opposite
  * to their type. Groups (`isGroup`) never take postings.
@@ -23,6 +24,13 @@ export interface TemplateAccount {
   systemKey: string | null;
   isGroup: boolean;
 }
+
+/**
+ * Accounts added to the template after the first release (§8.5, fixed assets).
+ * Existing flag-on charts get them through `ChartService.topUp` (insert only
+ * the missing codes, never touching a renamed or deactivated account).
+ */
+export const TOP_UP_CODES: readonly string[] = ["1224", "5340", "5350"];
 
 export const COA_TEMPLATE: readonly TemplateAccount[] = [
   { code: "1000", nameAr: "الأصول", nameEn: "Assets", type: "asset", normalBalance: "debit", parent: null, systemKey: null, isGroup: true },
@@ -57,6 +65,7 @@ export const COA_TEMPLATE: readonly TemplateAccount[] = [
   { code: "1221", nameAr: "الأثاث والتجهيزات", nameEn: "Furniture and fixtures", type: "asset", normalBalance: "debit", parent: "1220", systemKey: null, isGroup: false },
   { code: "1222", nameAr: "أجهزة الحاسب الآلي", nameEn: "Computer equipment", type: "asset", normalBalance: "debit", parent: "1220", systemKey: null, isGroup: false },
   { code: "1223", nameAr: "السيارات", nameEn: "Vehicles", type: "asset", normalBalance: "debit", parent: "1220", systemKey: null, isGroup: false },
+  { code: "1224", nameAr: "المعدات والأجهزة المكتبية", nameEn: "Office equipment", type: "asset", normalBalance: "debit", parent: "1220", systemKey: null, isGroup: false },
   { code: "1229", nameAr: "مجمع إهلاك الممتلكات والمعدات", nameEn: "Accumulated depreciation – equipment (contra)", type: "asset", normalBalance: "credit", parent: "1220", systemKey: null, isGroup: false },
   { code: "1230", nameAr: "الأصول غير الملموسة", nameEn: "Intangible assets", type: "asset", normalBalance: "debit", parent: "1200", systemKey: null, isGroup: true },
   { code: "1231", nameAr: "البرامج والأنظمة", nameEn: "Software", type: "asset", normalBalance: "debit", parent: "1230", systemKey: null, isGroup: false },
@@ -136,6 +145,8 @@ export const COA_TEMPLATE: readonly TemplateAccount[] = [
   { code: "5310", nameAr: "إهلاك العقارات الاستثمارية", nameEn: "Depreciation – investment property", type: "expense", normalBalance: "debit", parent: "5300", systemKey: null, isGroup: false },
   { code: "5320", nameAr: "إهلاك الممتلكات والمعدات", nameEn: "Depreciation – property and equipment", type: "expense", normalBalance: "debit", parent: "5300", systemKey: null, isGroup: false },
   { code: "5330", nameAr: "الخسائر الائتمانية المتوقعة والديون المعدومة", nameEn: "Expected credit losses and bad debts", type: "expense", normalBalance: "debit", parent: "5300", systemKey: "bad_debt_expense", isGroup: false },
+  { code: "5340", nameAr: "إطفاء الأصول غير الملموسة", nameEn: "Amortisation of intangible assets", type: "expense", normalBalance: "debit", parent: "5300", systemKey: null, isGroup: false },
+  { code: "5350", nameAr: "خسائر بيع واستبعاد الأصول", nameEn: "Loss on disposal of assets", type: "expense", normalBalance: "debit", parent: "5300", systemKey: null, isGroup: false },
   { code: "5400", nameAr: "تكاليف التمويل", nameEn: "Finance costs", type: "expense", normalBalance: "debit", parent: "5000", systemKey: null, isGroup: false },
   { code: "5500", nameAr: "ضريبة القيمة المضافة غير القابلة للاسترداد", nameEn: "Non-recoverable VAT", type: "expense", normalBalance: "debit", parent: "5000", systemKey: "vat_non_recoverable", isGroup: false },
   { code: "5600", nameAr: "الزكاة وضريبة الدخل", nameEn: "Zakat and income tax", type: "expense", normalBalance: "debit", parent: "5000", systemKey: null, isGroup: true },

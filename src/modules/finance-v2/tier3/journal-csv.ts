@@ -9,6 +9,8 @@
  *    and date cells are never altered.
  */
 
+import type { XlsxCell } from "./xlsx";
+
 export const BOM = "﻿";
 
 export interface ExportLine {
@@ -35,26 +37,30 @@ export interface ExportLine {
   vatCategory: string | null;
   vatRate: string | null;
   taxRole: string | null;
+  /** The account's code in the external accounting system (0074 side table), or null. */
+  accountCodeExternal?: string | null;
 }
 
-export type Preset = "standard" | "simple";
+export type Preset = "standard" | "simple" | "external";
 export type DateFormat = "iso" | "dmy";
 
 interface Column {
   key: string;
   numeric?: boolean;
+  /** How the Excel variant stores the cell (default text). */
+  xlsx?: "money" | "number";
   get: (l: ExportLine, lang: "ar" | "en") => string | number | null;
 }
 
 const STANDARD: Column[] = [
   { key: "date", numeric: true, get: (l) => l.date },
   { key: "entry_no", get: (l) => l.entryNo },
-  { key: "line_no", numeric: true, get: (l) => l.lineNo },
+  { key: "line_no", numeric: true, xlsx: "number", get: (l) => l.lineNo },
   { key: "account_code", get: (l) => l.accountCode },
   { key: "account_name_ar", get: (l) => l.accountNameAr },
   { key: "account_name_en", get: (l) => l.accountNameEn },
-  { key: "debit", numeric: true, get: (l) => l.debit },
-  { key: "credit", numeric: true, get: (l) => l.credit },
+  { key: "debit", numeric: true, xlsx: "money", get: (l) => l.debit },
+  { key: "credit", numeric: true, xlsx: "money", get: (l) => l.credit },
   { key: "memo", get: (l) => l.memo ?? l.entryMemo },
   { key: "owner", get: (l) => l.owner },
   { key: "property", get: (l) => l.property },
@@ -68,8 +74,10 @@ const STANDARD: Column[] = [
   { key: "status", get: (l) => l.status },
   { key: "original_date", numeric: true, get: (l) => l.originalDate },
   { key: "vat_category", get: (l) => l.vatCategory },
-  { key: "vat_rate", numeric: true, get: (l) => l.vatRate },
+  { key: "vat_rate", numeric: true, xlsx: "number", get: (l) => l.vatRate },
   { key: "tax_role", get: (l) => l.taxRole },
+  // v2 (fixed-asset round): added at the end, per the versioning rule.
+  { key: "account_code_external", get: (l) => l.accountCodeExternal ?? null },
 ];
 
 const SIMPLE: Column[] = [
@@ -77,14 +85,36 @@ const SIMPLE: Column[] = [
   { key: "entry_no", get: (l) => l.entryNo },
   { key: "account_code", get: (l) => l.accountCode },
   { key: "account_name", get: (l, lang) => (lang === "en" ? l.accountNameEn || l.accountNameAr : l.accountNameAr) },
-  { key: "debit", numeric: true, get: (l) => l.debit },
-  { key: "credit", numeric: true, get: (l) => l.credit },
+  { key: "debit", numeric: true, xlsx: "money", get: (l) => l.debit },
+  { key: "credit", numeric: true, xlsx: "money", get: (l) => l.credit },
   { key: "memo", get: (l) => l.memo ?? l.entryMemo },
 ];
+
+/**
+ * The accountant's "تصدير القيود" layout: the external system's account code
+ * first, Dara's code next to it, the property as cost centre and the tenant
+ * (else the landlord) as the party.
+ */
+const EXTERNAL: Column[] = [
+  { key: "date", numeric: true, get: (l) => l.date },
+  { key: "entry_no", get: (l) => l.entryNo },
+  { key: "account_code_external", get: (l) => l.accountCodeExternal ?? null },
+  { key: "account_code", get: (l) => l.accountCode },
+  { key: "account_name", get: (l, lang) => (lang === "en" ? l.accountNameEn || l.accountNameAr : l.accountNameAr) },
+  { key: "debit", numeric: true, xlsx: "money", get: (l) => l.debit },
+  { key: "credit", numeric: true, xlsx: "money", get: (l) => l.credit },
+  { key: "cost_center", get: (l) => l.property },
+  { key: "party", get: (l) => l.tenant ?? l.owner },
+  { key: "reference", get: (l) => l.sourceRef },
+  { key: "memo", get: (l) => l.memo ?? l.entryMemo },
+];
+
+const COLUMNS: Record<Preset, Column[]> = { standard: STANDARD, simple: SIMPLE, external: EXTERNAL };
 
 export const PRESETS: Record<Preset, readonly string[]> = {
   standard: STANDARD.map((c) => c.key),
   simple: SIMPLE.map((c) => c.key),
+  external: EXTERNAL.map((c) => c.key),
 };
 
 /** Quote per RFC 4180 when needed; neutralise a formula prefix on text cells. */
@@ -103,7 +133,7 @@ export function formatDate(iso: string, f: DateFormat): string {
 
 /** The whole file: BOM, header row, one row per line, CRLF, trailing CRLF. */
 export function journalCsv(lines: ExportLine[], opts: { preset?: Preset; lang?: "ar" | "en"; dateFormat?: DateFormat } = {}): string {
-  const cols = (opts.preset ?? "standard") === "simple" ? SIMPLE : STANDARD;
+  const cols = COLUMNS[opts.preset ?? "standard"];
   const lang = opts.lang ?? "ar";
   const df = opts.dateFormat ?? "iso";
   const out: string[] = [cols.map((c) => c.key).join(",")];
@@ -112,4 +142,21 @@ export function journalCsv(lines: ExportLine[], opts: { preset?: Preset; lang?: 
     out.push(cols.map((c) => csvCell(c.get(row, lang), c.numeric)).join(","));
   }
   return BOM + out.join("\r\n") + "\r\n";
+}
+
+/** The Excel variant: the same columns and values as the CSV, amounts as numbers (`#,##0.00`), no apostrophe guard. */
+export function journalXlsxRows(lines: ExportLine[], opts: { preset?: Preset; lang?: "ar" | "en"; dateFormat?: DateFormat } = {}): { header: string[]; rows: XlsxCell[][] } {
+  const cols = COLUMNS[opts.preset ?? "standard"];
+  const lang = opts.lang ?? "ar";
+  const df = opts.dateFormat ?? "iso";
+  return {
+    header: cols.map((c) => c.key),
+    rows: lines.map((l) => {
+      const row = { ...l, date: formatDate(l.date, df), originalDate: formatDate(l.originalDate, df) };
+      return cols.map((c): XlsxCell => {
+        const v = c.get(row, lang);
+        return c.xlsx ? { t: "n", v: v == null || v === "" ? null : v, money: c.xlsx === "money" } : { t: "s", v: v == null ? null : String(v) };
+      });
+    }),
+  };
 }

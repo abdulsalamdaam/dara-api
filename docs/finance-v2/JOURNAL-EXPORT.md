@@ -12,11 +12,11 @@ GET /api/finance/v2/journal-export
 |---|---|---|---|
 | `from` | `YYYY-MM-DD` | first day of `to`'s month | First entry date included |
 | `to` | `YYYY-MM-DD` | today (Asia/Riyadh) | Last entry date included |
-| `preset` | `standard`, `simple` | `standard` | The column set (§3) |
-| `lang` | `ar`, `en` | `ar` | Account-name language in the `simple` preset (`standard` always carries both) |
+| `preset` | `standard`, `simple`, `external` | `standard` | The column set (§3) |
+| `lang` | `ar`, `en` | `ar` | Account-name language in the `simple` and `external` presets (`standard` always carries both) |
 | `dateFormat` | `iso`, `dmy` | `iso` | `2026-08-05` or `05/08/2026` in the date columns |
 | `excludeReversed` | `true` / `false` | `false` | Leave out reversed entries **and** their reversals (the net effect is the same; the file is shorter) |
-| `format` | `csv`, `json` | `csv` | `json` returns a preview (§6) instead of the file |
+| `format` | `csv`, `xlsx`, `json` | `csv` | `xlsx` returns the same columns as an Excel workbook (§2.1); `json` returns a preview (§6) instead of the file |
 
 - **Access:** the finance-v2 flag must be on for the account (otherwise 404) and the caller needs the `view` capability. Owner-mobile tokens are refused (403). The export only ever reads the caller's own account.
 - **Errors:** 400 `BAD_DATE`, `BAD_RANGE` (from after to), `BAD_PRESET`, `BAD_INPUT` (dateFormat), `EXPORT_TOO_LARGE` (more than 200,000 lines; the body carries `count` and `max`: narrow the range).
@@ -32,6 +32,10 @@ GET /api/finance/v2/journal-export
 - **Formula guard:** a text cell that begins with `=`, `+`, `-`, `@`, a tab or a CR is prefixed with an apostrophe (`'`) so that a spreadsheet never evaluates it. Amount, date, line-number and VAT-rate cells are never altered. An importer that reads text columns should strip one leading apostrophe.
 - **Filename** (`Content-Disposition`): `dara-journal_<from>_<to>.csv`.
 - **Control totals** (response headers, also exposed to browsers): `X-Export-Rows` (line count), `X-Export-Debit`, `X-Export-Credit` (the two are always equal).
+
+### 2.1 Excel (`format=xlsx`)
+
+The same columns, rows, order and values as the CSV of the same parameters, in one sheet (`القيود`, or `Journal` with `lang=en`) with a bold, frozen header row. `debit` and `credit` are numeric cells formatted `#,##0.00`; `line_no` and `vat_rate` are numeric; dates are text in the chosen `dateFormat`; every other cell is an inline text cell. Text is never evaluated as a formula, so the apostrophe guard of the CSV is not applied. Filename `dara-journal_<from>_<to>.xlsx`, the same control-total headers, the same 200,000-line limit.
 
 ## 3. Columns
 
@@ -62,14 +66,33 @@ GET /api/finance/v2/journal-export
 | 21 | `vat_category` | `S`, `Z`, `E`, `O` on VAT-relevant lines, else empty |
 | 22 | `vat_rate` | VAT percent on those lines (e.g. `15`), else empty |
 | 23 | `tax_role` | `output`, `input` or `input_nonrecoverable` on the lines the VAT return reads, else empty |
+| 24 | `account_code_external` | The account's code in the external accounting system (كود النظام الخارجي, set per account in the chart), or empty. Added in the fixed-asset round; files from before it have 23 columns |
 
 ### 3.2 `simple`
 
-`date, entry_no, account_code, account_name, debit, credit, memo`. `account_name` is Arabic, or English with `lang=en` (falling back to Arabic when there is no English name). This is the lowest-common-denominator layout most packages can map in their generic "import journal" screen.
+`date, entry_no, account_code, account_name, debit, credit, memo`. `account_name` is Arabic, or English with `lang=en` (falling back to Arabic when there is no English name). This is the lowest-common-denominator layout most packages can map in their generic "import journal" screen. It is unchanged by the external code.
+
+### 3.3 `external`
+
+The accountant's "تصدير القيود" layout, for importing with the other system's own account codes:
+
+| # | Column | Content |
+|---|---|---|
+| 1 | `date` | Entry date |
+| 2 | `entry_no` | Journal entry number |
+| 3 | `account_code_external` | The external system's account code, or empty when the account has none (map it before importing) |
+| 4 | `account_code` | Dara's account code |
+| 5 | `account_name` | Arabic, or English with `lang=en` (Arabic when there is none) |
+| 6 | `debit` | Debit amount |
+| 7 | `credit` | Credit amount |
+| 8 | `cost_center` | The property (cost centre), or empty |
+| 9 | `party` | The tenant, else the landlord, or empty |
+| 10 | `reference` | As `source_ref` |
+| 11 | `memo` | The line's memo, or the entry memo |
 
 ## 4. `source_type` values
 
-`simple_invoice` (tax invoice, credit/debit note, commission, rent receipt, agency fee, receipt/deposit voucher), `payment` (an installment's due-date charge, release or cancellation), `payment_collection`, `contract` (deposit forfeit), `expense`, `landlord_payout`, `tenant_credit_action`, `write_off`, `manual_journal`, `opening_balance`, `vat_return`, `fiscal_year` (the year-end closing entry and its refreshes), `supplier_bill`, `supplier_payment`.
+`simple_invoice` (tax invoice, credit/debit note, commission, rent receipt, agency fee, receipt/deposit voucher), `fixed_asset` (acquisition, monthly depreciation, disposal; `source_ref` is the asset number `FA-######`), `payment` (an installment's due-date charge, release or cancellation), `payment_collection`, `contract` (deposit forfeit), `expense`, `landlord_payout`, `tenant_credit_action`, `write_off`, `manual_journal`, `opening_balance`, `vat_return`, `fiscal_year` (the year-end closing entry and its refreshes), `supplier_bill`, `supplier_payment`.
 
 ## 5. Reversals
 
@@ -83,7 +106,7 @@ The ledger is immutable: a correction is a reversal entry that mirrors the origi
   totals: { debit, credit, balanced },
   lines: [{ date, entryNo, lineNo, accountCode, accountNameAr, accountNameEn, debit, credit, memo, entryMemo,
             owner, property, unit, tenant, contract, sourceType, sourceRef, origin, status, originalDate,
-            vatCategory, vatRate, taxRole }] }
+            vatCategory, vatRate, taxRole, accountCodeExternal }] }
 ```
 
 `lines` holds the first 200 lines; `count` and `totals` cover the whole range.
