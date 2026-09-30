@@ -30,3 +30,27 @@ export const EMAIL_OTP_BYPASS_CODE = "111111";
 export function qaBypassEnabled(): boolean {
   return process.env.SMS_DEV_BYPASS === "true" || process.env.TWILIO_DEV_BYPASS === "true";
 }
+
+/**
+ * The App Store review login: ONE phone number that accepts ONE fixed code on
+ * the phone-OTP paths, so Apple's reviewer can sign in without receiving an SMS.
+ *
+ * Unlike the QA bypass above this may be armed in production — that is the
+ * point — so it is scoped as tightly as it can be: it needs BOTH
+ * `APP_REVIEW_PHONE` (any form; compared as its last 9 digits) and
+ * `APP_REVIEW_OTP` (4–8 digits) set, and fails closed if either is missing or
+ * malformed. It never touches the email OTP or any other number. Unset the two
+ * variables once the review is approved.
+ */
+export function appReviewLogin(): { phone9: string; code: string } | null {
+  const phone9 = (process.env.APP_REVIEW_PHONE || "").replace(/\D/g, "").slice(-9);
+  const code = (process.env.APP_REVIEW_OTP || "").trim();
+  if (!/^5\d{8}$/.test(phone9) || !/^\d{4,8}$/.test(code)) return null;
+  return { phone9, code };
+}
+
+/** True when `phone` (any format) is the armed App Store review number. */
+export function isAppReviewPhone(phone: string): boolean {
+  const r = appReviewLogin();
+  return !!r && phone.replace(/\D/g, "").slice(-9) === r.phone9;
+}
