@@ -54,7 +54,7 @@ export async function docById(q: Sql, scope: number, id: number): Promise<any | 
 }
 
 /** The seller landlord of a contract (frozen dims first) and whether it is VAT-registered. */
-async function sellerOf(q: Sql, scope: number, contractId: number): Promise<{ ownerId: number | null; name: string | null; idNumber: string | null; vatRegistered: boolean }> {
+export async function sellerOf(q: Sql, scope: number, contractId: number): Promise<{ ownerId: number | null; name: string | null; idNumber: string | null; vatRegistered: boolean }> {
   await captureDims(q, scope, contractId);
   const [r] = await q.rows(
     `select o.id, o.name, o.id_number, nullif(trim(coalesce(o.tax_number,'')),'') is not null as reg
