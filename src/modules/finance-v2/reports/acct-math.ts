@@ -86,6 +86,9 @@ export function lineOfRule(rule: Rule, counters: Counter[], cashNet: number, isR
     case "E19": return has("owner_drawings") ? "drawings" : "landlord_payouts";
     case "E18": return "expenses_paid";
     case "E39": return "supplier_payments";
+    // Fixed assets (§8.5): buying one from a bank and the proceeds of a disposal are investing as a whole,
+    // including the part a disposal books to gain (4420) or loss (5350), which a counter split would call operating.
+    case "FA01": case "FA03": return "investing";
     default: return null;
   }
 }

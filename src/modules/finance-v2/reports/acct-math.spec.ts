@@ -15,6 +15,9 @@ describe("accountant reports: classification (pure)", () => {
     assert.equal(lineOfRule("E09C", [], -100, true), "deposits_received", "a reversed receipt stays on the receipts line");
     assert.equal(lineOfRule("E19", [c("landlord_payable", "liability", "2121", -5)], -5, false), "landlord_payouts");
     assert.equal(lineOfRule("E19", [c("owner_drawings", "equity", "3400", -5)], -5, false), "drawings", "Owner mode: a payout is drawings");
+    assert.equal(lineOfRule("FA01", [c(null, "asset", "1221", 500)], -500, false), "investing", "an asset bought from the bank");
+    assert.equal(lineOfRule("FA03", [c(null, "asset", "1221", 900), c(null, "expense", "5350", -100)], 800, false), "investing",
+      "disposal proceeds are investing as a whole, the loss part included");
     assert.equal(lineOfRule("E28", [], 1, false), null);
     assert.equal(lineOfRule(null, [], 1, false), null);
   });

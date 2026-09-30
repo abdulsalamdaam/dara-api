@@ -14,6 +14,7 @@ import { DEPOSIT_DESC } from "../hooks/classify";
 import { createRentReceipt, sellerOf } from "../overrides/documents-v2";
 import { fromHalalas, toHalalas } from "../money";
 import { AUTO_INVOICE_ERROR_TEXT } from "./errors";
+import { dueNotInvoicedSql } from "../due-uninvoiced";
 
 export { AUTO_INVOICE_ERROR_TEXT };
 
@@ -254,17 +255,8 @@ export class AutoInvoiceService implements OnModuleInit, OnModuleDestroy {
               and (si.payment_id = p.id or coalesce(si.payment_ids, '[]'::jsonb) @> jsonb_build_array(p.id))
             order by si.id limit 1) dr on true
          left join finance_settings s on s.account_user_id = p.user_id
-        where p.user_id = $1 and p.deleted_at is null and c.deleted_at is null
-          and not c.is_draft and not p.is_demo
-          and p.due_date <= $2::date
-          and p.status::text not in ('cancelled','settled_external')
-          and coalesce(p.description, '') <> $3
-          and (s.ledger_go_live_date is null or p.due_date >= s.ledger_go_live_date)
-          and not (c.status::text in ('terminated','cancelled')
-                   and p.due_date > coalesce(d.ended_on, (c.updated_at at time zone 'Asia/Riyadh')::date))
-          and not exists (select 1 from simple_invoices si where si.user_id = p.user_id and si.status = 'confirmed' and si.deleted_at is null
-                            and si.type = 'invoice' and coalesce(si.kind, 'invoice') in ('invoice','manual','rent_receipt')
-                            and (si.payment_id = p.id or coalesce(si.payment_ids, '[]'::jsonb) @> jsonb_build_array(p.id)))
+        where p.user_id = $1 and p.due_date <= $2::date
+          and ${dueNotInvoicedSql({ depositParam: "$3", goLive: "s.ledger_go_live_date" })}
           ${extra}
         order by p.due_date, p.contract_id, p.id`,
       [scope, horizon, DEPOSIT_DESC, ...params],

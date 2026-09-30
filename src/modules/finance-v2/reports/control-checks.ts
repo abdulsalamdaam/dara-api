@@ -6,6 +6,7 @@ import { DEPOSIT_DESC, h } from "./common";
 import { fyStartOf } from "./core-math";
 import { CoreReportsService } from "./core-reports.service";
 import { BankRecService } from "../tier2/bank-rec.service";
+import { dueNotInvoicedSql } from "../due-uninvoiced";
 
 /**
  * The accountant's control checks that the reconciliation report (R1–R8) did
@@ -407,21 +408,18 @@ export class ExtraChecks {
 
   // ─── R19 (#19) ───
   async r19(scope: number, asOf: string, goLive: string | null): Promise<CheckBody> {
-    // "Due" follows the recognizer (§5.6): on today's check an installment due today is not due yet.
+    // Which installments count is the auto-invoice list's rule (../due-uninvoiced.ts), so this check and
+    // "due, not invoiced" agree. "Due" follows the recognizer (§5.6): on today's check an installment due today is not due yet.
     const today = riyadhToday();
     const cutoffOp = asOf >= today ? "<" : "<=";
     const cutoff = asOf >= today ? today : asOf;
     const r = await this.pool.query(
       `select p.id as "paymentId", p.contract_id as "contractId", to_char(p.due_date, 'YYYY-MM-DD') as "dueDate", p.amount::text as amount, p.status::text as status
-         from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id and c.deleted_at is null
+         from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
          left join finance_contract_dims d on d.contract_id = c.id and d.user_id = c.user_id
-        where p.user_id = $1 and p.deleted_at is null and p.status::text <> 'cancelled' and coalesce(p.description, '') <> $4
-          and p.due_date ${cutoffOp} $2::date and p.due_date >= $3::date
-          and (d.ended_on is null or p.due_date <= d.ended_on)
-          and not exists (select 1 from finance_installment_charges ch where ch.user_id = p.user_id and ch.payment_id = p.id and ch.reversed_at is null and ch.charged_by = 'document')
-          and not exists (select 1 from simple_invoices si where si.user_id = p.user_id and si.deleted_at is null and si.status = 'confirmed' and si.type = 'invoice'
-                            and (si.payment_id = p.id or (jsonb_typeof(si.payment_ids) = 'array' and si.payment_ids @> to_jsonb(p.id))))
-        order by p.due_date, p.id`, [scope, cutoff, goLive ?? "0001-01-01", DEPOSIT_DESC]);
+        where p.user_id = $1 and p.due_date ${cutoffOp} $2::date
+          and ${dueNotInvoicedSql({ depositParam: "$4", goLive: "$3::date" })}
+        order by p.due_date, p.id`, [scope, cutoff, goLive, DEPOSIT_DESC]);
     const amt = r.rows.reduce((t: number, x: any) => t + h(x.amount), 0);
     return countCheck(r.rowCount ?? 0, r.rows, [{ code: "amount_due_not_invoiced", count: r.rowCount ?? 0, amount: money(amt) }]);
   }

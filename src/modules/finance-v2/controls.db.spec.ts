@@ -299,6 +299,9 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       const bad = await one(`insert into simple_invoices (user_id, number, status, contract_id, subtotal, total, issue_date) values ($1, 'INV-000004', 'confirmed', $2, 500, 500, '2026-02-15') returning id`, [u, C]);
       const p3 = await one(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 1000, '2026-03-01', 'pending') returning id`, [u, C]);
       await q(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 1000, '2026-03-01', 'cancelled')`, [u, C]); // cancelled: not due
+      // Ejar-settled (Ejar issues it) and demo rows: not due either — the auto-invoice list's rule (due-uninvoiced.ts).
+      await q(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 1000, '2026-03-01', 'settled_external')`, [u, C]);
+      await q(`insert into payments (user_id, contract_id, amount, due_date, status, is_demo) values ($1, $2, 1000, '2026-03-01', 'pending', true)`, [u, C]);
       await q(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 1000, '2026-04-01', 'pending')`, [u, C]);   // after asOf
       const r18 = await check(u, "R18");
       assert.deepEqual([r18.status, r18.ledger, r18.rows.map((x: any) => x.documentId)], ["difference", "1", [bad]]);
