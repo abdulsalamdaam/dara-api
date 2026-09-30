@@ -5,7 +5,7 @@ import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { phoneOtpTokensTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { TaqnyatService } from "./taqnyat.service";
-import { qaBypassEnabled } from "../../common/qa-bypass";
+import { qaBypassEnabled, appReviewLogin, isAppReviewPhone } from "../../common/qa-bypass";
 
 /**
  * Phone-OTP for the mobile app's two login paths (tenant and landlord).
@@ -74,6 +74,12 @@ export class PhoneOtpService {
       return;
     }
 
+    if (isAppReviewPhone(phone)) {
+      // Apple's reviewer cannot receive the SMS; they are given the code.
+      this.log.warn(`[APP_REVIEW] ${purpose} OTP for the review number — nothing sent`);
+      return;
+    }
+
     // Resend cooldown, enforced against the last row rather than in memory.
     const [recent] = await this.db
       .select({ createdAt: phoneOtpTokensTable.createdAt })
@@ -120,6 +126,10 @@ export class PhoneOtpService {
     if (!phone || !entered) return false;
 
     if (smsBypassEnabled()) return entered === DEV_BYPASS_CODE;
+
+    // The review number checks its fixed code and nothing else: a wrong code
+    // fails, and it never falls through to (or consumes) a real SMS token.
+    if (isAppReviewPhone(phone)) return entered === appReviewLogin()!.code;
 
     const [token] = await this.db
       .select()
