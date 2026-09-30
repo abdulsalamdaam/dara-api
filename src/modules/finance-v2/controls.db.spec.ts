@@ -259,6 +259,22 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       await post(u, "2026-03-11", [L(u, "5270", "dr", "5.00"), L(u, "1114", "cr", "5.00")], { origin: "manual" });
       assert.equal((await check(u, "R16")).rows.length, 2);
     });
+
+    it("the monthly commission invoice (landlord, no contract, with VAT) is office money until the commission transfer (E15T) moves it", async () => {
+      const u = U_T;
+      const h = (s: string) => toHalalas(s);
+      const before = (await check(u, "R16")).explanations[0].items[0];
+      const diff0 = (await check(u, "R16")).difference;
+      await post(u, "2026-03-20", [L(u, "2121", "dr", "115.00", { ownerId: O2 }), L(u, "4210", "cr", "100.00", { ownerId: O2 }), L(u, "2151", "cr", "15.00", { ownerId: O2 })], { rule: "E15" });
+      const mid = await check(u, "R16");
+      assert.equal(mid.difference, diff0, "posted, not yet transferred: explained as office money");
+      assert.equal(h(mid.explanations[0].items[0].commissionDeducted) - h(before.commissionDeducted), 11500);
+      await post(u, "2026-03-21", [L(u, "1113", "dr", "115.00"), L(u, "1114", "cr", "115.00")], { rule: "E15T", sourceType: "commission_transfer" });
+      const after = await check(u, "R16");
+      assert.deepEqual([after.difference, after.rows.length], [diff0, 2]);
+      assert.equal(h(after.explanations[0].items[0].transfersToOffice) - h(before.transfersToOffice), -11500);
+      assert.equal(after.explanations[0].items[0].officeMoneyNotTransferred, before.officeMoneyNotTransferred);
+    });
   });
 
   // ─────────────────────────────── R17–R21 ───────────────────────────────

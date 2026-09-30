@@ -341,6 +341,32 @@ describe("finance v2 accountant reports (real Postgres)", { skip: fv2DbSkip }, (
       assert.deepEqual(one.rows.map((r: any) => r.propertyName), ["B Palms"]);
       assert.equal(one.check.balanced, true);
     });
+
+    it("the monthly landlord commission invoice (0070: landlord, no property) is spread over its run's properties", async () => {
+      // April only, so the Jan–Mar figures above are untouched. The run: 150 on B Palms, 50 on a second property of the same landlord.
+      const P4 = await one(`insert into properties (user_id, name, owner_id) values ($1, 'D Court', $2) returning id`, [U, ids.O2]);
+      const doc = await one(`insert into simple_invoices (user_id, number, type, kind, status, subtotal, total, issue_date)
+                             values ($1, 'COM-000901', 'invoice', 'commission', 'confirmed', 200, 230, '2026-04-30') returning id`, [U]);
+      await q(`insert into finance_commission_runs (user_id, owner_id, month, document_id, collected, base, net, vat, total, vat_registered, detail, origin)
+               values ($1, $2, '2026-04-01', $3, 4600, 4000, 200, 30, 230, true, $4::jsonb, 'manual')`,
+        [U, ids.O2, doc, JSON.stringify([{ propertyId: ids.P2, commission: "150.00", deferred: null }, { propertyId: P4, commission: "50.00", deferred: null },
+          { propertyId: ids.P3, commission: "0.00", deferred: "no_rate" }])]);
+      const d = { ownerId: ids.O2 };
+      await withTx(t.pool, (c) => repo.post(c, {
+        userId: U, entryDate: "2026-04-30", origin: "auto", sourceType: "simple_invoice", sourceId: doc, event: "confirmed", payload: { rule: "E15" },
+        lines: [L("2121", "dr", "230.00", d), L("4210", "cr", "200.00", d), L("2151", "cr", "30.00", d)],
+      }));
+      const apr: any = await svc.propertyProfitability(U, { from: "2026-04-01", to: "2026-04-30" });
+      const r = (name: string) => apr.rows.find((x: any) => x.propertyName === name);
+      assert.deepEqual([r("B Palms").commission, r("D Court").commission], ["150.00", "50.00"]);
+      // Unregistered landlord: his commission cost is gross (150 + 22.50 VAT; 50 + 7.50).
+      assert.deepEqual([r("B Palms").landlord.commission, r("D Court").landlord.commission], ["172.50", "57.50"]);
+      assert.equal(apr.rows.find((x: any) => x.treatment === "unallocated")?.commission ?? "0.00", "0.00");
+      assert.equal(apr.totals.commission, "200.00");
+      assert.equal(apr.check.balanced, true);
+      const only: any = await svc.propertyProfitability(U, { from: "2026-04-01", to: "2026-04-30", propertyId: String(P4) });
+      assert.deepEqual([only.rows.map((x: any) => [x.propertyName, x.commission]), only.check.balanced], [[["D Court", "50.00"]], true]);
+    });
   });
 
   describe("scope and routes", () => {

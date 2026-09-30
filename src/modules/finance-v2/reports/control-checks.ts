@@ -273,8 +273,9 @@ export class ExtraChecks {
    *   2121 landlord payable (agent landlords)
    * + 2141 deposits held on agent landlords' contracts
    * − cash in transit (1116) on agent landlords' lines (Ejar; zero by construction in Manager mode)
-   * + commission deducted from landlords and landlord expenses the office paid from its own accounts, less the
-   *   transfers between the trust account and the office's own accounts ("office money not yet transferred")
+   * + commission deducted from landlords (E15/E36, the monthly collected-basis invoice included; E16) and landlord
+   *   expenses the office paid from its own accounts, less the transfers between the trust account and the office's
+   *   own accounts, the commission transfer E15T among them ("office money not yet transferred")
    * + landlord-charged supplier bills not yet paid ("landlord expenses not yet paid")
    * Tenant advances need no line of their own: in v2 an advance on managed rent is credited to 2121 on collection.
    * Every other entry that moves the trust account and the client liabilities by different amounts is the difference,
@@ -340,6 +341,8 @@ export class ExtraChecks {
       if (r === 0) continue;
       if (e.rule && COMMISSION.has(e.rule)) { commission += r; continue; }
       if (e.origin === "opening") { opening += r; continue; }
+      // The commission transfer (E15T, 0070): trust → the office's operating account, the office money moving out.
+      if (e.rule === "E15T") { transfers += r; continue; }
       // A landlord expense (E18) or bill payment (E39) settled from the office's own account: the office's money is owed back from trust.
       if ((e.rule === "E18" || e.rule === "E38") && e.trust === 0) { if (e.rule === "E38") billsFlow += r; else officePaid += r; continue; }
       if (e.rule === "E39") { billsFlow += r; continue; }

@@ -514,6 +514,50 @@ export class AcctReportsService {
 
   // ───────────────────────────── property profitability ─────────────────────────────
 
+  /**
+   * Commission (4210) and its VAT (2151) on the landlord commission documents of the monthly run (0070), which carry
+   * the landlord but no property, spread over the run's properties in proportion to each property's commission
+   * (finance_commission_runs.detail; deferred properties take none). Integer halalas; the remainder goes to the
+   * largest share so the parts add up to the line.
+   */
+  private async commissionRunAllocation(scope: number, from: string, to: string, f: Filt): Promise<Map<number, { com: number; cvat: number }>> {
+    const out = new Map<number, { com: number; cvat: number }>();
+    const p: unknown[] = [scope, from, to];
+    let x = "";
+    if (f.ownerId != null) { p.push(f.ownerId); x = ` and r.owner_id = $${p.length}`; }
+    let rows: any[];
+    try {
+      rows = (await this.pool.query(
+        `select a.system_key as sk, (l.credit - l.debit)::text as amt, r.detail
+           from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+           join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+           join finance_commission_runs r on r.user_id = e.user_id and e.source_type = 'simple_invoice'
+                                         and e.source_id in (r.document_id, coalesce(r.credit_document_id, -1))
+          where l.user_id = $1 and l.entry_date between $2::date and $3::date and e.origin <> 'closing' and l.property_id is null
+            and a.system_key in ('commission_revenue', 'output_vat')${x}`, p)).rows;
+    } catch (err: any) {
+      if (err?.code === "42P01") return out; // 0070 not applied
+      throw err;
+    }
+    for (const row of rows) {
+      const parts = (Array.isArray(row.detail) ? row.detail : [])
+        .filter((d: any) => d && d.propertyId != null && !d.deferred && h(String(d.commission ?? "0")) > 0)
+        .map((d: any) => ({ k: Number(d.propertyId), w: h(String(d.commission)) }));
+      const W = parts.reduce((t: number, d: any) => t + d.w, 0);
+      if (!W) continue;
+      const amt = h(row.amt);
+      let left = amt;
+      const shares = parts.map((d: any) => { const s = Math.trunc((amt * d.w) / W); left -= s; return { k: d.k, s, w: d.w }; });
+      shares.sort((a: any, b: any) => b.w - a.w)[0].s += left;
+      for (const sh of shares) {
+        const v = out.get(sh.k) ?? { com: 0, cvat: 0 };
+        if (row.sk === "commission_revenue") v.com += sh.s; else v.cvat += sh.s;
+        out.set(sh.k, v);
+      }
+    }
+    return out;
+  }
+
   /** GET /finance/v2/reports/property-profitability?from&to&ownerId&propertyId&lang */
   async propertyProfitability(scope: number, q: Record<string, any> = {}) {
     const lang = langOf(q.lang);
@@ -563,6 +607,22 @@ export class AcctReportsService {
     }
     for (const x of pl) Object.assign(ensure(x.k), { rev: h(x.rev), rent: h(x.rent), com: h(x.com), exp: h(x.exp) });
     for (const x of ag) Object.assign(ensure(x.k), { lrent: h(x.lrent), lexpGross: h(x.lexp_gross), lexpVat: h(x.lexp_vat), cvat: h(x.cvat) });
+    // The monthly landlord commission invoice (collected basis, 0070) posts with the landlord but no property:
+    // spread it over the properties of its run, so an agent landlord's commission lands on each property.
+    let allocatedOutsideFilter = 0;
+    for (const [k, v] of await this.commissionRunAllocation(scope, from, to, f)) {
+      if (f.propertyId == null) {
+        const n = ensure(null);
+        n.rev = (n.rev ?? 0) - v.com; n.com = (n.com ?? 0) - v.com; n.cvat = (n.cvat ?? 0) - v.cvat;
+      } else if (k !== f.propertyId) continue;
+      else allocatedOutsideFilter += v.com; // the income statement for one property never saw these (no property on the line)
+      const p = ensure(k);
+      p.rev = (p.rev ?? 0) + v.com; p.com = (p.com ?? 0) + v.com; p.cvat = (p.cvat ?? 0) + v.cvat;
+    }
+    if (f.propertyId == null) {
+      const n = props.get(null);
+      if (n && !n.rev && !n.com && !n.cvat && !n.exp && !n.lrent && !n.lexpGross && !n.billed && !n.collected && !n.units) props.delete(null);
+    }
     for (const [k, v] of arMv) Object.assign(ensure(k), { billed: v.billed, collected: v.collected });
     // Properties that only appear through the ledger (no current unit listed): load their landlord.
     const missing = [...props.values()].filter((v) => v.k != null && v.name === undefined).map((v) => v.k);
@@ -618,7 +678,7 @@ export class AcctReportsService {
          from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
          join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
         where l.user_id = $1 and l.entry_date between $2::date and $3::date and e.origin <> 'closing'${x3}`, p3)).rows[0];
-    const isRev = h(is.rev);
+    const isRev = h(is.rev) + allocatedOutsideFilter;
     const isExp = h(is.exp);
     const f2 = (n: number) => fromHalalas(n);
     return {
