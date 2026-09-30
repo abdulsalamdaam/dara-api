@@ -17,6 +17,17 @@ import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import type { Sql } from "./sql";
 import { CONVERSION_NOTE, DEPOSIT_DESC, documentGroups, installmentNature, installmentVat, parseBusinessDate, usageOf } from "./classify";
+import { accountVatRegistered } from "../account-seller";
+
+/**
+ * A document with no contract (a free invoice to an external customer, a
+ * tenant or a landlord as BUYER, and its notes) is the ACCOUNT's own sale: it
+ * has no landlord to act for, and ZATCA files it under the account's
+ * standalone seller (`resolveStandaloneSellerId`). So it is principal with
+ * `seller_key 'account'` in both modes — never agent money for an unresolved
+ * landlord. Deposit vouchers keep their landlord-based treatment (trust money).
+ */
+const STANDALONE = { treatment: "principal" as Treatment, warnings: [] as string[] };
 
 export interface FinanceSettingsRow {
   mode: AccountingMode;
@@ -231,6 +242,7 @@ export async function collectionEvents(q: Sql, userId: number, s: FinanceSetting
     `select pc.id, pc.payment_id, pc.amount::text as amount, to_char(pc.collected_date,'YYYY-MM-DD') as date, pc.method, pc.notes, pc.invoice_id,
             p.contract_id as p_contract, p.description as p_desc, p.vat_enabled as p_vat,
             si.kind as doc_kind, si.contract_id as doc_contract, to_char(si.issue_date,'YYYY-MM-DD') as doc_issue,
+            si.id as doc_id, si.tenant_id as doc_tenant,
             m.classification, m.bank_account_id
        from payment_collections pc
        left join payments p on p.id = pc.payment_id and p.user_id = pc.user_id
@@ -260,13 +272,15 @@ export async function collectionEvents(q: Sql, userId: number, s: FinanceSetting
       if (!ctxCache.has(contractId)) ctxCache.set(contractId, await contractCtx(q, userId, s.mode, contractId));
       ctx = ctxCache.get(contractId) ?? null;
     }
-    const t0 = ctx ? { treatment: ctx.treatment, warnings: ctx.warnings } : resolveTreatment(s.mode, null);
+    // Money on a document with no contract (and no installment) settles the account's own sale.
+    const standalone = !contractId && r.doc_id != null && r.doc_kind !== "deposit";
+    const t0 = ctx ? { treatment: ctx.treatment, warnings: ctx.warnings } : standalone ? STANDALONE : resolveTreatment(s.mode, null);
     const t = cls.treatment ? { ...t0, treatment: cls.treatment } : t0;
     const vat = r.payment_id && nature !== "deposit" && r.doc_kind !== "agency_fee"
       ? installmentVat({ vatEnabled: r.p_vat === true, usage: ctx?.usage ?? null, sellerRegistered: ctx?.sellerRegistered ?? false })
       : null;
     const facts: CollectionFacts = {
-      date: r.date, treatment: t.treatment, dims: dimsOf(ctx, { paymentId: r.payment_id ?? null }),
+      date: r.date, treatment: t.treatment, dims: dimsOf(ctx, { paymentId: r.payment_id ?? null, ...(ctx ? {} : { tenantId: r.doc_tenant ?? null }) }),
       warnings: [...t.warnings, ...cls.warnings],
       collectionId: r.id, amount: r.amount, cls: cls.cls,
       bank: { bankAccountId: r.bank_account_id ?? null, method: r.method ?? null },
@@ -307,10 +321,13 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
   if (!d || (d.status !== "confirmed" && !returnedDeposit)) return [];
   const kind: string = d.kind ?? "invoice";
   const ctx = d.contract_id ? await contractCtx(q, userId, s.mode, Number(d.contract_id)) : null;
+  const standalone = !d.contract_id && kind !== "deposit";
   const clientOwner = Number(d.client?.ownerId);
   const t = ctx
     ? { treatment: ctx.treatment, warnings: ctx.warnings }
-    : await ownerTreatment(q, userId, s.mode, Number.isInteger(clientOwner) && clientOwner > 0 ? clientOwner : null);
+    : standalone
+      ? STANDALONE
+      : await ownerTreatment(q, userId, s.mode, Number.isInteger(clientOwner) && clientOwner > 0 ? clientOwner : null);
   const dims = dimsOf(ctx, { tenantId: d.tenant_id ?? ctx?.tenantId ?? null });
 
   if (d.type === "invoice" && kind === "receipt") return []; // E30: its collections post
@@ -353,8 +370,15 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
   const feeNames = new Set<string>(cov.filter((p: any) => installmentNature(p.description) === "fee").map((p: any) => String(p.description).trim()));
 
   const commission = kind === "commission" || (d.type === "credit" && ref?.kind === "commission");
+  const ownFee = commission || kind === "agency_fee";
+  // Lines bill rent only on a contract document that is not a debit note: a
+  // free invoice (consulting, services) and a debit note (an extra claim) are
+  // other income (4140) unless a line names a covered fee (4130), DESIGN §3.
   const { groups, warnings: gw } = documentGroups(d, {
-    feeNames, usage: ctx?.usage ?? null, sellerRegistered: ctx?.sellerRegistered ?? false, nature: commission || kind === "agency_fee" ? "other" : undefined,
+    feeNames, usage: ctx?.usage ?? null,
+    sellerRegistered: standalone ? await accountVatRegistered(q, userId) : ctx?.sellerRegistered ?? false,
+    nature: ownFee ? "other" : undefined, ownFee,
+    defaultNature: standalone || d.type === "debit" ? "other" : "rent",
   });
   const facts: DocumentFacts = {
     date: d.date, treatment: t.treatment, dims, warnings: [...t.warnings, ...gw], memo: d.number ?? null,

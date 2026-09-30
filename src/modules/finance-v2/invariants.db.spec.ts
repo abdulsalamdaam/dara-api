@@ -120,11 +120,15 @@ async function settle(env: LegacyEnv, U: number): Promise<void> {
   }
 }
 
-/** A synthetic account (seedAccount) with the account holder ZATCA-linked too, Finance v2 on in `mode`. */
-async function setupAccount(env: LegacyEnv, U: number, mode: "owner" | "manager", before?: (s: Seed) => Promise<void>): Promise<Seed> {
+/**
+ * A synthetic account (seedAccount) with the account holder ZATCA-linked too (unless `linkHolder` is false),
+ * Finance v2 on in `mode`.
+ */
+async function setupAccount(env: LegacyEnv, U: number, mode: "owner" | "manager", before?: (s: Seed) => Promise<void>,
+  opts: { linkHolder?: boolean } = {}): Promise<Seed> {
   const s: Seed = await seedAccount(env, U);
   // Dummy sandbox row for the holder, as the seed has for the agent (ZATCA is stubbed), so the holder's invoices approve.
-  await env.q(
+  if (opts.linkHolder !== false) await env.q(
     `insert into zatca_credentials (user_id, owner_id, active_environment, seller_name, seller_vat_number, seller_street, seller_building_no,
        seller_district, seller_city, seller_postal_zone, serial_number, organization_identifier, organization_unit_name, location_address,
        industry_category, common_name, sandbox_private_key_enc, sandbox_binary_security_token, sandbox_secret_enc, sandbox_cert_pem)
@@ -148,13 +152,17 @@ async function runSequence(env: LegacyEnv, backfill: BackfillService, rec: Recon
     throw new SequenceFailure(`${msg}\n  replay: FV2_PROP_SEQUENCES=1 FV2_PROP_SEED=${seed}\n  ops: ${log.join(" | ")}`);
   };
 
+  // Half the non-trust manager sequences leave the account holder unlinked: the account then issues no tax invoice of
+  // its own, so its commission is drafted without VAT and approves (E15/E36); a linked account's commission is S-rated
+  // and refused (§9 E8, never reported to ZATCA), as are the holder's own invoices and free invoices when unlinked.
+  const linkHolder = !(mode === "manager" && seed % 4 === 2);
   const s = await setupAccount(env, U, mode, async (s) => {
     if (r.chance(0.3)) {
       // E1: sometimes the landlord carries the fee rather than the property.
       await env.q(`update owners set management_fee_percent = $2 where id = $1`, [s.agent, r.pick(["2.5", "5", "7.5"])]);
       await env.q(`update properties set management_fee_percent = null where id = $1`, [s.propA]);
     }
-  });
+  }, { linkHolder });
   stats.byMode[mode] = (stats.byMode[mode] ?? 0) + 1;
   if (seed % 4 === 0) {
     // Every other manager-mode sequence keeps client money in a default trust account (agency_collections_to_trust):
@@ -257,6 +265,7 @@ async function runSequence(env: LegacyEnv, backfill: BackfillService, rec: Recon
   const kinds = [
     "collect_installment", "collect_installment", "invoice", "invoice", "credit_note", "collect_invoice", "collect_deposit",
     "advance_voucher", "deposit_voucher", "expense", "expense_delete", "payout", "payout_delete", "terminate", "commission_credit",
+    "free_invoice",
   ] as const;
   for (let op = 0; op < nOps; op++) {
     const kind = r.pick(kinds);
@@ -303,7 +312,35 @@ async function runSequence(env: LegacyEnv, backfill: BackfillService, rec: Recon
           if (ok && r.chance(0.6)) {
             await act("collect_commission", `com${com.id}`, () => env.billing.collect(user, String(com.id), { paidDate: dateBetween(r, issue, LAST), method: "bank_transfer" }));
           }
+          if (ok && r.chance(0.4)) {
+            // A credit note on the rent invoice right away drafts the commission credit (E36), approved at once.
+            const part = Math.max(1, Math.floor(net / 100 / 4)) * 100;
+            const crn: any = await act("credit_note", `inv${inv.id} ${sar(part)}`, () => env.billing.create(user, {
+              type: "credit", billingReference: inv.number, issueDate: dateBetween(r, issue, LAST),
+              items: [{ description: "خصم", quantity: 1, unitPrice: part / 100, amount: part / 100, vat }], total: (part + (vat ? Math.round(part * 0.15) : 0)) / 100,
+            }));
+            if (crn?.id && (await act("approve_credit", `crn${crn.id}`, () => env.billing.approve(user, String(crn.id), {})))) {
+              const [ccn] = await env.q(`select id::int as id from simple_invoices where user_id = $1 and kind = 'commission' and type = 'credit' and status = 'draft'
+                                           and deleted_at is null and notes like $2`, [U, `%${crn.number}%`]);
+              if (ccn) await act("commission_credit", `ccn${ccn.id}`, () => env.billing.approve(user, String(ccn.id), {}));
+            }
+          }
         }
+        break;
+      }
+      case "free_invoice": {
+        // A free invoice to an external customer: the account's own sale (principal, seller 'account') in both modes;
+        // collect_invoice picks it up like any invoice. Standard-rated or VAT-free (exempt as printed), never mixed.
+        const vat = r.chance(0.6);
+        const net = r.int(1, 40) * 100;
+        const vatAmt = vat ? Math.round(net * 0.15) : 0;
+        const issue = dateBetween(r, addDays(LAST, -200), LAST);
+        const inv: any = await act(kind, `${sar(net)}+${sar(vatAmt)} ${issue}`, () => env.billing.create(user, {
+          type: "invoice", issueDate: issue,
+          client: { name: `Synthetic Customer ${r.int(1, 3)}`, type: "individual", email: `cust-${U}@example.test`, phone: "0500000009", idNumber: `10000${U}` },
+          items: [{ description: r.pick(["خدمة استشارية", "خدمة إدارية"]), quantity: 1, unitPrice: net / 100, amount: net / 100, vat }], total: (net + vatAmt) / 100,
+        }));
+        if (inv?.id) await act("approve_free_invoice", `inv${inv.id}`, () => env.billing.approve(user, String(inv.id), { confirmations: { tenantNoVat: true } }));
         break;
       }
       case "credit_note": {
@@ -585,7 +622,8 @@ describe(`finance v2 property / invariant sequences (real Postgres, real legacy 
     assert.equal(stats.sequences, N);
     if (N < 50) return;
     for (const k of ["create_contract", "collect_installment", "invoice", "credit_note", "collect_invoice", "collect_deposit", "advance_voucher",
-      "expense", "payout", "terminate", "approve_commission"]) assert.ok((stats.ops[k] ?? 0) > 0, `never ran ${k}`);
+      "expense", "payout", "terminate", "approve_commission", "free_invoice"]) assert.ok((stats.ops[k] ?? 0) > 0, `never ran ${k}`);
+    assert.ok((stats.ops.approve_free_invoice ?? 0) > (stats.refused.approve_free_invoice ?? 0), "some free invoices were approved");
     // E16 is absent by design: a collected commission settles by deduction from the landlord's payable (skip settled_by_deduction).
     for (const rule of ["E01", "E02", "E03", "E04", "E05", "E06", "E09", "E10", "E11", "E12", "E15", "E18", "E19", "E24", "E34", "E35", "E36"]) {
       assert.ok((stats.rules[rule] ?? 0) > 0, `never posted ${rule}: ${JSON.stringify(stats.rules)}`);
@@ -705,6 +743,28 @@ describe("finance v2 invariants — regressions found by the property run (real 
     const [a] = await env.q(`select id from owners where user_id = $1 and not is_account_holder`, [U]);
     await env.reports.createPayout(user(U), { ownerId: a.id, amount: 25, transferDate: LAST, method: "bank_transfer" });
     await checkInvariants(env, backfill, rec, U, "manager", () => settle(env, U), fail("R-e"), null);
+  });
+
+  it("free invoice (external customer), manager mode with a trust account: the account's own sale; R1, R3, R4 and R5 hold", async () => {
+    const U = 39008;
+    const s = await setupAccount(env, U, "manager");
+    await new BankAccountsService(env.t.pool as any).create(U, U, { kind: "bank", nameAr: "حساب العملاء", nameEn: "Client trust", isTrust: true, isDefault: true });
+    await env.q(`update finance_settings set agency_collections_to_trust = true where account_user_id = $1`, [U]);
+    void s;
+    const client = { name: "Synthetic Customer", type: "individual", email: `cust-${U}@example.test`, phone: "0500000009", idNumber: `10000${U}` };
+    const mk = async (items: any[], total: number) => {
+      const d: any = await env.billing.create(user(U), { type: "invoice", issueDate: LAST, client, items, total });
+      await env.billing.approve(user(U), String(d.id), { confirmations: { tenantNoVat: true } });
+      return d;
+    };
+    const a = await mk([{ description: "خدمة استشارية", quantity: 1, unitPrice: 1000, amount: 1000, vat: true }], 1150);
+    await mk([{ description: "خدمة إدارية", quantity: 1, unitPrice: 100, amount: 100, vat: false }], 100);
+    await env.billing.collect(user(U), String(a.id), { amount: 600, paidDate: LAST, method: "bank_transfer" });
+    await settle(env, U);
+    const [agent] = await env.q(
+      `select count(*)::int as n from journal_lines l join accounts a on a.id = l.account_id where l.user_id = $1 and a.code in ('1122','2121','2122')`, [U]);
+    assert.equal(agent.n, 0, "never agent money");
+    await checkInvariants(env, backfill, rec, U, "manager", () => settle(env, U), fail("R-h"), null);
   });
 
   it("R1: an installment falling due today is not a receivable yet on either side (the recognizer charges it tomorrow)", async () => {

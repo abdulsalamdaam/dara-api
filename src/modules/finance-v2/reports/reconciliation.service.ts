@@ -231,7 +231,7 @@ export class ReconciliationService {
     const r = await this.pool.query(
       `select pc.id, pc.payment_id, pc.amount::text as amount, pc.method, pc.notes, to_char(pc.collected_date, 'YYYY-MM-DD') as d,
               p.contract_id as p_contract, p.description as p_desc, si.kind as doc_kind, si.contract_id as doc_contract,
-              to_char(si.issue_date, 'YYYY-MM-DD') as doc_issue, m.classification, m.bank_account_id
+              to_char(si.issue_date, 'YYYY-MM-DD') as doc_issue, si.id as doc_id, m.classification, m.bank_account_id
          from payment_collections pc
          left join payments p on p.id = pc.payment_id and p.user_id = pc.user_id
          left join simple_invoices si on si.id = pc.invoice_id and si.user_id = pc.user_id
@@ -244,7 +244,9 @@ export class ReconciliationService {
         paymentIsDeposit: x.payment_id != null && x.p_desc === DEPOSIT_DESC,
         looksLikeTerminateConversion: x.doc_kind === "deposit" && !x.payment_id && x.notes === CONVERSION_NOTE && !!x.doc_issue && x.d > x.doc_issue,
       });
-      return { id: x.id as number, amount, rule: cls.rule, cls: cls.cls, principal: cls.treatment === "principal", contractId: (x.p_contract ?? x.doc_contract ?? null) as number | null, method: x.method as string | null, bankAccountId: x.bank_account_id as number | null };
+      // Money on a document with no contract settles the account's own sale (facts-loader `STANDALONE`).
+      const standalone = (x.p_contract ?? x.doc_contract) == null && x.doc_id != null && x.doc_kind !== "deposit";
+      return { id: x.id as number, amount, rule: cls.rule, cls: cls.cls, principal: cls.treatment === "principal" || standalone, contractId: (x.p_contract ?? x.doc_contract ?? null) as number | null, method: x.method as string | null, bankAccountId: x.bank_account_id as number | null };
     });
   }
 

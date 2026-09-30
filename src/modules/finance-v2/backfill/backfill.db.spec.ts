@@ -50,6 +50,9 @@ async function history(env: LegacyEnv, s: Seed, U: number) {
   ids.inv = inv.id;
   const approved: any = await env.billing.approve(user, String(inv.id), { confirmations: { tenantNoVat: true } });
   ids.com = approved?.commission?.id;
+  // Legacy drafts every commission at 15 %; v2 drafts none on an account not linked to ZATCA (§9 E8) and never
+  // approves a VAT-bearing one. Both histories approve the same no-VAT document, so live and backfill compare.
+  await env.q(`update simple_invoices set total = subtotal, items = jsonb_set(items, '{0,vat}', 'false') where id = $1`, [ids.com]);
   await env.billing.approve(user, String(ids.com), {});
   await env.billing.collect(user, String(ids.com), { paidDate: "2026-03-30" });
   const crn: any = await env.billing.create(user, {

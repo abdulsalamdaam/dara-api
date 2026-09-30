@@ -8,9 +8,10 @@
  *    and triggers the v2 commission (E1).
  *  - `agency_fee` "أتعاب الوساطة (السعي) / Brokerage fee": the account's own
  *    supply billed to the tenant, AGF-######, 15% only when the account is
- *    VAT-registered (else O). A VAT-bearing AGF is refused at approval while
- *    the account is ZATCA-integrated (409 FINANCE_V2_TAX_DOC_NOT_REPORTABLE;
- *    a 15% document that never reaches Fatoora is not a valid tax invoice).
+ *    VAT-registered AND linked to ZATCA (else O, printed "not a tax invoice").
+ *    A VAT-bearing AGF is refused at approval in every case (409
+ *    FINANCE_V2_TAX_DOC_NOT_REPORTABLE): it is never sent to Fatoora, and a
+ *    15% document that never reaches Fatoora is not a valid tax invoice.
  *    Approval posts E17.
  *
  * Both are approved by `approveV2Kind` (the legacy approve forks to it at the
@@ -19,7 +20,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { and, eq } from "drizzle-orm";
 import { simpleInvoicesTable } from "@dara/database";
-import { accountVatRegistered, accountZatcaIntegrated, createCommissionV2, nextDocNumber } from "../commission";
+import { accountZatcaIntegrated, createCommissionV2, nextDocNumber, ownFeeCarriesVat } from "../commission";
 import { captureDims } from "../hooks/facts-loader";
 import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
@@ -141,7 +142,9 @@ export async function ensureAgencyFeeDraft(q: Sql, scope: number, contractId: nu
     [scope, contractId],
   );
   if (existing) return { existing: true, ...(await docById(q, scope, Number(existing.id))) };
-  const reg = await accountVatRegistered(q, scope);
+  // 15% only for a VAT-registered account that is linked to ZATCA (§9 E8): an
+  // unlinked account's AGF prints as "not a tax invoice" with no VAT.
+  const reg = await ownFeeCarriesVat(q, scope);
   const vat = reg ? Math.floor((fee * 15 + 50) / 100) : 0;
   const net = Number(fromHalalas(fee));
   const items = [{ description: AGENCY_FEE_LINE, quantity: 1, unitPrice: net, amount: net, vat: reg, vatCategory: reg ? "S" : "O" }];
@@ -173,6 +176,38 @@ export async function unbilledAgencyFees(q: Sql, scope: number) {
 }
 
 /**
+ * §9 E8 (Q6b) and DARA-NOTES §2b-iii: the account's own fee documents
+ * (agency fee, commission) are never reported to ZATCA during the beta, so one
+ * carrying VAT is never approved under v2 — its VAT would sit in 2151 and in
+ * box 1 of the VAT return with no tax invoice behind it:
+ *  - linked account: the fee is S-rated but cannot reach Fatoora (DESIGN §9 E8, until Q6b);
+ *  - unlinked account: no tax invoice is issued by an unlinked seller, so the
+ *    document must print as "not a tax invoice" without VAT.
+ */
+export async function refuseUnreportableTaxDoc(q: Sql, scope: number): Promise<never> {
+  const linked = await accountZatcaIntegrated(q, scope);
+  throw new ConflictException({
+    error: "FINANCE_V2_TAX_DOC_NOT_REPORTABLE",
+    message: linked
+      ? "لا يمكن اعتماد مستند خاضع للضريبة لا يُرسل إلى هيئة الزكاة أثناء المرحلة التجريبية · "
+        + "A VAT-bearing document that is not reported to ZATCA cannot be approved during the beta"
+      : "الحساب غير مرتبط بهيئة الزكاة، فلا يصدر فاتورة ضريبية؛ احذف الضريبة من المستند · "
+        + "The account is not linked to ZATCA, so it issues no tax invoice: remove the VAT from this document",
+    linked,
+  });
+}
+
+/**
+ * Commission documents take the legacy approve (flag on too); under v2 the
+ * same rule applies to them: a commission INVOICE carrying VAT is refused. A
+ * commission credit note is not: it reverses VAT already booked (E36).
+ */
+export async function guardCommissionApprove(q: Sql, scope: number, doc: any): Promise<void> {
+  if (doc?.kind !== "commission" || doc?.type !== "invoice") return;
+  if (toHalalas(String(doc.total ?? "0")) > toHalalas(String(doc.subtotal ?? "0"))) await refuseUnreportableTaxDoc(q, scope);
+}
+
+/**
  * The v2 approve of a `rent_receipt` / `agency_fee` (the legacy approve forks
  * here at the top). Confirms the draft, emits the ledger event (E08/E17) via
  * `emitConfirmed`, and for a rent receipt creates the v2 commission. Never
@@ -198,13 +233,7 @@ export async function approveV2Kind(
       }
     }
   }
-  if (doc.kind === "agency_fee" && total > subtotal && (await accountZatcaIntegrated(q, scope))) {
-    throw new ConflictException({
-      error: "FINANCE_V2_TAX_DOC_NOT_REPORTABLE",
-      message: "لا يمكن اعتماد مستند خاضع للضريبة لا يُرسل إلى هيئة الزكاة أثناء المرحلة التجريبية · "
-        + "A VAT-bearing document that is not reported to ZATCA cannot be approved during the beta",
-    });
-  }
+  if (doc.kind === "agency_fee" && total > subtotal) await refuseUnreportableTaxDoc(q, scope);
   const [updated] = await db.update(simpleInvoicesTable).set({ status: "confirmed", confirmedAt: new Date() } as any)
     .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scope))).returning();
   await emitConfirmed(updated.id);

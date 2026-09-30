@@ -73,15 +73,20 @@ describe("finance v2 hooks: pure classification", () => {
     assert.equal(rent.groups[0].nature, "rent");
   });
 
-  it("document groups: a no-VAT line follows the installment rule (E only for a registered seller's residential rent); Σ items reconciled; three-decimal jsonb flagged", () => {
+  it("document groups: a no-VAT line is what the document states (E, as filed) for a registered seller, O for an unregistered one or the account's own fee; Σ items reconciled; three-decimal jsonb flagged", () => {
     const noVat = (opts: any) => documentGroups({ items: [{ amount: 1000, vat: false }], subtotal: "1000.00", total: "1000.00" }, opts);
     assert.equal(noVat({ usage: "residential", sellerRegistered: true }).groups[0].category, "E");
     assert.equal(noVat({ usage: "residential", sellerRegistered: false }).groups[0].category, "O", "an unregistered landlord's rent is out of scope");
+    // The document prints and files a `vat:false` line as exempt (billing zatcaLinesFromDoc); the ledger books what it
+    // says. Commercial rent is taxable, so that exemption is flagged, not rewritten.
     const com = noVat({ usage: "commercial", sellerRegistered: true });
-    assert.deepEqual([com.groups[0].category, com.warnings], ["O", ["commercial_without_vat"]], "commercial rent is never exempt");
+    assert.deepEqual([com.groups[0].category, com.warnings], ["E", ["commercial_without_vat"]]);
     assert.equal(noVat({ usage: null, sellerRegistered: false }).groups[0].category, "O");
-    assert.equal(noVat({ usage: "residential", sellerRegistered: true, nature: "other" }).groups[0].category, "O", "a fee of the account's own is not exempt rent");
-    assert.equal(noVat({}).groups[0].category, "O", "no context: out of scope, never a guessed exemption");
+    assert.equal(noVat({ usage: null, sellerRegistered: true, defaultNature: "other" }).groups[0].category, "E", "a free invoice's no-VAT line: exempt, as filed");
+    assert.equal(noVat({ usage: null, sellerRegistered: true, defaultNature: "other" }).groups[0].nature, "other");
+    assert.deepEqual(noVat({ usage: "commercial", sellerRegistered: true, defaultNature: "other" }).warnings, [], "not rent: no commercial-rent warning");
+    assert.equal(noVat({ usage: "residential", sellerRegistered: true, nature: "other", ownFee: true }).groups[0].category, "O", "a fee of the account's own is not exempt");
+    assert.equal(noVat({}).groups[0].category, "O", "no seller context: out of scope");
     const explicit = documentGroups({ items: [{ amount: 1000, vat: false, vatCategory: "E" }], subtotal: "1000.00", total: "1000.00" }, { usage: "commercial", sellerRegistered: true });
     assert.equal(explicit.groups[0].category, "E", "an explicit category wins");
     const b = documentGroups({ items: [{ amount: 333.334, vat: true }, { amount: 666.66, vat: true }], subtotal: "1000.00", total: "1150.00" });
@@ -89,7 +94,7 @@ describe("finance v2 hooks: pure classification", () => {
     assert.ok(b.warnings.includes("items_subtotal_mismatch"));
     assert.equal(b.groups.reduce((s, g) => s + toHalalas(g.net), 0), 100000);
     assert.equal(b.groups.reduce((s, g) => s + toHalalas(g.vat), 0), 15000);
-    const c = documentGroups({ items: [], subtotal: "100.00", total: "100.00" }, { nature: "other" });
+    const c = documentGroups({ items: [], subtotal: "100.00", total: "100.00" }, { nature: "other", ownFee: true });
     assert.deepEqual(c.groups.map((g) => [g.category, g.net, g.nature]), [["O", "100.00", "other"]]);
     assert.ok(c.warnings.includes("document_without_items"));
   });
