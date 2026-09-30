@@ -24,8 +24,8 @@ import { BillingModule } from "../billing/billing.module";
  *    standard for a VAT-registered landlord, simplified otherwise;
  *  - the commission transfer (Dr operating / Cr trust), landlord statement unchanged.
  */
-const M = 5701; // manager, office VAT-registered and linked (the account-holder landlord's credentials)
-const N = 5702; // manager, office not linked (no VAT on commission)
+const M = 5901; // manager, office VAT-registered and linked (the account-holder landlord's credentials)
+const N = 5902; // manager, office not linked (no VAT on commission)
 const today = riyadhToday();
 const firstOf = (monthsFromNow: number) => {
   const [y, m] = today.split("-").map(Number);

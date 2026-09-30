@@ -16,8 +16,8 @@ import { TaqnyatService } from "../../sms/taqnyat.service";
  * stub counts its calls); every message sender is stubbed to count, and must
  * stay at zero. Synthetic data only (public repo).
  */
-const M = 7301; // manager mode: agent landlord (VAT, linked) + account-holder landlord (VAT, linked)
-const O = 7302; // owner mode: one legal person
+const M = 7351; // manager mode: agent landlord (VAT, linked) + account-holder landlord (VAT, linked)
+const O = 7352; // owner mode: one legal person
 const U = 7303; // manager mode: the agent landlord has NO VAT number (rent receipts)
 const F = 7304; // flag off
 const today = riyadhToday();

@@ -25,10 +25,10 @@ import { DepreciationJobService } from "./depreciation-job.service";
  *      base 3,000 → 100.00 a month; March 16/31 → 51.61. April is closed: dep:2026-04 posts on 2026-05-01, late.
  *      Voided: every B entry reversed.
  */
-const U = 5701;
-const OTHER = 5702;
+const U = 5801;
+const OTHER = 5802;
 const PERMS = ["reports.view", "payments.view", "payments.write", "invoices.view", "invoices.write", "expenses.write", "expenses.approve"];
-const user = { id: U, ownerUserId: null, ownerScopeId: null, email: "fv2-spec-5701@example.test", role: "user", permissions: PERMS } as any;
+const user = { id: U, ownerUserId: null, ownerScopeId: null, email: "fv2-spec-5801@example.test", role: "user", permissions: PERMS } as any;
 
 async function drain(env: LegacyEnv, u = U) {
   for (let i = 0; i < 20; i++) {
@@ -76,7 +76,7 @@ describe("fv2 fixed assets: register, depreciation, disposal, schedule, external
     assert.ok(acc["1224"] && acc["5340"] && acc["5350"], "a new chart has them from the template");
     assert.equal(await chart.topUp(env.t.pool as any, U), 0);
     // an older chart: only the parent groups exist
-    const OLD = 5703;
+    const OLD = 5803;
     for (const [code, type, nb, parent] of [["1000", "asset", "debit", null], ["1200", "asset", "debit", "1000"], ["1220", "asset", "debit", "1200"],
       ["5000", "expense", "debit", null], ["5300", "expense", "debit", "5000"]] as const) {
       await env.q(`insert into accounts (user_id, code, name_ar, name_en, type, normal_balance, parent_id, is_group, is_template)
