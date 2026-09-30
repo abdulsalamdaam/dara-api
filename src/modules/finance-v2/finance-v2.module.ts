@@ -5,6 +5,8 @@ import { FinanceSetupService } from "./setup.service";
 import { FinanceV2AdminService } from "./admin.service";
 import { FinanceV2Guard } from "./finance-v2.guard";
 import { FinanceV2StatusController } from "./controllers/status.controller";
+import { FinanceV2SettingsController } from "./controllers/settings.controller";
+import { FinanceSettingsService } from "./settings.service";
 import { FinanceV2AccountsController } from "./controllers/accounts.controller";
 import { FinanceV2AdminController } from "./controllers/admin.controller";
 import { FinanceV2PostingErrorsController } from "./controllers/posting-errors.controller";
@@ -52,7 +54,7 @@ import { JournalExportService } from "./tier3/journal-export.service";
 @Module({
   imports: [FinanceV2CoreModule, FinanceV2HooksModule],
   controllers: [
-    FinanceV2StatusController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
+    FinanceV2StatusController, FinanceV2SettingsController, FinanceV2AccountsController, FinanceV2AdminController, FinanceV2PostingErrorsController,
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
     FinanceV2BugsController, FinanceV2Tier1Controller, FinanceV2Tier2Controller, FinanceV2Tier3Controller,
@@ -63,7 +65,7 @@ import { JournalExportService } from "./tier3/journal-export.service";
     BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
     BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
-    ApService, JournalExportService,
+    ApService, JournalExportService, FinanceSettingsService,
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],

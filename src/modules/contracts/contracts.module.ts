@@ -1170,6 +1170,7 @@ class ContractsController {
     const [contract] = await this.db.select().from(contractsTable)
       .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
     if (!contract) throw new NotFoundException("Contract not found");
+    await this.fv2h?.guardRegenerate(fv2, ownerId, id); // finance-v2: N-12 — the v2 409 answers before the legacy "has_collected_payments" skip
 
     // Never regenerate once money has been collected — re-creating rent rows
     // alongside already-paid ones would duplicate periods. Only fully-pending
