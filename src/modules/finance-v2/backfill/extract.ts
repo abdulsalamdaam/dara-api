@@ -190,7 +190,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
 
   // ── Installments: due-date charges (E02), external settlements (E33), releases (E35) ──
   const pays = await q.rows<InstallmentRow & { created: string; doc_date: string | null; collected: string; has_col: boolean;
-    c_status: string; ended: string | null; charge_events: number; written_off: boolean }>(
+    c_status: string; ended: string | null; charge_events: number; written_off: boolean; ejar_reported: string | null; ejar_partial_posted: string | null }>(
     `select ${INSTALLMENT_COLS}, p.created_at::text as created, c.status::text as c_status,
             to_char(coalesce(d.ended_on, case when c.status::text in ('terminated','cancelled') then (c.updated_at at time zone 'Asia/Riyadh')::date end),'YYYY-MM-DD') as ended,
             (select to_char(min(coalesce(si.issue_date, (si.confirmed_at at time zone 'Asia/Riyadh')::date)),'YYYY-MM-DD')
@@ -200,6 +200,12 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
             (select coalesce(sum(pc.amount), 0)::text from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as collected,
             exists (select 1 from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as has_col,
             exists (select 1 from finance_write_offs w where w.user_id = p.user_id and p.id = any(w.payment_ids)) as written_off,
+            (select es.reported_amount::text from finance_ejar_settlements es where es.payment_id = p.id and es.user_id = p.user_id
+                and es.reported_status = 'partially_paid') as ejar_reported,
+            (select o.payload->'facts'->>'amount' from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment'
+                and o.source_id = p.id and o.event = 'ejar_partial' and o.status in ('pending','posted','failed')
+                and not exists (select 1 from ledger_outbox r where r.user_id = o.user_id and r.source_type = 'payment' and r.source_id = o.source_id
+                                 and r.event = 'reversal:ejar_partial')) as ejar_partial_posted,
             (select count(*)::int from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment' and o.source_id = p.id
                 and o.event ~ '^charge(:g[0-9]+)?$') as charge_events
        from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
@@ -249,7 +255,13 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
       push({ sourceType: "payment", sourceId: p.id, event: "charge", occurredOn: p.due, payload: { rule: "E02", facts: f, paymentIds: [p.id] } }, p.created);
     }
     if (p.status === "settled_external") {
-      push({ sourceType: "payment", sourceId: p.id, event: "settled_external", occurredOn: p.due, payload: { rule: "E33", facts: f, paymentIds: [p.id] } }, p.created);
+      const before = p.ejar_partial_posted ?? null; // live posting settled a part Ejar reported before the row was settled whole
+      const fs = before ? { ...f, settledBefore: before } : f;
+      push({ sourceType: "payment", sourceId: p.id, event: "settled_external", occurredOn: p.due, payload: { rule: "E33", facts: fs, paymentIds: [p.id] } }, p.created);
+    } else if (p.ejar_reported != null && toHalalas(p.ejar_reported) > 0) {
+      // A part payment Ejar reported (§9 E7): E33 settles the reported amount only, at the due date.
+      push({ sourceType: "payment", sourceId: p.id, event: "ejar_partial", occurredOn: p.due,
+        payload: { rule: "E33", facts: { ...f, amount: p.ejar_reported }, paymentIds: [p.id] } }, p.created);
     }
     // Straight-line releases for principal rent (§4.1), every passed month-end inside the window.
     if (s.deferRent && ctx && ctx.treatment === "principal" && installmentNature(p.description) === "rent") {

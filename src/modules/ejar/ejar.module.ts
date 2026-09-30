@@ -17,6 +17,8 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
+import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "../finance-v2/hooks/classify"; // finance-v2: 11a/11b/11i — one reading of Ejar invoices for both paths
+import { ejarRentVat } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
 import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
@@ -380,6 +382,8 @@ export class EjarController {
     const unitIds = await this.upsertUnits(ownerId, propertyId, body?.units || [], raw.units || {}, created, linked);
     // 5) Tenant — so the contract joins the Tenants tab like a manual one.
     const tenantId = await this.upsertTenant(ownerId, tenantParty, tenantRep, src, created, linked);
+    // finance-v2: 11g — rent VAT follows the property/unit usage (DARA-NOTES §4), as a manual contract; Ejar's amounts stay VAT-inclusive
+    const rentVat = await ejarRentVat(this.db, propertyId, unitIds); // finance-v2:
 
     const today = new Date().toISOString().slice(0, 10);
     const num2 = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -470,6 +474,7 @@ export class EjarController {
         paymentFrequency: freq as never,
         customSchedule: customSchedule.length ? customSchedule : null,
         depositAmount: num2(src.depositAmount) != null ? String(num2(src.depositAmount)) : null,
+        vatEnabled: rentVat, // finance-v2: 11g — was always false
         status: status as never,
         notes: [str(src.notes), src.propertyName ? `العقار: ${src.propertyName}` : null].filter(Boolean).join(" — ") || null,
         ejarRaw: raw.contract ?? null,
@@ -501,6 +506,7 @@ export class EjarController {
         additionalFees.length ? (additionalFees as never) : null,
         false, 0, "percent", null, 0, customSchedule.length ? customSchedule : null,
       );
+      for (const r of rows) if (r.description === null) r.vatEnabled = rentVat; // finance-v2: 11g — rent rows only (fees keep their own treatment); amounts are Ejar's, VAT-inclusive
       if (rows.length > 0) {
         const inserted = await this.db.insert(paymentsTable).values(rows).returning({ id: paymentsTable.id, dueDate: paymentsTable.dueDate });
         installmentsCreated = inserted.length;
@@ -530,34 +536,28 @@ export class EjarController {
     invoices: EjarInvoiceRow[],
   ): Promise<void> {
     if (rows.length === 0 || invoices.length === 0) return;
-    const byDue = new Map<string, EjarInvoiceRow>();
-    for (const inv of invoices) {
-      const key = String(inv.dueDate ?? "").slice(0, 10);
-      if (key && !byDue.has(key)) byDue.set(key, inv);
-    }
-    for (const row of rows) {
-      const inv = byDue.get(String(row.dueDate).slice(0, 10));
-      if (!inv) continue;
-      const paid = /paid|مدفوع/i.test(inv.status || "") && !/unpaid|غير مدفوع/i.test(inv.status || "");
-      const remaining = Number(inv.remaining);
-      const partly = !paid && Number.isFinite(remaining) && remaining > 0 && remaining < Number(inv.amount);
+    // Invoices are RENT: match rent rows only, each invoice once, so a fee on
+    // the same due date is never stamped as rent or marked paid (issue 11a).
+    const described = await this.db
+      .select({ id: paymentsTable.id, description: paymentsTable.description })
+      .from(paymentsTable)
+      .where(inArray(paymentsTable.id, rows.map((r) => r.id)));
+    const descOf = new Map(described.map((d) => [d.id, d.description]));
+    for (const { row, inv } of matchEjarInvoices(rows.map((r) => ({ ...r, description: descOf.get(r.id) ?? null })), invoices)) {
+      // "مدفوعة جزئياً" is a part payment, never fully paid (issue 11b).
+      const status = mapEjarStatusLegacy(inv);
       await this.db
         .update(paymentsTable)
         .set(
           onlyPresent({
             receiptNumber: inv.number,
-            status: (paid ? "paid" : partly ? "partially_paid" : null) as never,
+            status: status as never,
             // Deliberately no Ejar payment status here: the row's own `status`
             // column already carries it, and repeating "غير مدفوعة" in the
             // description froze a moment-in-time verdict into text that never
-            // updates once the installment is collected locally.
-            description: [
-              inv.number && `فاتورة إيجار رقم ${inv.number}`,
-              inv.issueDate && `تاريخ الإصدار ${inv.issueDate}`,
-              inv.lateDate && `تاريخ التأخر ${inv.lateDate}`,
-            ]
-              .filter(Boolean)
-              .join(" — ") || null,
+            // updates once the installment is collected locally. Always begins
+            // "فاتورة إيجار", with or without a number, so it reads as rent (11i).
+            description: ejarInvoiceDescription(inv),
           }),
         )
         .where(eq(paymentsTable.id, row.id));

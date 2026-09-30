@@ -428,6 +428,39 @@ export function installmentFacts(p: InstallmentRow, ctx: ContractCtx | null, s: 
   };
 }
 
+/**
+ * E33 for a part payment Ejar reported (`finance_ejar_settlements`, reported
+ * `partially_paid`): the rows charged, still open (not `settled_external`),
+ * with a positive reported figure and no `ejar_partial` event yet. The event
+ * settles only the reported amount, at the due date (DESIGN §9 E7).
+ */
+export async function ejarPartialRows(q: Sql, userId: number, paymentIds?: number[]): Promise<Array<InstallmentRow & { reported: string }>> {
+  return q.rows(
+    `select ${INSTALLMENT_COLS}, es.reported_amount::text as reported
+       from payments p join finance_ejar_settlements es on es.payment_id = p.id and es.user_id = p.user_id
+      where p.user_id = $1 and p.deleted_at is null and p.status::text not in ('settled_external','cancelled')
+        and es.reported_status = 'partially_paid' and es.reported_amount > 0
+        and ($2::int[] is null or p.id = any($2::int[]))
+        and exists (select 1 from finance_installment_charges c where c.payment_id = p.id and c.user_id = p.user_id and c.reversed_at is null)
+        and not exists (select 1 from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment' and o.source_id = p.id
+                          and o.event = 'ejar_partial')
+      order by p.id`,
+    [userId, paymentIds ?? null],
+  );
+}
+
+/** What an earlier `ejar_partial` settled on the installment (live, not reversed), for a later full E33 to deduct; null when none. */
+export async function ejarPartialSettled(q: Sql, userId: number, paymentId: number): Promise<string | null> {
+  const [o] = await q.rows(
+    `select o.payload->'facts'->>'amount' as amount from ledger_outbox o
+      where o.user_id = $1 and o.source_type = 'payment' and o.source_id = $2 and o.event = 'ejar_partial' and o.status in ('pending','posted','failed')
+        and not exists (select 1 from ledger_outbox r where r.user_id = o.user_id and r.source_type = 'payment' and r.source_id = o.source_id
+                         and r.event = 'reversal:ejar_partial')`,
+    [userId, paymentId],
+  );
+  return o?.amount ?? null;
+}
+
 // ─── Expenses (E18) and landlord payouts (E19) ─────────────────────────────
 
 export async function expenseEvent(q: Sql, userId: number, s: FinanceSettingsRow, expenseId: number): Promise<LedgerEvent | null> {

@@ -3,3 +3,6 @@
 #   <file><TAB><hunk hash><TAB><one-line reason>
 # scripts/finance-v2-additive-diff.ts prints the exact line for a failing hunk.
 # This list is presented for approval at the merge gate, next to EX-1..EX-4.
+src/modules/ejar/ejar.module.ts	78db2389602302a6	EJ-1 (flag off, issue 11a): the legacy Ejar attach matches invoices to RENT rows only (matchEjarInvoices), so a fee on the same due date is no longer stamped as rent and marked paid
+src/modules/ejar/ejar.module.ts	915ad24dbaa6cd99	EJ-1 (flag off, issue 11b): the legacy status comes from mapEjarStatusLegacy, so "مدفوعة جزئياً" is partially_paid, not paid
+src/modules/ejar/ejar.module.ts	320799a465cbd1ab	EJ-1 (flag off, issue 11i): the legacy stamp is ejarInvoiceDescription, which always begins "فاتورة إيجار" so a numberless rent invoice is not read as a fee

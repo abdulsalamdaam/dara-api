@@ -5,10 +5,10 @@ import { LedgerEmitter, type LedgerEvent } from "../ledger-emitter.service";
 import { appLog } from "../../../common/logging/app-log.service";
 import { sqlOf, type Sql } from "./sql";
 import {
-  captureDims, collectionEvents, contractCtx, depositForfeitEvent, depositRefundedEvent, documentEvents, expenseEvent, expenseRevision,
+  captureDims, collectionEvents, contractCtx, depositForfeitEvent, ejarPartialSettled, depositRefundedEvent, documentEvents, expenseEvent, expenseRevision,
   installmentFacts, installmentRows, loadSettings, payoutEvent, reversalEvent, today, voucherUnlinked, type FinanceSettingsRow,
 } from "./facts-loader";
-import { CONVERSION_NOTE, mapEjarStatusV2, parseBusinessDate } from "./classify";
+import { CONVERSION_NOTE, ejarInvoiceDescription, mapEjarStatusV2, matchEjarInvoices, parseBusinessDate } from "./classify";
 import { withTx } from "../db";
 import { and, eq } from "drizzle-orm";
 import { simpleInvoicesTable } from "@dara/database";
@@ -378,7 +378,8 @@ export class FinanceV2Hooks {
       if (!p || p.status !== "settled_external") return [];
       if (!(await this.isCharged(q, ctx.userId, paymentId))) return [];
       const cctx = await contractCtx(q, ctx.userId, s.mode, p.contract_id);
-      const f = installmentFacts(p, cctx, s, p.due);
+      const before = await ejarPartialSettled(q, ctx.userId, p.id); // a part Ejar reported was settled already
+      const f = installmentFacts(p, cctx, s, p.due, before ? { settledBefore: before } : {});
       return f ? [{ sourceType: "payment", sourceId: p.id, event: "settled_external", occurredOn: p.due, payload: { rule: "E33", facts: f, paymentIds: [p.id] } }] : [];
     });
   }
@@ -459,7 +460,11 @@ export class FinanceV2Hooks {
    * status mapped by `mapEjarStatusV2` — Ejar-paid becomes `settled_external`
    * (charged at its due date by the recognizer, settled by E33), a partial
    * payment stays pending, and what Ejar reported is kept in
-   * `finance_ejar_settlements`. Nothing becomes paid without a collection.
+   * `finance_ejar_settlements` (a partial counts as settled outside Dara for
+   * its reported amount: the rest stays open, and E33 settles only that part).
+   * Invoices match RENT rows only (a fee row on the same date is never
+   * stamped or settled, issue 11a), and the stamp always reads as rent
+   * (issue 11i). Nothing becomes paid without a collection.
    * Unlike the hooks this is a replacement write path, so it runs even though
    * the enqueue part is best-effort; it swallows its own errors like the
    * legacy step (whose errors the import already swallows).
@@ -467,27 +472,20 @@ export class FinanceV2Hooks {
   async ejarAttachV2(ctx: HookCtx, rows: Array<{ id: number; dueDate: string }>, invoices: Array<Record<string, any>>): Promise<void> {
     if (!ctx.fv2 || !rows.length || !invoices.length) return;
     try {
-      const byDue = new Map<string, Record<string, any>>();
-      for (const inv of invoices) {
-        const key = String(inv?.dueDate ?? "").slice(0, 10);
-        if (key && !byDue.has(key)) byDue.set(key, inv);
-      }
-      for (const row of rows) {
-        const inv = byDue.get(String(row.dueDate).slice(0, 10));
-        if (!inv) continue;
+      const desc = new Map<number, string | null>(
+        (await this.pool.query(`select id, description from payments where user_id = $1 and id = any($2::int[])`, [ctx.userId, rows.map((r) => r.id)]))
+          .rows.map((r: any) => [Number(r.id), r.description ?? null]),
+      );
+      const matched = matchEjarInvoices(rows.map((r) => ({ ...r, description: desc.get(r.id) ?? null })), invoices);
+      for (const { row, inv } of matched) {
         const m = mapEjarStatusV2(inv);
-        const description = [
-          inv.number && `فاتورة إيجار رقم ${inv.number}`,
-          inv.issueDate && `تاريخ الإصدار ${inv.issueDate}`,
-          inv.lateDate && `تاريخ التأخر ${inv.lateDate}`,
-        ].filter(Boolean).join(" — ") || null;
         await this.pool.query(
           `update payments set receipt_number = coalesce($3, receipt_number),
                   status = coalesce($4::text, status::text)::payment_status,
                   paid_date = case when $4::text = 'settled_external' then due_date else paid_date end,
                   description = coalesce($5, description), updated_at = now()
             where id = $1 and user_id = $2`,
-          [row.id, ctx.userId, inv.number ?? null, m.status, description],
+          [row.id, ctx.userId, inv.number ?? null, m.status, ejarInvoiceDescription(inv)],
         );
         if (m.reported) {
           await this.pool.query(

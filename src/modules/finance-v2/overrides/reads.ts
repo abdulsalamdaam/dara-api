@@ -5,7 +5,7 @@
  * Every query is scoped to the account (`user_id = scope`); money is exact
  * (numeric in SQL, halalas in TS).
  */
-import { liveStatusV2Sql, remainingSqlV2, riyadhTodayV2 } from "../../../common/payment-status-v2";
+import { ejarSettledSqlV2, liveStatusV2Sql, remainingSqlV2, riyadhTodayV2 } from "../../../common/payment-status-v2";
 import { effectiveFeeForProperty, effectiveManagementFee } from "../commission";
 import { fromHalalas, toHalalas } from "../money";
 import { overdueByTenantV2 } from "./payments-list";
@@ -57,6 +57,16 @@ export async function accountingV2(q: Sql, scope: number, legacy: any, today = r
       where w.user_id = $1 group by 1, 2`,
     [scope],
   );
+  // What Ejar reported part-paid on a charged installment was paid outside Dara: E33 cleared it from AR.
+  const ejar = await q.rows(
+    `select c.tenant_id, coalesce(nullif(c.tenant_name, ''), t.name, '—') as tenant, sum(${ejarSettledSqlV2("p")})::text as amount
+       from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
+       left join finance_contract_dims d on d.contract_id = c.id and d.user_id = c.user_id
+       left join tenants t on t.id = c.tenant_id
+      where p.user_id = $1 and ${DUE_CHARGE_SQL("$2::date")}
+      group by 1, 2 having sum(${ejarSettledSqlV2("p")}) > 0`,
+    [scope, today],
+  );
   const rows: any[] = (legacy.tenantStatement ?? []).map((r: any) => ({ ...r }));
   const byKey = new Map<string, any>(rows.map((r) => [r.key, r]));
   const bump = (tenantId: number | null, name: string, delta: number) => {
@@ -71,6 +81,7 @@ export async function accountingV2(q: Sql, scope: number, legacy: any, today = r
   };
   for (const e of extra) bump(e.tenant_id ?? null, e.tenant, Number(fromHalalas(H(e.amount))));
   for (const w of wo) bump(w.tenant_id ?? null, w.tenant, -Number(fromHalalas(H(w.amount))));
+  for (const e of ejar) bump(e.tenant_id ?? null, e.tenant, -Number(fromHalalas(H(e.amount))));
   for (const r of rows) r.balance = r2(r.invoiced - r.collected);
   rows.sort((a, b) => b.balance - a.balance);
 
@@ -165,7 +176,10 @@ export async function dashboardV2(q: Sql, scope: number, legacy: any, today = ri
  *                plus invoice-linked through documents of the contract —
  *                excluding deposit rows, deposit vouchers and commission
  *  - writtenOff: Σ write-offs (E24)
- *  - outstanding = max(0, billed − collected − writtenOff); credit = the rest
+ *  - settledExternal: charged installments settled outside Dara (E33): Ejar-
+ *                paid rows whole (these are billed too) and the part Ejar
+ *                reported paid on part-paid rows
+ *  - outstanding = max(0, billed − collected − writtenOff − settledExternal); credit = the rest
  *  - overdue:    Σ remaining of v2-overdue installments (E4)
  *  - depositHeld: confirmed deposit vouchers' unlinked amounts − conversions
  *                + net collections on legacy deposit rows
@@ -197,6 +211,17 @@ export async function contractSummaryV2(q: Sql, scope: number, contractId: numbe
     [scope, contractId, DEPOSIT_DESC],
   );
   const [wo] = await q.rows(`select coalesce(sum(amount), 0)::text as amount from finance_write_offs where user_id = $1 and contract_id = $2`, [scope, contractId]);
+  // Settled outside Dara (E33): Ejar-paid rows whole, and what Ejar reported on part-paid rows, once they are charges.
+  const [ext] = await q.rows(
+    `select coalesce(sum(case when p.status::text = 'settled_external' then p.amount else ${ejarSettledSqlV2("p")} end), 0)::text as amount,
+            coalesce(sum(p.amount) filter (where p.status::text = 'settled_external'), 0)::text as whole
+       from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
+       left join finance_contract_dims d on d.contract_id = c.id and d.user_id = c.user_id
+      where p.user_id = $1 and p.contract_id = $2 and p.deleted_at is null and c.deleted_at is null
+        and p.due_date < $3::date and coalesce(p.description, '') <> $4
+        and not (c.status::text in ('terminated','cancelled') and d.ended_on is not null and p.due_date > d.ended_on)`,
+    [scope, contractId, today, DEPOSIT_DESC],
+  );
   const [od] = await q.rows(
     `select coalesce(sum(remaining), 0)::text as amount, count(*)::int as n from (
        select ${remainingSqlV2("p")} as remaining, ${liveStatusV2Sql("p", "$3::date")} as s from payments p
@@ -213,16 +238,19 @@ export async function contractSummaryV2(q: Sql, scope: number, contractId: numbe
                   where pc.user_id = $1 and p.contract_id = $2 and p.description = $3 and p.deleted_at is null), 0) as held`,
     [scope, contractId, DEPOSIT_DESC],
   );
-  const billed = H(docs.billed) + H(due.amount);
+  // An Ejar-paid row is charged at its due date too (and settled by E33): it is billed, and settled externally.
+  const billed = H(docs.billed) + H(due.amount) + H(ext.whole);
   const collected = H(col.amount);
   const writtenOff = H(wo.amount);
-  const net = billed - collected - writtenOff;
+  const settledExternal = H(ext.amount);
+  const net = billed - collected - writtenOff - settledExternal;
   const fee = await effectiveManagementFee(q, scope, contractId);
   return {
     contractId, contractNumber: c.contract_number, asOf: today,
     billed: fromHalalas(billed),
     collected: fromHalalas(collected),
     writtenOff: fromHalalas(writtenOff),
+    settledExternal: fromHalalas(settledExternal),
     outstanding: fromHalalas(Math.max(0, net)),
     credit: fromHalalas(Math.max(0, -net)),
     overdue: fromHalalas(H(od.amount)),

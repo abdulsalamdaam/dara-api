@@ -12,8 +12,13 @@ export const DEPOSIT_DESC = "تأمين (وديعة)";
 export const ADVANCE_NOTE = "إيجار مدفوع مقدماً";
 /** contracts.module.ts terminate: a deposit voucher turned into a landlord collection. */
 export const CONVERSION_NOTE = "تأمين محوّل إلى إيراد عند إنهاء العقد";
-/** Ejar import writes this onto RENT rows (ejar.module.ts attachEjarInvoices). */
-const EJAR_RENT_DESC = /^فاتورة إيجار/;
+/**
+ * Ejar import writes this onto RENT rows (ejar.module.ts attachEjarInvoices,
+ * `ejarInvoiceDescription`). Rows imported before the stamp always began with
+ * "فاتورة إيجار" carry only the dates when Ejar gave no invoice number
+ * ("تاريخ الإصدار …" / "تاريخ التأخر …"): those are rent too (issue 11i).
+ */
+const EJAR_RENT_DESC = /^(فاتورة إيجار|تاريخ الإصدار |تاريخ التأخر )/;
 
 /**
  * What an installment row is. Rent rows have a null description, except that
@@ -161,30 +166,99 @@ export function documentGroups(
   return { groups, warnings: [...new Set(warnings)] };
 }
 
+/** An Ejar invoice row as the preview hands it to the import (ejar.map.ts `EjarInvoiceRow`). */
+export interface EjarInvoiceLike {
+  number?: string | null;
+  dueDate?: string | null;
+  issueDate?: string | null;
+  lateDate?: string | null;
+  amount?: string | null;
+  remaining?: string | null;
+  status?: string | null;
+}
+
+/** What Ejar's own words and figures say about one invoice (shared by the v2 and legacy mappings). */
+function ejarPaidState(inv: EjarInvoiceLike): { state: "paid" | "partial" | "unpaid"; paidAmount: string | null } {
+  const text = inv.status || "";
+  const unpaidWord = /unpaid|غير مدفوع/i.test(text);
+  const paidWord = /paid|مدفوع/i.test(text) && !unpaidWord;
+  // "مدفوعة جزئياً" / "Partially paid" contain the paid word: they were read as fully paid (issue 11b).
+  const partialWord = /partial|جزئ/i.test(text);
+  let amountH: number | null = null;
+  let remainingH: number | null = null;
+  try { amountH = jsonbHalalas(inv.amount).halalas; } catch { amountH = null; }
+  try { remainingH = inv.remaining == null || String(inv.remaining).trim() === "" ? null : jsonbHalalas(inv.remaining).halalas; } catch { remainingH = null; }
+  // Ejar's remaining figure decides a part payment whatever the wording says.
+  if (amountH != null && remainingH != null && remainingH > 0 && remainingH < amountH) {
+    return { state: "partial", paidAmount: fromHalalas(amountH - remainingH) };
+  }
+  if (partialWord && !unpaidWord && !(remainingH != null && remainingH <= 0)) return { state: "partial", paidAmount: null };
+  if (paidWord && !(remainingH != null && amountH != null && remainingH >= amountH && amountH > 0)) {
+    return { state: "paid", paidAmount: amountH != null ? fromHalalas(amountH) : null };
+  }
+  return { state: "unpaid", paidAmount: null };
+}
+
 /**
  * Ejar invoice status under v2 (§9 E7, E26): what Ejar reports PAID becomes
  * `settled_external` (real rent settled through Ejar, charged at its due date
  * and settled by E33); a partial payment leaves the row pending, with the
- * reported figure kept aside (`finance_ejar_settlements`). Nothing becomes
- * `paid` or `partially_paid` without a collection. The paid/partial tests are
- * the legacy ones (ejar.module.ts attachEjarInvoices), verbatim.
+ * reported figure kept in `finance_ejar_settlements` — it counts as settled
+ * outside Dara (the remaining stays open, E33 settles only the reported part).
+ * Nothing becomes `paid` or `partially_paid` without a collection. A partial
+ * wording ("مدفوعة جزئياً", "Partially paid") is never fully paid, and Ejar's
+ * remaining figure, when it has one, decides the paid part.
  */
-export function mapEjarStatusV2(inv: { status?: string | null; amount?: string | null; remaining?: string | null }):
+export function mapEjarStatusV2(inv: EjarInvoiceLike):
   { status: "settled_external" | null; reported: "paid" | "partially_paid" | null; reportedAmount: string | null } {
-  const paid = /paid|مدفوع/i.test(inv.status || "") && !/unpaid|غير مدفوع/i.test(inv.status || "");
-  const remaining = Number(inv.remaining);
-  const partly = !paid && Number.isFinite(remaining) && remaining > 0 && remaining < Number(inv.amount);
-  if (paid) return { status: "settled_external", reported: "paid", reportedAmount: decimalOrNull(inv.amount) };
-  if (partly) {
-    let reportedAmount: string | null = null;
-    try {
-      reportedAmount = fromHalalas(jsonbHalalas(inv.amount).halalas - jsonbHalalas(inv.remaining).halalas);
-    } catch {
-      reportedAmount = null;
-    }
-    return { status: null, reported: "partially_paid", reportedAmount };
-  }
+  const s = ejarPaidState(inv);
+  if (s.state === "paid") return { status: "settled_external", reported: "paid", reportedAmount: s.paidAmount };
+  if (s.state === "partial") return { status: null, reported: "partially_paid", reportedAmount: s.paidAmount };
   return { status: null, reported: null, reportedAmount: null };
+}
+
+/** The flag-off (legacy) stored status for an imported installment: the same reading of Ejar, as the legacy statuses. */
+export function mapEjarStatusLegacy(inv: EjarInvoiceLike): "paid" | "partially_paid" | null {
+  const s = ejarPaidState(inv).state;
+  return s === "paid" ? "paid" : s === "partial" ? "partially_paid" : null;
+}
+
+/**
+ * The description an Ejar invoice stamps onto its RENT installment. Always
+ * begins with "فاتورة إيجار", with or without a number, so the row stays rent
+ * everywhere the description classifies it (issue 11i).
+ */
+export function ejarInvoiceDescription(inv: EjarInvoiceLike): string {
+  return [
+    inv.number ? `فاتورة إيجار رقم ${inv.number}` : "فاتورة إيجار",
+    inv.issueDate && `تاريخ الإصدار ${inv.issueDate}`,
+    inv.lateDate && `تاريخ التأخر ${inv.lateDate}`,
+  ].filter(Boolean).join(" — ");
+}
+
+/**
+ * Pair Ejar's invoices with the generated installments, by due date. Ejar
+ * invoices are RENT: a fee installment is never matched, even when it falls on
+ * the same date (issue 11a), and each invoice is used once.
+ */
+export function matchEjarInvoices<R extends { id: number; dueDate: string; description?: string | null }, I extends EjarInvoiceLike>(
+  rows: R[], invoices: I[],
+): Array<{ row: R; inv: I }> {
+  const byDue = new Map<string, I[]>();
+  for (const inv of invoices) {
+    const key = String(inv?.dueDate ?? "").slice(0, 10);
+    if (!key) continue;
+    const list = byDue.get(key) ?? [];
+    list.push(inv);
+    byDue.set(key, list);
+  }
+  const out: Array<{ row: R; inv: I }> = [];
+  for (const row of rows) {
+    if (installmentNature(row.description ?? null) !== "rent") continue;
+    const inv = byDue.get(String(row.dueDate).slice(0, 10))?.shift();
+    if (inv) out.push({ row, inv });
+  }
+  return out;
 }
 
 function decimalOrNull(v: unknown): string | null {

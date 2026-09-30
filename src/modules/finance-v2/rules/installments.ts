@@ -108,12 +108,16 @@ export function chargeCancelled(f: InstallmentFacts, s: PostState): RuleOutput {
  * E33: an installment Ejar reports paid, after it is charged. Principal: Dr
  * 1116 cash in transit / Cr AR. Agent: Dr 2122 / Cr 1122 (the landlord was
  * paid directly). Not charged yet → retried (the charge is queued first).
+ * The same rule posts a PART payment Ejar reported (event `ejar_partial`,
+ * `amount` = the reported figure): only that much is settled, never more
+ * than the charge, and a later full settlement deducts it (`settledBefore`).
  */
 export function settledExternal(f: InstallmentFacts, s: PostState): RuleOutput {
   const p = f.paymentId;
   const c = s.charges[p];
   if (!c) throw new RuleError("NOT_CHARGED", `installment ${p} is not charged yet`);
-  const amount = f.amount != null ? toHalalas(f.amount) : c.amount;
+  const before = f.settledBefore != null ? toHalalas(f.settledBefore) : 0;
+  const amount = Math.min(f.amount != null ? toHalalas(f.amount) : c.amount, c.amount) - Math.max(0, before);
   const warnings = [...(f.warnings ?? [])];
   if (amount <= 0) return { lines: [], warnings, skip: "zero_amount", effects: [], date: f.date };
   const dims = { ...f.dims, paymentId: p };

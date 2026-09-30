@@ -46,8 +46,10 @@ export interface InstallmentFacts extends Base {
   nature: Nature;
   usage?: Usage | null;
   deferRent: boolean;
-  /** E33 only: the amount Ejar reported settled (defaults to the charge). */
+  /** E33 only: the amount Ejar reported settled (defaults to the charge; never more than it). */
   amount?: string | null;
+  /** E33 only: already settled outside Dara by an earlier part settlement (`ejar_partial`), deducted from the amount. */
+  settledBefore?: string | null;
 }
 
 /** E35: a monthly straight-line release. */
