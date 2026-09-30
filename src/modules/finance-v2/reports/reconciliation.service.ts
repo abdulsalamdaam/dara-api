@@ -9,6 +9,7 @@ import { ArAgingService } from "./aging.service";
 import { classifyCollection } from "../rules/money-flows";
 import { resolveTreatment } from "../rules";
 import { CONVERSION_NOTE, parseBusinessDate } from "../hooks/classify";
+import { EXTRA_LABELS, ExtraChecks } from "./control-checks";
 
 /**
  * The reconciliation report (DESIGN §7.10): the ledger against the
@@ -24,6 +25,7 @@ import { CONVERSION_NOTE, parseBusinessDate } from "../hooks/classify";
  *  R6 Posting completeness  entries                 vs  the source records that should have one
  *  R7 Sub-ledger integrity  —                       lists only
  *  R8 Trial balance         Σ debit = Σ credit, and per entry
+ *  R9–R21                   the accountant's remaining control checks (control-checks.ts)
  */
 
 /** The legacy `GET /reports/accounting` computation for an account (R3), bound in the module. */
@@ -41,7 +43,11 @@ const LABELS: Record<string, { ar: string; en: string }> = {
   R6: { ar: "اكتمال الترحيل", en: "Posting completeness" },
   R7: { ar: "سلامة السجلات الفرعية", en: "Sub-ledger integrity" },
   R8: { ar: "ميزان المراجعة", en: "Trial balance" },
+  ...EXTRA_LABELS,
 };
+
+/** Every check id the report can compute, in order. */
+export const RECON_CHECK_IDS = Object.keys(LABELS);
 
 interface Check {
   id: string;
@@ -51,6 +57,8 @@ interface Check {
   ledger: string | null;
   subLedger: string | null;
   difference: string | null;
+  /** Count checks (R17–R21) carry item counts, not money. */
+  unit?: "money" | "count";
   rows: any[];
   explanations: Array<{ code: string; count: number; amount: string | null; items?: any[] }>;
   notes: string[];
@@ -92,16 +100,19 @@ export class ReconciliationService {
     const s = await settingsOf(this.pool, scope);
     const mk = (id: string, key: string, body: Omit<Check, "id" | "key" | "label">): Check =>
       ({ id, key, label: lang === "en" ? LABELS[id].en : LABELS[id].ar, ...body });
-    const checks: Check[] = [
-      await this.r1(scope, asOf, mk),
-      await this.r2(scope, asOf, mk),
-      await this.r3(scope, asOf, s.mode, mk),
-      await this.r4(scope, asOf, s.mode, mk),
-      await this.r5(scope, asOf, mk),
-      await this.r6(scope, asOf, s.goLive, mk),
-      await this.r7(scope, asOf, mk),
-      await this.r8(scope, asOf, mk),
-    ];
+    // `only` (comma-separated ids) computes a subset; the default is every check.
+    const only = q.only ? new Set(String(q.only).split(",").map((x) => x.trim()).filter((x) => LABELS[x])) : null;
+    const want = (id: string) => !only || only.has(id);
+    const checks: Check[] = [];
+    if (want("R1")) checks.push(await this.r1(scope, asOf, mk));
+    if (want("R2")) checks.push(await this.r2(scope, asOf, mk));
+    if (want("R3")) checks.push(await this.r3(scope, asOf, s.mode, mk));
+    if (want("R4")) checks.push(await this.r4(scope, asOf, s.mode, mk));
+    if (want("R5")) checks.push(await this.r5(scope, asOf, mk));
+    if (want("R6")) checks.push(await this.r6(scope, asOf, s.goLive, mk));
+    if (want("R7")) checks.push(await this.r7(scope, asOf, mk));
+    if (want("R8")) checks.push(await this.r8(scope, asOf, mk));
+    checks.push(...await new ExtraChecks(this.pool).all(scope, asOf, { mode: s.mode, goLive: s.goLive, sm: s.startMonth }, mk, only ?? undefined));
     return {
       report: "reconciliation",
       lang,

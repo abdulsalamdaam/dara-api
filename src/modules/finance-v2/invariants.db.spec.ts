@@ -578,9 +578,15 @@ async function assertReconciled(rec: ReconciliationService, U: number, mode: str
   // R3 compares 2121 with the LEGACY dues report, which by design (DESIGN §7.10) differs by the listed, quantified
   // explanations; what must be zero is the part they do not explain.
   const r3Residual = (c: any) => h(c.difference) - explainedR3(c);
+  // The accountant's checks R9–R21 hold too, except R18/R19 (invoicing discipline, not a ledger property: the
+  // sequences leave due installments uninvoiced on purpose); a check that does not apply (no trust account,
+  // no bank statement, Owner mode) is fine.
+  const policy = new Set(["R18", "R19"]);
+  const extra = (c: any) => Number(c.id.slice(1)) >= 9;
   const bad = r.checks.filter((c: any) => !(c.status === "ok" || (c.id === "R3" && mode === "owner" && c.status === "not_applicable")
-    || (c.id === "R7" && c.difference == null) || (c.id === "R3" && c.status === "difference" && r3Residual(c) === 0)));
-  const nonZero = r.checks.filter((c: any) => c.difference != null && !["R3", "R6"].includes(c.id) && h(c.difference) !== 0);
+    || (c.id === "R7" && c.difference == null) || (c.id === "R3" && c.status === "difference" && r3Residual(c) === 0)
+    || (extra(c) && c.status === "not_applicable") || policy.has(c.id)));
+  const nonZero = r.checks.filter((c: any) => c.difference != null && !["R3", "R6"].includes(c.id) && !policy.has(c.id) && h(c.difference) !== 0);
   if (bad.length || nonZero.length) {
     fail(`I2 (${phase}) reconciliation: ${JSON.stringify([...new Set([...bad, ...nonZero])].map((c: any) => ({
       id: c.id, status: c.status, ledger: c.ledger, sub: c.subLedger, diff: c.difference, rows: c.rows.slice(0, 4), expl: c.explanations,

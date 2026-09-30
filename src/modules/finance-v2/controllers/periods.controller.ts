@@ -17,7 +17,7 @@ export class FinanceV2PeriodsController {
     return this.periods.list(scopeId(req.user!), q);
   }
 
-  /** Body: { fiscalYear } */
+  /** Body: { fiscalYear, override?, overrideReason?, lang? } */
   @Post("close-year")
   @HttpCode(200)
   @RequireCapability("settings")
@@ -25,7 +25,7 @@ export class FinanceV2PeriodsController {
     return this.periods.closeYear(scopeId(req.user!), req.user!, body);
   }
 
-  /** Body: { reason? } */
+  /** Body: { reason?, override?, overrideReason?, lang? } — override: close over failed control checks (finance admin, audited) */
   @Post(":id/close")
   @HttpCode(200)
   @RequireCapability("settings")
