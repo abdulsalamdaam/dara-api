@@ -120,7 +120,8 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
         results.push({ ownerId: l.ownerId, name: l.name, status: "skipped", reason: l.skip, runId: l.existingRunId ?? undefined });
         continue;
       }
-      results.push(await this.runLandlord(scope, span, l.ownerId, actor, origin));
+      const res = await this.runLandlord(scope, span, l.ownerId, actor, origin);
+      results.push({ ...res, name: res.name || l.name });
     }
     return { month: span.month, label: pv.label, results };
   }
