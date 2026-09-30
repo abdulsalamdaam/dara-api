@@ -97,6 +97,9 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
     assert.equal(res.settings.enabled, true);
     assert.equal(res.settings.accountingMode, "manager");
     assert.equal(res.firstEnable, true);
+    assert.equal(res.settings.commissionBasis, "collected", "a new Manager-mode account starts on the collected commission basis");
+    const [cut] = (await q(`select to_char(collected_from,'YYYY-MM') as m from finance_commission_settings where account_user_id = $1`, [ids.company])).rows;
+    assert.equal(cut?.m, new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Riyadh" }).slice(0, 7), "cutover: this month");
     assert.equal(res.backfill.suggested, true);
     assert.equal(await flag.isOn(ids.company), true, "cache invalidated by the toggle");
 
@@ -187,6 +190,7 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
   it("allows Owner mode for one legal person's several landlord rows", async () => {
     const res: any = await admin.toggle(ids.staff, ids.ownerOnly, { enabled: true, accountingMode: "owner", reason });
     assert.equal(res.settings.accountingMode, "owner");
+    assert.equal(res.settings.commissionBasis, "billed", "Owner mode keeps the default (no agency commission)");
   });
 
   it("lists customer accounts only, with their flag state", async () => {

@@ -69,10 +69,10 @@ describe("finance-v2 additive-diff gate (DESIGN §1.4.5)", () => {
     assert.ok(!/\balter\s+table\b/i.test(sql.replace(/--[^\n]*/g, "")), "no ALTER TABLE at all");
   });
 
-  it("the real 0068 and 0069 alter nothing and never touch the purge switch", () => {
+  it("the real 0068, 0069 and 0070 alter nothing and never touch the purge switch", () => {
     const { readFileSync, existsSync } = require("node:fs");
     const { join } = require("node:path");
-    for (const f of ["0068_finance_v2_hardening.sql", "0069_finance_v2_tier3.sql"]) {
+    for (const f of ["0068_finance_v2_hardening.sql", "0069_finance_v2_tier3.sql", "0070_finance_v2_commission.sql"]) {
       const p = join(__dirname, "../../../db/drizzle", f);
       if (f.startsWith("0068")) assert.ok(existsSync(p), f);
       if (!existsSync(p)) continue;

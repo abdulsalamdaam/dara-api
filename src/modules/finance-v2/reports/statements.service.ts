@@ -254,6 +254,12 @@ export class StatementsService {
       const e = m.sourceType === "expense" ? exp.get(m.sourceId) : m.sourceType === "supplier_bill" ? bills.get(m.sourceId) : undefined;
       const gross = Math.abs(amt);
       const vat = type === "commission" || type === "commission_credit" ? v?.commissionVat ?? 0 : type === "expense" ? v?.inputVat ?? 0 : 0;
+      if (type === "commission" || type === "commission_credit") {
+        // The accountant's كشف الملاك shows commission before VAT and its VAT apart (signed as they move 2121).
+        const sv = Math.sign(amt) * Math.abs(vat);
+        summary.commission_vat = (summary.commission_vat ?? 0) + sv;
+        summary.commission_net = (summary.commission_net ?? 0) + amt - sv;
+      }
       return {
         entryId: m.entryId, entryNo: m.entryNo, date: m.entryDate, type, rule: m.rule, documentNumber: ref(m).number, method: ref(m).method,
         description: m.memo, sourceType: m.sourceType, sourceId: m.sourceId,
@@ -291,6 +297,7 @@ export class StatementsService {
         depositsApplied: sum("deposit_applied"), commission: sum("commission"), commissionCredit: sum("commission_credit"),
         commissionCash: sum("commission_cash"), expenses: sum("expense"), payouts: sum("payout"), tenantRefunds: sum("tenant_refund"),
         manual: sum("manual"), reversals: sum("reversal"), other: sum("other"),
+        commissionNet: sum("commission_net"), commissionVat: sum("commission_vat"),
       },
       rentByProperty: [...byProperty.entries()].map(([pid, v]) => ({ propertyId: pid, propertyName: pid != null ? props.get(pid) ?? null : null, amount: fromHalalas(v) })),
       closing: fromHalalas(bal),

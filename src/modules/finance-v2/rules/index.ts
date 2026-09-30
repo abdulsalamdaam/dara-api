@@ -7,6 +7,7 @@
 import { toHalalas } from "../money";
 import { agencyFee, chargeDocument, commissionDocument, creditNote } from "./documents";
 import { chargeCancelled, dueCharge, monthlyRelease, settledExternal } from "./installments";
+import { commissionTransfer } from "./commission-transfer";
 import {
   advanceVat, collection, commissionCollected, creditApply, creditRefund, depositForfeited, depositInstallmentCollection, depositOffset,
   depositReceived, depositRefunded, expense, landlordPayout, manualJournal, supplierBill, supplierPayment, vatSettlement, writeOff,
@@ -16,7 +17,8 @@ import { RuleError, type AccountingMode, type PostState, type RuleOutput, type T
 export type RuleCode =
   | "E01" | "E02" | "E03" | "E04" | "E05" | "E06" | "E07" | "E08" | "E09" | "E09C" | "E10" | "E11" | "E12" | "E12B"
   | "E14" | "E15" | "E16" | "E17" | "E18" | "E19" | "E20" | "E21" | "E24" | "E28" | "E33" | "E34" | "E35" | "E36" | "E37"
-  | "E38" | "E39";
+  | "E38" | "E39"
+  | "E15T";
 
 export interface OutboxPayload {
   rule: RuleCode;
@@ -72,6 +74,7 @@ export const RULES: Record<RuleCode, RuleFn> = {
   E37: vatSettlement,
   E38: supplierBill,
   E39: supplierPayment,
+  E15T: commissionTransfer,
 };
 
 /** §4.4 rows that never produce an outbox event, and why. */
