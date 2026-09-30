@@ -17,7 +17,7 @@ import { resolvePackage } from "../../common/packages";
  * rather than a hunt through email bodies — which is exactly how the previous
  * domain ended up hardcoded in a dozen places.
  */
-const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.net";
+const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.com";
 const SITE_URL = process.env.SITE_URL || `https://${SITE_DOMAIN}`;
 
 /** Shown to recipients as the contact address in email bodies. */
