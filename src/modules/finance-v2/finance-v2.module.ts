@@ -32,6 +32,8 @@ import { VatReportService } from "./reports/vat-report.service";
 import { ArAgingService } from "./reports/aging.service";
 import { StatementsService } from "./reports/statements.service";
 import { ReconciliationService } from "./reports/reconciliation.service";
+import { FinanceV2AcctReportsController } from "./controllers/reports-acct.controller";
+import { AcctReportsService } from "./reports/acct-reports.service";
 import { legacyAccountingProvider } from "./reports/legacy-accounting";
 import { FinanceV2BugsController } from "./controllers/bugs.controller";
 import { FinanceV2Tier1Controller } from "./controllers/tier1.controller";
@@ -61,6 +63,7 @@ import { FinanceV2ControlsController } from "./controllers/controls.controller";
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
     FinanceV2BugsController, FinanceV2Tier1Controller, FinanceV2Tier2Controller, FinanceV2Tier3Controller,
     FinanceV2ControlsController,
+    FinanceV2AcctReportsController,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
@@ -70,6 +73,7 @@ import { FinanceV2ControlsController } from "./controllers/controls.controller";
     BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
     ApService, JournalExportService, FinanceSettingsService,
     ControlChecksService,
+    AcctReportsService,
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
