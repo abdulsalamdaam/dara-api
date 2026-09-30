@@ -121,7 +121,7 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
                                   p.code as parent_code, p.type as parent_type, p.is_group as parent_is_group
                              from accounts a left join accounts p on p.id = a.parent_id
                             where a.user_id = $1 order by a.code`, [ids.company])).rows;
-    assert.equal(rows.length, 116);
+    assert.equal(rows.length, 119);
     assert.equal(rows.filter((r) => r.is_group).length, 30);
     const tpl = new Map(COA_TEMPLATE.map((a) => [a.code, a]));
     for (const r of rows) {
@@ -167,7 +167,7 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
     await admin.toggle(ids.staff, ids.company, { enabled: true, reason: "Resume the beta after review" });
     const n = (await q(`select (select count(*) from accounts where user_id = $1)::int a, (select count(*) from fiscal_periods where user_id = $1)::int p,
                                (select count(*) from bank_accounts where user_id = $1)::int b`, [ids.company])).rows[0];
-    assert.deepEqual(n, { a: 116, p: 24, b: 2 });
+    assert.deepEqual(n, { a: 119, p: 24, b: 2 });
     assert.equal((await q(`select name_en from accounts where user_id = $1 and code = '5280'`, [ids.company])).rows[0].name_en, "Renamed by the user");
     assert.equal((await q(`select count(*)::int n from audit_logs where entity = 'finance_v2'`)).rows[0].n, 3);
     assert.equal((await admin.events(ids.company)).length, 4);

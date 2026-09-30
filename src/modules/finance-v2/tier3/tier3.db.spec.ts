@@ -280,7 +280,7 @@ describe("fv2 tier 3: suppliers, bills and AP, journal export (real Postgres)", 
     assert.equal(bill1.length, 4, "one row per journal line of B1's entry");
     assert.ok(bill1[0].split(",")[3] === "5290");
     const vatRow = bill1.find((r) => r.split(",")[3] === "1151")!.split(",");
-    assert.deepEqual(vatRow.slice(-3), ["S", "15", "input"], "vat_category, vat_rate, tax_role");
+    assert.deepEqual(vatRow.slice(-4), ["S", "15", "input", ""], "vat_category, vat_rate, tax_role, account_code_external (not set)");
     assert.equal(f.filename, "dara-journal_2026-08-01_2026-08-31.csv");
     const simple = await exp.csv(U, { from: "2026-08-01", to: "2026-08-31", preset: "simple", dateFormat: "dmy", lang: "en", excludeReversed: "true" });
     const srows = simple.body.slice(1).split("\r\n").filter(Boolean);

@@ -45,6 +45,9 @@ import { DryRunReminderSender, REMINDER_SENDER } from "./tier2/reminder-sender";
 import { FinanceV2Tier3Controller } from "./controllers/tier3.controller";
 import { ApService } from "./tier3/ap.service";
 import { JournalExportService } from "./tier3/journal-export.service";
+import { FinanceV2AssetsController } from "./controllers/assets.controller";
+import { AssetsService } from "./assets/assets.service";
+import { DepreciationJobService } from "./assets/depreciation-job.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -58,6 +61,7 @@ import { JournalExportService } from "./tier3/journal-export.service";
     FinanceV2JournalController, FinanceV2ManualJournalsController, FinanceV2OpeningBalancesController, FinanceV2PeriodsController,
     FinanceV2VatReturnsController, FinanceV2CoreReportsController, FinanceV2SubReportsController,
     FinanceV2BugsController, FinanceV2Tier1Controller, FinanceV2Tier2Controller, FinanceV2Tier3Controller,
+    FinanceV2AssetsController, // fixed assets (§8.5)
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
@@ -66,6 +70,7 @@ import { JournalExportService } from "./tier3/journal-export.service";
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
     BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
     ApService, JournalExportService, FinanceSettingsService,
+    AssetsService, DepreciationJobService, // fixed assets (§8.5)
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],

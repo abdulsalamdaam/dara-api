@@ -391,6 +391,7 @@ export class CoreReportsService {
     const pos = new Set((await fetch(src("landlord_payout"), `select id from landlord_payouts where user_id = $1 and id = any($2::int[])`)).map((r: any) => r.id));
     const bills = new Map((await fetch(src("supplier_bill"), `select id, number from supplier_bills where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const spays = new Map((await fetch(src("supplier_payment"), `select id, number from supplier_payments where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
+    const assets = new Map((await fetch(src("fixed_asset"), `select id, number from fixed_assets where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const source = rows.map((r) => {
       const type = r.sourceType as string;
       const id = r.sourceId as number;
@@ -423,6 +424,10 @@ export class CoreReportsService {
         case "supplier_payment": {
           const x = spays.get(id);
           return x ? { type, id, number: x.number, route: `/dashboard/accounting/supplier-payments?id=${id}`, exists: true } : miss;
+        }
+        case "fixed_asset": {
+          const x = assets.get(id);
+          return x ? { type, id, number: x.number, route: `/dashboard/accounting/fixed-assets?id=${id}`, exists: true } : miss;
         }
         case "manual_journal":
         case "opening_balance":

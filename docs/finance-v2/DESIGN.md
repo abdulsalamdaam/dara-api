@@ -679,6 +679,7 @@ The template is seeded per account on first enable (§1.5) by `seedChart(user)`.
 | 1221 | الأثاث والتجهيزات | Furniture and fixtures | asset | 1220 | — | |
 | 1222 | أجهزة الحاسب الآلي | Computer equipment | asset | 1220 | — | |
 | 1223 | السيارات | Vehicles | asset | 1220 | — | |
+| 1224 | المعدات والأجهزة المكتبية | Office equipment | asset | 1220 | — | |
 | 1229 | مجمع إهلاك الممتلكات والمعدات | Accumulated depreciation – equipment (contra) | asset (credit-normal) | 1220 | — | |
 | 1230 | الأصول غير الملموسة | Intangible assets | asset | 1200 | — | G |
 | 1231 | البرامج والأنظمة | Software | asset | 1230 | — | |
@@ -758,13 +759,15 @@ The template is seeded per account on first enable (§1.5) by `seedChart(user)`.
 | 5310 | إهلاك العقارات الاستثمارية | Depreciation – investment property | expense | 5300 | — | |
 | 5320 | إهلاك الممتلكات والمعدات | Depreciation – property and equipment | expense | 5300 | — | |
 | 5330 | الخسائر الائتمانية المتوقعة والديون المعدومة | Expected credit losses and bad debts | expense | 5300 | `bad_debt_expense` | |
+| 5340 | إطفاء الأصول غير الملموسة | Amortisation of intangible assets | expense | 5300 | — | |
+| 5350 | خسائر بيع واستبعاد الأصول | Loss on disposal of assets | expense | 5300 | — | |
 | 5400 | تكاليف التمويل | Finance costs | expense | 5000 | — | |
 | 5500 | ضريبة القيمة المضافة غير القابلة للاسترداد | Non-recoverable VAT | expense | 5000 | `vat_non_recoverable` | |
 | 5600 | الزكاة وضريبة الدخل | Zakat and income tax | expense | 5000 | — | G |
 | 5610 | مصروف الزكاة | Zakat expense | expense | 5600 | `zakat_expense` | |
 | 5620 | مصروف ضريبة الدخل | Income tax expense | expense | 5600 | — | |
 
-That is 116 accounts, of which 30 are groups.
+That is 119 accounts, of which 30 are groups (116 at the first release; 1224, 5340 and 5350 were added for the fixed-asset register, §8.5, and reach existing charts through `ChartService.topUp`).
 
 **Accounts the engine resolves, and how:**
 - **Rent revenue** is chosen by the line's nature:
@@ -1636,6 +1639,30 @@ create unique index if not exists bank_matches_jl_once on bank_matches (journal_
 **Accounting-software export.** `GET /finance/v2/journal-export`: the general journal as a documented CSV, one row per journal line (UTF-8 with BOM, RFC 4180, CRLF), presets `standard` (all columns) and `simple`, Arabic or English account names, ISO or dd/mm/yyyy dates, optional exclusion of reversed entries, a CSV-injection guard, control totals in response headers, and a JSON preview. The format is specified in `docs/finance-v2/JOURNAL-EXPORT.md`. Vendor-specific mapping presets for Saudi accounting packages are **not** built (their import formats were not verified); the `simple` preset is the lowest common denominator.
 
 ---
+
+### 8.5 Fixed assets and external account codes (the accountant's round; built)
+
+The accountant's workbook asks for automatic monthly depreciation ("إهلاك (شهري) — آلي نهاية كل شهر: من ح/ إهلاك إلى ح/ مجمع الإهلاك"; Owner mode also depreciates its buildings) and an external-system code on every account for the journal export. Migration `0074_finance_v2_assets.sql` (additive: `fixed_assets`, `fixed_asset_dep_runs`, `account_external_codes`).
+
+**Register.** Name (ar/en), category (`buildings`, `land`, `furniture`, `equipment`, `computers`, `vehicles`, `software`, `other`), optional linked property (every line carries it as the property dimension, so depreciation reaches the property's profitability), acquisition date, cost, salvage value, useful life in months (0 = not depreciated; land is always 0), depreciation start (default: acquisition date), opening accumulated depreciation (for an asset carried over from a previous system), method (straight line only), and the cost / accumulated / expense accounts. Defaults by category: buildings 1212 / 1213 / 5310; land 1211; furniture 1221, equipment and other 1224, computers 1222, vehicles 1223, all with 1229 / 5320; software 1231 / 1239 / 5340. Numbered `FA-######` per account. The three accounts the template lacked (1224 office equipment, 5340 amortisation, 5350 loss on disposal) are in the template for new charts and reach existing charts through `ChartService.topUp` (insert-only, only under the template parent, only when the code is free).
+
+**Acquisition.** `acquisitionMode = bank`: FA01 Dr cost account / Cr the chosen bank or cash account, on the acquisition date. `none`: the purchase is already in the ledger (a supplier bill whose line uses the asset account — the AP path handles input VAT — an expense, a manual journal, or the opening balances); the register only depreciates it.
+
+**Depreciation (FA02).** Base D = cost − salvage − opening accumulated, spread over the useful life from the depreciation start, the first month pro-rata by day (start day included). The schedule is cumulative and rounded once per month end: cum(t) = min(D, round(D × elapsed months / life)); a month's charge is cum(month end) − cum(previous month end). The charges therefore add up to D exactly, the last (partial) month takes the remainder, and nothing is charged once the net book value reaches salvage. One event per asset and month, key `fixed_asset,<id>,dep:YYYY-MM`, dated the month end, Dr expense / Cr accumulated. A repeated run queues nothing (the outbox key). Late months route to the next open period, flagged `late_posting`, like every v2 event.
+
+**When it runs.** `DepreciationJobService` daily at 00:20 Riyadh, for accounts with the flag on, the ledger started and at least one asset: every missing month whose end has passed (so the 1st books the month just ended, and a missed day catches up). Kill switches: `FINANCE_V2_WORKER_DISABLED=1` (all v2 jobs) or `FINANCE_V2_DEPRECIATION_DISABLED=1` (this job only). The UI's "run for month" (capability `approve`) queues everything missing through a chosen month, the current month included (month-end close on the last day); a future month is refused. Registering an asset queues its acquisition and every already-ended month at once. The preview lists what a run would queue and which of those land in a closed period. `fixed_asset_dep_runs` logs every manual run and every automatic run that queued something.
+
+**Go-live.** When `ledger_go_live_date` is set, an acquisition posted from the register and a depreciation start must be on or after it: an older asset is entered with its accumulated depreciation to that date as opening accumulated and the start at the go-live date (its cost and accumulated depreciation are in the opening balances).
+
+**Disposal (FA03)**, capability `approve`, date ≤ today: the disposal month's depreciation up to the date (Dr expense / Cr accumulated), then Dr accumulated (opening + everything booked), Dr bank (proceeds, if any), Cr cost, and the difference to 4420 gain (Cr) or 5350 loss (Dr). Depreciation already queued for the disposal month or later is reversed (never dated before the original). No VAT is booked on the proceeds: a taxable sale needs a tax invoice through the invoice flow (open question for the accountant).
+
+**Void** (`approve`, reason required): every event of the asset is reversed (dated today) and the asset leaves the register. An asset with no queued event can simply be deleted. Once anything is queued, the financial fields (dates, amounts, life, accounts, acquisition) are frozen: void and re-enter.
+
+**Asset schedule** (`GET reports/asset-schedule?from&to`): per asset, cost at the start + additions − disposals = cost at the end; accumulated at the start + the period's depreciation (from the ledger) − removed on disposal = accumulated at the end; NBV. Void assets and assets disposed before `from` are left out. The web builds its Excel and PDF from this JSON.
+
+**External account codes.** `account_external_codes` (1:1 with `accounts`), set with `PATCH /accounts/:id {externalCode}` (1–50 printable characters; empty clears; many Dara accounts may share one code). Shown in the chart. The journal export gains `account_code_external` as column 24 of `standard`, a new `external` preset (the accountant's "تصدير القيود" layout) and `format=xlsx` (JOURNAL-EXPORT.md).
+
+**Numbering settings — not built.** The workbook's "الترقيم" asks for a prefix and next number per document type. Invoices, credit/debit notes and receipts are numbered by the legacy billing code (and the invoice series feeds ZATCA), so a per-account setting there means forking legacy numbering for flag-on accounts, which this round does not do. The v2-only series (JV, BILL, PV, RR, AGF, FA) could take a prefix cheaply but on their own would be half the feature; left for a decision.
 
 ## 9. Bug decisions (brief §E)
 

@@ -31,6 +31,8 @@ export const LOCK_KEYS = {
   BILL: -110,
   /** Supplier payment allocation: the bill open-amount check and the write, serialised per account (tier 3). */
   AP: -111,
+  /** FA- fixed-asset numbers and the per-account asset/depreciation writes (§8.5). */
+  FIXED_ASSET: -140,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];

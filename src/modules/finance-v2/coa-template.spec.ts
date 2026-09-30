@@ -7,8 +7,8 @@ import { COA_TEMPLATE, REQUIRED_SYSTEM_KEYS } from "./coa-template";
 describe("chart-of-accounts template (DESIGN §3)", () => {
   const byCode = new Map(COA_TEMPLATE.map((a) => [a.code, a]));
 
-  it("has the 116 accounts of §3, 30 of them groups", () => {
-    assert.equal(COA_TEMPLATE.length, 116);
+  it("has the 116 accounts of §3 plus the 3 fixed-asset accounts of §8.5, 30 of them groups", () => {
+    assert.equal(COA_TEMPLATE.length, 119);
     assert.equal(COA_TEMPLATE.filter((a) => a.isGroup).length, 30);
   });
 
