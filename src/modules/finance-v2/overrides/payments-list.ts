@@ -4,11 +4,12 @@
  * (`payment-status-v2.ts`): a part-paid installment past due is overdue, the
  * overdue card is Σ remaining (not Σ face amount), paid-without-money rows are
  * `paid` with `unverified: true` and never overdue. Every row also carries
- * `statusV2` and `remaining`. `?statusV2=` filters on the v2 status exactly;
+ * `statusV2`, `remaining` and `ejarSettled` (the part Ejar reported paid,
+ * which the remaining already excludes). `?statusV2=` filters on the v2 status exactly;
  * the legacy `?status=` / `?statusIn=` are mapped onto it.
  */
 import { listQuerySchema, parseDateBound } from "../../../common/pagination";
-import { liveStatusV2Sql, remainingSqlV2, collectedSqlV2, riyadhTodayV2 } from "../../../common/payment-status-v2";
+import { liveStatusV2Sql, remainingSqlV2, collectedSqlV2, ejarSettledSqlV2, riyadhTodayV2 } from "../../../common/payment-status-v2";
 import type { Sql } from "../hooks/sql";
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
@@ -70,7 +71,8 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
     `select p.id, p.contract_id, p.amount::text as amount, to_char(p.due_date,'YYYY-MM-DD') as due_date,
             to_char(p.paid_date,'YYYY-MM-DD') as paid_date, p.receipt_number, p.attachment_key, p.description, p.notes, p.created_at,
             p.vat_enabled, c.contract_number, c.tenant_name, c.vat_enabled as contract_vat, t.short_name as tenant_short_name,
-            ${collectedSqlV2("p")}::text as collected, ${remainingSqlV2("p")}::text as remaining, ${st} as status_v2
+            ${collectedSqlV2("p")}::text as collected, ${remainingSqlV2("p")}::text as remaining, ${st} as status_v2,
+            ${ejarSettledSqlV2("p")}::text as ejar_settled
        from payments p left join contracts c on c.id = p.contract_id left join tenants t on t.id = c.tenant_id
       where ${where} order by ${order}${limit}`,
     params,
@@ -94,6 +96,8 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
     statusV2: r.status_v2,
     remaining: toNum(r.remaining),
     unverified: r.status_v2 === "paid_unverified",
+    /** What Ejar reported part-paid on this row (settled outside Dara; not in `collectedAmount`). */
+    ejarSettled: toNum(r.ejar_settled),
   }));
   if (!usePaginated) return data;
 

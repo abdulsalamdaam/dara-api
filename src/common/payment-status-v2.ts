@@ -17,6 +17,11 @@
  *  - `partially_paid`   some collected, not yet due;
  *  - `pending`          otherwise.
  *
+ * What Ejar reported as PART-paid (`finance_ejar_settlements`, reported
+ * `partially_paid`) was paid outside Dara: it reduces the remaining exactly
+ * like a collection does (E33 clears that much of the receivable in the
+ * ledger), but it is not a collection — `collected` stays Dara's own money.
+ *
  * Amounts are exact: numeric strings in, a 2-decimal string out (halalas inside).
  */
 
@@ -46,8 +51,9 @@ export function liveStatusV2(
   collected: string | number | null | undefined,
   today: string = riyadhTodayV2(),
   writtenOff: string | number | null | undefined = 0,
+  ejarSettled: string | number | null | undefined = 0,
 ): { status: LiveStatusV2; remaining: string } {
-  const remainingH = Math.max(0, toH(row.amount) - toH(collected) - toH(writtenOff));
+  const remainingH = Math.max(0, toH(row.amount) - toH(collected) - toH(writtenOff) - toH(ejarSettled));
   const remaining = fromH(remainingH);
   if (row.status === "cancelled" || row.status === "settled_external") return { status: row.status, remaining: "0.00" };
   if (toH(writtenOff) > 0 && remainingH === 0) return { status: "written_off", remaining };
@@ -55,19 +61,27 @@ export function liveStatusV2(
   if (row.status === "paid") return { status: "paid_unverified", remaining };
   const due = String(row.dueDate ?? "").slice(0, 10);
   if (due && due < today) return { status: "overdue", remaining };
-  if (toH(collected) > 0) return { status: "partially_paid", remaining };
+  if (toH(collected) > 0 || toH(ejarSettled) > 0) return { status: "partially_paid", remaining };
   return { status: "pending", remaining };
 }
 
 /**
  * The SQL twin, for raw queries over `payments <alias>`. `$today` is the SQL
  * text of a date expression (a bound parameter such as `$2::date`).
- * `remaining` = amount − Σ collections − Σ written off, never below 0.
+ * `remaining` = amount − Σ collections − Σ written off − what Ejar reported
+ * part-paid, never below 0.
  */
 export function remainingSqlV2(p: string): string {
   return `greatest(0, ${p}.amount
     - coalesce((select sum(pc.amount) from payment_collections pc where pc.payment_id = ${p}.id and pc.user_id = ${p}.user_id), 0)
-    - coalesce((select sum(w.amount) from finance_write_offs w where w.user_id = ${p}.user_id and w.payment_ids = array[${p}.id]), 0))`;
+    - coalesce((select sum(w.amount) from finance_write_offs w where w.user_id = ${p}.user_id and w.payment_ids = array[${p}.id]), 0)
+    - ${ejarSettledSqlV2(p)})`;
+}
+
+/** What Ejar reported PART-paid on the installment (0 when none): settled outside Dara, not collected by it. */
+export function ejarSettledSqlV2(p: string): string {
+  return `coalesce((select greatest(0, es.reported_amount) from finance_ejar_settlements es
+    where es.payment_id = ${p}.id and es.user_id = ${p}.user_id and es.reported_status = 'partially_paid'), 0)`;
 }
 
 export function collectedSqlV2(p: string): string {
@@ -83,6 +97,6 @@ export function liveStatusV2Sql(p: string, today: string): string {
     when ${rem} <= 0.005 then 'paid'
     when ${p}.status::text = 'paid' then 'paid_unverified'
     when ${p}.due_date < ${today} then 'overdue'
-    when ${col} > 0.005 then 'partially_paid'
+    when ${col} > 0.005 or ${ejarSettledSqlV2(p)} > 0.005 then 'partially_paid'
     else 'pending' end)`;
 }

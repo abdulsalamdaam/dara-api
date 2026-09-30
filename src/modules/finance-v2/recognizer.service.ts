@@ -3,7 +3,7 @@ import { FV2_POOL, type Fv2Pool } from "./db";
 import { LedgerEmitter, type LedgerEvent } from "./ledger-emitter.service";
 import { riyadhToday, lastDayOfMonth } from "./dates";
 import { sqlOf, type Sql } from "./hooks/sql";
-import { contractCtx, installmentFacts, INSTALLMENT_COLS, loadSettings, type ContractCtx, type FinanceSettingsRow, type InstallmentRow } from "./hooks/facts-loader";
+import { contractCtx, ejarPartialRows, ejarPartialSettled, installmentFacts, INSTALLMENT_COLS, loadSettings, type ContractCtx, type FinanceSettingsRow, type InstallmentRow } from "./hooks/facts-loader";
 import { DEPOSIT_DESC, installmentNature, installmentVat } from "./hooks/classify";
 import { SYS, type ReleaseFacts } from "./rules";
 
@@ -25,7 +25,9 @@ export interface RecognizerSummary {
  *    Riyadh) that is not cancelled, deleted, a deposit row, after its ended
  *    contract's `ended_on`, before the cutover go-live date, already charged,
  *    covered by a confirmed charge document, or already queued;
- *  - E33 `payment,<id>,settled_external` for a charged `settled_external` row;
+ *  - E33 `payment,<id>,settled_external` for a charged `settled_external` row,
+ *    and E33 `payment,<id>,ejar_partial` for the part Ejar reported paid on a
+ *    charged open row;
  *  - E35 `payment,<id>,release:YYYY-MM` for every passed month-end inside the
  *    coverage window of a principal rent charge with unreleased 2131.
  * Keys are the backfill's keys, so a run is idempotent and a repeat is free.
@@ -113,9 +115,18 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
       [userId],
     );
     for (const p of settled) {
-      const f = installmentFacts(p, await ctxOf(p.contract_id), s, p.due);
+      const before = await ejarPartialSettled(q, userId, p.id);
+      const f = installmentFacts(p, await ctxOf(p.contract_id), s, p.due, before ? { settledBefore: before } : {});
       if (!f) continue;
       if (await emit({ sourceType: "payment", sourceId: p.id, event: "settled_external", occurredOn: p.due, payload: { rule: "E33", facts: f, paymentIds: [p.id] } })) summary.settlements++;
+    }
+
+    // 2b. Part payments Ejar reported, once charged: E33 for the reported amount only (§9 E7).
+    for (const p of await ejarPartialRows(q, userId)) {
+      if (s.goLive && p.due < s.goLive) continue; // cutover: in the opening balance, like the charge
+      const f = installmentFacts(p, await ctxOf(p.contract_id), s, p.due, { amount: p.reported });
+      if (!f) continue;
+      if (await emit({ sourceType: "payment", sourceId: p.id, event: "ejar_partial", occurredOn: p.due, payload: { rule: "E33", facts: f, paymentIds: [p.id] } })) summary.settlements++;
     }
 
     // 3. Straight-line releases (E35) for principal rent with unreleased 2131.

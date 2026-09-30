@@ -15,7 +15,8 @@ import { BUCKETS, bucketOf, type Bucket } from "./sub-math";
  *  1. Installments due on or before `asOf` that no confirmed charge document
  *     covers (deposit rows, cancelled, settled-external, written-off, deleted
  *     rows and rows of deleted contracts are not items). remaining = amount −
- *     Σ collections dated ≤ asOf (negative refund rows included).
+ *     Σ collections dated ≤ asOf (negative refund rows included) − what Ejar
+ *     reported part-paid (settled outside Dara at the due date, E33).
  *  2. Confirmed charge documents issued ≤ asOf (invoice, manual, rent receipt,
  *     agency fee, debit note; never commission, which is billed to the
  *     landlord). remaining = total − credit notes − collections applied (each
@@ -44,6 +45,8 @@ export interface AgingItem {
   amount: number;
   collected: number;
   credited: number;
+  /** Paid outside Dara as Ejar reported it (a part payment; E33 at the due date), halalas. */
+  settledExternal: number;
   remaining: number;
   daysPastDue: number;
   bucket: Bucket | null;
@@ -66,7 +69,7 @@ export class ArAgingService {
   /** The open items and unapplied credit as of `asOf` (every tenant; filter afterwards). */
   async openItems(scope: number, asOf: string, by: "tenant" | "contract" = "tenant", opts: { installmentsDueBefore?: string } = {}): Promise<AgingData> {
     const dims = await contractDims(this.pool, scope);
-    const [pays, cols, docs, wos, acts] = await Promise.all([
+    const [pays, cols, docs, wos, acts, ejar] = await Promise.all([
       this.pool.query(
         `select id, contract_id, amount::text as amount, to_char(due_date, 'YYYY-MM-DD') as due, status::text as status, description,
                 deleted_at is not null as deleted
@@ -86,6 +89,9 @@ export class ArAgingService {
         `select a.kind, a.tenant_id, a.contract_id, a.amount::text as amount, a.target_document_id, t.target_payment_id
            from tenant_credit_actions a left join tenant_credit_targets t on t.action_id = a.id and t.user_id = a.user_id
           where a.user_id = $1 and a.status = 'posted' and a.action_on <= $2::date`, [scope, asOf]),
+      this.pool.query(
+        `select payment_id, reported_amount::text as amount from finance_ejar_settlements
+          where user_id = $1 and reported_status = 'partially_paid' and reported_amount > 0`, [scope]),
     ]);
 
     const payById = new Map<number, any>(pays.rows.map((p: any) => [p.id, p]));
@@ -126,7 +132,7 @@ export class ArAgingService {
       items.set(`d:${d.id}`, {
         type: "document", id: d.id, number: d.number, contractId: d.contract_id, tenantId: docTenant(d),
         ownerId: c?.ownerId ?? null, propertyId: c?.propertyId ?? null,
-        dueDate: d.due ?? covered[covered.length - 1] ?? d.issue, amount: h(d.total), collected: 0, credited: 0, remaining: 0, daysPastDue: 0, bucket: null,
+        dueDate: d.due ?? covered[covered.length - 1] ?? d.issue, amount: h(d.total), collected: 0, credited: 0, settledExternal: 0, remaining: 0, daysPastDue: 0, bucket: null,
       });
     }
     type PState = "item" | "consumed" | "credit" | "deposit";
@@ -145,7 +151,7 @@ export class ArAgingService {
       const c = dims.get(p.contract_id)!;
       items.set(`p:${p.id}`, {
         type: "installment", id: p.id, number: null, contractId: p.contract_id, tenantId: c.tenantId, ownerId: c.ownerId, propertyId: c.propertyId,
-        dueDate: p.due, amount: h(p.amount), collected: 0, credited: 0, remaining: 0, daysPastDue: 0, bucket: null,
+        dueDate: p.due, amount: h(p.amount), collected: 0, credited: 0, settledExternal: 0, remaining: 0, daysPastDue: 0, bucket: null,
       });
     }
 
@@ -180,6 +186,16 @@ export class ArAgingService {
       }
       // Money received on a document not (yet) issued as of asOf, or on a receipt voucher: the tenant's credit.
       if (doc && !doc.deleted) addCredit(docTenant(doc), doc.contract_id, -amt);
+    }
+
+    // What Ejar reported part-paid, on an installment that is an item as of asOf (E33 is dated at its due date): paid
+    // outside Dara, so it reduces the item (or the document covering the installment) like the ledger's E33 does.
+    for (const e of ejar.rows) {
+      const pay = payById.get(Number(e.payment_id));
+      if (!pay) continue;
+      const byDoc = coveredBy.get(pay.id);
+      const it = byDoc != null ? items.get(`d:${byDoc}`) : items.get(`p:${pay.id}`);
+      if (it) it.settledExternal += h(e.amount);
     }
 
     // Credit notes: against the document they reference; the excess is the tenant's credit.
@@ -222,7 +238,7 @@ export class ArAgingService {
 
     const out: AgingItem[] = [];
     for (const it of items.values()) {
-      it.remaining = it.amount - it.collected - it.credited;
+      it.remaining = it.amount - it.collected - it.credited - it.settledExternal;
       if (it.remaining < 0) {
         addCredit(it.tenantId, it.contractId, it.remaining);
         it.remaining = 0;
