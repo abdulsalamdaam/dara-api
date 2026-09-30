@@ -191,7 +191,9 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
   });
 
   // ── E1 ───────────────────────────────────────────────────────────────────
-  it("E1: approving a 6,900 rent invoice under v2 creates a COM draft of 300 + 45 from the landlord's 5%; legacy creates none", async () => {
+  // The account holder is not linked to ZATCA here (only the agent landlord is), so the account issues no tax invoice of its
+  // own: v2 drafts its commission and agency fee without VAT (§9 E8; the VAT-bearing, linked case is billing-docs.db.spec).
+  it("E1: approving a 6,900 rent invoice under v2 creates a COM draft of 300 (no VAT: the account is not ZATCA-linked) from the landlord's 5%; legacy creates none", async () => {
     const mk = async (env: LegacyEnv, f: Fx) => {
       const inv: any = await env.billing.create(user, {
         type: "invoice", paymentIds: [f.p4], issueDate: today,
@@ -206,7 +208,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.equal(v2.commission.kind, "commission");
     assert.equal(v2.commission.status, "draft");
     assert.equal(v2.commission.subtotal, "300.00");
-    assert.equal(v2.commission.total, "345.00");
+    assert.equal(v2.commission.total, "300.00");
     assert.match(v2.commission.notes, /from landlord/);
     const rate: any = await ctl(on).contractRate(req(), String(fOn.c4));
     assert.deepEqual([rate.pct, rate.source], ["5.00", "landlord"]);
@@ -214,7 +216,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const rev = acc.revenue.find((r: any) => r.propertyId === fOn.s.propA);
     assert.deepEqual([rev.commissionPct, rev.commissionSource], [5, "landlord"]);
 
-    // E36: a 1,150 credit note on that invoice (1,000 of its 6,000 rent) drafts a commission credit of 50 + 7.50 once the COM is confirmed.
+    // E36: a 1,150 credit note on that invoice (1,000 of its 6,000 rent) drafts a commission credit of 50 once the COM is confirmed.
     await on.billing.approve(user, String(v2.commission.id), {});
     const crn: any = await on.billing.create(user, {
       type: "credit", billingReference: v2.number, issueDate: today,
@@ -224,7 +226,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const [cc] = await on.q(
       `select type::text as type, kind, status::text as status, subtotal::text as subtotal, total::text as total, billing_reference
          from simple_invoices where user_id = $1 and type = 'credit' and kind = 'commission' and notes like $2`, [U, `%${crn.number}%`]);
-    assert.deepEqual([cc?.status, cc?.subtotal, cc?.total, cc?.billing_reference], ["draft", "50.00", "57.50", v2.commission.number]);
+    assert.deepEqual([cc?.status, cc?.subtotal, cc?.total, cc?.billing_reference], ["draft", "50.00", "50.00", v2.commission.number]);
   });
 
   // ── E5 ───────────────────────────────────────────────────────────────────
@@ -298,7 +300,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
   });
 
   // ── E8 ───────────────────────────────────────────────────────────────────
-  it("E8: a contract with an agency fee gets one AGF draft of 2,500 + 375 under v2; approving posts Dr 1121 2,875 / Cr 4220 2,500 / Cr 2151 375", async () => {
+  it("E8: a contract with an agency fee gets one AGF draft of 2,500 (not a tax invoice: the account is not ZATCA-linked) under v2; approving posts Dr 1121 2,500 / Cr 4220 2,500", async () => {
     const mk = async (env: LegacyEnv, f: Fx) => {
       await env.q(`insert into units (property_id, unit_number) values ($1, 'A9')`, [f.s.propA]);
       const [u] = await env.q(`select id from units where unit_number = 'A9' and property_id = $1`, [f.s.propA]);
@@ -314,7 +316,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const docs = await on.q(`select id, number, status::text as status, subtotal::text as subtotal, total::text as total from simple_invoices where contract_id = $1 and kind = 'agency_fee'`, [c.id]);
     assert.equal(docs.length, 1);
     assert.match(docs[0].number, /^AGF-\d{6}$/);
-    assert.deepEqual([docs[0].status, docs[0].subtotal, docs[0].total], ["draft", "2500.00", "2875.00"]);
+    assert.deepEqual([docs[0].status, docs[0].subtotal, docs[0].total], ["draft", "2500.00", "2500.00"]);
     const again: any = await ctl(on).agencyFee(req(), String(c.id));
     assert.equal(again.id, docs[0].id, "idempotent");
     assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_agency_fee' and entity_id = $2`, [U, String(docs[0].id)]))[0].n, 0,
@@ -324,7 +326,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.equal(ap.zatca, null);
     await drain(on);
     assert.deepEqual((await entryLines(on, "simple_invoice", docs[0].id, "confirmed")).map((l: any) => [l.code, l.debit, l.credit]), [
-      ["1121", "2875.00", "0.00"], ["4220", "0.00", "2500.00"], ["2151", "0.00", "375.00"],
+      ["1121", "2500.00", "0.00"], ["4220", "0.00", "2500.00"],
     ]);
     const unbilled: any = await ctl(on).unbilled(req());
     assert.ok(!unbilled.rows.some((r: any) => r.contractId === c.id));
@@ -334,7 +336,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     await drain(on);
     const [pc] = await on.q(`select id from payment_collections where invoice_id = $1`, [docs[0].id]);
     assert.deepEqual((await entryLines(on, "payment_collection", pc.id, "collected")).map((l: any) => [l.code, l.debit, l.credit]), [
-      ["1111", "2875.00", "0.00"], ["1121", "0.00", "2875.00"],
+      ["1111", "2500.00", "0.00"], ["1121", "0.00", "2500.00"],
     ]);
     // A POST that does create the draft (here after the first one is soft-deleted) is audited.
     await on.q(`update simple_invoices set deleted_at = now() where id = $1`, [docs[0].id]);

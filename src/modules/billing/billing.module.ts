@@ -1345,6 +1345,7 @@ class SimpleInvoicesController {
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
     if (fv2 && isV2DocKind(doc.kind)) return this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); // finance-v2: E8/E9 — their own approve, never ZATCA
     refuseV2KindOnLegacyApprove(doc.kind); // finance-v2: EX-4 — a v2 kind never takes the tax-invoice path (flag off)
+    await this.fv2h?.guardCommissionApprove(fv2, uid, doc); // finance-v2: §9 E8 — a VAT-bearing commission is never reported, so never approved
 
     // Approval is where a draft becomes a real, issued document — the copy the
     // buyer keeps and the one mirrored to ZATCA. Everything the create path

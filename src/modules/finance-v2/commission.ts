@@ -9,7 +9,9 @@
  *
  * and a v2 commission document is created on approval of a rent invoice or a
  * non-tax rent receipt: none for a principal landlord (a commission to
- * oneself), VAT only when the ACCOUNT is VAT-registered (legacy forces 15%).
+ * oneself), VAT only when the ACCOUNT is VAT-registered and linked to ZATCA
+ * (legacy forces 15%; §9 E8 — a VAT-bearing commission is then refused at
+ * approval until Q6b, since commission documents are never reported).
  * Money is computed in integer halalas.
  */
 import { contractCtx, loadSettings } from "./hooks/facts-loader";
@@ -17,6 +19,7 @@ import { installmentNature } from "./hooks/classify";
 import { fromHalalas, toHalalas, vatSplit } from "./money";
 import type { Sql } from "./hooks/sql";
 import { riyadhToday } from "./dates";
+import { ownFeeCarriesVat } from "./account-seller";
 
 export type FeeSource = "property" | "landlord" | null;
 export interface EffectiveFee {
@@ -81,27 +84,7 @@ export async function effectiveManagementFee(q: Sql, scope: number, contractId: 
   return none;
 }
 
-/** Is the ACCOUNT (the managing company) VAT-registered? Its company, else its account-holder / default landlord row. */
-export async function accountVatRegistered(q: Sql, scope: number): Promise<boolean> {
-  const [r] = await q.rows(
-    `select exists (select 1 from users u join companies c on c.id = u.company_id
-                     where u.id = $1 and nullif(trim(coalesce(c.vat_number,'')),'') is not null)
-         or exists (select 1 from owners o where o.user_id = $1 and o.deleted_at is null and (o.is_account_holder or o.is_default)
-                      and nullif(trim(coalesce(o.tax_number,'')),'') is not null) as reg`,
-    [scope],
-  );
-  return r?.reg === true;
-}
-
-/** Is the account's own seller linked to ZATCA (a credentials row for no landlord or for the account-holder landlord)? */
-export async function accountZatcaIntegrated(q: Sql, scope: number): Promise<boolean> {
-  const [r] = await q.rows(
-    `select exists (select 1 from zatca_credentials z where z.user_id = $1
-                     and (z.owner_id is null or z.owner_id in (select id from owners where user_id = $1 and is_account_holder))) as linked`,
-    [scope],
-  );
-  return r?.linked === true;
-}
+export { accountVatRegistered, accountZatcaIntegrated, ownFeeCarriesVat } from "./account-seller";
 
 /** pct (a decimal string, ≤ 2 dp) of a halala amount, rounded half-up to the halala. */
 export function pctOf(baseHalalas: number, pct: string): number {
@@ -145,7 +128,9 @@ export async function planCommission(q: Sql, scope: number, doc: { contractId: n
   if (base <= 0) return null;
   const net = pctOf(base, fee.pct);
   if (net <= 0) return null;
-  const vatRegistered = await accountVatRegistered(q, scope);
+  // VAT only for a registered AND ZATCA-linked account (account-seller.ts
+  // `ownFeeCarriesVat`): an unlinked account's commission is not a tax invoice.
+  const vatRegistered = await ownFeeCarriesVat(q, scope);
   const vat = vatRegistered ? Math.floor((net * 15 + 50) / 100) : 0;
   return { pct: fee.pct, source: fee.source, base: fromHalalas(base), net: fromHalalas(net), vat: fromHalalas(vat), total: fromHalalas(net + vat), vatRegistered };
 }
@@ -187,7 +172,7 @@ export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
     ...(c.landlord_address ? { address: c.landlord_address } : {}), ...(c.landlord_tax_number ? { vatNumber: c.landlord_tax_number } : {}),
   };
   const netNum = Number(plan.net);
-  const items = [{ description: "عمولة إدارة الأملاك", quantity: 1, unitPrice: netNum, amount: netNum, vat: plan.vatRegistered }];
+  const items = [{ description: "عمولة إدارة الأملاك", quantity: 1, unitPrice: netNum, amount: netNum, vat: plan.vatRegistered, vatCategory: plan.vatRegistered ? "S" : "O" }];
   const src = plan.source === "landlord" ? "من المؤجر / from landlord" : "من العقار / from property";
   const [row] = await q.rows(
     `insert into simple_invoices (user_id, number, type, kind, status, contract_id, tenant_id, tenant_name, client, items,

@@ -16,7 +16,7 @@ import { capabilities } from "../capabilities";
 import { createCommissionCreditV2, createCommissionV2 } from "../commission";
 import { paymentsListV2 } from "../overrides/payments-list";
 import { accountingV2, dashboardV2 } from "../overrides/reads";
-import { approveV2Kind, ensureAgencyFeeDraft } from "../overrides/documents-v2";
+import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
 
@@ -530,6 +530,17 @@ export class FinanceV2Hooks {
   /** E3/E4/E1: GET /reports/accounting — v2 values over the legacy result. */
   async accounting(scope: number, legacy: any): Promise<any> {
     return accountingV2(this.sqlPool(), scope, legacy);
+  }
+
+  /**
+   * §9 E8 (Q6b): a commission invoice carrying VAT is refused under v2 (409
+   * FINANCE_V2_TAX_DOC_NOT_REPORTABLE) — commission is never reported to
+   * ZATCA, so its VAT would be in the return with no tax invoice. Flag on
+   * only, before the legacy approve writes anything.
+   */
+  async guardCommissionApprove(fv2: boolean, scope: number, doc: any): Promise<void> {
+    if (!fv2) return;
+    await guardCommissionApprove(this.sqlPool(), scope, doc);
   }
 
   /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA. `db` is the legacy Drizzle handle (same row shape). */
