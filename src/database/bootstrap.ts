@@ -619,6 +619,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 control-run table failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0073 auto-invoicing of due installments (setting + per-installment links). After 0069, same rules.
+    try { // finance-v2:
+      const fv2Auto = findSqlFile(join("drizzle", "0073_finance_v2_autoinvoice.sql")); // finance-v2:
+      if (fv2Auto) await client.query(readFileSync(fv2Auto, "utf8")); // finance-v2:
+      else log.warn("0073_finance_v2_autoinvoice.sql not found — Finance v2 auto-invoice tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 auto-invoice tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

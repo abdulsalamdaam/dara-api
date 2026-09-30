@@ -186,7 +186,7 @@ function main(): void {
     }
     // 4. migrations alter nothing that exists
     for (const f of ["db/drizzle/0066_finance_v2.sql", "db/drizzle/0067_finance_v2_tier2.sql", "db/drizzle/0068_finance_v2_hardening.sql", "db/drizzle/0069_finance_v2_tier3.sql",
-      "db/drizzle/0071_finance_v2_controls.sql"]) {
+      "db/drizzle/0071_finance_v2_controls.sql", "db/drizzle/0073_finance_v2_autoinvoice.sql"]) {
       const p = join(cwd, f);
       if (existsSync(p)) problems.push(...checkMigrationAlters(readFileSync(p, "utf8"), f));
     }

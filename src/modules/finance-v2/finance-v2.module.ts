@@ -49,6 +49,8 @@ import { ApService } from "./tier3/ap.service";
 import { JournalExportService } from "./tier3/journal-export.service";
 import { ControlChecksService } from "./controls.service";
 import { FinanceV2ControlsController } from "./controllers/controls.controller";
+import { AutoInvoiceService } from "./auto-invoice/auto-invoice.service";
+import { FinanceV2AutoInvoiceController } from "./controllers/auto-invoice.controller";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -64,6 +66,7 @@ import { FinanceV2ControlsController } from "./controllers/controls.controller";
     FinanceV2BugsController, FinanceV2Tier1Controller, FinanceV2Tier2Controller, FinanceV2Tier3Controller,
     FinanceV2ControlsController,
     FinanceV2AcctReportsController,
+    FinanceV2AutoInvoiceController,
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
@@ -74,6 +77,7 @@ import { FinanceV2ControlsController } from "./controllers/controls.controller";
     ApService, JournalExportService, FinanceSettingsService,
     ControlChecksService,
     AcctReportsService,
+    AutoInvoiceService,
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
