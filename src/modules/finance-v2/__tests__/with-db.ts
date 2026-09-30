@@ -30,6 +30,7 @@ export const MIGRATION_0066 = join(__dirname, "../../../../db/drizzle/0066_finan
 export const MIGRATION_0067 = join(__dirname, "../../../../db/drizzle/0067_finance_v2_tier2.sql");
 export const MIGRATION_0068 = join(__dirname, "../../../../db/drizzle/0068_finance_v2_hardening.sql");
 export const MIGRATION_0069 = join(__dirname, "../../../../db/drizzle/0069_finance_v2_tier3.sql");
+export const MIGRATION_0070 = join(__dirname, "../../../../db/drizzle/0070_finance_v2_commission.sql");
 export const MIGRATION_0071 = join(__dirname, "../../../../db/drizzle/0071_finance_v2_controls.sql");
 export const MIGRATION_0073 = join(__dirname, "../../../../db/drizzle/0073_finance_v2_autoinvoice.sql");
 export const MIGRATION_0074 = join(__dirname, "../../../../db/drizzle/0074_finance_v2_assets.sql");
@@ -64,6 +65,7 @@ export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolea
     await apply(MIGRATION_0067);
     await apply(MIGRATION_0068);
     await apply(MIGRATION_0069);
+    await apply(MIGRATION_0070);
     await apply(MIGRATION_0071);
     await apply(MIGRATION_0073);
     await apply(MIGRATION_0074);

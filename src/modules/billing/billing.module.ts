@@ -1655,6 +1655,7 @@ class SimpleInvoicesController {
   private async runZatcaSubmission(uid: number, doc: any): Promise<ZatcaSubmitOutcome> {
     try {
       if (isV2DocKind(doc?.kind)) return V2_KIND_ZATCA_SKIP; // finance-v2: EX-4 — rent receipts and agency fees never reach ZATCA
+      doc = (await this.fv2h?.commissionZatcaDoc(uid, doc)) ?? doc; // finance-v2: Q6b — the monthly landlord commission is reported under the office's seller
       // Commission invoices (فاتورة عمولة) are intentionally NOT sent to ZATCA.
       if (doc.kind === "commission") {
         return { submitted: false, code: "skipped", reason: "Commission invoices are not sent to ZATCA" };

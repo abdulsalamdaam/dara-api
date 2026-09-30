@@ -142,6 +142,24 @@ const buyerIqaScheme = { ...registeredIndividualBuyer, id: "2029384756", idSchem
 // A seller that identifies with a unified establishment number (scheme 700).
 const seller700: SellerSnapshot = { ...seller, name: "مؤسسة بالرقم الموحد", nameAr: "مؤسسة بالرقم الموحد", vat: "355555555500003", crn: "7038475612", idScheme: "700" } as SellerSnapshot;
 
+// The monthly management commission (Finance v2, collected basis): the OFFICE
+// is the seller and one of its LANDLORDS the buyer — standard (cleared) when the
+// landlord is VAT-registered, simplified (reported) when not — one S line per
+// property, worded exactly as commission-run.service.ts writes it, and the
+// credit note that reverses a run.
+const commissionLandlordCompany = {
+  name: "شركة الواحة للعقارات",
+  vat: "377777777700003",
+  street: "طريق الأمير محمد بن عبدالعزيز", buildingNo: "4321", district: "السليمانية", city: "الرياض", postalZone: "12245", additionalNo: "7777",
+};
+const commissionLandlordIndividual = { name: "عبدالله محمد السالم", id: "1087654321", idScheme: "NAT" };
+const commissionLine = (id: string, property: string, pct: string, base: string, amount: number) => ({
+  id, name: `عمولة إدارة الأملاك — ${property} — يناير 2026 (${pct}% × ${base}) · Management commission January 2026`,
+  quantity: 1, unitPrice: amount, vatPercent: 15, vatCategory: "S" as const,
+});
+const commissionTwoProperties = [commissionLine("1", "برج الأعمال", "5.00", "36000.00", 1800), commissionLine("2", "مجمع الواحة", "10.00", "2608.70", 260.87)];
+const commissionOneProperty = [commissionLine("1", "عمارة النخيل", "7.50", "10500.00", 787.5)];
+
 const MATRIX = [
   { file: "01-standard-invoice", profile: "standard", docType: "invoice", buyer, lines: [commercialRent] },
   { file: "02-standard-credit", profile: "standard", docType: "credit", buyer, lines: [commercialRent], ref: true },
@@ -202,6 +220,10 @@ const MATRIX = [
     lines: [commercialRent,
       { id: "2", name: "رسوم تسجيل مستردة", quantity: 1, unitPrice: 300, vatPercent: 0, vatCategory: "O" as const, exemptionReasonCode: "VATEX-SA-OOS",
         exemptionReasonText: `رسوم حكومية مستردة بالتكلفة & دون هامش <لا تخضع للضريبة> — "Gov't fee" recharged at cost` }] },
+  { file: "23-standard-commission", profile: "standard", docType: "invoice", buyer: commissionLandlordCompany, lines: commissionTwoProperties },
+  { file: "24-simplified-commission", profile: "simplified", docType: "invoice", buyer: commissionLandlordIndividual, lines: commissionOneProperty },
+  { file: "25-standard-commission-credit", profile: "standard", docType: "credit", buyer: commissionLandlordCompany, lines: commissionTwoProperties, ref: true },
+  { file: "26-simplified-commission-credit", profile: "simplified", docType: "credit", buyer: commissionLandlordIndividual, lines: commissionOneProperty, ref: true },
 ] as const;
 
 async function main() {

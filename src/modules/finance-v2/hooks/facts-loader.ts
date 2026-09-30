@@ -321,14 +321,18 @@ export async function documentEvents(q: Sql, userId: number, s: FinanceSettingsR
   if (!d || (d.status !== "confirmed" && !returnedDeposit)) return [];
   const kind: string = d.kind ?? "invoice";
   const ctx = d.contract_id ? await contractCtx(q, userId, s.mode, Number(d.contract_id)) : null;
-  const standalone = !d.contract_id && kind !== "deposit";
   const clientOwner = Number(d.client?.ownerId);
+  // The monthly commission invoice (collected basis, commission-run.service) and its credit note are billed to ONE
+  // landlord across all his contracts: no contract, the landlord on `client.ownerId`. It is that landlord's
+  // agency money (E15/E36 on his 2121), never the account's standalone sale.
+  const landlordFee = !d.contract_id && kind === "commission" && Number.isInteger(clientOwner) && clientOwner > 0;
+  const standalone = !d.contract_id && kind !== "deposit" && !landlordFee;
   const t = ctx
     ? { treatment: ctx.treatment, warnings: ctx.warnings }
     : standalone
       ? STANDALONE
       : await ownerTreatment(q, userId, s.mode, Number.isInteger(clientOwner) && clientOwner > 0 ? clientOwner : null);
-  const dims = dimsOf(ctx, { tenantId: d.tenant_id ?? ctx?.tenantId ?? null });
+  const dims = dimsOf(ctx, { tenantId: d.tenant_id ?? ctx?.tenantId ?? null, ...(landlordFee ? { ownerId: clientOwner } : {}) });
 
   if (d.type === "invoice" && kind === "receipt") return []; // E30: its collections post
   if (d.type === "invoice" && kind === "deposit") {

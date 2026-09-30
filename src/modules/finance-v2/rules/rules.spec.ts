@@ -88,6 +88,7 @@ function cases(rule: RuleCode, t: Treatment, cat: VatCategory, amt: number): Cas
     case "E21": return [pay({ date: "2026-08-01", treatment: t, dims: DIMS, amount: s(amt), targetDims: { ...DIMS, contractId: 14 }, sameContract: false, sameLandlord: true })];
     case "E14": return [pay({ date: "2026-08-01" })];
     case "E28": return [pay({ date: "2026-08-01", lines: [{ accountId: 1, debit: s(amt), credit: "0" }, { accountId: 2, debit: "0", credit: s(amt) }] }, EMPTY_STATE, false)];
+    case "E15T": return [pay({ date: "2026-08-31", amount: s(amt), fromBankAccountId: 4, toBankAccountId: 3 }, EMPTY_STATE, false)];
     case "E37": return [pay({ date: "2026-09-30", outputVat: s(amt), inputVat: s(Math.floor(amt / 3)) }, EMPTY_STATE, false), pay({ date: "2026-09-30", outputVat: s(amt), inputVat: s(amt * 2) }, EMPTY_STATE, false)];
     // Fixed assets (§8.5): same in both modes.
     case "FA01": return [pay({ date: "2026-08-01", assetId: 5, amount: s(amt), assetAccountId: 61, bank: {}, dims: DIMS })];

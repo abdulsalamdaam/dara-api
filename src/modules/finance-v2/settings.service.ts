@@ -5,6 +5,7 @@ import { auditRow, requireReason, settingsEvent } from "./audit";
 import { LOCK_KEYS } from "./lock-keys";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { FinanceFlagService } from "./flag.service";
+import { recordCollectedCutover } from "./commission-run";
 
 /** The fields `PATCH /finance/v2/settings` may change (DESIGN §10.2), camelCase → column. */
 const EDITABLE = {
@@ -104,6 +105,11 @@ export class FinanceSettingsService {
         } else {
           await c.query(`update finance_settings set ${EDITABLE[k]} = $2, updated_at = now() where account_user_id = $1`, [scope, want[k]]);
         }
+        if (k === "commissionBasis" && want[k] === "collected") {
+          // The cutover (DESIGN §9 E1, "collected basis"): the run counts collections posted from the first day of
+          // this month; a collection on rent that already has a billed COM document is never counted again.
+          await recordCollectedCutover(c, scope, actorId);
+        }
         await settingsEvent(c, scope, actorId, EDITABLE[k], cur[EDITABLE[k]], want[k], reason);
       }
       if (changed.length) await auditRow(c, scope, actorId, "finance_v2_settings", scope, "/finance/v2/settings", "PATCH");
@@ -131,12 +137,8 @@ export class FinanceSettingsService {
         case "vatFilingFrequency": want[k] = oneOf(k, ["monthly", "quarterly"]); break;
         case "depositForfeitVat": want[k] = oneOf(k, ["O", "S", "E"]); break;
         case "commissionBasis":
+          // collected: the monthly commission run (commission-run.service.ts); billed: one COM per approved rent document.
           want[k] = oneOf(k, ["billed", "collected"]);
-          // The collected basis needs the commission run (§9 E1, POST /landlords/:id/commission-run), which is not built:
-          // accepting it would silently stop nothing and start nothing.
-          if (want[k] === "collected") {
-            throw new ConflictException({ error: "COMMISSION_BASIS_UNAVAILABLE", message: "The collected commission basis is not available yet" });
-          }
           break;
         case "agencyCollectionsToTrust":
           if (typeof body[k] !== "boolean") throw bad("BAD_VALUE", `${k} must be a boolean`);

@@ -233,7 +233,7 @@ describe("fv2 reconciliation and minor API fixes (real Postgres, real legacy rou
       assert.deepEqual(await code({ reason: "synthetic change", depositForfeitVat: "X" }), [400, "BAD_VALUE"]);
       assert.deepEqual(await code({ reason: "synthetic change", vatFilingFrequency: "yearly" }), [400, "BAD_VALUE"]);
       assert.deepEqual(await code({ reason: "synthetic change", agencyCollectionsToTrust: "yes" }), [400, "BAD_VALUE"]);
-      assert.deepEqual(await code({ reason: "synthetic change", commissionBasis: "collected" }), [409, "COMMISSION_BASIS_UNAVAILABLE"]);
+      assert.deepEqual(await code({ reason: "synthetic change", commissionBasis: "monthly" }), [400, "BAD_VALUE"]); // "collected" is accepted since the commission run (commission-run.db.spec.ts)
       const cash = (await banks.list(U)).find((b) => b.kind === "cash")!;
       assert.deepEqual(await code({ reason: "synthetic change", defaultBankAccountId: cash.id }), [400, "BAD_BANK_ACCOUNT"]);
       assert.deepEqual(await code({ reason: "synthetic change", defaultCashAccountId: b2.id }), [400, "BAD_BANK_ACCOUNT"]);

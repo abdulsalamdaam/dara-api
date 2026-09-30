@@ -33,6 +33,10 @@ export const LOCK_KEYS = {
   AP: -111,
   /** FA- fixed-asset numbers and the per-account asset/depreciation writes (§8.5). */
   FIXED_ASSET: -140,
+  /** The monthly commission run (collected basis): one landlord-month at a time per account. */
+  COMMISSION_RUN: -170,
+  /** TRF- commission transfer numbers and the unsent-commission check. */
+  COMMISSION_TRANSFER: -171,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];

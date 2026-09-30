@@ -26,6 +26,7 @@ import { depositForfeitEvent } from "../hooks/facts-loader";
 import { creditActionEvents, writeOffEvents } from "../tier1/credit-events";
 import { billEvents, supplierPaymentEvents } from "../tier3/ap-events";
 import { assetEvents } from "../assets/asset-events";
+import { transferEvents } from "../commission-run";
 
 export interface PlannedEvent extends LedgerEvent {
   /** §6.4 rank within a business date. */
@@ -362,6 +363,13 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
     for (const x of await q.rows(`select id from fixed_assets where user_id = $1 order by id`, [userId])) {
       const r = await assetEvents(q, userId, Number(x.id), opts.today);
       for (const e of r?.events ?? []) push(e, r!.createdAt);
+    }
+  }
+
+  // ── Commission transfers (E15T, 0070), with the reversal of a voided one ──
+  if (await hasTable(q, "finance_commission_transfers")) {
+    for (const x of await q.rows(`select id, created_at::text as created from finance_commission_transfers where user_id = $1 order by id`, [userId])) {
+      for (const e of await transferEvents(q, userId, Number(x.id))) push(e, x.created);
     }
   }
 
