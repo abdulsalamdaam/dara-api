@@ -285,26 +285,42 @@ export class VatReportService {
     return r.rows;
   }
 
-  /** Confirmed documents' own VAT against the VAT their ledger entry carries for this seller. */
+  /**
+   * Confirmed documents' own VAT against the VAT their ledger entry carries for this seller.
+   *
+   * On the ACCOUNT's return it also lists every document whose entry booked
+   * VAT under a seller no return reads (`owner:unresolved`: an agent landlord
+   * that could not be resolved, or a free invoice posted before it was
+   * recognised as the account's own sale). That VAT went to ZATCA under
+   * someone, yet no VAT return carries it: it shows here with the account's
+   * ledger VAT (0) and explanation `seller_unresolved`, never silently.
+   */
   private async documentCheck(scope: number, p: VatPeriod, seller: string) {
     const r = await this.pool.query(
       `select d.id as "documentId", d.number, d.type::text as type, d.kind, to_char(d.issue_date, 'YYYY-MM-DD') as "issueDate",
               ((d.total - d.subtotal) * case when d.type = 'credit' then -1 else 1 end)::text as "documentVat",
-              x.vat as "ledgerVat", x.entry_id as "entryId", x.adv as "advanceVatOnCovered"
+              x.vat as "ledgerVat", x.entry_id as "entryId", x.adv as "advanceVatOnCovered", x.unresolved
          from journal_entries e
          join simple_invoices d on d.id = e.source_id and d.user_id = e.user_id
          join lateral (
-           select coalesce(sum(l.credit - l.debit) filter (where l.tax_role = 'output' and l.vat_category = 'S'), 0)::text as vat, e.id::int as entry_id,
+           select coalesce(sum(l.credit - l.debit) filter (where l.tax_role = 'output' and l.vat_category = 'S'
+                                                               and coalesce(l.seller_key, 'account') = $2), 0)::text as vat,
+                  e.id::int as entry_id,
                   exists (select 1 from finance_installment_vat_points v where v.user_id = e.user_id
-                           and v.payment_id in (select l2.payment_id from journal_lines l2 where l2.entry_id = e.id and l2.payment_id is not null)) as adv
-             from journal_lines l where l.entry_id = e.id and l.user_id = e.user_id and coalesce(l.seller_key, 'account') = $2
-           having count(*) filter (where l.tax_role is not null) > 0) x on true
+                           and v.payment_id in (select l2.payment_id from journal_lines l2 where l2.entry_id = e.id and l2.payment_id is not null)) as adv,
+                  count(*) filter (where l.tax_role is not null and l.seller_key = 'owner:unresolved') > 0 as unresolved
+             from journal_lines l where l.entry_id = e.id and l.user_id = e.user_id
+           having count(*) filter (where l.tax_role is not null and coalesce(l.seller_key, 'account') = $2) > 0
+               or ($2 = 'account' and count(*) filter (where l.tax_role = 'output' and l.seller_key = 'owner:unresolved') > 0)) x on true
         where e.user_id = $1 and e.source_type = 'simple_invoice' and e.event = 'confirmed' and e.origin <> 'reversal'
           and e.entry_date between $3::date and $4::date
         order by d.issue_date, d.id`, [scope, seller, p.from, p.to]);
-    return r.rows.map((x: any) => {
+    return r.rows.map(({ unresolved, ...x }: any) => {
       const diff = h(x.documentVat) - h(x.ledgerVat);
-      return { ...x, difference: fromHalalas(diff), explanation: diff !== 0 && x.advanceVatOnCovered ? "advance_vat_netted" : diff !== 0 ? "unexplained" : null };
+      const explanation = diff === 0 ? null
+        : seller === "account" && unresolved ? "seller_unresolved"
+        : x.advanceVatOnCovered ? "advance_vat_netted" : "unexplained";
+      return { ...x, difference: fromHalalas(diff), explanation };
     });
   }
 

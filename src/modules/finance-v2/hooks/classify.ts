@@ -75,19 +75,36 @@ function namesFee(desc: string, feeNames: ReadonlySet<string> | undefined): bool
 
 /**
  * A document's VAT groups, from its own items, subtotal and total (§4.1,
- * §2.1: documents are never re-split). Category per item: `vatCategory`,
- * else the legacy `vat` flag (true → S; false → the installment rule of
- * `installmentVat`: E for a registered seller's residential rent, else O;
- * O for the account's own fees; billing.module.ts `LineItem`). Nature: `fee` when the item's description names a covered fee
- * installment (exactly, or followed by a qualifier, `namesFee`), else `rent`. VAT = total − subtotal, all on the S groups
- * (split by their nets). Σ items is reconciled to `subtotal` on the largest
- * group, with a warning, so the entry always posts the document's own figures.
+ * §2.1: documents are never re-split).
+ *
+ * Category per item, as the DOCUMENT itself states it (the same reading the
+ * ZATCA mirror makes, billing.module.ts `zatcaLinesFromDoc`):
+ *  - `vatCategory` when the line carries one;
+ *  - else the legacy `vat` flag: true → S; false → E, the exemption the
+ *    document prints and files, for a VAT-registered seller. A seller with no
+ *    VAT number makes no exempt supplies, so its no-VAT line is O. The
+ *    account's own fees (commission, agency fee: `ownFee`) are O.
+ *    A no-VAT RENT line of a registered seller's commercial unit is still E as
+ *    printed, flagged `commercial_without_vat` (commercial rent is taxable).
+ *
+ * Nature: `nature` when forced; else `fee` when the item's description names a
+ * covered fee installment (exactly, or followed by a qualifier, `namesFee`),
+ * else `defaultNature` (`rent`, unless the caller knows the document bills no
+ * rent: a free invoice, a debit note → `other`). VAT = total − subtotal, all on
+ * the S groups (split by their nets). Σ items is reconciled to `subtotal` on
+ * the largest group, with a warning, so the entry always posts the document's
+ * own figures.
  */
 export function documentGroups(
   doc: { items: DocItem[] | null | undefined; subtotal: string; total: string },
-  opts: { feeNames?: ReadonlySet<string>; usage?: Usage | null; nature?: Nature; sellerRegistered?: boolean } = {},
+  opts: {
+    feeNames?: ReadonlySet<string>; usage?: Usage | null; nature?: Nature; defaultNature?: Nature;
+    /** The account's own fee document (commission, agency fee): a no-VAT line is O, never exempt. */
+    ownFee?: boolean; sellerRegistered?: boolean;
+  } = {},
 ): { groups: DocGroup[]; warnings: string[] } {
   const warnings: string[] = [];
+  const baseNature: Nature = opts.nature ?? opts.defaultNature ?? "rent";
   const buckets = new Map<string, { category: VatCategory; nature: Nature; net: number }>();
   for (const it of Array.isArray(doc.items) ? doc.items : []) {
     if (it == null || it.amount == null) continue;
@@ -95,18 +112,17 @@ export function documentGroups(
     if (rounded) warnings.push("jsonb_precision");
     const explicit = typeof it.vatCategory === "string" && CATS.has(it.vatCategory) ? (it.vatCategory as VatCategory) : null;
     const vatFlag = it.vat == null ? true : !!it.vat;
+    const desc = String(it.description ?? "").trim();
+    const nature: Nature = opts.nature ?? (desc && namesFee(desc, opts.feeNames) ? "fee" : baseNature);
     let category: VatCategory;
     if (explicit) category = explicit;
     else if (vatFlag) category = "S";
-    else if (opts.nature === "other") category = "O"; // the account's own fee (commission, agency fee): never exempt rent
+    else if (opts.ownFee) category = "O"; // the account's own fee (commission, agency fee): never exempt
+    else if (opts.sellerRegistered !== true) category = "O"; // only a taxable person makes exempt supplies
     else {
-      // A no-VAT rent or fee line takes the installment rule: E only for a registered seller's residential rent.
-      const v = installmentVat({ vatEnabled: false, usage: opts.usage ?? null, sellerRegistered: opts.sellerRegistered === true });
-      category = v.category;
-      warnings.push(...v.warnings);
+      category = "E"; // what the document prints and files for a no-VAT line (zatcaLinesFromDoc)
+      if (nature === "rent" && opts.usage === "commercial") warnings.push("commercial_without_vat");
     }
-    const desc = String(it.description ?? "").trim();
-    const nature: Nature = opts.nature ?? (desc && namesFee(desc, opts.feeNames) ? "fee" : "rent");
     const key = `${category}|${nature}`;
     const b = buckets.get(key) ?? { category, nature, net: 0 };
     b.net += halalas;
@@ -116,7 +132,7 @@ export function documentGroups(
   const total = toHalalas(doc.total);
   let list = [...buckets.values()];
   if (!list.length) {
-    list = [{ category: total > subtotal ? "S" : "O", nature: opts.nature ?? "rent", net: subtotal }];
+    list = [{ category: total > subtotal ? "S" : "O", nature: baseNature, net: subtotal }];
     warnings.push("document_without_items");
   }
   const sumNet = list.reduce((s, g) => s + g.net, 0);
@@ -128,7 +144,7 @@ export function documentGroups(
   const vatTotal = total - subtotal;
   let sGroups = list.filter((g) => g.category === "S");
   if (vatTotal !== 0 && !sGroups.length) {
-    list.push({ category: "S", nature: opts.nature ?? "rent", net: 0 });
+    list.push({ category: "S", nature: baseNature, net: 0 });
     sGroups = list.filter((g) => g.category === "S");
     warnings.push("vat_without_standard_line");
   }

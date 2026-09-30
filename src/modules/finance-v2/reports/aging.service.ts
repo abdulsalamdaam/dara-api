@@ -47,6 +47,12 @@ export interface AgingItem {
   remaining: number;
   daysPastDue: number;
   bucket: Bucket | null;
+  /**
+   * The buyer's name as the document states it, for a document with no tenant
+   * and no contract (a free invoice to an external customer or a landlord);
+   * null otherwise. Such items have no tenant key of their own.
+   */
+  customer?: string | null;
 }
 
 export interface AgingData {
@@ -77,6 +83,7 @@ export class ArAgingService {
       this.pool.query(
         `select id, number, type::text as type, coalesce(kind, 'invoice') as kind, status::text as status, contract_id, tenant_id,
                 payment_id, payment_ids, total::text as total, billing_reference,
+                nullif(trim(coalesce(client->>'name', tenant_name, '')), '') as customer,
                 to_char(coalesce(issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as issue,
                 to_char(due_date, 'YYYY-MM-DD') as due, deleted_at is not null as deleted
            from simple_invoices where user_id = $1`, [scope]),
@@ -127,6 +134,7 @@ export class ArAgingService {
         type: "document", id: d.id, number: d.number, contractId: d.contract_id, tenantId: docTenant(d),
         ownerId: c?.ownerId ?? null, propertyId: c?.propertyId ?? null,
         dueDate: d.due ?? covered[covered.length - 1] ?? d.issue, amount: h(d.total), collected: 0, credited: 0, remaining: 0, daysPastDue: 0, bucket: null,
+        customer: docTenant(d) == null && d.contract_id == null ? d.customer ?? null : null,
       });
     }
     type PState = "item" | "consumed" | "credit" | "deposit";
@@ -284,19 +292,22 @@ export class ArAgingService {
     const keep = (x: { tenantId: number | null; ownerId: number | null; propertyId: number | null }) =>
       (f.tenantId == null || x.tenantId === f.tenantId) && (f.ownerId == null || x.ownerId === f.ownerId) && (f.propertyId == null || x.propertyId === f.propertyId);
 
-    type Row = { key: string; tenantId: number | null; contractId: number | null; b: Record<Bucket, number>; credit: number; items: AgingItem[] };
+    type Row = { key: string; tenantId: number | null; contractId: number | null; customer: string | null; b: Record<Bucket, number>; credit: number; items: AgingItem[] };
     const rows = new Map<string, Row>();
-    const row = (k: string, tenantId: number | null, contractId: number | null) => {
+    const row = (k: string, tenantId: number | null, contractId: number | null, customer: string | null = null) => {
       let r = rows.get(k);
       if (!r) {
-        r = { key: k, tenantId, contractId, b: { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, d90p: 0 }, credit: 0, items: [] };
+        r = { key: k, tenantId, contractId, customer, b: { notDue: 0, d0_30: 0, d31_60: 0, d61_90: 0, d90p: 0 }, credit: 0, items: [] };
         rows.set(k, r);
       }
       return r;
     };
     for (const it of data.items) {
       if (!keep(it) || it.remaining <= 0) continue;
-      const r = row(tkey(it.tenantId, it.contractId, by), it.tenantId, by === "contract" ? it.contractId : null);
+      // An external customer (no tenant, no contract) gets a row of its own, named from the document.
+      const r = it.customer
+        ? row(`x:${it.customer}`, null, null, it.customer)
+        : row(tkey(it.tenantId, it.contractId, by), it.tenantId, by === "contract" ? it.contractId : null);
       r.b[it.bucket!] += it.remaining;
       r.items.push(it);
     }
@@ -315,7 +326,8 @@ export class ArAgingService {
       const c = r.contractId != null ? data.dims.get(r.contractId) : undefined;
       return {
         tenantId: r.tenantId,
-        tenantName: (r.tenantId != null ? tenants.get(r.tenantId) : null) ?? c?.tenantName ?? null,
+        tenantName: (r.tenantId != null ? tenants.get(r.tenantId) : null) ?? c?.tenantName ?? r.customer ?? null,
+        customerName: r.customer,
         contractId: r.contractId,
         contractNumber: c?.number ?? null,
         notDue: fromHalalas(r.b.notDue), d0_30: fromHalalas(r.b.d0_30), d31_60: fromHalalas(r.b.d31_60), d61_90: fromHalalas(r.b.d61_90), d90p: fromHalalas(r.b.d90p),
