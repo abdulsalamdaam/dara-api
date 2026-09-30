@@ -326,8 +326,10 @@ export class ReconciliationService {
     const ids = new Set<number>(accts.map((a: any) => a.id));
     const ledgerR = await this.pool.query(
       `select l.account_id, sum(l.debit - l.credit)::text as bal,
-              coalesce(sum(l.debit - l.credit) filter (where e.origin in ('manual','opening','closing') or e.payload->>'rule' = 'E33'), 0)::text as own
+              coalesce(sum(l.debit - l.credit) filter (where e.origin in ('manual','opening','closing') or e.payload->>'rule' = 'E33'
+                or (e.origin = 'reversal' and (o.origin in ('manual','opening','closing') or o.payload->>'rule' = 'E33'))), 0)::text as own
          from journal_lines l join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+         left join journal_entries o on o.id = e.reversal_of and o.user_id = e.user_id
         where l.user_id = $1 and l.entry_date <= $2::date and l.account_id = any($3::int[]) group by 1`, [scope, asOf, [...ids]]);
     const ledger = new Map<number, number>();
     const sub = new Map<number, number>();
@@ -379,15 +381,18 @@ export class ReconciliationService {
               to_char(coalesce(v.paid_date, v.issue_date, (v.confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as d,
               to_char((v.updated_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as upd,
               (select coalesce(sum(pc.amount), 0) from payment_collections pc where pc.user_id = v.user_id and pc.invoice_id = v.id and pc.payment_id is not null)::text as linked,
-              exists (select 1 from finance_deposit_refunds r where r.user_id = v.user_id and v.id = any(r.voucher_ids)) as v2_refund
+              exists (select 1 from finance_deposit_refunds r where r.user_id = v.user_id and v.id = any(r.voucher_ids)) as v2_refund,
+              dm.bank_account_id
          from simple_invoices v left join contracts c on c.id = v.contract_id and c.user_id = v.user_id
+         left join finance_document_meta dm on dm.document_id = v.id and dm.user_id = v.user_id
         where v.user_id = $1 and v.kind = 'deposit' and v.deleted_at is null
           and (v.status = 'confirmed' or (v.status = 'cancelled' and c.deposit_status = 'returned'))`, [scope]);
     for (const v of vouchers.rows) {
       const unlinked = Math.max(0, h(v.total) - h(v.linked));
       const co = Number(v.client_owner);
       const agency = v.contract_id != null ? agent(v.contract_id) : agentOwner(Number.isInteger(co) && co > 0 ? co : null);
-      if (v.d && v.d <= asOf) put({ method: v.payment_method, agency }, unlinked);
+      // E09 books the voucher into the account it was received into (finance_document_meta), as the engine does.
+      if (v.d && v.d <= asOf) put({ bankAccountId: v.bank_account_id, method: v.payment_method, agency }, unlinked);
       if (v.status === "cancelled" && !v.v2_refund && v.upd <= asOf) put({ method: v.payment_method, agency: v.contract_id != null && agent(v.contract_id) }, -unlinked);
     }
     for (const r of (await this.pool.query(

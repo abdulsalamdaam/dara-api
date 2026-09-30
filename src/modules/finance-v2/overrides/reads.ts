@@ -89,6 +89,20 @@ export async function accountingV2(q: Sql, scope: number, legacy: any, today = r
 }
 
 /**
+ * N-C (staging test, 30 Sep 2026): the legacy landlord-dues report finds a
+ * contract's landlord through `contract_units`, which terminate and DELETE
+ * remove, so a terminated contract's collections fell onto an unnamed row and
+ * R3 went red. `finance_contract_dims` captured the contract's property before
+ * the units were unlinked (§4.3); the dues report uses it where the live link
+ * is gone. Contract id → property id, for contracts with a captured property.
+ */
+export async function contractPropertySnapshots(q: { query: (sql: string, p?: unknown[]) => Promise<{ rows: any[] }> }, scope: number): Promise<Map<number, number>> {
+  const r = await q.query(
+    `select contract_id, property_id from finance_contract_dims where user_id = $1 and property_id is not null`, [scope]);
+  return new Map(r.rows.map((x: any) => [Number(x.contract_id), Number(x.property_id)]));
+}
+
+/**
  * E2 + E4: GET /dashboard/summary under v2. Same shape. `monthlyRevenue` =
  * Σ collections (net of refunds, no deposits, no commission) dated in the
  * current Riyadh month; `revenueByMonth` the same per month of the Riyadh

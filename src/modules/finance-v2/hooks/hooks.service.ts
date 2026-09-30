@@ -15,7 +15,7 @@ import { simpleInvoicesTable } from "@dara/database";
 import { capabilities } from "../capabilities";
 import { createCommissionCreditV2, createCommissionV2 } from "../commission";
 import { paymentsListV2 } from "../overrides/payments-list";
-import { accountingV2, dashboardV2 } from "../overrides/reads";
+import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrides/reads";
 import { approveV2Kind, ensureAgencyFeeDraft } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
@@ -412,6 +412,21 @@ export class FinanceV2Hooks {
     });
   }
 
+  /**
+   * DELETE /reports/expenses/:id under v2 (staging TC-1104): the legacy handler
+   * answers 200 for an id that is missing or already deleted. Under v2 the soft
+   * delete is one conditional UPDATE, so only the request that actually deletes
+   * the row succeeds (and enqueues the E18 reversal); any other gets 404.
+   */
+  async deleteExpenseV2(scope: number, expenseId: number): Promise<{ ok: true }> {
+    if (!Number.isInteger(expenseId) || expenseId <= 0) throw new NotFoundException("Expense not found");
+    const r = await this.pool.query(
+      `update expenses set deleted_at = now() where id = $1 and user_id = $2 and deleted_at is null returning id`, [expenseId, scope]);
+    if (!r.rowCount) throw new NotFoundException("Expense not found");
+    await this.expenseDeleted({ fv2: true, userId: scope }, expenseId);
+    return { ok: true };
+  }
+
   /** POST /reports/landlord-payouts (E19). */
   async payoutCreated(ctx: HookCtx, payoutId: number, money: MoneyMeta & { transferDate?: unknown } = {}): Promise<void> {
     await this.run(ctx, "payout", async (q, s) => {
@@ -530,6 +545,21 @@ export class FinanceV2Hooks {
   /** E3/E4/E1: GET /reports/accounting — v2 values over the legacy result. */
   async accounting(scope: number, legacy: any): Promise<any> {
     return accountingV2(this.sqlPool(), scope, legacy);
+  }
+
+  /**
+   * N-C: contract → property as captured in `finance_contract_dims`, for the
+   * legacy dues report to fall back on once terminate has unlinked the units.
+   * Empty with the flag off (so the flag-off report is unchanged), and on any error.
+   */
+  async contractPropertySnapshots(scope: number): Promise<Map<number, number>> {
+    try {
+      if (!(await this.resolve(scope))) return new Map();
+      return await contractPropertySnapshots(this.pool, scope);
+    } catch (err) {
+      this.log.warn(`finance_v2.contract_snapshots_failed (scope ${scope}): ${(err as Error)?.message}`);
+      return new Map();
+    }
   }
 
   /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA. `db` is the legacy Drizzle handle (same row shape). */

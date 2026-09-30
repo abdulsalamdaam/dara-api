@@ -81,6 +81,7 @@ class ReportsController {
       const pid = unitProp.get(cu.unitId);
       if (pid != null) contractProp.set(cu.contractId, pid);
     }
+    for (const [cid, pid] of (await this.fv2h?.contractPropertySnapshots(uid)) ?? []) if (!contractProp.has(cid)) contractProp.set(cid, pid); // finance-v2: N-C — a terminated contract (units unlinked) keeps the property its v2 dims captured; flag off: empty
     const paymentById = new Map(payments.map((p) => [p.id, p]));
     const invoiceById = new Map(invoices.map((i) => [i.id, i]));
 
@@ -390,6 +391,7 @@ class ReportsController {
   @Delete("expenses/:id")
   @RequirePermissions(PERMISSIONS.EXPENSES_WRITE)
   async deleteExpense(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    if ((await this.fv2h?.resolve(scopeId(user))) === true) return this.fv2h!.deleteExpenseV2(scopeId(user), parseInt(id, 10)); // finance-v2: TC-1104 — 404 for a missing or already-deleted expense; one atomic soft delete, then the E18 reversal
     await this.db.update(expensesTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(expensesTable.id, parseInt(id, 10)), eq(expensesTable.userId, scopeId(user))));
     await this.fv2h?.expenseDeleted({ fv2: (await this.fv2h.resolve(scopeId(user))) === true, userId: scopeId(user) }, parseInt(id, 10)); // finance-v2: E18 reversal
