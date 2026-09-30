@@ -95,12 +95,12 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     assert.equal(bad.status, 400);
     assert.equal(bad.body.error, "BAD_IBAN");
     bankB = await banks.create(U, U, { kind: "bank", nameAr: "حساب التشغيل", nameEn: "Operating", iban: IBAN_B.replace(/(.{4})/g, "$1 ").toLowerCase(), isDefault: true });
-    assert.equal(bankB.glCode, "111001");
+    assert.equal(bankB.glCode, "1117");
     assert.equal(bankB.iban, IBAN_B);
     assert.equal(bankB.bankCode, "80");
     assert.equal(bankB.isDefault, true);
     const [gl] = await env.q(`select a.code, p.code as parent, a.bank_account_id, a.type from accounts a join accounts p on p.id = a.parent_id where a.id = $1`, [bankB.glAccountId]);
-    assert.deepEqual(gl, { code: "111001", parent: "1110", bank_account_id: bankB.id, type: "asset" });
+    assert.deepEqual(gl, { code: "1117", parent: "1110", bank_account_id: bankB.id, type: "asset" });
     const [st] = await env.q(`select default_bank_account_id from finance_settings where account_user_id = $1`, [U]);
     assert.equal(st.default_bank_account_id, bankB.id);
     const old = (await banks.list(U)).find((b) => b.glCode === "1113")!;
@@ -124,17 +124,17 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const [meta] = await env.q(`select bank_account_id from finance_collection_meta where collection_id = $1`, [r.collection.id]);
     assert.equal(meta.bank_account_id, bankB.id);
     const ls = await linesOf(env, "payment_collection", r.collection.id, "collected");
-    assert.equal(ls[0].code, "111001");
+    assert.equal(ls[0].code, "1117");
     assert.equal(ls[0].bank_account_id, bankB.id);
     // a payout paid from B
     const po: any = await env.reports.createPayout(user, { ownerId: s.agent, amount: 40, transferDate: today, method: "bank_transfer", bankAccountId: bankB.id });
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "landlord_payout", po.id, "created")), ["2121 Dr 40", "111001 Cr 40"]);
+    assert.deepEqual(codes(await linesOf(env, "landlord_payout", po.id, "created")), ["2121 Dr 40", "1117 Cr 40"]);
     // a bank account id of nobody in this scope is ignored (no meta row), the engine uses the default
     const r2: any = await env.payments.addCollection(user, String(p.id), { amount: "10", collectedDate: today, method: "bank_transfer", bankAccountId: 999999 });
     await drain(env);
     assert.equal((await env.q(`select 1 from finance_collection_meta where collection_id = $1`, [r2.collection.id])).length, 0);
-    assert.equal((await linesOf(env, "payment_collection", r2.collection.id, "collected"))[0].code, "111001", "B is the default now");
+    assert.equal((await linesOf(env, "payment_collection", r2.collection.id, "collected"))[0].code, "1117", "B is the default now");
     bankB = await banks.get(U, bankB.id);
     assert.equal(bankB.balance, "70.00", "100 + 10 − 40");
     assert.equal(bankB.used, true);
@@ -154,12 +154,12 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const [legacy] = await env.q(`select amount::text as amount, expense_date, owner_id, property_id from expenses where id = $1`, [e.id]);
     assert.deepEqual(legacy, { amount: "1150.00", expense_date: today, owner_id: null, property_id: null });
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:1")), ["5290 Dr 1000", "1151 Dr 150", "111001 Cr 1150"], "5290: general (no property)");
+    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:1")), ["5290 Dr 1000", "1151 Dr 150", "1117 Cr 1150"], "5290: general (no property)");
     // edit: 2,300 gross → reversal of rev:1 and rev:2; net effect 5190 2,000 / 1151 300
     const e2 = await expenses.update(U, user, e.id, { amount: "2300" });
     assert.equal(e2.details!.revision, 2);
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:2")), ["5290 Dr 2000", "1151 Dr 300", "111001 Cr 2300"]);
+    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:2")), ["5290 Dr 2000", "1151 Dr 300", "1117 Cr 2300"]);
     assert.equal((await linesOf(env, "expense", e.id, "reversal:rev:1")).length, 3);
     const [net] = await env.q(`select sum(l.debit - l.credit)::text as n from journal_lines l join journal_entries je on je.id = l.entry_id
       where je.user_id = $1 and je.source_type = 'expense' and je.source_id = $2 and l.account_id = (select id from accounts where user_id = $1 and code = '1151')`, [U, e.id]);
@@ -170,12 +170,12 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
   it("expenses: a legacy expense gets its details lazily on the first v2 edit (O rev:1 reversed, S rev:2 posted)", async () => {
     const row: any = await env.reports.createExpense(user, { ownerId: s.holder, propertyId: s.propH, category: "كهرباء", amount: 230, expenseDate: today });
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", row.id, "rev:1")), ["5190 Dr 230", "111001 Cr 230"], "legacy: O, gross; 5190: property expense");
+    assert.deepEqual(codes(await linesOf(env, "expense", row.id, "rev:1")), ["5190 Dr 230", "1117 Cr 230"], "legacy: O, gross; 5190: property expense");
     const e = await expenses.update(U, user, row.id, { vatCategory: "S", vatRate: 15, vatRecoverable: true, supplierVatNumber: "300000000000003" });
     assert.equal(e.details!.revision, 2);
     assert.equal(e.details!.net, "200.00");
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", row.id, "rev:2")), ["5190 Dr 200", "1151 Dr 30", "111001 Cr 230"]);
+    assert.deepEqual(codes(await linesOf(env, "expense", row.id, "rev:2")), ["5190 Dr 200", "1151 Dr 30", "1117 Cr 230"]);
   });
 
   it("expenses: refusals — bad supplier VAT, charge-to-landlord for a principal landlord, a foreign property, a locked period", async () => {
@@ -194,12 +194,12 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const dflt = await expenses.create(U, user, sBase);
     assert.equal(dflt.details!.vatRecoverable, false, "the recoverable default drops without a VAT number");
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", dflt.id, "rev:1")), ["5290 Dr 100", "5500 Dr 15", "111001 Cr 115"]);
+    assert.deepEqual(codes(await linesOf(env, "expense", dflt.id, "rev:1")), ["5290 Dr 100", "5500 Dr 15", "1117 Cr 115"]);
     // charge to landlord for the AGENT landlord: Dr LP net / Dr LP VAT / Cr bank
     const e = await expenses.create(U, user, { ...base, amount: "115", vatCategory: "S", ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord" });
     assert.equal(e.details!.vatRecoverable, false);
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:1")), ["2121 Dr 100", "2121 Dr 15", "111001 Cr 115"]);
+    assert.deepEqual(codes(await linesOf(env, "expense", e.id, "rev:1")), ["2121 Dr 100", "2121 Dr 15", "1117 Cr 115"]);
   });
 
   // ── Tenant credits ────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     assert.equal(rf.action.number, "PV-000001");
     assert.equal(rf.remainingCredit, "200.00");
     await drain(env);
-    assert.deepEqual(codes(await linesOf(env, "tenant_credit_action", rf.action.id, "refund")), ["111001 Cr 500", "1122 Dr 500", "2122 Cr 500", "2121 Dr 500"]);
+    assert.deepEqual(codes(await linesOf(env, "tenant_credit_action", rf.action.id, "refund")), ["1117 Cr 500", "1122 Dr 500", "2122 Cr 500", "2121 Dr 500"]);
   });
 
   it("tenant credit: two concurrent refunds of the whole remaining credit — exactly one succeeds", async () => {

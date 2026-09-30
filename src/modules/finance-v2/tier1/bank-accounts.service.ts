@@ -46,6 +46,15 @@ const bool = (v: unknown, field: string): boolean | undefined => {
   return v;
 };
 
+/**
+ * A new bank or cash leaf's code (DESIGN §3): the template holds 1111–1116, so
+ * leaves take 1117, 1118, 1119 and then 111001 … 111099, lowest free first.
+ */
+export const BANK_LEAF_CODES: readonly string[] = [
+  "1117", "1118", "1119",
+  ...Array.from({ length: 99 }, (_, i) => `1110${String(i + 1).padStart(2, "0")}`),
+];
+
 /** Every place a bank account id is recorded; any hit means "used" (DESIGN §8.2 a: deactivate, never delete). */
 const USED_SQL = `(
      exists (select 1 from journal_lines l where l.user_id = b.user_id and (l.bank_account_id = b.id or l.account_id = b.gl_account_id))
@@ -113,9 +122,8 @@ export class BankAccountsService {
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.BANK_ACCOUNT]);
       const parent = await c.query(`select id, code from accounts where user_id = $1 and code = '1110'`, [scope]);
       if (!parent.rows[0]) throw new ConflictException({ error: "CHART_MISSING", message: "The chart of accounts has no 1110 group" });
-      const used = new Set((await c.query(`select code from accounts where user_id = $1 and code like '1110__'`, [scope])).rows.map((x: any) => x.code));
-      let code: string | null = null;
-      for (let i = 1; i <= 99 && !code; i++) if (!used.has(`1110${String(i).padStart(2, "0")}`)) code = `1110${String(i).padStart(2, "0")}`;
+      const used = new Set((await c.query(`select code from accounts where user_id = $1 and code like '111%'`, [scope])).rows.map((x: any) => x.code));
+      const code = BANK_LEAF_CODES.find((x) => !used.has(x)) ?? null;
       if (!code) throw new ConflictException({ error: "CHART_FULL", message: "No free account code under 1110" });
       const gl = await c.query(
         `insert into accounts (user_id, code, name_ar, name_en, type, normal_balance, parent_id, created_by)
@@ -233,7 +241,8 @@ export class BankAccountsService {
     return (r as Extract<typeof r, { ok: true }>).iban;
   }
 
-  private async makeDefault(c: Fv2Client, scope: number, id: number, kind: string, isTrust: boolean) {
+  /** One default per (kind, trust); a non-trust default is also the settings default. In the caller's transaction. */
+  async makeDefault(c: Fv2Client, scope: number, id: number, kind: string, isTrust: boolean) {
     await c.query(`update bank_accounts set is_default = false, updated_at = now() where user_id = $1 and kind = $2 and is_trust = $3 and id <> $4 and is_default`, [scope, kind, isTrust, id]);
     await c.query(`update bank_accounts set is_default = true, updated_at = now() where id = $1 and user_id = $2`, [id, scope]);
     if (!isTrust) {
