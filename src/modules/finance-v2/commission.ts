@@ -20,6 +20,13 @@ import { fromHalalas, toHalalas, vatSplit } from "./money";
 import type { Sql } from "./hooks/sql";
 import { riyadhToday } from "./dates";
 import { ownFeeCarriesVat } from "./account-seller";
+import { propertyBasis } from "./commission-basis";
+
+/** Is 0070 applied (the monthly run's counted lines)? */
+async function hasRunItemsTable(q: Sql): Promise<boolean> {
+  const [r] = await q.rows(`select to_regclass('finance_commission_run_items') is not null as ok`);
+  return r?.ok === true;
+}
 
 export type FeeSource = "property" | "landlord" | null;
 export interface EffectiveFee {
@@ -111,15 +118,18 @@ export async function planCommission(q: Sql, scope: number, doc: { contractId: n
   if (!doc.contractId || !doc.paymentIds.length) return null;
   const s = await loadSettings(q, scope);
   if (!s) return null;
-  // On the COLLECTED basis commission is issued by the monthly run (commission-run.ts), never per rent document.
-  const [b] = await q.rows(`select commission_basis from finance_settings where account_user_id = $1`, [scope]);
-  if (b?.commission_basis === "collected") return null;
   const ctx = await contractCtx(q, scope, s.mode, doc.contractId);
   if (!ctx || ctx.treatment === "principal") return null;
   const fee = await effectiveManagementFee(q, scope, doc.contractId);
+  // On the COLLECTED basis commission is issued by the monthly run (commission-run.ts), never per rent document.
+  // The basis is the PROPERTY's own when it has one, else the account's (commission-basis.ts, finding 9).
+  if ((await propertyBasis(q, scope, fee.propertyId)).basis === "collected") return null;
   if (!fee.pct || !(toHalalas(fee.pct) > 0)) return null;
+  // An installment a live monthly run already counted (the property was on "collected" then) is never charged again.
+  const runItems = await hasRunItemsTable(q);
   const rows = await q.rows(
-    `select amount::text as amount, description, vat_enabled from payments where user_id = $1 and id = any($2::int[]) and deleted_at is null`,
+    `select amount::text as amount, description, vat_enabled from payments p where p.user_id = $1 and p.id = any($2::int[]) and p.deleted_at is null
+        ${runItems ? `and not exists (select 1 from finance_commission_run_items i where i.user_id = p.user_id and i.payment_id = p.id and i.live)` : ""}`,
     [scope, doc.paymentIds],
   );
   let base = 0;
@@ -159,6 +169,7 @@ export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
   const paymentIds = rentDoc.paymentIds?.length ? rentDoc.paymentIds.map(Number) : rentDoc.paymentId ? [Number(rentDoc.paymentId)] : [];
   const plan = await planCommission(q, scope, { contractId: rentDoc.contractId, paymentIds });
   if (!plan) return null;
+  const fee = await effectiveManagementFee(q, scope, Number(rentDoc.contractId));
   const [dup] = await q.rows(
     `select id from simple_invoices where user_id = $1 and kind = 'commission' and type = 'invoice' and billing_reference = $2 and deleted_at is null limit 1`,
     [scope, rentDoc.number],
@@ -170,7 +181,10 @@ export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
   );
   if (!c) return null;
   const number = await nextDocNumber(q, scope, "COM");
+  // The buyer is the landlord (the office bills him): named on the document so the ZATCA path can file it
+  // under the office's seller with this landlord as the buyer (documents-v2.ts commissionZatcaDoc).
   const client = {
+    ...(fee.ownerId ? { kind: "landlord", ownerId: Number(fee.ownerId) } : {}),
     ...(c.landlord_phone ? { phone: c.landlord_phone } : {}), ...(c.landlord_email ? { email: c.landlord_email } : {}),
     ...(c.landlord_address ? { address: c.landlord_address } : {}), ...(c.landlord_tax_number ? { vatNumber: c.landlord_tax_number } : {}),
   };

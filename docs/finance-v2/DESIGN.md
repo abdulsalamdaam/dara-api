@@ -1737,6 +1737,22 @@ The accountant's rule (workbook, "قواعد القيود" → فاتورة عم
 - **Landlord statement.** `summary.commissionNet` and `summary.commissionVat` (signed as they move 2121) beside the existing gross `commission`.
 - **For the accountant to confirm.** (1) Ejar-settled rent (E33) counts as collected, as in his workbook — in Dara the landlord was paid directly by Ejar, so the commission leaves 2121 negative (the landlord owes it). (2) A property with no agreed rate is deferred, not charged 0% (a rate added later charges its uncounted collections). (3) The invoice date is the run day (ZATCA's issue date), so a month run late posts in the month it is run.
 
+#### E1-D: the commission basis per property (accountant's test 5 Oct 2026, finding 9; migration 0075)
+
+- **Rule.** A property may choose its own basis in `finance_property_commission (user_id, property_id, basis, collected_from)`; a missing row or `basis = null` follows the account's `commission_basis`, so with no row anywhere nothing changes (the default keeps current behaviour). Code: `commission-basis.ts`.
+- **Billed path.** `planCommission` reads the basis of the contract's property: on `collected` it creates no per-document COM. It also skips any installment a live monthly run already counted (`finance_commission_run_items`), so switching a property collected → billed never charges the same rent twice.
+- **Collected path.** `collectedLines` counts only lines whose property is on `collected` (its own, else the account's), and for a property override only from its own `collected_from` (the first day of the Riyadh month it was switched). A billed account with at least one collected property is no longer `BASIS_BILLED`: its run cutover is the earliest property cutover, and the scheduler includes it. The existing rule "an installment with a live billed COM is never counted" still covers billed → collected.
+- **Routes.** `GET /finance/v2/properties/:id/commission` (view) → `{basis, override, accountBasis, collectedFrom, pct, source, available}`; `PATCH` the same `{basis: 'billed'|'collected'|null, reason?}` (settings), written to `finance_settings_events` (`property_commission_basis:<id>`) and `audit_logs`.
+- **Rate precision (finding 8).** `management_fee_percent` was always numeric(5,2); the web input stripped the decimal point. The API now refuses more than two decimals on the property and landlord rate (`applyPercent`) rather than letting the column round; computation is in halalas (`pctOf`), so 7.5% of 3,000 = 225.00.
+
+#### E1-E: approving a commission checks the office only (accountant's test 5 Oct 2026, finding 1)
+
+The commission invoice is issued BY the office TO the landlord, but the approve dialog ran the contract's readiness (landlord VAT number, landlord ZATCA link, the tenant "no VAT number" confirmation). The API never applied that gate to `kind = 'commission'` (`TAX_EXEMPT_KINDS`); the web did. Now one verdict, `commissionSellerCheck` (`overrides/commission-approve.ts`), is used by the approve guard and by `GET /finance/v2/commission-documents/:id/seller-check` (the dialog):
+
+- **Non-tax document** (no VAT: the office is not VAT-registered, or not linked): always approvable. A registered-but-unlinked office gets a notice that the commission is a non-tax document until it links (DARA-NOTES §2b-iii).
+- **Tax invoice** (VAT): the office must be VAT-registered, linked, with its seller name and VAT number on the credentials, and the landlord billed must be known (`client.ownerId`, else the contract's landlord). Otherwise 409 `FINANCE_V2_TAX_DOC_NOT_REPORTABLE` with `sellerCheck` naming the office's missing item. The landlord's VAT number only picks standard vs simplified; an incomplete address of a VAT-registered landlord is a notice (the clearance needs it; the submission is retryable).
+- **ZATCA.** D6 is lifted for billed-basis commission: a VAT-bearing contract-bound COM (and its E36 credit note) is handed to the ZATCA path as the free invoice billed TO the landlord, exactly like the monthly document (D6-a), i.e. under the office's standalone seller. A non-tax COM is still never sent. New billed COM drafts carry `client = {kind:'landlord', ownerId}`. The signer, builder and QR are untouched; the XML shape is the monthly one (matrix shapes 23–26), but more documents now reach ZATCA, so run the SDK CI before promoting.
+
 ### E2: dashboard revenue and arrears show 0. **Refuted as described.** The v2 definitions are **FG**.
 
 **Verified.** The fields are on master (`dashboard.module.ts:93,103-110,128-129`, commit `01ede96`, the same patch as `240638d`), and staging runs `3eb2e4a` (D§5.4). There is nothing to "bring to master". Production (`main`) lacks it, and production is out of scope (staging-only rule).
@@ -2210,7 +2226,8 @@ These are product or policy calls, not accounting questions. The design assumes 
 | D4 | **Advance VAT** (Q22): VAT booked when an advance arrives will appear in the VAT summary earlier than the invoices do today. | On. |
 | D5 | **Owner mode is refused** for an account whose landlords include third parties (§4.2). | Refused. |
 | D6 | During the beta, a ZATCA-integrated account **cannot approve** an S-rated agency-fee document or a VAT-bearing v2 commission document (§9 E8, Q6b). | Refused until Q6b is decided. |
-| D6-a | The monthly collected-basis commission invoice is reported to ZATCA under the office's seller and may carry VAT (Q6b decided for commission, E1-C). | D6 stays for agency fees and billed-basis commission documents. |
+| D6-a | The monthly collected-basis commission invoice is reported to ZATCA under the office's seller and may carry VAT (Q6b decided for commission, E1-C). | D6 stays for agency fees. |
+| D6-b | Billed-basis (contract-bound) commission documents carrying VAT are reported the same way, under the office's seller to the landlord; approval checks the office only (E1-E, finding 1, 5 Oct 2026). | Supersedes D6 for commission. |
 | D7 | Terminating a contract under v2 **requires a disposition** for every open installment (§4.6), a stricter dialog than today's. | Required. |
 | D8 | The staging bypass codes are published in the public repo's `DARA-NOTES.md` (around line 968 on master). That is outside this design's scope and was not edited; the account holder should decide whether to move them to a private note and rotate them. | Not changed here. |
 | D9 | `dara-mobile` is read (not changed) in Phase 2 to see how it renders the two new document kinds (§12.2). | Read-only check. |

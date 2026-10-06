@@ -586,8 +586,20 @@ export function applyMoney(o: Record<string, unknown>, key: string, label: strin
   applyWith(o, key, (v) => money(v, label));
 }
 
+/**
+ * A stored percentage (`management_fee_percent` is numeric(5,2)): 0–100 with
+ * at most two decimal places, so 7.5 and 7.25 are kept exactly and 7.255 is
+ * refused rather than silently rounded by the column (accountant's test,
+ * 5 Oct 2026, finding 8).
+ */
 export function applyPercent(o: Record<string, unknown>, key: string, label: string): void {
-  applyWith(o, key, (v) => percent(v, label));
+  applyWith(o, key, (v) => {
+    const out = percent(v, label);
+    if (out != null && /\.\d{3,}$/.test(out)) {
+      bad(`${label} يقبل منزلتين عشريتين كحد أقصى · ${label} accepts at most two decimal places`);
+    }
+    return out;
+  });
 }
 
 export function applyPhone(o: Record<string, unknown>, key: string, label = "رقم الجوال"): void {

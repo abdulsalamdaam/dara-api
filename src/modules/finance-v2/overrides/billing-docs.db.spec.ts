@@ -218,7 +218,7 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
   });
 
   // ── Fix list 5: commission / agency-fee VAT that never reaches ZATCA ──
-  it("linked account: the commission is S-rated, and approving it is refused (never reported to ZATCA); nothing posts", async () => {
+  it("linked, VAT-registered office: the billed commission is S-rated, a tax invoice in the office's name; it approves (reported under the office's seller) and posts its VAT", async () => {
     const c: any = await env.contracts.create(userFor(M), {
       unitIds: [sM.unitA1], tenantId: sM.tenant, tenantName: "Synthetic Tenant", startDate: firstOf(0), endDate: lastOf(11),
       monthlyRent: "6000", paymentFrequency: "monthly", vatEnabled: true,
@@ -230,14 +230,13 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
     });
     const ap: any = await env.billing.approve(userFor(M), String(inv.id), { confirmations: { tenantNoVat: true } });
     assert.deepEqual([ap.commission?.subtotal, ap.commission?.total], ["300.00", "345.00"]);
-    const r: any = await attempt(() => env.billing.approve(userFor(M), String(ap.commission.id), {}));
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error, "FINANCE_V2_TAX_DOC_NOT_REPORTABLE");
-    const [st] = await env.q(`select status::text as status from simple_invoices where id = $1`, [ap.commission.id]);
-    assert.equal(st.status, "draft");
+    // Finding 1 (5 Oct 2026): approval checks the office only — no tenant confirmation, nothing about the landlord's link.
+    const ok: any = await env.billing.approve(userFor(M), String(ap.commission.id), {});
+    assert.equal(ok.status, "confirmed");
     await drain(env, M);
-    const [n] = await env.q(`select count(*)::int as n from ledger_outbox where user_id = $1 and source_id = $2 and source_type = 'simple_invoice'`, [M, ap.commission.id]);
-    assert.equal(n.n, 0);
+    const e = await entry(env, M, "simple_invoice", ap.commission.id, "confirmed");
+    assert.deepEqual(codes(e.lines), [["2121", "345.00", "0.00"], ["4210", "0.00", "300.00"], ["2151", "0.00", "45.00"]]);
+    assert.ok(e.lines.every((l: any) => l.owner_id === sM.agent), "on the landlord's sub-ledger");
   });
 
   it("linked account: a VAT-bearing agency fee is refused (pinned); unlinked account: the AGF prints without VAT and approves with no 2151", async () => {

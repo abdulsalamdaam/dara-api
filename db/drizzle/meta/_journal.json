@@ -470,6 +470,13 @@
       "when": 1779141900000,
       "tag": "0066_finance_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1791244800000,
+      "tag": "0075_finance_v2_property_commission",
+      "breakpoints": true
     }
   ]
 }

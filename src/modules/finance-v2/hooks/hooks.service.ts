@@ -16,7 +16,8 @@ import { capabilities } from "../capabilities";
 import { createCommissionCreditV2, createCommissionV2 } from "../commission";
 import { paymentsListV2 } from "../overrides/payments-list";
 import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrides/reads";
-import { approveV2Kind, commissionZatcaDoc, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
+import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
+import { commissionZatcaDocV2 } from "../overrides/commission-approve";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
 
@@ -516,6 +517,7 @@ export class FinanceV2Hooks {
       "finance_control_runs", // 0071
       "finance_auto_invoice_links", "finance_auto_invoice_settings", // 0073
       "fixed_asset_dep_runs", "fixed_assets", "account_external_codes", // 0074
+      "finance_property_commission", // 0075
       "finance_commission_run_items", "finance_commission_runs", "finance_commission_transfers"]) { // 0070 in FK order
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);
@@ -590,7 +592,7 @@ export class FinanceV2Hooks {
   async commissionZatcaDoc(scope: number, doc: any): Promise<any | null> {
     try {
       if (doc?.kind !== "commission" || !(await this.resolve(scope))) return null;
-      return commissionZatcaDoc(doc);
+      return await commissionZatcaDocV2(this.sqlPool(), scope, doc);
     } catch (err) {
       this.fail("commission_zatca", scope, err);
       return null;

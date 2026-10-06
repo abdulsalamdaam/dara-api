@@ -26,6 +26,7 @@ import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { DEPOSIT_DESC } from "./reads";
 import type { Sql } from "../hooks/sql";
+import { guardCommissionSeller } from "./commission-approve";
 
 export const RENT_RECEIPT_LABEL = { ar: "سند استلام إيجار — مستند غير ضريبي", en: "Rent receipt — not a tax invoice" } as const;
 export const AGENCY_FEE_LINE = "أتعاب الوساطة (السعي) / Brokerage fee";
@@ -226,17 +227,16 @@ export function commissionZatcaDoc(doc: any): any | null {
 }
 
 /**
- * Commission documents take the legacy approve (flag on too); under v2 the
- * same rule applies to them: a commission INVOICE carrying VAT is refused —
- * except the landlord commission document of an account linked to ZATCA,
- * which is reported (above). A commission credit note is not refused: it
- * reverses VAT already booked (E36).
+ * Commission documents take the legacy approve (flag on too). Under v2 the
+ * approval checks the OFFICE, the seller, only (finding 1, 5 Oct 2026;
+ * commission-approve.ts): a non-tax commission document always approves; a
+ * commission INVOICE carrying VAT approves when the office is VAT-registered,
+ * linked to ZATCA (it is then reported under the office's seller, monthly or
+ * billed basis alike) and the landlord billed is known. A commission credit
+ * note is not refused: it reverses VAT already booked (E36).
  */
 export async function guardCommissionApprove(q: Sql, scope: number, doc: any): Promise<void> {
-  if (doc?.kind !== "commission" || doc?.type !== "invoice") return;
-  if (!(toHalalas(String(doc.total ?? "0")) > toHalalas(String(doc.subtotal ?? "0")))) return;
-  if (isLandlordCommissionDoc(doc) && (await accountZatcaIntegrated(q, scope))) return;
-  await refuseUnreportableTaxDoc(q, scope);
+  await guardCommissionSeller(q, scope, doc);
 }
 
 /**
