@@ -17,6 +17,23 @@ const DIM_FILTERS: Array<[string, string]> = [
 ];
 
 /**
+ * Display names for a line's dimensions (TR-11): the accountant reads "المؤجر: فلان", not "landlord #292". The ids
+ * stay on the line (filters and links use them); a name is null when the row is gone or outside the account, and
+ * the screen then falls back to the id. Every join is scoped to the line's account (units through their property).
+ */
+export const DIM_NAME_COLS = `o.name as "ownerName", pr.name as "propertyName", u.unit_number as "unitNumber", t.name as "tenantName",
+              c.contract_number as "contractNumber", to_char(pay.due_date,'YYYY-MM-DD') as "paymentDueDate", si.number as "documentNumber",
+              ba.name_ar as "bankAccountNameAr", ba.name_en as "bankAccountNameEn"`;
+export const DIM_NAME_JOINS = `left join owners o on o.id = l.owner_id and o.user_id = l.user_id
+         left join properties pr on pr.id = l.property_id and pr.user_id = l.user_id
+         left join units u on u.id = l.unit_id and exists (select 1 from properties up where up.id = u.property_id and up.user_id = l.user_id)
+         left join tenants t on t.id = l.tenant_id and t.user_id = l.user_id
+         left join contracts c on c.id = l.contract_id and c.user_id = l.user_id
+         left join payments pay on pay.id = l.payment_id and pay.user_id = l.user_id
+         left join simple_invoices si on si.id = l.document_id and si.user_id = l.user_id
+         left join bank_accounts ba on ba.id = l.bank_account_id and ba.user_id = l.user_id`;
+
+/**
  * The journal (DESIGN §10.2): entries with filters, one entry with its lines
  * and a link to its source, and the manual reversal (§5.4) of a manual or
  * opening entry. Every query is scoped to the account; an id outside it is a 404.
@@ -64,8 +81,10 @@ export class JournalQueryService {
               l.debit::text as debit, l.credit::text as credit, l.memo, l.owner_id as "ownerId", l.property_id as "propertyId",
               l.unit_id as "unitId", l.tenant_id as "tenantId", l.contract_id as "contractId", l.payment_id as "paymentId",
               l.document_id as "documentId", l.bank_account_id as "bankAccountId", l.vat_category as "vatCategory",
-              l.vat_rate::text as "vatRate", l.vat_base::text as "vatBase", l.tax_role as "taxRole", l.seller_key as "sellerKey", l.doc_class as "docClass"
+              l.vat_rate::text as "vatRate", l.vat_base::text as "vatBase", l.tax_role as "taxRole", l.seller_key as "sellerKey", l.doc_class as "docClass",
+              ${DIM_NAME_COLS}
          from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+         ${DIM_NAME_JOINS}
         where l.entry_id = $1 and l.user_id = $2 order by l.line_no`, [id, scope]);
     return { ...e, lines: lines.rows, source: await this.sourceLink(scope, e.sourceType, e.sourceId, e.payload) };
   }
