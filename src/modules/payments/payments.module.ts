@@ -530,6 +530,7 @@ class PaymentsController {
     const id = parseInt(paymentId, 10);
     if (!Number.isInteger(id)) throw new BadRequestException("رقم القسط غير صالح");
     const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: resolved before the transaction (§1.2)
+    await this.fv2h?.guardCollectionTrust(fv2, scopeId(user), id, body, user?.id); // finance-v2: accountant #6 — Manager-mode landlord rent goes to the trust account (409 unless confirmed)
     // Read-then-insert with nothing holding the row: eight parallel requests
     // each read "nothing collected yet", each passed the cap, and the same
     // money landed five times. The lock is per installment, held to the end of

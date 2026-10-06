@@ -57,6 +57,8 @@ import { DepreciationJobService } from "./assets/depreciation-job.service";
 import { CommissionRunService } from "./commission-run.service";
 import { commissionIssuerProvider } from "./commission-issuer";
 import { FinanceV2CommissionController } from "./controllers/commission.controller";
+import { FinanceV2InstallmentsController } from "./controllers/installments.controller";
+import { InstallmentDocsService } from "./installment-docs.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -75,6 +77,7 @@ import { FinanceV2CommissionController } from "./controllers/commission.controll
     FinanceV2AutoInvoiceController,
     FinanceV2AssetsController, // fixed assets (§8.5)
     FinanceV2CommissionController,
+    FinanceV2InstallmentsController, // accountant #3/#6/#7: installments screen
   ],
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
@@ -88,6 +91,7 @@ import { FinanceV2CommissionController } from "./controllers/commission.controll
     AutoInvoiceService,
     AssetsService, DepreciationJobService, // fixed assets (§8.5)
     CommissionRunService, commissionIssuerProvider,
+    InstallmentDocsService, // accountant #3: rent receipt from the installments screen
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
