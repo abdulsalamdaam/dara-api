@@ -16,7 +16,7 @@ import { capabilities } from "../capabilities";
 import { createCommissionCreditV2, createCommissionV2 } from "../commission";
 import { paymentsListV2 } from "../overrides/payments-list";
 import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrides/reads";
-import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
+import { approveV2Kind, commissionZatcaDoc, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
 
@@ -512,7 +512,11 @@ export class FinanceV2Hooks {
     }
     // 0067 tables (no immutability triggers, so plain deletes; each table on its own so one missing table skips only itself).
     for (const t of ["bank_matches", "bank_statement_lines", "bank_statements", "bank_import_profiles", "reminder_log", "tenant_credit_targets", "finance_document_meta",
-      "supplier_payment_allocations", "supplier_bill_lines", "supplier_payments", "supplier_bills", "suppliers"]) { // 0069 in FK order
+      "supplier_payment_allocations", "supplier_bill_lines", "supplier_payments", "supplier_bills", "suppliers", // 0069 in FK order
+      "finance_control_runs", // 0071
+      "finance_auto_invoice_links", "finance_auto_invoice_settings", // 0073
+      "fixed_asset_dep_runs", "fixed_assets", "account_external_codes", // 0074
+      "finance_commission_run_items", "finance_commission_runs", "finance_commission_transfers"]) { // 0070 in FK order
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);
       } catch (err: any) {
@@ -523,6 +527,11 @@ export class FinanceV2Hooks {
       await this.pool.query(`delete from reminder_settings where user_id = $1`, [userId]);
     } catch (err: any) {
       if (err?.code !== "42P01") this.fail("purge reminder_settings", userId, err);
+    }
+    try {
+      await this.pool.query(`delete from finance_commission_settings where account_user_id = $1`, [userId]);
+    } catch (err: any) {
+      if (err?.code !== "42P01") this.fail("purge finance_commission_settings", userId, err);
     }
   }
 
@@ -569,6 +578,23 @@ export class FinanceV2Hooks {
   async guardCommissionApprove(fv2: boolean, scope: number, doc: any): Promise<void> {
     if (!fv2) return;
     await guardCommissionApprove(this.sqlPool(), scope, doc);
+  }
+
+  /**
+   * Q6b for commission: the ZATCA submission of a landlord commission document
+   * (the monthly collected-basis invoice and its credit note) goes out under
+   * the office's own seller with the landlord as buyer. Returns the document
+   * as the submission should see it, or null (flag off, any other document,
+   * any error) so the legacy path is unchanged.
+   */
+  async commissionZatcaDoc(scope: number, doc: any): Promise<any | null> {
+    try {
+      if (doc?.kind !== "commission" || !(await this.resolve(scope))) return null;
+      return commissionZatcaDoc(doc);
+    } catch (err) {
+      this.fail("commission_zatca", scope, err);
+      return null;
+    }
   }
 
   /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA. `db` is the legacy Drizzle handle (same row shape). */

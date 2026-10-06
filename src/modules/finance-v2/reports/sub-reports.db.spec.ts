@@ -406,7 +406,8 @@ describe("finance v2 sub-ledger reports (real Postgres)", { skip: fv2DbSkip }, (
     it("a consistent ledger: all eight checks pass (R3 against the real legacy dues computation)", async () => {
       const r: any = await new ReconciliationService(t.pool, legacyOf()).reconciliation(U_REC, { asOf: "2026-01-31", lang: "en" });
       const by = (id: string) => r.checks.find((c: any) => c.id === id);
-      assert.deepEqual(r.checks.map((c: any) => [c.id, c.status]), [
+      // R1–R8 here; the accountant's checks R9–R21 have their own spec (controls.db.spec.ts).
+      assert.deepEqual(r.checks.filter((c: any) => Number(c.id.slice(1)) <= 8).map((c: any) => [c.id, c.status]), [
         ["R1", "ok"], ["R2", "ok"], ["R3", "ok"], ["R4", "ok"], ["R5", "ok"], ["R6", "ok"], ["R7", "ok"], ["R8", "ok"],
       ]);
       assert.deepEqual([by("R1").ledger, by("R1").subLedger, by("R1").difference], ["400.00", "400.00", "0.00"]);
@@ -427,7 +428,7 @@ describe("finance v2 sub-ledger reports (real Postgres)", { skip: fv2DbSkip }, (
       assert.deepEqual([by("R4").status, by("R4").difference], ["difference", "-100.00"]);
       assert.deepEqual([by("R6").status, by("R6").difference, by("R6").rows.map((x: any) => x.sourceType)], ["attention", "1", ["payment_collection"]]);
       assert.equal(by("R8").status, "ok");
-      assert.deepEqual(r.summary.withDifferences, ["R1", "R3", "R4", "R6"]);
+      assert.deepEqual(r.summary.withDifferences.filter((id: string) => Number(id.slice(1)) <= 8), ["R1", "R3", "R4", "R6"]);
       // Without the legacy computation R3 says so rather than guessing.
       const n: any = await new ReconciliationService(t.pool).reconciliation(U_REC, { asOf: "2026-01-31" });
       assert.equal(n.checks.find((c: any) => c.id === "R3").status, "unavailable");

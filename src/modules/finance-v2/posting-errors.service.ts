@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Pool } from "./db";
+import { AUTO_INVOICE_ERROR_TEXT } from "./auto-invoice/errors";
 
 export type PostingErrorsTab = "errors" | "skipped";
 
@@ -58,15 +59,41 @@ export class PostingErrorsService {
          from ledger_outbox where user_id = $1`,
       [userId],
     );
+    const autoInvoice = await this.autoInvoiceFailures(userId);
     return {
       tab,
-      counts: counts.rows[0],
+      counts: { ...counts.rows[0], autoInvoiceFailed: autoInvoice.length },
+      autoInvoice,
       items: rows.rows.map((r: any) => ({
         ...r,
         state: r.status === "failed" ? "failed" : r.status === "skipped" ? "skipped" : r.blockedOn ? "blocked" : "retrying",
         message: r.lastErrorCode ? ERROR_TEXT[r.lastErrorCode] ?? ERROR_TEXT.POST_ERROR : null,
       })),
     };
+  }
+
+  /**
+   * Automatic-invoicing failures (finance_auto_invoice_links, 0073): not ledger
+   * events, so they are listed beside the outbox rows rather than in them. Their
+   * Retry is "issue now" and their Dismiss is /finance/v2/auto-invoice/:paymentId/dismiss.
+   */
+  private async autoInvoiceFailures(userId: number): Promise<any[]> {
+    try {
+      const r = await this.pool.query(
+        `select l.payment_id::int as "paymentId", l.document_id::int as "documentId", l.origin, l.attempts, l.last_error_code as "errorCode",
+                l.last_error as "error", l.updated_at as "updatedAt", to_char(p.due_date,'YYYY-MM-DD') as "dueDate", p.amount::text as amount,
+                p.contract_id::int as "contractId", c.contract_number as "contractNumber", c.tenant_name as "tenantName"
+           from finance_auto_invoice_links l
+           join payments p on p.id = l.payment_id and p.user_id = l.user_id
+           left join contracts c on c.id = p.contract_id and c.user_id = p.user_id
+          where l.user_id = $1 and l.status = 'failed' order by l.updated_at desc limit 500`,
+        [userId],
+      );
+      return r.rows.map((x: any) => ({ ...x, message: AUTO_INVOICE_ERROR_TEXT[x.errorCode] ?? AUTO_INVOICE_ERROR_TEXT.ISSUE_FAILED }));
+    } catch (err: any) {
+      if (err?.code === "42P01") return []; // 0073 not applied
+      throw err;
+    }
   }
 
   /** Retry: attempts reset, due now. Only failed or pending rows. */

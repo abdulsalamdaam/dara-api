@@ -158,15 +158,15 @@ export class FinanceV2Tier3Controller {
   }
 
   /**
-   * ?from&to&preset=standard|simple&lang&dateFormat=iso|dmy&excludeReversed&format=csv|json
-   * CSV (default): the file (docs/finance-v2/JOURNAL-EXPORT.md). JSON: a preview and the totals.
+   * ?from&to&preset=standard|simple|external&lang&dateFormat=iso|dmy&excludeReversed&format=csv|xlsx|json
+   * CSV (default) or Excel: the file (docs/finance-v2/JOURNAL-EXPORT.md). JSON: a preview and the totals.
    */
   @Get("journal-export")
   @RequireCapability("view")
   async journalExport(@Req() req: Fv2Request, @Query() q: any, @Res({ passthrough: true }) res: Response) {
     if (q?.format === "json") return this.exporter.preview(scopeId(req.user!), q);
-    const f = await this.exporter.csv(scopeId(req.user!), q);
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    const f = q?.format === "xlsx" ? await this.exporter.xlsx(scopeId(req.user!), q) : await this.exporter.csv(scopeId(req.user!), q);
+    res.setHeader("Content-Type", q?.format === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${f.filename}"`);
     res.setHeader("X-Export-Rows", String(f.rows));
     res.setHeader("X-Export-Debit", f.debit);

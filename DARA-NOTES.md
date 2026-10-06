@@ -1331,6 +1331,15 @@ only; off for everyone else. Not on `main`.
   with `ledger_started_at`. Kill switches (value `1`):
   `FINANCE_V2_WORKER_DISABLED` (all three), `FINANCE_V2_RECOGNIZER_DISABLED`,
   `FINANCE_V2_REPAIR_DISABLED`. Set them for any local run.
+- **Commission run (collected basis, migration 0070):** month-end, per agent
+  landlord, rent collected before VAT (from the ledger) × the property/landlord
+  rate → one tax invoice per landlord issued by the OFFICE through the billing
+  approve handler, reported to ZATCA under the office's own seller (standard if
+  the landlord has a VAT number, else simplified). Scheduled at 23:00 Riyadh on
+  the month's last day, with catch-up; `FINANCE_V2_COMMISSION_DISABLED=1` (or the
+  worker switch) turns it off, and each account has an auto-run switch. New
+  Manager-mode accounts start on "collected"; existing ones keep their basis.
+  Commission transfer (TRF-) moves it trust → operating (rule E15T). DESIGN §9 E1-C.
 - **`FINANCE_REMINDERS_ENABLED` must stay unset** everywhere. Rent reminders are
   built disabled and the only sender is a dry-run one.
 - **Additive-diff CI gate:** `scripts/finance-v2-additive-diff.ts` (in

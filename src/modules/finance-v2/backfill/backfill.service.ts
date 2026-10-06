@@ -120,6 +120,8 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
   private lastSweepDay: string | null = null;
   private sweeping = false;
+  /** Called once the nightly sweep has run for every account (the control checks run next, controls.service.ts). */
+  onSweepDone: ((day: string) => Promise<unknown>) | null = null;
 
   constructor(
     @Inject(FV2_POOL) private readonly pool: Fv2Pool,
@@ -161,6 +163,13 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
       if (err?.code !== "42P01") this.log.warn(`finance v2 repair sweep failed: ${err?.message ?? err}`);
     } finally {
       this.sweeping = false;
+    }
+    if (this.lastSweepDay === day && this.onSweepDone) {
+      try {
+        await this.onSweepDone(day);
+      } catch (err: any) {
+        this.log.warn(`finance v2 post-sweep control checks failed: ${err?.message ?? err}`);
+      }
     }
   }
 

@@ -111,6 +111,9 @@ export async function planCommission(q: Sql, scope: number, doc: { contractId: n
   if (!doc.contractId || !doc.paymentIds.length) return null;
   const s = await loadSettings(q, scope);
   if (!s) return null;
+  // On the COLLECTED basis commission is issued by the monthly run (commission-run.ts), never per rent document.
+  const [b] = await q.rows(`select commission_basis from finance_settings where account_user_id = $1`, [scope]);
+  if (b?.commission_basis === "collected") return null;
   const ctx = await contractCtx(q, scope, s.mode, doc.contractId);
   if (!ctx || ctx.treatment === "principal") return null;
   const fee = await effectiveManagementFee(q, scope, doc.contractId);

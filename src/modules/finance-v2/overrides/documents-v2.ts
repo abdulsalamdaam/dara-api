@@ -54,7 +54,7 @@ export async function docById(q: Sql, scope: number, id: number): Promise<any | 
 }
 
 /** The seller landlord of a contract (frozen dims first) and whether it is VAT-registered. */
-async function sellerOf(q: Sql, scope: number, contractId: number): Promise<{ ownerId: number | null; name: string | null; idNumber: string | null; vatRegistered: boolean }> {
+export async function sellerOf(q: Sql, scope: number, contractId: number): Promise<{ ownerId: number | null; name: string | null; idNumber: string | null; vatRegistered: boolean }> {
   await captureDims(q, scope, contractId);
   const [r] = await q.rows(
     `select o.id, o.name, o.id_number, nullif(trim(coalesce(o.tax_number,'')),'') is not null as reg
@@ -198,13 +198,45 @@ export async function refuseUnreportableTaxDoc(q: Sql, scope: number): Promise<n
 }
 
 /**
+ * The monthly commission document (collected basis, commission-run.service):
+ * billed by the office to ONE landlord across his contracts — no contract, the
+ * landlord on `client.ownerId`. These, and their credit notes, ARE reported to
+ * ZATCA under the office's own seller (Q6b, decided 1 Oct 2026 for commission):
+ * `commissionZatcaDoc` hands the ZATCA path the free-invoice-to-a-landlord
+ * shape, which already files under the account's standalone seller
+ * (`resolveStandaloneSellerId`) with the landlord as the buyer.
+ */
+export function isLandlordCommissionDoc(doc: any): boolean {
+  if (doc?.kind !== "commission" || doc?.contractId != null) return false;
+  const o = Number(doc?.client?.ownerId);
+  return Number.isInteger(o) && o > 0;
+}
+
+/**
+ * The document the ZATCA submission should see for a landlord commission
+ * document (null for every other document, which keeps its own path): the
+ * same row as a free invoice billed TO that landlord — the kind the legacy
+ * code never sends ("commission") becomes "invoice", and `client.kind` names
+ * the landlord as the buyer. Standard (cleared) when the landlord has a VAT
+ * number, simplified (reported) otherwise, exactly as for any buyer.
+ */
+export function commissionZatcaDoc(doc: any): any | null {
+  if (!isLandlordCommissionDoc(doc)) return null;
+  return { ...doc, kind: "invoice", contractId: null, client: { ...(doc.client ?? {}), kind: "landlord", ownerId: Number(doc.client.ownerId) } };
+}
+
+/**
  * Commission documents take the legacy approve (flag on too); under v2 the
- * same rule applies to them: a commission INVOICE carrying VAT is refused. A
- * commission credit note is not: it reverses VAT already booked (E36).
+ * same rule applies to them: a commission INVOICE carrying VAT is refused —
+ * except the landlord commission document of an account linked to ZATCA,
+ * which is reported (above). A commission credit note is not refused: it
+ * reverses VAT already booked (E36).
  */
 export async function guardCommissionApprove(q: Sql, scope: number, doc: any): Promise<void> {
   if (doc?.kind !== "commission" || doc?.type !== "invoice") return;
-  if (toHalalas(String(doc.total ?? "0")) > toHalalas(String(doc.subtotal ?? "0"))) await refuseUnreportableTaxDoc(q, scope);
+  if (!(toHalalas(String(doc.total ?? "0")) > toHalalas(String(doc.subtotal ?? "0")))) return;
+  if (isLandlordCommissionDoc(doc) && (await accountZatcaIntegrated(q, scope))) return;
+  await refuseUnreportableTaxDoc(q, scope);
 }
 
 /**

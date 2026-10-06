@@ -54,7 +54,7 @@ describe("fv2 journal CSV format (docs/finance-v2/JOURNAL-EXPORT.md)", () => {
     const rows = csv.slice(1).split("\r\n");
     assert.equal(rows.at(-1), "", "ends with CRLF");
     assert.equal(rows[0], PRESETS.standard.join(","));
-    assert.equal(rows[0], "date,entry_no,line_no,account_code,account_name_ar,account_name_en,debit,credit,memo,owner,property,unit,tenant,contract,source_type,source_ref,entry_memo,origin,status,original_date,vat_category,vat_rate,tax_role");
+    assert.equal(rows[0], "date,entry_no,line_no,account_code,account_name_ar,account_name_en,debit,credit,memo,owner,property,unit,tenant,contract,source_type,source_ref,entry_memo,origin,status,original_date,vat_category,vat_rate,tax_role,account_code_external");
     assert.equal(rows.length, 4);
     assert.ok(rows[1].startsWith("2026-08-05,JV-2026-000001,1,2111,الموردون,Accounts payable – suppliers,0.00,1400.00,Supplier bill BILL-000001,"));
     assert.ok(!csv.includes("\n\n") && !/[^\r]\n/.test(csv), "no bare LF");

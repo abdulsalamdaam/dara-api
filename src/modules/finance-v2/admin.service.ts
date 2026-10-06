@@ -4,6 +4,7 @@ import { FinanceFlagService, type AccountingMode } from "./flag.service";
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
+import { recordCollectedCutover } from "./commission-run";
 
 export interface ToggleBody {
   enabled: boolean;
@@ -77,6 +78,13 @@ export class FinanceV2AdminService {
         [accountUserId, body.enabled, newMode, actorUserId, turningOn],
       )).rows[0];
 
+      if (!cur && newMode === "manager") {
+        // New Manager-mode accounts start on the COLLECTED commission basis (the accountant's rule: month-end, rent
+        // collected before VAT × the landlord's rate). Existing accounts keep what they have; see DESIGN §9 E1 cutover.
+        await c.query(`update finance_settings set commission_basis = 'collected' where account_user_id = $1`, [accountUserId]);
+        s.commission_basis = "collected";
+        await recordCollectedCutover(c, accountUserId, actorUserId);
+      }
       await this.event(c, accountUserId, actorUserId, "finance_v2_enabled", cur ? wasOn : null, body.enabled, body.reason);
       if (newMode !== oldMode) await this.event(c, accountUserId, actorUserId, "accounting_mode", oldMode, newMode, body.reason);
 

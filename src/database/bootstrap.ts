@@ -611,6 +611,38 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 tier-3 tables failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0070 commission run (collected basis) and commission transfer tables. After 0069, same rules.
+    try { // finance-v2:
+      const fv2Com = findSqlFile(join("drizzle", "0070_finance_v2_commission.sql")); // finance-v2:
+      if (fv2Com) await client.query(readFileSync(fv2Com, "utf8")); // finance-v2:
+      else log.warn("0070_finance_v2_commission.sql not found — Finance v2 commission tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 commission tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+    // finance-v2: 0071 control-check runs (the accountant's control checks). After 0069, same rules.
+    try { // finance-v2:
+      const fv2Controls = findSqlFile(join("drizzle", "0071_finance_v2_controls.sql")); // finance-v2:
+      if (fv2Controls) await client.query(readFileSync(fv2Controls, "utf8")); // finance-v2:
+      else log.warn("0071_finance_v2_controls.sql not found — Finance v2 control-run table not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 control-run table failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+    // finance-v2: 0073 auto-invoicing of due installments (setting + per-installment links). After 0069, same rules.
+    try { // finance-v2:
+      const fv2Auto = findSqlFile(join("drizzle", "0073_finance_v2_autoinvoice.sql")); // finance-v2:
+      if (fv2Auto) await client.query(readFileSync(fv2Auto, "utf8")); // finance-v2:
+      else log.warn("0073_finance_v2_autoinvoice.sql not found — Finance v2 auto-invoice tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 auto-invoice tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
+    // finance-v2: 0074 fixed assets, depreciation runs, external account codes. After 0069, same rules.
+    try { // finance-v2:
+      const fv2Assets = findSqlFile(join("drizzle", "0074_finance_v2_assets.sql")); // finance-v2:
+      if (fv2Assets) await client.query(readFileSync(fv2Assets, "utf8")); // finance-v2:
+      else log.warn("0074_finance_v2_assets.sql not found — Finance v2 fixed-asset tables not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 fixed-asset tables failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

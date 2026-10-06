@@ -25,7 +25,7 @@ export class FinanceV2AccountsController {
   @Patch(":id")
   @RequireCapability("settings")
   update(@Req() req: Fv2Request, @Param("id", ParseIntPipe) id: number, @Body() body: any) {
-    return this.chart.update(scopeId(req.user!), id, body);
+    return this.chart.update(scopeId(req.user!), id, body, req.user!.id);
   }
 
   @Delete(":id")
