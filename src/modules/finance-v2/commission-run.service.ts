@@ -10,6 +10,9 @@ import { fromHalalas, toHalalas } from "./money";
 import { riyadhToday, lastDayOfMonth, parseIsoDate } from "./dates";
 import { nextDocNumber } from "./commission";
 import { ownFeeCarriesVat } from "./account-seller";
+import { hasPropertyBasisTable, propertyBasis, setPropertyBasis } from "./commission-basis";
+import { effectiveFeeForProperty } from "./commission";
+import { commissionSellerCheckById } from "./overrides/commission-approve";
 import {
   collectedLines, commissionSettings, landlordInfo, lineBase, monthLabel, monthSpan, planLandlord, previewMonth, previousMonth, rateResolver,
   transferEvents, unsentCommission, type MonthPreview,
@@ -326,6 +329,41 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
     return this.getSettings(scope);
   }
 
+  /** GET /finance/v2/commission-documents/:id/seller-check (finding 1): the office-only approval verdict. */
+  async sellerCheck(scope: number, documentId: number) {
+    return commissionSellerCheckById(this.q(), scope, documentId);
+  }
+
+  // ─── The basis per property (finding 9, 0075) ────────────────────────────
+
+  /** GET /finance/v2/properties/:id/commission: the property's basis (own or the account's) and its effective rate. */
+  async getPropertyCommission(scope: number, propertyId: number) {
+    const q = this.q();
+    const fee = await effectiveFeeForProperty(q, scope, propertyId);
+    if (!fee) throw new NotFoundException("Property not found");
+    const b = await propertyBasis(q, scope, propertyId);
+    return {
+      propertyId, basis: b.basis, override: b.override, accountBasis: b.accountBasis, collectedFrom: b.collectedFrom,
+      pct: fee.pct, source: fee.source, propertyPct: fee.propertyPct, landlordPct: fee.landlordPct,
+      available: await hasPropertyBasisTable(q),
+    };
+  }
+
+  /** PATCH /finance/v2/properties/:id/commission {basis: 'billed'|'collected'|null, reason?}: null follows the account. */
+  async patchPropertyCommission(scope: number, actor: { id: number }, propertyId: number, body: any) {
+    if (!body || !("basis" in body)) throw bad("BAD_VALUE", "basis is required ('billed', 'collected' or null)");
+    if (!(await hasPropertyBasisTable(this.q()))) throw conflict("COMMISSION_PROPERTY_BASIS_UNAVAILABLE", "إعداد أساس العمولة للعقار غير متاح بعد · The per-property commission basis is not available yet");
+    const reason = typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim().slice(0, 500) : "property commission basis";
+    await withTx(this.pool, async (c) => {
+      const prev = await setPropertyBasis(c as any, scope, propertyId, body.basis, actor.id);
+      await c.query(
+        `insert into finance_settings_events (account_user_id, actor_user_id, field, old_value, new_value, reason) values ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
+        [scope, actor.id, `property_commission_basis:${propertyId}`, JSON.stringify(prev), JSON.stringify(body.basis ?? null), reason]);
+      await auditRow(c, scope, actor.id, "finance_v2_property_commission", propertyId, `/finance/v2/properties/${propertyId}/commission`, "PATCH");
+    });
+    return this.getPropertyCommission(scope, propertyId);
+  }
+
   onModuleInit(): void {
     if (process.env.FINANCE_V2_WORKER_DISABLED === "1" || process.env.FINANCE_V2_COMMISSION_DISABLED === "1") return;
     this.timer = setInterval(() => void this.tick(), CHECK_MS);
@@ -365,9 +403,13 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
    */
   async runScheduled(month: string): Promise<Array<{ scope: number; results: RunResult[] | null; error?: string }>> {
     const span = monthSpan(month)!;
+    // The collected basis is the account's, or (0075) any of its properties' own (commission-basis.ts).
+    const anyProperty = (await hasPropertyBasisTable(this.q()))
+      ? `or exists (select 1 from finance_property_commission pc where pc.user_id = fs.account_user_id and pc.basis = 'collected')` : "";
     const r = await this.pool.query(
       `select fs.account_user_id from finance_settings fs left join finance_commission_settings cs on cs.account_user_id = fs.account_user_id
-        where fs.finance_v2_enabled and fs.ledger_started_at is not null and fs.accounting_mode = 'manager' and fs.commission_basis = 'collected'
+        where fs.finance_v2_enabled and fs.ledger_started_at is not null and fs.accounting_mode = 'manager'
+          and (fs.commission_basis = 'collected' ${anyProperty})
           and coalesce(cs.auto_run, true) and (cs.last_auto_month is null or cs.last_auto_month < $1::date)
         order by fs.account_user_id`,
       [span.start],

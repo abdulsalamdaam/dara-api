@@ -154,7 +154,8 @@ async function runSequence(env: LegacyEnv, backfill: BackfillService, rec: Recon
 
   // Half the non-trust manager sequences leave the account holder unlinked: the account then issues no tax invoice of
   // its own, so its commission is drafted without VAT and approves (E15/E36); a linked account's commission is S-rated
-  // and refused (§9 E8, never reported to ZATCA), as are the holder's own invoices and free invoices when unlinked.
+  // and approves too, reported under the office's seller (finding 1, 5 Oct 2026); the holder's own invoices and free
+  // invoices are still refused when unlinked.
   const linkHolder = !(mode === "manager" && seed % 4 === 2);
   const s = await setupAccount(env, U, mode, async (s) => {
     if (r.chance(0.3)) {

@@ -61,6 +61,31 @@ export class FinanceV2CommissionController {
     return this.runs.patchSettings(scopeId(req.user!), req.user!, body);
   }
 
+  /**
+   * The approve dialog's verdict on a commission document: the OFFICE (seller)
+   * only — tax invoice or non-tax document, and what (if anything) blocks it.
+   * The approve guard refuses on the same verdict (commission-approve.ts).
+   */
+  @Get("commission-documents/:id/seller-check")
+  @RequireCapability("view")
+  sellerCheck(@Req() req: Fv2Request, @Param("id") id: string) {
+    return this.runs.sellerCheck(scopeId(req.user!), idOf(id));
+  }
+
+  /** The property's commission basis (its own, or the account's) and its effective rate. */
+  @Get("properties/:id/commission")
+  @RequireCapability("view")
+  propertyCommission(@Req() req: Fv2Request, @Param("id") id: string) {
+    return this.runs.getPropertyCommission(scopeId(req.user!), idOf(id));
+  }
+
+  /** {basis: 'billed'|'collected'|null, reason?} — null follows the account's basis. */
+  @Patch("properties/:id/commission")
+  @RequireCapability("settings")
+  patchPropertyCommission(@Req() req: Fv2Request, @Param("id") id: string, @Body() body: any) {
+    return this.runs.patchPropertyCommission(scopeId(req.user!), req.user!, idOf(id), body);
+  }
+
   /** The transfers, the untransferred commission and the default trust / operating accounts. */
   @Get("commission-transfers")
   @RequireCapability("view")

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { commissionVat, lineBase, monthLabel, monthSpan, planLandlord, previousMonth, type CollectedLine, type RateInfo } from "./commission-run";
 import { CommissionRunService } from "./commission-run.service";
 import { commissionZatcaDoc, isLandlordCommissionDoc } from "./overrides/documents-v2";
+import { commissionZatcaDocV2 } from "./overrides/commission-approve";
 import { runRule } from "./rules";
 import { toHalalas } from "./money";
 
@@ -99,6 +100,15 @@ describe("fv2 commission run: the collected-basis calculation", () => {
     assert.equal(commissionZatcaDoc({ ...doc, contractId: 5 }), null, "billed-basis commission keeps the legacy path");
     assert.equal(commissionZatcaDoc({ ...doc, kind: "invoice" }), null);
     assert.equal(commissionZatcaDoc({ ...doc, client: {} }), null);
+  });
+
+  it("finding 1: a contract-bound (billed) commission reaches ZATCA under the office only when it carries VAT; its landlord is the buyer", async () => {
+    const q: any = { rows: async () => { throw new Error("no DB needed when client.ownerId is on the document"); } };
+    const base = { id: 2, kind: "commission", type: "invoice", contractId: 9, client: { kind: "landlord", ownerId: 7 }, subtotal: "210.00" };
+    assert.equal(await commissionZatcaDocV2(q, 1, { ...base, total: "210.00" }), null, "a non-tax commission document is never sent");
+    const z = await commissionZatcaDocV2(q, 1, { ...base, total: "241.50" });
+    assert.deepEqual([z.kind, z.contractId, z.client.kind, z.client.ownerId], ["invoice", null, "landlord", 7]);
+    assert.equal(await commissionZatcaDocV2(q, 1, { ...base, kind: "invoice", total: "241.50" }), null);
   });
 
   it("E15T commission transfer: Dr operating bank / Cr trust bank, no landlord dimension; refuses a non-positive amount or one account", () => {

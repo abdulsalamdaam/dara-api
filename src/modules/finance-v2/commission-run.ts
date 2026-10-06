@@ -37,6 +37,7 @@ import { fromHalalas, toHalalas, vatSplit } from "./money";
 import { lastDayOfMonth, parseIsoDate, riyadhToday } from "./dates";
 import { reversalEvent } from "./hooks/facts-loader";
 import type { LedgerEvent } from "./ledger-emitter.service";
+import { accountBasis, anyCollectedProperty, collectedBasisSql, hasPropertyBasisTable } from "./commission-basis";
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
@@ -107,12 +108,19 @@ export async function commissionSettings(q: Sql, scope: number): Promise<Commiss
     [scope],
   );
   if (!r) return null;
+  // A billed account runs only for its properties on "collected" (0075): its cutover is the earliest of theirs.
+  let from: string = r.from_date;
+  if (r.basis !== "collected" && (await hasPropertyBasisTable(q))) {
+    const [p] = await q.rows(
+      `select to_char(min(collected_from),'YYYY-MM-DD') as d from finance_property_commission where user_id = $1 and basis = 'collected'`, [scope]);
+    if (p?.d) from = p.d;
+  }
   return {
     enabled: r.enabled === true,
     ledgerStarted: r.started === true,
     mode: r.mode === "owner" ? "owner" : "manager",
     basis: r.basis === "collected" ? "collected" : "billed",
-    collectedFrom: r.from_date,
+    collectedFrom: from,
     autoRun: r.auto_run !== false,
     lastAutoMonth: r.last_auto ?? null,
   };
@@ -142,6 +150,8 @@ export interface CollectedLine {
  */
 export async function collectedLines(q: Sql, scope: number, from: string, to: string, ownerId: number | null = null): Promise<CollectedLine[]> {
   if (from > to) return [];
+  // Only properties on the COLLECTED basis (their own, else the account's; commission-basis.ts), each from its own cutover.
+  const basisCond = collectedBasisSql(await hasPropertyBasisTable(q), "$5");
   const rows = await q.rows(
     `select l.id::text as line_id, l.entry_id::text as entry_id, l.owner_id, l.property_id, l.contract_id, l.payment_id,
             to_char(l.entry_date,'YYYY-MM-DD') as entry_date, a.system_key,
@@ -155,6 +165,7 @@ export async function collectedLines(q: Sql, scope: number, from: string, to: st
        left join payments p on p.id = l.payment_id and p.user_id = l.user_id
       where l.user_id = $1 and l.entry_date >= $2::date and l.entry_date <= $3::date
         and ($4::int is null or l.owner_id = $4::int)
+        and ${basisCond}
         and (
           -- tenant money (E03/E04/E12B/E20 and their reversals): the 2121 side of an entry that also moves 2122
           (a.system_key = 'landlord_payable'
@@ -173,7 +184,7 @@ export async function collectedLines(q: Sql, scope: number, from: string, to: st
              and com.deleted_at is null and com.status::text <> 'cancelled'
              and (rd.payment_id = l.payment_id or coalesce(rd.payment_ids, '[]'::jsonb) @> jsonb_build_array(l.payment_id))))
       order by l.entry_date, l.id`,
-    [scope, from, to, ownerId],
+    [scope, from, to, ownerId, await accountBasis(q, scope)],
   );
   return rows.map((r: any) => {
     const nature = r.payment_id ? installmentNature(r.description) : "rent";
@@ -363,7 +374,7 @@ export async function previewMonth(q: Sql, scope: number, month: string, today =
   const blocked: MonthPreview["blocked"] = !s || !s.enabled ? "NOT_ENABLED"
     : !s.ledgerStarted ? "LEDGER_NOT_STARTED"
     : s.mode !== "manager" ? "NOT_MANAGER_MODE"
-    : s.basis !== "collected" ? "BASIS_BILLED"
+    : s.basis !== "collected" && !(await anyCollectedProperty(q, scope)) ? "BASIS_BILLED"
     : span.end > today ? "MONTH_NOT_ENDED"
     : span.end < s.collectedFrom ? "BEFORE_CUTOVER"
     : null;
