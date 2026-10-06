@@ -18,6 +18,7 @@ import { paymentsListV2 } from "../overrides/payments-list";
 import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrides/reads";
 import { approveV2Kind, commissionZatcaDoc, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
+import { assertPayoutWithinDue } from "../overrides/landlord-dues";
 import { fromHalalas } from "../money";
 
 /** Tier 1 (§8.2 a): the optional "received into / paid from" account a legacy money route's body names. */
@@ -444,6 +445,16 @@ export class FinanceV2Hooks {
       const e = await payoutEvent(q, ctx.userId, s, payoutId);
       return e ? [e] : [];
     });
+  }
+
+  /**
+   * POST /reports/landlord-payouts, before the insert (finding #2): an agent
+   * landlord is never paid more than the dues report's remaining unless the
+   * body says `allowAdvance: true`. 409 PAYOUT_EXCEEDS_DUE, nothing written.
+   */
+  async payoutWithinDue(fv2: boolean, scope: number, ownerId: number, amount: number, allowAdvance: unknown, accounting: () => Promise<any>): Promise<void> {
+    if (!fv2) return;
+    await assertPayoutWithinDue(this.sqlPool(), scope, ownerId, amount, allowAdvance === true, accounting);
   }
 
   /** DELETE /reports/landlord-payouts/:id (E19 reversal). */

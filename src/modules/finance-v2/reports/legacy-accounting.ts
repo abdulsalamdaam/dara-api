@@ -3,6 +3,8 @@ import { DRIZZLE } from "../../../database/database.module";
 import { ReportsModule } from "../../reports/reports.module";
 import { LEGACY_ACCOUNTING, type LegacyAccounting } from "./reconciliation.service";
 import { contractPropertySnapshots } from "../overrides/reads";
+import { landlordDuesV2 } from "../overrides/landlord-dues";
+import { sqlOf } from "../hooks/sql";
 
 /**
  * Reconciliation R3 compares landlord payable with the legacy landlord-dues
@@ -13,7 +15,10 @@ import { contractPropertySnapshots } from "../overrides/reads";
  * E3/E4/E1 overlay, so this is the legacy computation), and the one v2 input
  * the dues computation takes, the contract → property snapshot of a
  * terminated contract (N-C), comes from `finance_contract_dims`, exactly as
- * the flag-on dues report gets it. Read-only.
+ * the flag-on dues report gets it. The landlord rows then get the same v2
+ * landlord charges the flag-on report shows (supplier bills charged to the
+ * landlord, the monthly commission: overrides/landlord-dues.ts), so R3
+ * compares 2121 with the dues the payout screen offers. Read-only.
  */
 export function legacyAccountingFor(db: unknown): LegacyAccounting {
   const Ctl = (Reflect as any).getMetadata("controllers", ReportsModule)?.[0];
@@ -24,7 +29,10 @@ export function legacyAccountingFor(db: unknown): LegacyAccounting {
     resolve: async () => false,
     contractPropertySnapshots: async (scope: number) => (pool ? contractPropertySnapshots(pool, scope) : new Map<number, number>()),
   };
-  return (scope: number) => ctl.accounting({ id: scope, ownerUserId: null, ownerScopeId: null, role: "user", permissions: [], email: "" });
+  return async (scope: number) => {
+    const legacy = await ctl.accounting({ id: scope, ownerUserId: null, ownerScopeId: null, role: "user", permissions: [], email: "" });
+    return pool ? landlordDuesV2(sqlOf(pool), scope, legacy) : legacy;
+  };
 }
 
 export const legacyAccountingProvider: Provider = {

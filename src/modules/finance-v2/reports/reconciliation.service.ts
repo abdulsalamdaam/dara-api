@@ -19,8 +19,8 @@ import { EXTRA_LABELS, ExtraChecks } from "./control-checks";
  *
  *  R1 AR control            1121 + 1122 per tenant  vs  the §7.6 open items (+ advance VAT not yet netted)
  *  R2 Deposits held         2141 per contract       vs  vouchers + deposit-row collections − refunds − conversions − offsets − forfeits
- *  R3 Landlord payable      2121 per landlord       vs  the legacy landlord-dues `remaining` (agency-fee collections excluded)
- *  R4 Bank and cash         each cash/bank account  vs  collections, vouchers, refunds, payouts and expenses, routed like the engine
+ *  R3 Landlord payable      2121 per landlord       vs  the landlord-dues `remaining` + v2 landlord charges (agency-fee collections excluded)
+ *  R4 Bank and cash         each cash/bank account  vs  collections, vouchers, refunds, payouts, expenses and supplier payments, routed like the engine
  *  R5 Output VAT            Σ output VAT lines      vs  documents' VAT + due-date charges' VAT + advance VAT not yet invoiced
  *  R6 Posting completeness  entries                 vs  the source records that should have one
  *  R7 Sub-ledger integrity  —                       lists only
@@ -432,6 +432,15 @@ export class ReconciliationService {
         where e.user_id = $1 and e.deleted_at is null`, [scope])).rows) {
       const d = e.expense_on ?? parseBusinessDate(e.expense_date) ?? e.created;
       if (d <= asOf) put({ bankAccountId: e.bank_account_id }, -h(e.gross ?? e.amount));
+    }
+    // Supplier payment vouchers (E39 Cr BANK on paid_on; a void reverses on its void date, never before the payment).
+    for (const p of (await this.pool.query(
+      `select amount::text as amount, bank_account_id, method, status, to_char(paid_on, 'YYYY-MM-DD') as paid_on, to_char(voided_on, 'YYYY-MM-DD') as voided_on
+         from supplier_payments where user_id = $1`, [scope])).rows) {
+      const ref = { bankAccountId: p.bank_account_id, method: p.method };
+      if (p.paid_on <= asOf) put(ref, -h(p.amount));
+      const voidOn = p.voided_on && p.voided_on > p.paid_on ? p.voided_on : p.paid_on;
+      if (p.status === "void" && voidOn <= asOf) put(ref, h(p.amount));
     }
 
     for (const k of [...sub.keys()]) if (!ids.has(k)) sub.delete(k);
