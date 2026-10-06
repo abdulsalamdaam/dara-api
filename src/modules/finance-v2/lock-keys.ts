@@ -37,6 +37,8 @@ export const LOCK_KEYS = {
   COMMISSION_RUN: -170,
   /** TRF- commission transfer numbers and the unsent-commission check. */
   COMMISSION_TRANSFER: -171,
+  /** The installments screen's rent receipt (accountant #3): the coverage check and the RR- insert, serialised per account. */
+  INSTALLMENT_RR: -190,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];

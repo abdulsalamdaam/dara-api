@@ -19,6 +19,8 @@ import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrid
 import { approveV2Kind, commissionZatcaDoc, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { applyDispositions } from "../overrides/terminate";
 import { fromHalalas } from "../money";
+import { trustRefusal } from "../overrides/installment-docs";
+import { auditRow } from "../audit";
 
 /** Tier 1 (§8.2 a): the optional "received into / paid from" account a legacy money route's body names. */
 export interface MoneyMeta {
@@ -148,6 +150,22 @@ export class FinanceV2Hooks {
       [scope, contractId],
     );
     if (r.rowCount) throw new ConflictException(FV2_ERRORS.INSTALLMENTS_LINKED);
+  }
+
+  /**
+   * Accountant test #6: in Manager mode a third-party landlord's rent is client
+   * money and is collected into a trust (أمانات) account. Refused (409
+   * FINANCE_V2_TRUST_REQUIRED) when it would land elsewhere, unless the user
+   * confirmed it (`trustOverride: true`, audited). Flag on only; before any write.
+   */
+  async guardCollectionTrust(fv2: boolean, scope: number, paymentId: number, body: any, actorId?: number | null): Promise<void> {
+    if (!fv2) return;
+    const refusal = await trustRefusal(this.sqlPool(), scope, paymentId, body);
+    if (refusal) throw refusal;
+    if (body?.trustOverride === true && Number.isInteger(paymentId)) {
+      await auditRow(this.pool, scope, Number(actorId ?? scope), "finance_v2_trust_override", paymentId, `/payments/${paymentId}/collections`)
+        .catch((err) => this.log.warn(`trust override audit failed (scope ${scope}): ${err?.message ?? err}`));
+    }
   }
 
   // ─── Hooks: enqueue, never throw ────────────────────────────────────────
