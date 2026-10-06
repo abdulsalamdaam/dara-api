@@ -10,6 +10,7 @@ import { effectiveFeeForProperty, effectiveManagementFee } from "../commission";
 import { fromHalalas, toHalalas } from "../money";
 import { overdueByTenantV2 } from "./payments-list";
 import type { Sql } from "../hooks/sql";
+import { landlordDuesV2 } from "./landlord-dues";
 
 export const DEPOSIT_DESC = "تأمين (وديعة)";
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -37,7 +38,8 @@ export const DUE_CHARGE_SQL = (today: string) => `p.deleted_at is null and c.del
  * no covering document − write-offs, so a tenant paid on receipt vouchers
  * with no invoice nets to 0, not −total. `tenantOverdue` uses the E4
  * definition (Riyadh today, Σ remaining). `revenue[].commissionPct` is the
- * E1 effective rate, with its `commissionSource`.
+ * E1 effective rate, with its `commissionSource`. The landlord rows carry
+ * the v2 landlord charges (supplier bills, monthly commission: landlord-dues.ts).
  */
 export async function accountingV2(q: Sql, scope: number, legacy: any, today = riyadhTodayV2()): Promise<any> {
   // ── E3 ──
@@ -96,7 +98,8 @@ export async function accountingV2(q: Sql, scope: number, legacy: any, today = r
     const f = await effectiveFeeForProperty(q, scope, Number(r.propertyId));
     revenue.push({ ...r, commissionPct: f?.pct != null ? Number(f.pct) : 0, commissionSource: f?.source ?? null });
   }
-  return { ...legacy, tenantStatement: rows, tenantOverdue: overdue, revenue };
+  // ── finding #2: supplier bills charged to the landlord and the monthly commission in his dues ──
+  return landlordDuesV2(q, scope, { ...legacy, tenantStatement: rows, tenantOverdue: overdue, revenue });
 }
 
 /**

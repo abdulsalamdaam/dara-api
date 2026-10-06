@@ -464,6 +464,7 @@ class ReportsController {
     if (!Number.isFinite(ownerId)) throw new BadRequestException("المؤجر مطلوب");
     await assertOwnScope(this.db, scopeId(user), { ownerId }); // finance-v2: EX-3 — no foreign landlord id
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("المبلغ غير صالح");
+    await this.fv2h?.payoutWithinDue(fv2, scopeId(user), ownerId, amount, body?.allowAdvance, () => this.accounting(user)); // finance-v2: finding #2 — never more than the landlord's net due (409 PAYOUT_EXCEEDS_DUE) unless allowAdvance
     const [row] = await this.db.insert(landlordPayoutsTable).values({
       userId: scopeId(user), ownerId, amount: amount.toFixed(2),
       transferDate: body?.transferDate ?? null, method: body?.method ?? null,
