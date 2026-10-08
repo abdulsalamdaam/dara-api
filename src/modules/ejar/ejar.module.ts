@@ -20,7 +20,7 @@ import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v
 import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "../finance-v2/hooks/classify"; // finance-v2: 11a/11b/11i — one reading of Ejar invoices for both paths
 import { ejarRentVat } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
-import { EjarClientService, EjarApiError, EjarConfigError } from "./ejar.client.service";
+import { EjarClientService, EjarApiError, EjarConfigError, EjarAccessError } from "./ejar.client.service";
 import { EjarLogService, type EjarLogFilter } from "./ejar.log.service";
 import { EjarPolicyService, type ManualAddOverride } from "./ejar.policy.service";
 import { computeEjarLocks, isLockEntity, type EjarLockEntity } from "./ejar.locks";
@@ -188,7 +188,7 @@ export class EjarController {
         return r.body;
       } catch (e) {
         if (e instanceof EjarApiError && e.log) logs.push(e.log);
-        if (e instanceof EjarConfigError) throw this.toHttp(e);
+        if (e instanceof EjarConfigError || e instanceof EjarAccessError) throw this.toHttp(e);
         return null;
       }
     };

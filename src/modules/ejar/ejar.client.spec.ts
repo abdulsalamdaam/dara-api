@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { EjarClientService, EjarConfigError } from "./ejar.client.service";
+import { EjarAccessError, EjarClientService, EjarConfigError, ejarAccessDenial } from "./ejar.client.service";
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -14,6 +14,7 @@ const tokenOk = (token = "tok-1") => json(200, { access_token: token, expires_in
 const ENV_KEYS = [
   "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
   "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
+  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS",
 ];
 
 describe("EjarClientService gateways", () => {
@@ -117,5 +118,61 @@ describe("EjarClientService gateways", () => {
     setBalady("https://apiservices.balady.gov.sa/");
     await assert.rejects(client().request("getRentalContracts", { id_number: "1" }), EjarConfigError);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe("ejarAccessDenial", () => {
+  it("lets everyone through when EJAR_ACCESS is unset or all", () => {
+    assert.equal(ejarAccessDenial(7, {}), null);
+    assert.equal(ejarAccessDenial(7, { EJAR_ACCESS: "all" }), null);
+  });
+
+  it("allows only listed users in allowlist mode", () => {
+    const env = { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "1, 5" };
+    assert.equal(ejarAccessDenial(1, env), null);
+    assert.equal(ejarAccessDenial(5, env), null);
+    assert.match(ejarAccessDenial(34, env) ?? "", /user 34 is not allowed/);
+  });
+
+  it("lets nobody in when the allowlist is empty", () => {
+    assert.ok(ejarAccessDenial(1, { EJAR_ACCESS: "allowlist" }));
+  });
+
+  it("keeps the unattended health probe running in allowlist mode", () => {
+    assert.equal(ejarAccessDenial(undefined, { EJAR_ACCESS: "allowlist" }), null);
+  });
+
+  it("blocks everything, probe included, when off or misspelled", () => {
+    for (const mode of ["off", "allowlsit", "false"]) {
+      assert.ok(ejarAccessDenial(1, { EJAR_ACCESS: mode }), mode);
+      assert.ok(ejarAccessDenial(undefined, { EJAR_ACCESS: mode }), mode);
+    }
+  });
+});
+
+describe("EjarClientService access gate", () => {
+  const realFetch = globalThis.fetch;
+  const saved = { ...process.env };
+  afterEach(() => { globalThis.fetch = realFetch; process.env = { ...saved }; });
+
+  it("refuses before any network call and logs the attempt", async () => {
+    process.env.EJAR_ACCESS = "allowlist";
+    process.env.EJAR_ALLOWED_USER_IDS = "1";
+    process.env.EJAR_BASE_URL = "https://integration-gw.housingapps.sa/nhc/uat";
+    process.env.EJAR_CLIENT_ID = "x";
+    process.env.EJAR_CLIENT_SECRET = "y";
+    let fetched = 0;
+    globalThis.fetch = (async () => { fetched++; throw new Error("no"); }) as typeof fetch;
+    const logged: { userId: number | null; env: string; error: string | null }[] = [];
+    const c = new EjarClientService({ insert: async (r: never) => { logged.push(r); return r; } } as never);
+    await assert.rejects(c.request("getRentalContracts", { id_number: "1" }, { userId: 34 }), (e: unknown) => {
+      assert.ok(e instanceof EjarAccessError);
+      assert.equal((e as EjarAccessError).status, 403);
+      return true;
+    });
+    assert.equal(fetched, 0);
+    assert.equal(logged.length, 1);
+    assert.equal(logged[0].userId, 34);
+    assert.equal(logged[0].env, "blocked");
   });
 });

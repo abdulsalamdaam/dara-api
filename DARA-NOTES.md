@@ -137,6 +137,14 @@ until MOMRAH adds them. The client routes an endpoint to Balady when it has a
 `balady` route in `EJAR_ENDPOINTS` and `EJAR_BALADY_*` is set, else NHC — the
 two credential sets are not interchangeable.
 
+**Access gate.** `EJAR_ACCESS` (`all` default | `allowlist` | `off`) is checked
+inside `EjarClientService.request`, the one funnel for every outbound call, so
+no route, replay or `/call` passthrough can skip it. `allowlist` admits only
+`EJAR_ALLOWED_USER_IDS` plus the unattended health probe (userId null); a
+refused attempt writes an `ejar_api_logs` row with `env = 'blocked'` and returns
+403. Staging runs `allowlist` with user 1 only since 2026-10-08. The hourly
+health probe uses `skipLog`, so it never appears in the log.
+
 To probe Ejar, run a Node script **inside the API container** (it holds the
 credentials and the allow-listed IP). `curl` is not installed there, and
 `node /dev/stdin` fails on a piped fd — base64 the script to a file first.

@@ -34,6 +34,31 @@ export class EjarApiError extends Error {
   }
 }
 
+/** The caller may not reach Ejar (EJAR_ACCESS). Surfaces as HTTP 403. */
+export class EjarAccessError extends EjarApiError {
+  constructor(message: string, log?: unknown) {
+    super(message, 403, null, null, log);
+    this.name = "EjarAccessError";
+  }
+}
+
+/**
+ * Who may make outbound Ejar calls, from `EJAR_ACCESS`:
+ * - unset / `all` — any caller the route's permission check lets through;
+ * - `allowlist` — only the user ids in `EJAR_ALLOWED_USER_IDS` (comma
+ *   separated; empty means nobody), plus the unattended health probe;
+ * - `off` — nothing at all, not even the probe.
+ * Any other value is treated as `off`: a typo must not open the gate.
+ */
+export function ejarAccessDenial(userId: number | null | undefined, env = process.env): string | null {
+  const mode = (env.EJAR_ACCESS ?? "all").trim().toLowerCase() || "all";
+  if (mode === "all") return null;
+  if (mode !== "allowlist") return "Ejar access is switched off on this server (EJAR_ACCESS).";
+  if (userId == null) return null; // the unattended health probe
+  const allowed = (env.EJAR_ALLOWED_USER_IDS ?? "").split(",").map((v) => Number(v.trim())).filter(Number.isInteger);
+  return allowed.includes(userId) ? null : `Ejar access is restricted on this server; user ${userId} is not allowed.`;
+}
+
 export interface EjarCallResult<T = Record<string, unknown>> {
   body: EjarBody<T> | null;
   log: Record<string, unknown>;
@@ -162,6 +187,24 @@ export class EjarClientService {
   ): Promise<EjarCallResult<T>> {
     const def = EJAR_ENDPOINTS[endpoint];
     if (!def) throw new EjarConfigError(`Unknown Ejar endpoint: ${endpoint}`);
+
+    // Every outbound call passes through here — the routes, the replay and the
+    // health probe — so this is the one place the access rule cannot be missed.
+    // A refused attempt is still logged, so the log shows who tried.
+    const denial = ejarAccessDenial(opts.userId);
+    if (denial) {
+      this.logger.warn(`blocked ${endpoint} for user ${opts.userId ?? "system"}: ${denial}`);
+      const log = await this.safeLog(
+        {
+          userId: opts.userId ?? null, env: "blocked", endpoint, method: def.method, url: def.path,
+          params: {}, requestHeaders: {}, status: 403, ejarStatus: null, transactionId: null,
+          durationMs: 0, attempts: 0, responseBody: null, bodyTruncated: false, error: denial,
+        },
+        opts.skipLog,
+      );
+      throw new EjarAccessError(denial, log);
+    }
+
     const { gateway, cfg } = this.route(endpoint);
 
     const strParams: Record<string, string> = {};

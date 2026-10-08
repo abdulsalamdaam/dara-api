@@ -58,6 +58,9 @@ IP NHC whitelisted. Set as **runtime** env vars (never committed):
 - `EJAR_BALADY_BASE_URL` = `https://apiservicesstg.balady.gov.sa` (prod `apiservices.` is blocked in code)
 - `EJAR_BALADY_CLIENT_ID` / `EJAR_BALADY_CLIENT_SECRET` = MOMRAH consumer key / secret
 
+- `EJAR_ACCESS` = `all` | `allowlist` | `off`, with `EJAR_ALLOWED_USER_IDS` = `1,5` for
+  `allowlist`. Staging runs `allowlist`. Anything else than those three values means `off`.
+
 With the Balady vars set, contracts and contract invoices go through Balady and
 the other four endpoints stay on NHC — keep both sets.
 
