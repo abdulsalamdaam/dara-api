@@ -19,7 +19,7 @@ import { installmentNature } from "./hooks/classify";
 import { fromHalalas, toHalalas, vatSplit } from "./money";
 import type { Sql } from "./hooks/sql";
 import { riyadhToday } from "./dates";
-import { ownFeeCarriesVat } from "./account-seller";
+import { commissionCarriesVat } from "./account-seller";
 import { propertyBasis } from "./commission-basis";
 
 /** Is 0070 applied (the monthly run's counted lines)? */
@@ -91,7 +91,7 @@ export async function effectiveManagementFee(q: Sql, scope: number, contractId: 
   return none;
 }
 
-export { accountVatRegistered, accountZatcaIntegrated, ownFeeCarriesVat } from "./account-seller";
+export { accountVatRegistered, accountZatcaIntegrated, commissionCarriesVat, ownFeeCarriesVat } from "./account-seller";
 
 /** pct (a decimal string, ≤ 2 dp) of a halala amount, rounded half-up to the halala. */
 export function pctOf(baseHalalas: number, pct: string): number {
@@ -141,9 +141,9 @@ export async function planCommission(q: Sql, scope: number, doc: { contractId: n
   if (base <= 0) return null;
   const net = pctOf(base, fee.pct);
   if (net <= 0) return null;
-  // VAT only for a registered AND ZATCA-linked account (account-seller.ts
-  // `ownFeeCarriesVat`): an unlinked account's commission is not a tax invoice.
-  const vatRegistered = await ownFeeCarriesVat(q, scope);
+  // VAT whenever the office is VAT-registered (account-seller.ts `commissionCarriesVat`);
+  // an unlinked office's commission stays a draft tax invoice until it is linked.
+  const vatRegistered = await commissionCarriesVat(q, scope);
   const vat = vatRegistered ? Math.floor((net * 15 + 50) / 100) : 0;
   return { pct: fee.pct, source: fee.source, base: fromHalalas(base), net: fromHalalas(net), vat: fromHalalas(vat), total: fromHalalas(net + vat), vatRegistered };
 }

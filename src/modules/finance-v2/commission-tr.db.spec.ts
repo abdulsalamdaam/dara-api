@@ -186,7 +186,7 @@ describe("fv2 accountant test 5 Oct 2026: commission approval, 2-decimal rate, b
     assert.deepEqual(codes(await entryOf(env, V, com.id)), [["2121", "241.50", "0.00"], ["4210", "0.00", "210.00"], ["2151", "0.00", "31.50"]]);
   });
 
-  it("finding 1: a non-tax commission on a VAT-registered office that is not linked approves, with a notice (never a landlord blocker)", async () => {
+  it("accountant 7 Oct: a VAT-registered office that is not linked gets a 15% commission tax invoice held as a draft until it is linked", async () => {
     const W = 5954;
     const sW = await seedAccount(env, W); // holder registered, nobody linked for the office
     await env.q(`delete from zatca_credentials where user_id = $1`, [W]);
@@ -195,10 +195,13 @@ describe("fv2 accountant test 5 Oct 2026: commission approval, 2-decimal rate, b
     const c = await annualContract(env, W, sW.unitA1, sW.tenant);
     const ap: any = await receiptAndApprove(env, W, c.inst[0].id);
     const com = ap.commission;
-    assert.deepEqual([com.subtotal, com.total], ["150.00", "150.00"], "5% with no VAT: the office cannot issue a tax invoice yet");
+    assert.deepEqual([com.subtotal, com.total], ["150.00", "172.50"], "5% plus 15% VAT: a registered office never issues a non-tax commission");
     const check = await commissionSellerCheckById(sqlOf(env.t.pool as any), W, com.id);
-    assert.deepEqual([check.document, check.ok, check.notices.map((n) => n.code)], ["non_tax", true, ["OFFICE_REGISTERED_NOT_LINKED"]]);
-    assert.equal((await env.billing.approve(userFor(W), String(com.id), {})).status, "confirmed");
+    assert.deepEqual([check.document, check.ok, check.blockers.map((n) => n.code)], ["tax", false, ["OFFICE_NOT_LINKED"]]);
+    const r: any = await attempt(() => env.billing.approve(userFor(W), String(com.id), {}));
+    assert.equal(r.status, 409);
+    const [d] = await env.q(`select status::text as status from simple_invoices where id = $1`, [com.id]);
+    assert.equal(d.status, "draft", "held as a draft, not discarded");
   });
 
   // ── Finding 8: two decimals end to end ──

@@ -83,7 +83,8 @@ describe("fv2 finding #2: supplier bills and payments in the landlord dues, cash
   before(async () => {
     env = await legacyEnv("wired");
     await seedAccount(env, U);
-    // The office is not VAT-registered: no ZATCA link for the account holder (seedAccount links only its own agent landlord).
+    // The office is not VAT-registered (no VAT number on the account holder), so its commission is a non-tax document.
+    await env.q(`update owners set tax_number = null where user_id = $1 and is_account_holder`, [U]);
     await enableV2(env, U, "manager");
     await env.q(`update finance_settings set commission_basis = 'billed' where account_user_id = $1`, [U]);
     ap = new ApService(env.t.pool as any, env.emitter, new BankAccountsService(env.t.pool as any));

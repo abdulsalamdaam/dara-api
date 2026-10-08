@@ -191,9 +191,10 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
   });
 
   // ── E1 ───────────────────────────────────────────────────────────────────
-  // The account holder is not linked to ZATCA here (only the agent landlord is), so the account issues no tax invoice of its
-  // own: v2 drafts its commission and agency fee without VAT (§9 E8; the VAT-bearing, linked case is billing-docs.db.spec).
-  it("E1: approving a 6,900 rent invoice under v2 creates a COM draft of 300 (no VAT: the account is not ZATCA-linked) from the landlord's 5%; legacy creates none", async () => {
+  // The account holder is VAT-registered but not linked to ZATCA here (only the agent landlord is). Its agency fee is drafted
+  // without VAT (§9 E8); its commission is a 15% tax invoice held as a draft until the link exists (accountant review,
+  // 7 Oct 2026; the linked case is billing-docs.db.spec).
+  it("E1: approving a 6,900 rent invoice under v2 creates a COM draft of 300 + 15% (held: the account is not ZATCA-linked) from the landlord's 5%; legacy creates none", async () => {
     const mk = async (env: LegacyEnv, f: Fx) => {
       const inv: any = await env.billing.create(user, {
         type: "invoice", paymentIds: [f.p4], issueDate: today,
@@ -208,7 +209,7 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.equal(v2.commission.kind, "commission");
     assert.equal(v2.commission.status, "draft");
     assert.equal(v2.commission.subtotal, "300.00");
-    assert.equal(v2.commission.total, "300.00");
+    assert.equal(v2.commission.total, "345.00");
     assert.match(v2.commission.notes, /from landlord/);
     const rate: any = await ctl(on).contractRate(req(), String(fOn.c4));
     assert.deepEqual([rate.pct, rate.source], ["5.00", "landlord"]);
@@ -217,6 +218,10 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.deepEqual([rev.commissionPct, rev.commissionSource], [5, "landlord"]);
 
     // E36: a 1,150 credit note on that invoice (1,000 of its 6,000 rent) drafts a commission credit of 50 once the COM is confirmed.
+    const held: any = await attempt(() => on.billing.approve(user, String(v2.commission.id), {}));
+    assert.equal(held.status, 409, "the commission tax invoice is held until the office is linked");
+    // E36 only needs a confirmed COM: the draft is made a non-tax document by hand (what a non-registered office drafts).
+    await on.q(`update simple_invoices set total = subtotal, items = jsonb_build_array(items->0 || '{"vat":false,"vatCategory":"O"}'::jsonb) where id = $1`, [v2.commission.id]);
     await on.billing.approve(user, String(v2.commission.id), {});
     const crn: any = await on.billing.create(user, {
       type: "credit", billingReference: v2.number, issueDate: today,

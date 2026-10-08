@@ -32,7 +32,7 @@
 import type { Sql } from "./hooks/sql";
 import { installmentNature } from "./hooks/classify";
 import { effectiveFeeForProperty, effectiveRate, pctOf, type FeeSource } from "./commission";
-import { accountZatcaIntegrated, ownFeeCarriesVat } from "./account-seller";
+import { accountZatcaIntegrated, commissionCarriesVat } from "./account-seller";
 import { fromHalalas, toHalalas, vatSplit } from "./money";
 import { lastDayOfMonth, parseIsoDate, riyadhToday } from "./dates";
 import { reversalEvent } from "./hooks/facts-loader";
@@ -378,7 +378,7 @@ export async function previewMonth(q: Sql, scope: number, month: string, today =
     : span.end > today ? "MONTH_NOT_ENDED"
     : span.end < s.collectedFrom ? "BEFORE_CUTOVER"
     : null;
-  const vatRegistered = await ownFeeCarriesVat(q, scope);
+  const vatRegistered = await commissionCarriesVat(q, scope);
   const zatcaLinked = await accountZatcaIntegrated(q, scope);
   // Carried-over lines (earlier months, posted late or not yet counted) belong to this run too.
   const lines = s ? await collectedLines(q, scope, s.collectedFrom, span.end) : [];
