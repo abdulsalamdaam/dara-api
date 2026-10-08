@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
-import { fv2DbSkip, withDb, type TestDb } from "./__tests__/with-db";
+import { fv2DbSkip, withDb, MIGRATION_0076, type TestDb } from "./__tests__/with-db";
 import { withTx } from "./db";
 import { FinanceFlagService } from "./flag.service";
 import { PeriodsService } from "./periods.service";
@@ -153,10 +153,13 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
     assert.ok(p.every((r) => r.status === "open"));
   });
 
-  it("creates the default cash box (1111) and bank account (1113) and makes them the defaults", async () => {
-    const b = (await q(`select b.id, b.kind, b.is_default, a.code, a.bank_account_id from bank_accounts b join accounts a on a.id = b.gl_account_id
-                         where b.user_id = $1 order by b.kind`, [ids.company])).rows;
-    assert.deepEqual(b.map((r) => [r.kind, r.code, r.is_default, r.bank_account_id === r.id]), [["bank", "1113", true, true], ["cash", "1111", true, true]]);
+  it("creates the default cash box (1111) and bank account (1113) and makes them the defaults; Manager mode also the trust account (1114, routing on)", async () => {
+    const b = (await q(`select b.id, b.kind, b.is_default, b.is_trust, a.code, a.bank_account_id from bank_accounts b join accounts a on a.id = b.gl_account_id
+                         where b.user_id = $1 order by b.kind, b.is_trust`, [ids.company])).rows;
+    assert.deepEqual(b.map((r) => [r.kind, r.code, r.is_default, r.is_trust, r.bank_account_id === r.id]),
+      [["bank", "1113", true, false, true], ["bank", "1114", true, true, true], ["cash", "1111", true, false, true]]);
+    b.splice(1, 1);
+    assert.equal((await q(`select agency_collections_to_trust t from finance_settings where account_user_id = $1`, [ids.company])).rows[0].t, true);
     const s = (await q(`select default_bank_account_id, default_cash_account_id from finance_settings where account_user_id = $1`, [ids.company])).rows[0];
     assert.equal(s.default_bank_account_id, b[0].id);
     assert.equal(s.default_cash_account_id, b[1].id);
@@ -170,11 +173,24 @@ describe("finance v2 admin toggle and first-enable seed (real Postgres)", { skip
     await admin.toggle(ids.staff, ids.company, { enabled: true, reason: "Resume the beta after review" });
     const n = (await q(`select (select count(*) from accounts where user_id = $1)::int a, (select count(*) from fiscal_periods where user_id = $1)::int p,
                                (select count(*) from bank_accounts where user_id = $1)::int b`, [ids.company])).rows[0];
-    assert.deepEqual(n, { a: 119, p: 24, b: 2 });
+    assert.deepEqual(n, { a: 119, p: 24, b: 3 });
     assert.equal((await q(`select name_en from accounts where user_id = $1 and code = '5280'`, [ids.company])).rows[0].name_en, "Renamed by the user");
     assert.equal((await q(`select count(*)::int n from audit_logs where entity = 'finance_v2'`)).rows[0].n, 3);
     assert.equal((await admin.events(ids.company)).length, 4);
     assert.equal((await q(`select finance_v2_enabled, accounting_mode from finance_settings where account_user_id = $1`, [ids.company])).rows[0].accounting_mode, "manager");
+  });
+
+  it("0076 gives a Manager-mode account enabled before round 3 its trust account and routing, once", async () => {
+    // As such an account was: no trust bank account, routing off.
+    await q(`update finance_settings set agency_collections_to_trust = false where account_user_id = $1`, [ids.company]);
+    await q(`update accounts set bank_account_id = null where user_id = $1 and code = '1114'`, [ids.company]);
+    await q(`delete from bank_accounts where user_id = $1 and is_trust`, [ids.company]);
+    await t.apply(MIGRATION_0076);
+    await t.apply(MIGRATION_0076);
+    const b = (await q(`select b.id, b.is_default, a.code, a.bank_account_id from bank_accounts b join accounts a on a.id = b.gl_account_id
+                         where b.user_id = $1 and b.is_trust and b.is_active`, [ids.company])).rows;
+    assert.deepEqual(b.map((r) => [r.code, r.is_default, r.bank_account_id === r.id]), [["1114", true, true]]);
+    assert.equal((await q(`select agency_collections_to_trust t from finance_settings where account_user_id = $1`, [ids.company])).rows[0].t, true);
   });
 
   it("refuses a mode change after the first posting (409)", async () => {

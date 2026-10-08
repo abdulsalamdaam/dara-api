@@ -651,6 +651,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 property commission basis failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0076 the trust account is mandatory in Manager mode (data only; accountant round 3). After 0075, same rules.
+    try { // finance-v2:
+      const fv2Trust = findSqlFile(join("drizzle", "0076_finance_v2_trust_mandatory.sql")); // finance-v2:
+      if (fv2Trust) await client.query(readFileSync(fv2Trust, "utf8")); // finance-v2:
+      else log.warn("0076_finance_v2_trust_mandatory.sql not found — Finance v2 Manager-mode trust accounts not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 trust accounts failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

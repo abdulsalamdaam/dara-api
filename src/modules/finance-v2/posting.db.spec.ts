@@ -203,7 +203,8 @@ describe("finance v2 posting engine (real Postgres)", { skip: fv2DbSkip }, () =>
       assert.match(e.entry_no, /^JV-2026-\d{6}$/);
       assert.deepEqual(e.payload, ob.payload);
       const ls = await lines(e.id);
-      assert.deepEqual(ls.map((l: any) => [l.code, l.debit, l.credit]), [["2121", "1234.56", "0.00"], ["1113", "0.00", "1234.56"]]);
+      assert.deepEqual(ls.map((l: any) => [l.code, l.debit, l.credit]), [["2121", "1234.56", "0.00"], ["1114", "0.00", "1234.56"]],
+        "Manager mode: the payout leaves the trust account, seeded with routing on at the first enable (round 3)");
       assert.ok(ls[1].bank_account_id, "bank line carries bank_account_id");
       assert.ok(ls.every((l: any) => l.owner_id === 7 && l.tenant_id === 11 && l.contract_id === 13));
     });

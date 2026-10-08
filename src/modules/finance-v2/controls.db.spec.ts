@@ -226,14 +226,14 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       await q(`insert into supplier_bills (user_id, number, supplier_id, bill_date, due_date, status, owner_id, charge_to, subtotal, total, approved_at)
                values ($1, 'BILL-000001', $2, '2026-02-05', '2026-03-05', 'approved', $3, 'landlord', 200, 200, now())`, [u, S, O2]);
       await post(u, "2026-02-05", [L(u, "2121", "dr", "200.00", d), L(u, "2111", "cr", "200.00")], { rule: "E38" });
-      // The holder's own deposit into the office bank is not client money.
-      await post(u, "2026-02-06", [L(u, "1113", "dr", "700.00", { ownerId: O1 }), L(u, "2141", "cr", "700.00", { ownerId: O1 })], { rule: "E09" });
+      // The holder's own tenant's deposit is client money too (round 3): it goes to trust like any deposit.
+      await post(u, "2026-02-06", [L(u, "1114", "dr", "700.00", { ownerId: O1 }), L(u, "2141", "cr", "700.00", { ownerId: O1 })], { rule: "E09" });
       const r = await check(u, "R16");
-      // Trust 1000 + 500 − 60 = 1440 = 2121 (1000 − 100 − 200 = 700) + 2141 agent 500 + office money (100 − 60 = 40) + unpaid bill 200.
-      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["ok", "1440.00", "1440.00", "0.00"]);
+      // Trust 1000 + 500 − 60 + 700 = 2140 = 2121 (1000 − 100 − 200 = 700) + 2141 500 + 700 + office money (100 − 60 = 40) + unpaid bill 200.
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["ok", "2140.00", "2140.00", "0.00"]);
       assert.deepEqual(r.explanations[0].items[0], {
-        landlordPayable: "700.00", depositsHeld: "500.00", cashInTransit: "0.00", commissionDeducted: "100.00", landlordExpensesPaidByOffice: "0.00",
-        transfersToOffice: "-60.00", officeMoneyNotTransferred: "40.00", landlordBillsUnpaid: "200.00", openingBalanceDifference: "0.00",
+        landlordPayable: "700.00", depositsHeld: "1200.00", cashInTransit: "0.00", commissionDeducted: "100.00", landlordExpensesPaidByOffice: "0.00",
+        depositsKeptByOffice: "0.00", transfersToOffice: "-60.00", officeMoneyNotTransferred: "40.00", landlordBillsUnpaid: "200.00", openingBalanceDifference: "0.00",
       });
     });
 
@@ -244,7 +244,7 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       await q(`insert into supplier_payment_allocations (payment_id, bill_id, user_id, amount) values ($1, $2, $3, 200)`, [P, b.id, u]);
       await post(u, "2026-02-20", [L(u, "2111", "dr", "200.00"), L(u, "1114", "cr", "200.00")], { rule: "E39" });
       const r = await check(u, "R16");
-      assert.deepEqual([r.status, r.ledger, r.subLedger], ["ok", "1240.00", "1240.00"]);
+      assert.deepEqual([r.status, r.ledger, r.subLedger], ["ok", "1940.00", "1940.00"]);
       assert.equal(r.explanations[0].items[0].landlordBillsUnpaid, "0.00");
     });
 
@@ -253,7 +253,7 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       const d = { ownerId: O2 };
       const e = await post(u, "2026-03-10", [L(u, "1113", "dr", "300.00", d), L(u, "1122", "cr", "300.00", d), L(u, "2122", "dr", "300.00", d), L(u, "2121", "cr", "300.00", d)], { rule: "E03" });
       const r = await check(u, "R16");
-      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "1240.00", "1540.00", "-300.00"]);
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "1940.00", "2240.00", "-300.00"]);
       assert.deepEqual(r.rows.map((x: any) => [x.entryId, x.rule, x.trust, x.liability, x.difference]), [[Number(e.id), "E03", "0.00", "300.00", "-300.00"]]);
       // A bank fee taken from the trust account also shows (the office must cover it).
       await post(u, "2026-03-11", [L(u, "5270", "dr", "5.00"), L(u, "1114", "cr", "5.00")], { origin: "manual" });

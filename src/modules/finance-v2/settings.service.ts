@@ -90,6 +90,10 @@ export class FinanceSettingsService {
             throw new ConflictException({ error: "VAT_RETURN_LOCKED", message: "A VAT return is already locked; the filing frequency can no longer change" });
           }
         }
+        if (k === "agencyCollectionsToTrust" && want[k] === false && cur.accounting_mode === "manager") {
+          // Accountant round 3 (7 Oct 2026): in Manager mode client money always goes to the trust account.
+          throw new ConflictException({ error: "TRUST_ROUTING_REQUIRED", message: "في وضع مدير الأملاك يُحصَّل إيجار المؤجرين والتأمين في حساب الأمانات دائماً · In Manager mode landlords' rent and deposits always go to the trust account" });
+        }
         if (k === "agencyCollectionsToTrust" && want[k] === true) {
           if (cur.accounting_mode !== "manager") throw bad("NOT_MANAGER_MODE", "Trust routing applies in Manager mode only");
           const t = await c.query(

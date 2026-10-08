@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "../__tests__/with-db";
-import { attempt, enableV2, legacyEnv, normalise, seedAccount, userOf, type LegacyEnv, type Seed } from "../__tests__/legacy-env";
+import { attempt, enableV2, legacyEnv, normalise, seedAccount, userOf, withoutTrust, type LegacyEnv, type Seed } from "../__tests__/legacy-env";
 import { riyadhToday } from "../dates";
 import { BankAccountsService } from "./bank-accounts.service";
 import { ExpensesV2Service } from "./expenses-v2.service";
@@ -67,6 +67,7 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     env = await legacyEnv("wired");
     s = await seedAccount(env, U);
     await enableV2(env, U, "manager");
+    await withoutTrust(env, U); // the received-into mechanics on their own; the trust rule has its own spec
     banks = new BankAccountsService(env.t.pool as any);
     expenses = new ExpensesV2Service(env.t.pool as any, env.emitter, banks);
     credits = new TenantCreditsService(env.t.pool as any, env.emitter, banks, new ArAgingService(env.t.pool as any), env.worker);

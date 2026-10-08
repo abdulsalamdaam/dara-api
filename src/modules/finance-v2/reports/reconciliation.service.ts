@@ -386,7 +386,7 @@ export class ReconciliationService {
 
     for (const c of await this.collections(scope, asOf)) {
       if (c.rule === "E03" || c.rule === "E04") put({ bankAccountId: c.bankAccountId, method: c.method, agency: !c.principal && agent(c.contractId) }, c.amount);
-      else if (c.rule === "E09C") put({ bankAccountId: c.bankAccountId, method: c.method, agency: agent(c.contractId) }, c.amount);
+      else if (c.rule === "E09C") put({ bankAccountId: c.bankAccountId, method: c.method, agency: true }, c.amount); // deposits ask for trust under either treatment (round 3)
       else if (c.rule === "E16" && c.cls === "commission_cash" && agent(c.contractId)) put({ bankAccountId: c.bankAccountId, method: c.method }, c.amount);
     }
     const vouchers = await this.pool.query(
@@ -402,15 +402,14 @@ export class ReconciliationService {
           and (v.status = 'confirmed' or (v.status = 'cancelled' and c.deposit_status = 'returned'))`, [scope]);
     for (const v of vouchers.rows) {
       const unlinked = Math.max(0, h(v.total) - h(v.linked));
-      const co = Number(v.client_owner);
-      const agency = v.contract_id != null ? agent(v.contract_id) : agentOwner(Number.isInteger(co) && co > 0 ? co : null);
+      const agency = true; // a deposit asks for the trust account under either treatment (round 3)
       // E09 books the voucher into the account it was received into (finance_document_meta), as the engine does.
       if (v.d && v.d <= asOf) put({ bankAccountId: v.bank_account_id, method: v.payment_method, agency }, unlinked);
-      if (v.status === "cancelled" && !v.v2_refund && v.upd <= asOf) put({ method: v.payment_method, agency: v.contract_id != null && agent(v.contract_id) }, -unlinked);
+      if (v.status === "cancelled" && !v.v2_refund && v.upd <= asOf) put({ method: v.payment_method, agency }, -unlinked);
     }
     for (const r of (await this.pool.query(
       `select amount::text as amount, bank_account_id, method, contract_id from finance_deposit_refunds where user_id = $1 and refunded_on <= $2::date`, [scope, asOf])).rows) {
-      put({ bankAccountId: r.bank_account_id, method: r.method, agency: agent(r.contract_id) }, -h(r.amount));
+      put({ bankAccountId: r.bank_account_id, method: r.method, agency: true }, -h(r.amount));
     }
     for (const r of (await this.pool.query(
       `select amount::text as amount, bank_account_id, method, contract_id from tenant_credit_actions where user_id = $1 and kind = 'refund' and status = 'posted' and action_on <= $2::date`,

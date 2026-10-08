@@ -281,7 +281,15 @@ describe("fv2 mode resolution and collection classification (§4.2, §4.4.1)", (
 describe("fv2 client money under agency uses the trust account (agency_collections_to_trust)", () => {
   const bankRefs = (rule: RuleCode, facts: any) => RULES[rule](facts, EMPTY_STATE).lines.filter((l) => "bank" in l.account).map((l) => (l.account as any).bank.agency);
   const money = (t: Treatment) => ({ date: "2026-08-01", treatment: t, dims: DIMS, documentId: 601, collectionId: 701, paymentId: P, amount: "500.00", cls: "deposit_installment", bank: { method: "bank_transfer" } });
-  for (const rule of ["E09", "E09C", "E10", "E19", "E20"] as RuleCode[]) {
+  // A security deposit is the tenant's money whoever owns the unit (accountant round 3): trust under either treatment.
+  // Trust routing exists in Manager mode only, so this changes nothing in Owner mode.
+  for (const rule of ["E09", "E09C", "E10"] as RuleCode[]) {
+    it(`${rule}: a deposit asks for the trust account under either treatment`, () => {
+      assert.deepEqual(bankRefs(rule, money("agent")), [true]);
+      assert.deepEqual(bankRefs(rule, money("principal")), [true]);
+    });
+  }
+  for (const rule of ["E19", "E20"] as RuleCode[]) {
     it(`${rule}: agent flows ask for the trust account, principal flows never do`, () => {
       assert.deepEqual(bankRefs(rule, money("agent")), [true]);
       assert.deepEqual(bankRefs(rule, money("principal")), [false]);

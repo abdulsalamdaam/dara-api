@@ -1140,6 +1140,7 @@ class SimpleInvoicesController {
     }
     // A receipt voucher must belong to a contract.
     if (!contractId) throw new BadRequestException("العقد مطلوب لإصدار سند القبض");
+    await this.fv2h?.guardTrust(fv2, uid, { contractId, paymentIds: payIds, deposit: voucherKind === "deposit" }, body); // finance-v2: accountant round 3 — Manager-mode client money goes to the trust account (409)
 
     const voucher = await nextReceiptVoucherNumber(this.db, uid);
     // A receipt voucher is NOT an invoice — its document number IS the RV number;
@@ -1980,6 +1981,7 @@ class SimpleInvoicesController {
     const docId = requiredForeignKeyId(id, "رقم المستند");
     if (!Number.isInteger(docId)) throw new BadRequestException("رقم المستند غير صالح");
     const fv2 = (await this.fv2h?.resolve(uid)) === true; // finance-v2: resolved before the transaction (§1.2)
+    await this.fv2h?.guardTrust(fv2, uid, { documentId: docId }, body); // finance-v2: accountant round 3 — Manager-mode client money goes to the trust account (409)
     // Everything below reads what has been collected so far and then writes.
     // With no lock, parallel requests all read "nothing yet", all pass the cap,
     // and the same money lands several times — a 1,000 invoice was measured

@@ -271,7 +271,8 @@ export class ExtraChecks {
   /**
    * The client-money test, in v2's accounts. Trust bank balance (every GL account of a trust bank account) against
    *   2121 landlord payable (agent landlords)
-   * + 2141 deposits held on agent landlords' contracts
+   * + 2141 deposits held (every contract: a deposit is the tenant's money and is collected into trust under either
+   *   treatment since accountant round 3, 7 Oct 2026)
    * − cash in transit (1116) on agent landlords' lines (Ejar; zero by construction in Manager mode)
    * + commission deducted from landlords (E15/E36, the monthly collected-basis invoice included; E16) and landlord
    *   expenses the office paid from its own accounts, less the transfers between the trust account and the office's
@@ -318,7 +319,7 @@ export class ExtraChecks {
       const v = h(x.dc);
       if (trustAccts.includes(x.account_id)) { e.trust += v; trustBal += v; }
       else if (x.sk === "landlord_payable") { e.liab -= v; e.landlordLp -= v; lp -= v; }
-      else if (x.sk === "deposits_held") { if (agent(x.owner_id)) { e.liab -= v; dep -= v; } }
+      else if (x.sk === "deposits_held") { e.liab -= v; dep -= v; }
       else if (x.sk === "cash_in_transit") { if (agent(x.owner_id)) { e.transit += v; transit += v; } }
       else if (own.includes(x.account_id)) e.office += v;
     }
@@ -334,7 +335,10 @@ export class ExtraChecks {
 
     // Classify each entry's residual (trust movement − liability movement − transit).
     const COMMISSION = new Set(["E15", "E16", "E36"]);
-    let commission = 0, officePaid = 0, transfers = 0, billsFlow = 0, opening = 0;
+    let commission = 0, officePaid = 0, transfers = 0, billsFlow = 0, opening = 0, depositsToOffice = 0;
+    // A principal deposit forfeited, turned into revenue or applied to the office's own arrears (E11 / E12 / E12B) stops
+    // being client money while the cash stays in trust: it is the office's money, not yet transferred (round 3).
+    const DEPOSIT_TO_OFFICE = new Set(["E11", "E12", "E12B"]);
     const unexplained: any[] = [];
     for (const e of ents.values()) {
       const r = e.trust - e.liab + e.transit;
@@ -346,6 +350,7 @@ export class ExtraChecks {
       // A landlord expense (E18) or bill payment (E39) settled from the office's own account: the office's money is owed back from trust.
       if ((e.rule === "E18" || e.rule === "E38") && e.trust === 0) { if (e.rule === "E38") billsFlow += r; else officePaid += r; continue; }
       if (e.rule === "E39") { billsFlow += r; continue; }
+      if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; continue; }
       // A transfer between the trust account and the office's own cash/bank accounts (a manual journal, both sides cash).
       if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { transfers += r; continue; }
       unexplained.push({ entryId: e.entryId, entryNo: e.entryNo, date: e.date, rule: e.rule, sourceType: e.sourceType, sourceId: e.sourceId,
@@ -354,7 +359,7 @@ export class ExtraChecks {
     // Supplier payments from trust to landlord bills reduce the unpaid bills; from the office account they move to office money.
     // billsFlow carries the E38 (+) and E39 from trust (−) residuals; what is still open is `unpaidBills`, the rest is office-paid.
     const officeFromBills = billsFlow - unpaidBills;
-    const officeMoney = commission + officePaid + officeFromBills + transfers;
+    const officeMoney = commission + officePaid + officeFromBills + transfers + depositsToOffice;
     const v2 = lp + dep - transit + officeMoney + unpaidBills + opening;
     unexplained.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.entryId - b.entryId));
     return {
@@ -364,7 +369,7 @@ export class ExtraChecks {
         {
           code: "trust_components", count: 0, amount: null, items: [{
             landlordPayable: money(lp), depositsHeld: money(dep), cashInTransit: money(0 - transit), commissionDeducted: money(commission),
-            landlordExpensesPaidByOffice: money(officePaid + officeFromBills), transfersToOffice: money(transfers), officeMoneyNotTransferred: money(officeMoney),
+            landlordExpensesPaidByOffice: money(officePaid + officeFromBills), depositsKeptByOffice: money(depositsToOffice), transfersToOffice: money(transfers), officeMoneyNotTransferred: money(officeMoney),
             landlordBillsUnpaid: money(unpaidBills), openingBalanceDifference: money(opening),
           }],
         },

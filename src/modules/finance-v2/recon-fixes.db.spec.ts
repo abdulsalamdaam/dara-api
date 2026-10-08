@@ -103,16 +103,20 @@ describe("fv2 reconciliation and minor API fixes (real Postgres, real legacy rou
   });
 
   // ── Item 7a: R4 routes a deposit voucher to the bank it was collected into ──
-  it("R4: a deposit collected into B2 counts against B2 (ledger and sub-ledger agree)", async () => {
-    await on.contracts.collectDeposit(user, String(fOn.c2), { paidDate: today, method: "bank_transfer", bankAccountId: b2.id });
+  it("R4: a deposit collected into a chosen trust account counts against it (ledger and sub-ledger agree); an operating account is refused", async () => {
+    // Round 3: in Manager mode a deposit is client money — B2 (operating) is refused, a second trust account is fine.
+    const refused: any = await attempt(() => on.contracts.collectDeposit(user, String(fOn.c2), { paidDate: today, method: "bank_transfer", bankAccountId: b2.id }));
+    assert.deepEqual([refused.status, refused.body.error], [409, "FINANCE_V2_TRUST_REQUIRED"]);
+    const bt = await banks.create(U, U, { kind: "bank", nameAr: "أمانات ثانٍ", isTrust: true });
+    await on.contracts.collectDeposit(user, String(fOn.c2), { paidDate: today, method: "bank_transfer", bankAccountId: bt.id });
     await drain(on);
     const [line] = await on.q(
       `select a.code, l.debit::text as debit from journal_lines l join accounts a on a.id = l.account_id join journal_entries e on e.id = l.entry_id
         where e.user_id = $1 and e.payload->>'rule' = 'E09' and l.debit > 0`, [U]);
-    assert.deepEqual([line.code, line.debit], ["1117", "5000.00"], "the ledger books B2");
+    assert.deepEqual([line.code, line.debit], [bt.glCode, "5000.00"], "the ledger books the chosen trust account");
     const r4 = check(await recon(on), "R4");
     assert.deepEqual([r4.status, r4.difference, r4.rows], ["ok", "0.00", []]);
-    const bal = r4.explanations.find((e: any) => e.code === "balances").items.find((x: any) => x.code === "1117");
+    const bal = r4.explanations.find((e: any) => e.code === "balances").items.find((x: any) => x.code === bt.glCode);
     assert.deepEqual([bal.ledger, bal.subLedger], ["5000.00", "5000.00"]);
   });
 
@@ -216,7 +220,7 @@ describe("fv2 reconciliation and minor API fixes (real Postgres, real legacy rou
       assert.equal(s.accountingMode, "manager");
       assert.equal(s.depositForfeitVat, "O");
       assert.equal(s.commissionBasis, "billed");
-      assert.equal(s.agencyCollectionsToTrust, false);
+      assert.equal(s.agencyCollectionsToTrust, true, "Manager mode: on from the first enable (round 3)");
       assert.equal(s.vatFilingFrequency, "quarterly");
       assert.equal(typeof s.defaultBankAccountId, "number");
       assert.deepEqual([...s.readOnly].sort(), ["accountingMode", "deferRentStraightLine", "fiscalYearStartMonth", "inputVatMethod"]);
@@ -238,7 +242,7 @@ describe("fv2 reconciliation and minor API fixes (real Postgres, real legacy rou
       assert.deepEqual(await code({ reason: "synthetic change", defaultBankAccountId: cash.id }), [400, "BAD_BANK_ACCOUNT"]);
       assert.deepEqual(await code({ reason: "synthetic change", defaultCashAccountId: b2.id }), [400, "BAD_BANK_ACCOUNT"]);
       assert.deepEqual(await code({ reason: "synthetic change", defaultBankAccountId: 99999999 }), [404, "BANK_ACCOUNT_NOT_FOUND"]);
-      assert.deepEqual(await code({ reason: "synthetic change", agencyCollectionsToTrust: true }), [400, "TRUST_ACCOUNT_REQUIRED"]);
+      assert.deepEqual(await code({ reason: "synthetic change", agencyCollectionsToTrust: false }), [409, "TRUST_ROUTING_REQUIRED"], "Manager mode cannot turn trust routing off");
       assert.equal((await on.q(`select count(*)::int as n from finance_settings_events where account_user_id = $1 and reason = 'synthetic change'`, [U]))[0].n, 0, "nothing written");
     });
 

@@ -96,6 +96,18 @@ export async function enableV2(env: LegacyEnv, userId: number, mode: "owner" | "
   env.flag.invalidate(userId);
 }
 
+/**
+ * An account as it was before the trust account became mandatory (round 3): no trust bank account and trust
+ * routing off. For specs about other mechanics ("received into", R4, expenses) that collect a landlord's rent
+ * or a deposit into an operating account; the trust rule itself is covered in overrides/installment-docs.db.spec.ts.
+ */
+export async function withoutTrust(env: LegacyEnv, userId: number): Promise<void> {
+  await env.t.pool.query(`update finance_settings set agency_collections_to_trust = false where account_user_id = $1`, [userId]);
+  await env.t.pool.query(`update accounts set bank_account_id = null where user_id = $1 and bank_account_id in (select id from bank_accounts where user_id = $1 and is_trust)`, [userId]);
+  await env.t.pool.query(`delete from bank_accounts where user_id = $1 and is_trust`, [userId]);
+  env.flag.invalidate(userId);
+}
+
 export interface Seed {
   user: number;
   /** Agent landlord (not the account holder), VAT-registered, fully addressed, ZATCA-linked (sandbox, dummy). */

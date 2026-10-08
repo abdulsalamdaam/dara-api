@@ -170,6 +170,10 @@ export class BankAccountsService {
         const u = await c.query(`select ${USED_SQL} as used from bank_accounts b where b.id = $1`, [id]);
         if (u.rows[0]?.used) throw new ConflictException({ error: "BANK_ACCOUNT_IN_USE", message: "A used account cannot change between trust and own money" });
       }
+      if (cur.is_trust && cur.is_default && !isTrust) {
+        // Accountant round 3: the default trust account is never left unset (Manager mode requires one).
+        throw new ConflictException({ error: "BANK_ACCOUNT_IS_DEFAULT", message: "اجعل حساب أمانات آخر افتراضياً أولاً · Make another trust account the default first" });
+      }
       if (!isActive && (cur.is_default || isDefault)) {
         throw new ConflictException({ error: "BANK_ACCOUNT_IS_DEFAULT", message: "اختر حساباً افتراضياً آخر أولاً · Make another account the default first" });
       }

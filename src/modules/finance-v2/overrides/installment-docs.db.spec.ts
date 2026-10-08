@@ -176,47 +176,63 @@ describe("fv2 installments screen: rent receipt for an unregistered landlord (#3
 
   // ─── #6 ────────────────────────────────────────────────────────────────
 
-  it("#6 without a trust account nothing changes: the collection goes to the default account as before", async () => {
-    const k = await contract(M, sM, sM.propA, "900", [addDays(today, 1)]);
-    const ctx = await svc.collectContext(M, k.p[0]);
-    assert.equal(ctx.trustRequired, false);
-    assert.equal(status(await collect(M, k.p[0], { method: "cash" })), 200);
-  });
-
-  it("#6 Manager mode with a trust account: the context preselects it; a non-trust collection of landlord rent is refused unless confirmed", async () => {
-    const trust = await banks.create(M, M, { kind: "bank", nameAr: "حساب الأمانات", nameEn: "Client trust", isTrust: true, isDefault: true });
+  it("#6 Manager mode: the first enable made the trust account with routing on; the context preselects it; an operating account is refused, with no override", async () => {
+    const [trust] = await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default and is_active`, [M]);
+    assert.ok(trust, "seeded at the first enable (round 3)");
     const k = await contract(M, sM, sM.propA, "800", [addDays(today, 4)]);
     const ctx = await svc.collectContext(M, k.p[0]);
     assert.equal(ctx.trustRequired, true);
-    assert.equal(ctx.trustAccountId, trust.id);
+    assert.equal(ctx.trustAccountId, Number(trust.id));
     assert.equal(ctx.treatment, "agent");
-    assert.deepEqual(ctx.defaultInTrust, { cash: false, other: false }, "agency_collections_to_trust is off: the defaults are not trust");
+    assert.equal(ctx.deposit, false);
+    assert.deepEqual(ctx.defaultInTrust, { cash: true, other: true }, "routing on: a collection left on the default lands in trust");
 
-    // Cash into the default cash box (main cash box): refused.
-    const refused: any = await collect(M, k.p[0], { method: "cash" });
-    assert.equal(refused.status, 409);
-    assert.equal(refused.body.error, "FINANCE_V2_TRUST_REQUIRED");
-    assert.equal(refused.body.trustAccountId, trust.id);
+    // Into the main cash box, named: refused, and the old confirmation no longer lets it through.
+    const box = (await banks.list(M)).find((b) => b.kind === "cash")!;
+    for (const body of [{ method: "cash", bankAccountId: box.id }, { method: "cash", bankAccountId: box.id, trustOverride: true }]) {
+      const refused: any = await collect(M, k.p[0], body);
+      assert.equal(refused.status, 409);
+      assert.equal(refused.body.error, "FINANCE_V2_TRUST_REQUIRED");
+      assert.equal(refused.body.trustAccountId, Number(trust.id));
+    }
     assert.equal((await env.q(`select count(*)::int as n from payment_collections where payment_id = $1`, [k.p[0]]))[0].n, 0, "nothing written");
 
-    // Into the trust account: accepted, and posted there.
-    assert.equal(status(await collect(M, k.p[0], { method: "bank_transfer", bankAccountId: trust.id })), 200);
-    // Confirmed into another account: accepted and audited.
-    assert.equal(status(await collect(M, k.p[0], { method: "cash", trustOverride: true })), 200);
-    const [a] = await env.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_trust_override' and entity_id = $2`, [M, String(k.p[0])]);
-    assert.equal(a.n, 1);
+    // Cash on the default, and a transfer into the trust account by name: both accepted, both posted to trust.
+    assert.equal(status(await collect(M, k.p[0], { method: "cash" })), 200);
+    assert.equal(status(await collect(M, k.p[0], { method: "bank_transfer", bankAccountId: Number(trust.id) })), 200);
     await drain(M);
     const [bl] = await env.q(
       `select count(*)::int as n from journal_lines l where l.user_id = $1 and l.bank_account_id = $2 and l.payment_id = $3`, [M, trust.id, k.p[0]]);
-    assert.ok(bl.n >= 1, "the trust collection posted to the trust account");
+    assert.equal(bl.n, 2, "both collections posted to the trust account");
   });
 
-  it("#6 the account holder's own property is not client money: no trust requirement", async () => {
+  it("#6 the account holder's own property: its rent is the office's money, but its deposit is the tenant's and goes to trust", async () => {
     const k = await contract(M, sM, sM.propH, "700", [addDays(today, 6)]);
     const ctx = await svc.collectContext(M, k.p[0]);
     assert.equal(ctx.treatment, "principal");
     assert.equal(ctx.trustRequired, false);
-    assert.equal(status(await collect(M, k.p[0], { method: "cash" })), 200);
+    const box = (await banks.list(M)).find((b) => b.kind === "cash")!;
+    assert.equal(status(await collect(M, k.p[0], { method: "cash", bankAccountId: box.id })), 200);
+
+    await env.q(`update contracts set deposit_amount = 1200, deposit_status = 'pending' where id = $1`, [k.id]);
+    const refused: any = await attempt(() => env.contracts.collectDeposit(userFor(M), String(k.id), { paidDate: today, method: "cash", bankAccountId: box.id }));
+    assert.deepEqual([refused.status, refused.body?.error], [409, "FINANCE_V2_TRUST_REQUIRED"]);
+    const ok: any = await env.contracts.collectDeposit(userFor(M), String(k.id), { paidDate: today, method: "cash" });
+    assert.ok(ok.voucher?.id);
+    await drain(M);
+    const [l] = await env.q(
+      `select b.is_trust from journal_lines l join journal_entries e on e.id = l.entry_id join bank_accounts b on b.id = l.bank_account_id
+        where l.user_id = $1 and e.payload->>'rule' = 'E09' and l.document_id = $2 and l.debit > 0`, [M, ok.voucher.id]);
+    assert.equal(l?.is_trust, true, "E09 on the account holder's own contract debits the trust account");
+  });
+
+  it("#6 a deposit receipt voucher into an operating account is refused; an invoice collection follows the same rule", async () => {
+    const k = await contract(M, sM, sM.propA, "650", [addDays(today, 7)]);
+    const bank = (await banks.list(M)).find((b) => b.kind === "bank" && !b.isTrust)!;
+    const rv: any = await attempt(() => env.billing.createReceiptVoucher(userFor(M), { contractId: k.id, kind: "deposit", amount: 300, paidDate: today, method: "bank_transfer", bankAccountId: bank.id }));
+    assert.deepEqual([rv.status, rv.body?.error], [409, "FINANCE_V2_TRUST_REQUIRED"]);
+    const ok: any = await attempt(() => env.billing.createReceiptVoucher(userFor(M), { contractId: k.id, kind: "deposit", amount: 300, paidDate: today, method: "bank_transfer" }));
+    assert.equal(status(ok), 200);
   });
 
   it("#6 flag off: the same collection is accepted exactly as before", async () => {

@@ -361,11 +361,13 @@ describe("finance v2 backfill reproduces hand-computed balances (real Postgres, 
   it("every account equals the hand computation", async () => {
     assert.deepEqual(first.failed, []);
     // Charges due before 15 March: Jan, Feb, Mar = 3 × 1,150 (agent: Dr 1122 / Cr 2122 net 1,000 + VAT 150).
-    // Collections (cash): 1,150 + 500 → Dr 1111 / Cr 1122, and 2122 → 2121 for the landlord.
-    // Deposit 2,000 by transfer: Dr 1113 / Cr 2141. Landlord's expense 200 and payout 700 from the bank: Dr 2121 / Cr 1113.
+    // Manager mode: the first enable made the trust account (1114) and turned trust routing on (round 3), so the
+    // client money with no account named goes to trust. Collections (cash): 1,150 + 500 → Dr 1114 / Cr 1122, and
+    // 2122 → 2121 for the landlord. Deposit 2,000: Dr 1114 / Cr 2141. Payout 700 from trust: Dr 2121 / Cr 1114.
+    // The landlord's expense 200 is paid from the office's bank: Dr 2121 / Cr 1113.
     assert.deepEqual(await balances(env, V), {
-      "1111": "1650.00",                     // 1,150 + 500
-      "1113": "1100.00",                     // 2,000 − 200 − 700
+      "1113": "-200.00",                     // the expense
+      "1114": "2950.00",                     // 1,150 + 500 + 2,000 − 700
       "1122": "1800.00",                     // 3,450 − 1,650
       "2121": "-750.00",                     // −1,650 + 200 + 700
       "2122": "-1800.00",                    // −3,450 + 1,650 (the mirror of 1122)

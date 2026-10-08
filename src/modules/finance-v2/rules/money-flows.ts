@@ -36,6 +36,12 @@ function tenantCash(t: Treatment, x: number, cash: RuleLine[], dims: Dims): Rule
  * was chosen), so what flows into trust also flows out of it.
  */
 const clientBank = (b: BankRef | undefined, t: Treatment): { bank: BankRef } => ({ bank: { ...(b ?? {}), agency: t === "agent" } });
+/**
+ * A bank line for a security deposit: the tenant's money whoever owns the unit,
+ * so it asks for the trust account under either treatment (accountant round 3,
+ * 7 Oct 2026). Trust routing is Manager-mode only, so Owner mode is unchanged.
+ */
+const depositBank = (b: BankRef | undefined): { bank: BankRef } => ({ bank: { ...(b ?? {}), agency: true } });
 
 // ─── Collections ────────────────────────────────────────────────────────────
 
@@ -53,7 +59,7 @@ export function depositInstallmentCollection(f: CollectionFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x === 0) return skip("zero_amount", f);
   const dims = { ...f.dims, paymentId: f.paymentId ?? null };
-  return out([...signed(clientBank(f.bank, f.treatment), x, dims), ...signed(sys(SYS.dep), -x, dims)], f);
+  return out([...signed(depositBank(f.bank), x, dims), ...signed(sys(SYS.dep), -x, dims)], f);
 }
 
 /** E12b: deposit applied to arrears. Dr DEP / Cr AR (agent: plus Dr 2122 / Cr LP). */
@@ -171,7 +177,7 @@ export function depositReceived(f: DepositMoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("fully_linked", f);
   const dims = { ...f.dims, documentId: f.documentId };
-  return out([...dr(clientBank(f.bank, f.treatment), x, dims), ...cr(sys(SYS.dep), x, dims)], f);
+  return out([...dr(depositBank(f.bank), x, dims), ...cr(sys(SYS.dep), x, dims)], f);
 }
 
 /** E10: deposit refunded. Dr DEP / Cr BANK. */
@@ -179,7 +185,7 @@ export function depositRefunded(f: DepositMoneyFacts): RuleOutput {
   const x = toHalalas(f.amount);
   if (x <= 0) return skip("zero_amount", f);
   const dims = { ...f.dims, documentId: f.documentId };
-  const r = out([...dr(sys(SYS.dep), x, dims), ...cr(clientBank(f.bank, f.treatment), x, dims)], f);
+  const r = out([...dr(sys(SYS.dep), x, dims), ...cr(depositBank(f.bank), x, dims)], f);
   if (f.inferredDate) r.warnings.push("inferred_date");
   return r;
 }

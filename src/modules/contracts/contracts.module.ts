@@ -1139,6 +1139,7 @@ class ContractsController {
     if (!contract) throw new NotFoundException("Contract not found");
     const amt = round2(Number(contract.depositAmount) || 0);
     if (!(amt > 0)) throw new BadRequestException("لا يوجد مبلغ تأمين على هذا العقد");
+    await this.fv2h?.guardTrust(fv2, ownerId, { contractId: id, deposit: true }, body); // finance-v2: accountant round 3 — Manager-mode deposits go to the trust account (409)
 
     const [existing] = await this.db.select().from(simpleInvoicesTable)
       .where(and(eq(simpleInvoicesTable.userId, ownerId), eq(simpleInvoicesTable.contractId, id),

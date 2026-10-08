@@ -151,6 +151,7 @@ export class ContractDepositController {
     const paidDate = dateOnly(body?.paidDate, "تاريخ الاستلام") ?? riyadhToday();
     const method = text(body?.method, "طريقة السداد", 40) ?? "bank_transfer";
     const notes = text(body?.notes, "ملاحظات", 500);
+    await this.fv2h?.guardTrust(fv2, ownerId, { contractId: id, deposit: true }, body); // finance-v2: accountant round 3 — Manager-mode deposits go to the trust account (409)
     const attachmentKey = text(body?.attachmentKey, "المرفق", 500);
     return this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(${ownerId}, ${CONTRACT_LOCK})`);

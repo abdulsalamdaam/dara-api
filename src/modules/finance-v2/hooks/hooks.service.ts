@@ -21,8 +21,7 @@ import { commissionZatcaDocV2 } from "../overrides/commission-approve";
 import { applyDispositions } from "../overrides/terminate";
 import { assertPayoutWithinDue } from "../overrides/landlord-dues";
 import { fromHalalas } from "../money";
-import { trustRefusal } from "../overrides/installment-docs";
-import { auditRow } from "../audit";
+import { trustRefusal, trustRefusalFor, type TrustTarget } from "../overrides/installment-docs";
 
 /** Tier 1 (§8.2 a): the optional "received into / paid from" account a legacy money route's body names. */
 export interface MoneyMeta {
@@ -155,19 +154,23 @@ export class FinanceV2Hooks {
   }
 
   /**
-   * Accountant test #6: in Manager mode a third-party landlord's rent is client
-   * money and is collected into a trust (أمانات) account. Refused (409
-   * FINANCE_V2_TRUST_REQUIRED) when it would land elsewhere, unless the user
-   * confirmed it (`trustOverride: true`, audited). Flag on only; before any write.
+   * Accountant test #6 (made mandatory in round 3, 7 Oct 2026): in Manager mode
+   * a third-party landlord's rent and every security deposit are client money
+   * and are collected into a trust (أمانات) account. Refused (409
+   * FINANCE_V2_TRUST_REQUIRED) when it would land elsewhere; there is no
+   * override. Flag on only; before any write.
    */
-  async guardCollectionTrust(fv2: boolean, scope: number, paymentId: number, body: any, actorId?: number | null): Promise<void> {
+  async guardCollectionTrust(fv2: boolean, scope: number, paymentId: number, body: any, _actorId?: number | null): Promise<void> {
     if (!fv2) return;
     const refusal = await trustRefusal(this.sqlPool(), scope, paymentId, body);
     if (refusal) throw refusal;
-    if (body?.trustOverride === true && Number.isInteger(paymentId)) {
-      await auditRow(this.pool, scope, Number(actorId ?? scope), "finance_v2_trust_override", paymentId, `/payments/${paymentId}/collections`)
-        .catch((err) => this.log.warn(`trust override audit failed (scope ${scope}): ${err?.message ?? err}`));
-    }
+  }
+
+  /** The same rule on the other money routes (deposit vouchers, collect-deposit, top-up, receipt vouchers, invoice collect). */
+  async guardTrust(fv2: boolean, scope: number, target: TrustTarget, body: any): Promise<void> {
+    if (!fv2) return;
+    const refusal = await trustRefusalFor(this.sqlPool(), scope, target, body);
+    if (refusal) throw refusal;
   }
 
   // ─── Hooks: enqueue, never throw ────────────────────────────────────────
