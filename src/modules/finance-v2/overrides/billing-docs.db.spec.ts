@@ -274,7 +274,7 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
     assert.deepEqual([r.body.error, r.body.linked], ["FINANCE_V2_TAX_DOC_NOT_REPORTABLE", false]);
   });
 
-  it("unlinked account: the commission is drafted without VAT and approves; E15 books no output VAT", async () => {
+  it("registered but unlinked account: the commission is a 15% tax invoice held as a draft (approval refused until linked); no VAT booked", async () => {
     const c: any = await env.contracts.create(userFor(N), {
       unitIds: [sN.unitA1], tenantId: sN.tenant, tenantName: "Synthetic Tenant", startDate: firstOf(0), endDate: lastOf(11),
       monthlyRent: "6000", paymentFrequency: "monthly", vatEnabled: true,
@@ -285,14 +285,17 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
       items: [{ description: "إيجار", quantity: 1, unitPrice: 6000, amount: 6000, vat: true }], total: 6900,
     });
     const ap: any = await env.billing.approve(userFor(N), String(inv.id), { confirmations: { tenantNoVat: true } });
-    assert.deepEqual([ap.commission?.subtotal, ap.commission?.total], ["300.00", "300.00"]);
-    const ok: any = await env.billing.approve(userFor(N), String(ap.commission.id), {});
-    assert.equal(ok.status, "confirmed");
+    // Accountant review 7 Oct 2026: a VAT-registered office always bills 15%; unlinked, the tax invoice waits as a draft.
+    assert.deepEqual([ap.commission?.subtotal, ap.commission?.total, ap.commission?.status], ["300.00", "345.00", "draft"]);
+    const r409: any = await attempt(() => env.billing.approve(userFor(N), String(ap.commission.id), {}));
+    assert.equal(r409.status, 409);
+    assert.equal(r409.body.error, "FINANCE_V2_TAX_DOC_NOT_REPORTABLE");
+    assert.deepEqual(r409.body.sellerCheck.blockers.map((b: any) => b.code), ["OFFICE_NOT_LINKED"]);
+    const [held] = await env.q(`select status::text as status from simple_invoices where id = $1`, [ap.commission.id]);
+    assert.equal(held.status, "draft");
     await drain(env, N);
-    const e = await entry(env, N, "simple_invoice", ap.commission.id, "confirmed");
-    assert.deepEqual(codes(e.lines), [["2121", "300.00", "0.00"], ["4210", "0.00", "300.00"]]);
     const r: any = await vat.vatReturn(N, { period: vatPeriod });
-    assert.equal(r.boxes.find((b: any) => b.box === 1).vat, "0.00", "no commission VAT without a tax invoice");
+    assert.equal(r.boxes.find((b: any) => b.box === 1).vat, "0.00", "no commission VAT until the tax invoice is issued");
   });
 
   // ── Owner mode ──

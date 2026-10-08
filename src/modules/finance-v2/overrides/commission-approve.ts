@@ -6,9 +6,12 @@
  * Neither the contract's tenant nor the landlord's own VAT registration or
  * ZATCA link has anything to do with issuing it, so:
  *
- *  - office NOT VAT-registered (or not linked to ZATCA): the document is a
- *    non-tax commission document (category O, no VAT, "ليس فاتورة ضريبية").
- *    Nothing is demanded; it approves.
+ *  - office NOT VAT-registered: the document is a non-tax commission document
+ *    (category O, no VAT, "ليس فاتورة ضريبية"). Nothing is demanded; it approves.
+ *  - office VAT-registered but NOT linked to ZATCA (accountant review, 7 Oct
+ *    2026): the commission is still a 15% tax invoice — a registered business
+ *    never issues it as a non-tax document — and it is held as a DRAFT:
+ *    approval is refused (OFFICE_NOT_LINKED) until the office is linked.
  *  - office VAT-registered AND linked: the document is a tax invoice in the
  *    office's name (15%), reported to ZATCA under the office's own seller with
  *    the landlord as the buyer (standard/cleared when the landlord has a VAT
@@ -114,8 +117,8 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
     } else if (!office.zatcaLinked) {
       blockers.push({
         code: "OFFICE_NOT_LINKED",
-        message: "المكتب غير مرتبط بهيئة الزكاة، فلا يصدر فاتورة ضريبية؛ اربط المكتب بفاتورة أو احذف الضريبة من المستند · "
-          + "The office is not linked to ZATCA, so it issues no tax invoice: link the office to Fatoora, or remove the VAT from this document",
+        message: "المكتب مسجّل ضريبياً فتصدر عمولته فاتورة ضريبية بنسبة 15%، لكنه غير مرتبط بهيئة الزكاة بعد؛ تبقى الفاتورة مسودة حتى يُربط المكتب بمنصة فاتورة ثم تُعتمد · "
+          + "The office is VAT-registered, so its commission is a 15% tax invoice, but it is not linked to ZATCA yet: the invoice stays a draft until the office is linked to Fatoora, then it can be approved",
       });
     } else if (!office.seller?.name || !office.seller?.vat) {
       blockers.push({
@@ -136,11 +139,11 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
           + "The landlord is VAT-registered (a standard invoice) and his national address is incomplete: the invoice approves, but its ZATCA clearance needs the address",
       });
     }
-  } else if (office.vatRegistered && !office.zatcaLinked) {
+  } else if (office.vatRegistered) {
     notices.push({
       code: "OFFICE_REGISTERED_NOT_LINKED",
-      message: "المكتب مسجّل ضريبياً وغير مرتبط بهيئة الزكاة، لذا تصدر العمولة مستنداً غير ضريبي حتى يرتبط · "
-        + "The office is VAT-registered but not linked to ZATCA, so the commission is issued as a non-tax document until it is linked",
+      message: "المكتب مسجّل ضريبياً ويلزمه إصدار فاتورة ضريبية بنسبة 15%، وهذا المستند بلا ضريبة (أُنشئ قبل التعديل)؛ ألغِه وأعد إصدار العمولة لتصدر فاتورة ضريبية · "
+        + "The office is VAT-registered and must issue a 15% tax invoice; this document carries no VAT (created before the change): cancel it and re-issue the commission as a tax invoice",
     });
   }
   return {

@@ -47,3 +47,16 @@ export async function accountZatcaIntegrated(q: Sql, scope: number): Promise<boo
 export async function ownFeeCarriesVat(q: Sql, scope: number): Promise<boolean> {
   return (await accountVatRegistered(q, scope)) && (await accountZatcaIntegrated(q, scope));
 }
+
+/**
+ * Does the office's COMMISSION carry VAT? Whenever the office is VAT-registered
+ * (accountant review, 7 Oct 2026): a registered business must issue a 15% tax
+ * invoice, so its commission is never turned into a non-tax document because
+ * the ZATCA link is missing. An unlinked registered office's commission is
+ * created as a draft tax invoice and held there — approval is refused
+ * (commission-approve.ts, OFFICE_NOT_LINKED) until the office is linked; the
+ * monthly run leaves it as a held draft instead of discarding it.
+ */
+export async function commissionCarriesVat(q: Sql, scope: number): Promise<boolean> {
+  return accountVatRegistered(q, scope);
+}

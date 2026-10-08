@@ -25,7 +25,7 @@ import { BillingModule } from "../billing/billing.module";
  *  - the commission transfer (Dr operating / Cr trust), landlord statement unchanged.
  */
 const M = 5901; // manager, office VAT-registered and linked (the account-holder landlord's credentials)
-const N = 5902; // manager, office not linked (no VAT on commission)
+const N = 5902; // manager, office VAT-registered but not linked (commission held as a draft tax invoice)
 const today = riyadhToday();
 const firstOf = (monthsFromNow: number) => {
   const [y, m] = today.split("-").map(Number);
@@ -330,7 +330,7 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
   });
 
   // ── The cutover from the billed basis, and an office with no VAT ──
-  it("switching billed → collected never charges twice; an unlinked office's commission carries no VAT and is not a tax invoice", async () => {
+  it("switching billed → collected never charges twice; a registered but unlinked office's run is a 15% tax invoice held as a draft", async () => {
     const sN = await seedAccount(env, N);
     await enableV2(env, N, "manager");
     const c: any = await env.contracts.create(userFor(N), {
@@ -344,7 +344,7 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
       items: [{ description: "إيجار", quantity: 1, unitPrice: 2000, amount: 2000, vat: false, vatCategory: "O" }], total: 2000,
     });
     const ap: any = await env.billing.approve(userFor(N), String(inv.id), { confirmations: { tenantNoVat: true } });
-    assert.equal(ap.commission?.subtotal, "100.00");
+    assert.deepEqual([ap.commission?.subtotal, ap.commission?.total], ["100.00", "115.00"]);
 
     const settings = new FinanceSettingsService(env.t.pool as any, undefined, env.flag);
     const st: any = await settings.patch(N, N, { commissionBasis: "collected", reason: "Accountant: commission on collected rent" });
@@ -359,11 +359,19 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     const r = await svc.run(N, { id: N }, { month: monthOf(-1) });
     const x = r.results.find((y) => y.ownerId === sN.agent)!;
     // Only the second installment: the first already has its billed COM.
-    assert.deepEqual([x.status, x.net, x.vat, x.total], ["issued", "100.00", "0.00", "100.00"]);
+    // Accountant review 7 Oct 2026: the registered office bills 15%; with no ZATCA link the invoice is kept as a draft (not discarded).
+    assert.deepEqual([x.status, x.reason, x.net, x.vat, x.total], ["held", "OFFICE_NOT_LINKED", "100.00", "15.00", "115.00"]);
     await drain(env, N);
-    const [d] = await env.q(`select items from simple_invoices where id = $1`, [x.documentId]);
-    assert.equal(d.items[0].vatCategory, "O");
-    const e = await entryOf(env, N, x.documentId!);
-    assert.deepEqual(codes(e.lines), [["2121", "100.00", "0.00"], ["4210", "0.00", "100.00"]]);
+    const [d] = await env.q(`select items, status::text as status, deleted_at from simple_invoices where id = $1`, [x.documentId]);
+    assert.deepEqual([d.items[0].vatCategory, d.status, d.deleted_at], ["S", "draft", null]);
+    const [posted] = await env.q(`select count(*)::int as n from journal_entries where user_id = $1 and source_type = 'simple_invoice' and source_id = $2`, [N, x.documentId]);
+    assert.equal(posted.n, 0, "nothing posts while the tax invoice is held");
+    const again = await svc.run(N, { id: N }, { month: monthOf(-1) });
+    assert.equal(again.results.find((y) => y.ownerId === sN.agent)?.reason, "already_issued", "the held run is not re-created");
+    // Reversing a held run withdraws the draft (nothing was issued, so there is no credit note).
+    const rev: any = await svc.reverse(N, { id: N }, x.runId!, { reason: "Re-run after linking to ZATCA" });
+    assert.deepEqual([rev.status, rev.creditNote], ["reversed", null]);
+    const [gone] = await env.q(`select deleted_at is not null as gone from simple_invoices where id = $1`, [x.documentId]);
+    assert.equal(gone.gone, true);
   });
 });

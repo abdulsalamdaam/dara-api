@@ -9,7 +9,7 @@ import { LOCK_KEYS } from "./lock-keys";
 import { fromHalalas, toHalalas } from "./money";
 import { riyadhToday, lastDayOfMonth, parseIsoDate } from "./dates";
 import { nextDocNumber } from "./commission";
-import { ownFeeCarriesVat } from "./account-seller";
+import { accountZatcaIntegrated, commissionCarriesVat } from "./account-seller";
 import { hasPropertyBasisTable, propertyBasis, setPropertyBasis } from "./commission-basis";
 import { effectiveFeeForProperty } from "./commission";
 import { commissionSellerCheckById } from "./overrides/commission-approve";
@@ -52,7 +52,7 @@ const CHECK_MS = 60_000;
 export interface RunResult {
   ownerId: number;
   name: string;
-  status: "issued" | "skipped" | "failed";
+  status: "issued" | "held" | "skipped" | "failed";
   reason?: string | null;
   runId?: number;
   documentId?: number;
@@ -145,7 +145,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       const li = info.get(ownerId);
       if (!li) return { none: "landlord_not_found" } as const;
       const { rateFor, names } = await rateResolver(q, scope, lines, info);
-      const vatRegistered = await ownFeeCarriesVat(q, scope);
+      const vatRegistered = await commissionCarriesVat(q, scope);
       const plan = planLandlord(ownerId, lines, rateFor(ownerId), vatRegistered, names);
       if (plan.skip) return { none: plan.skip } as const;
 
@@ -194,11 +194,21 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
         );
       }
       if (actor) await auditRow(c, scope, actor.id, "finance_v2_commission_run", runId, "/finance/v2/commission-runs");
-      return { runId, documentId, number, plan, name: li.name } as const;
+      // A registered office not yet linked to ZATCA: the tax invoice is kept as a draft (never discarded, never
+      // turned non-tax) until the link exists; it is then approved from the documents list like any draft.
+      const held = vatRegistered && !(await accountZatcaIntegrated(q, scope));
+      return { runId, documentId, number, plan, name: li.name, held } as const;
     });
 
     if ("none" in created) {
       return { ownerId, name: "", status: "skipped", reason: created.none, runId: (created as any).runId };
+    }
+    if (created.held) {
+      return {
+        ownerId, name: created.name, status: "held", reason: "OFFICE_NOT_LINKED", runId: created.runId, documentId: created.documentId, number: created.number,
+        net: fromHalalas(created.plan.net), vat: fromHalalas(created.plan.vat), total: fromHalalas(created.plan.total),
+        zatcaStatus: null, zatcaError: null,
+      };
     }
     try {
       await this.issuerOrThrow().approve(scope, created.documentId);
@@ -269,6 +279,12 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
         `select id, number, status::text as status, client, items, subtotal::text as subtotal, total::text as total from simple_invoices where id = $1 and user_id = $2`,
         [r.document_id, scope])).rows[0];
       if (!d) throw conflict("RUN_DOCUMENT_MISSING", "The commission invoice is missing");
+      if (d.status === "draft") {
+        // A held draft (office not yet linked to ZATCA): nothing was issued or posted, so there is nothing to
+        // credit — the draft is withdrawn and the lines return to the pool.
+        await c.query(`update simple_invoices set deleted_at = now() where id = $1 and user_id = $2 and status = 'draft'`, [d.id, scope]);
+        return { creditId: null, confirmed: true, number: d.number };
+      }
       const existing = (await c.query(
         `select id, status::text as status from simple_invoices where user_id = $1 and type = 'credit' and kind = 'commission' and billing_reference = $2
             and deleted_at is null order by id limit 1`, [scope, d.number])).rows[0];
@@ -285,7 +301,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       );
       return { creditId: Number(cr.rows[0].id), confirmed: false, number: d.number };
     });
-    if (!prep.confirmed) {
+    if (!prep.confirmed && prep.creditId != null) {
       try {
         await this.issuerOrThrow().approve(scope, prep.creditId);
       } catch (err) {

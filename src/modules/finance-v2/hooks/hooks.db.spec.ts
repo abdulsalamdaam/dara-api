@@ -173,6 +173,9 @@ describe("finance v2 hooks on the real legacy routes (real Postgres)", { skip: f
     sOn = await seedAccount(on, U);
     const sOff = await seedAccount(off, U);
     const sBare = await seedAccount(bare, U);
+    // The office is not VAT-registered here, so its commission is a non-tax document that approves (a registered office's
+    // commission is a 15% tax invoice held as a draft until it is linked to ZATCA: commission-tr.db.spec).
+    await on.q(`update owners set tax_number = null where user_id = $1 and is_account_holder`, [U]);
     await enableV2(on, U, "manager");
     rOn = await scenario(on, sOn);
     rOff = await scenario(off, sOff);
