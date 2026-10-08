@@ -55,6 +55,11 @@ IP NHC whitelisted. Set as **runtime** env vars (never committed):
 - `EJAR_BASE_URL` = `https://integration-gw.housingapps.sa/nhc/uat` (prod is blocked in code)
 - `EJAR_CLIENT_ID` = IBM gateway client id
 - `EJAR_CLIENT_SECRET` = IBM gateway client secret
+- `EJAR_BALADY_BASE_URL` = `https://apiservicesstg.balady.gov.sa` (prod `apiservices.` is blocked in code)
+- `EJAR_BALADY_CLIENT_ID` / `EJAR_BALADY_CLIENT_SECRET` = MOMRAH consumer key / secret
+
+With the Balady vars set, contracts and contract invoices go through Balady and
+the other four endpoints stay on NHC — keep both sets.
 
 Verify after deploy (needs a user JWT): `GET /api/ejar/health` → `{ "ok": true }`.
 The `contracts.ejar_source` column + `ejar_api_logs` table are created

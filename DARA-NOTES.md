@@ -123,6 +123,20 @@ Six whitelisted endpoints in two groups, each keyed by exactly one identifier:
 - Credentials live only in the API container's env; `EJAR_BASE_URL` is guarded
   against pointing at the production NHC gateway.
 
+**Two gateways, one backend.** MOMRAH's Balady gateway
+(`apiservicesstg.balady.gov.sa`, guide "Ejar Services Integration Guide
+V1.1.0") serves the same Ejar data — verified 2026-10-08, its `data.result` is
+byte-identical to the NHC `Body` for contracts and invoices. Auth is OAuth
+client-credentials (`POST /oauth/v1/token`, Basic consumer key:secret → Bearer,
+~5 h), then `RefId: 1`. Verified paths: `/v1/ejar-services/contracts`
+(same query params as GetRentalContracts), `/contracts/{uuid}` (details),
+`/contracts/{contractNumber}/invoices`. Our app is subscribed to "Ejar Rental
+Contracts" and "Ejar Rental Contract Invoices" only; properties, units,
+national address and financial data answer `401 no Api Product match found`
+until MOMRAH adds them. The client routes an endpoint to Balady when it has a
+`balady` route in `EJAR_ENDPOINTS` and `EJAR_BALADY_*` is set, else NHC — the
+two credential sets are not interchangeable.
+
 To probe Ejar, run a Node script **inside the API container** (it holds the
 credentials and the allow-listed IP). `curl` is not installed there, and
 `node /dev/stdin` fails on a piped fd — base64 the script to a file first.

@@ -1,6 +1,11 @@
 // Types + endpoint registry for the NHC / Takamolat "Ejar" integration.
 //
-// Every Ejar response shares one envelope: a `Header` (status + tracing) and a
+// Two gateways front the same Ejar backend: NHC's IBM gateway (client id +
+// secret headers) and MOMRAH's Balady gateway (OAuth client-credentials).
+// Balady only carries the endpoints with a `balady` route below; the rest stay
+// on NHC until MOMRAH subscribes us to them.
+//
+// Every NHC response shares one envelope: a `Header` (status + tracing) and a
 // `Body` in JSON:API shape (`data` / `included` / `meta` / `links`). The client
 // unwraps the envelope and returns the `Body`.
 
@@ -43,6 +48,12 @@ export interface EjarEnvelope<T = Record<string, unknown>> {
   Body?: EjarBody<T>;
 }
 
+/** Balady's envelope. `statusDetails.code` can be a string like "401-01". */
+export interface BaladyEnvelope<T = Record<string, unknown>> {
+  statusDetails?: { code?: number | string; message?: string };
+  data?: { responseCode?: string; responseMessage?: string; responseId?: string; result?: EjarBody<T> };
+}
+
 /* ── Endpoint registry — the six verified endpoints ── */
 
 export type EjarEndpointKey =
@@ -60,14 +71,27 @@ export interface EjarEndpointDef {
   group: "A" | "B";
   required: string[];
   label: string;
+  /**
+   * Route on MOMRAH's Balady gateway, when it carries this endpoint. Balady
+   * serves the same Ejar backend — its `data.result` is byte-identical to the
+   * NHC `Body` — so only the path differs. Returns the path and the params
+   * left over for the query string.
+   */
+  balady?: (params: Record<string, string>) => { path: string; query: Record<string, string> };
 }
 
 export const EJAR_ENDPOINTS: Record<EjarEndpointKey, EjarEndpointDef> = {
-  getRentalContracts: { method: "GET", path: "/v1/ejarext/GetRentalContracts", group: "B", required: ["id_number"], label: "Get Rental Contracts" },
+  getRentalContracts: {
+    method: "GET", path: "/v1/ejarext/GetRentalContracts", group: "B", required: ["id_number"], label: "Get Rental Contracts",
+    balady: (query) => ({ path: "/v1/ejar-services/contracts", query }),
+  },
   getProperties: { method: "GET", path: "/v1/ejarext/GetProperties", group: "B", required: ["id_number"], label: "Get Properties" },
   getUnits: { method: "GET", path: "/v1/ejarext/GetUnits", group: "B", required: ["id_number"], label: "Get Units" },
   nationalAddress: { method: "GET", path: "/v1/ejar/NationalAddress", group: "A", required: ["contractNumber"], label: "National Address" },
-  rentalContractInvoices: { method: "GET", path: "/v1/ejar/RentalContractInvoices", group: "A", required: ["contractNumber"], label: "Rental Contract Invoices" },
+  rentalContractInvoices: {
+    method: "GET", path: "/v1/ejar/RentalContractInvoices", group: "A", required: ["contractNumber"], label: "Rental Contract Invoices",
+    balady: ({ contractNumber, ...query }) => ({ path: `/v1/ejar-services/contracts/${encodeURIComponent(contractNumber)}/invoices`, query }),
+  },
   rentalFinancialData: { method: "GET", path: "/v1/ejar/RentalFinancialData", group: "A", required: ["contractNumber"], label: "Rental Financial Data" },
 };
 
