@@ -138,22 +138,78 @@ until MOMRAH adds them. The client routes an endpoint to Balady when it has a
 two credential sets are not interchangeable.
 
 **Access gate.** `EJAR_ACCESS` (`all` default | `allowlist` | `off`) is checked
-inside `EjarClientService.request`, the one funnel for every outbound call, so
-no route, replay or `/call` passthrough can skip it. `allowlist` admits only
-`EJAR_ALLOWED_USER_IDS` plus the unattended health probe (userId null); a
-refused attempt writes an `ejar_api_logs` row with `env = 'blocked'` and returns
-403. Staging runs `allowlist` with user 1 only since 2026-10-08. The hourly
-health probe uses `skipLog`, so it never appears in the log.
+inside `EjarClientService.request`, the one funnel for every outbound call, and
+again at the top of `POST /ejar/lookup` (so even a cache hit is gated).
+`allowlist` admits only `EJAR_ALLOWED_USER_IDS` plus the unattended health
+probe (userId null); a refused attempt writes an `ejar_api_logs` row with
+`env = 'blocked'` and returns 403. Staging runs `allowlist` with user 1 only
+since 2026-10-08. The hourly health probe is a Balady **token request only**
+(`checkToken`) since Import v2 — it used to call NationalAddress every hour,
+a data call per hour on a quota-limited gateway. Balady not configured reads
+as "down", which unlocks manual entry (the import cannot work without it).
+
+**Ejar Import v2 — the two-call lookup (staging, Oct 2026).** The six-call
+flow is retired: `/ejar/contracts`, the old `/ejar/preview`, `/ejar/call` and
+`/ejar/logs/:id/replay` are removed, and the only code that calls Ejar is
+`EjarLookupService`. A lookup is exactly two Balady calls, in order:
+
+1. Invoices — `GET /v1/ejar-services/contracts/{contractNumber}/invoices`
+   (`rentalContractInvoices`): returns the contract **UUID** and the payment
+   schedule. Unknown number → staging answers 400 "رقم العقد غير صحيح"; we
+   answer 404 `{code:"not_found"}` (1 call spent, Details never called).
+2. Details — `GET /v1/ejar-services/contracts/{uuid}` (`contractDetails`,
+   Balady-only, no NHC route): contract facts, parties, deposit, IBAN. A
+   non-UUID makes Balady answer 500, so the client refuses it before sending.
+
+Parties come back as organizations (name + CR + org type) or individuals
+(**name + id type only — no ID number, no phone, no email anywhere**), roles
+`lessor` / `tenant` / `*_representative`. So an individual party needs its ID
+typed at import, or an existing record picked.
+
+**Budget semantics.** `EJAR_LOOKUP_LIMIT=50` (per `EJAR_LOOKUP_WINDOW`
+`day|month|total`, default month, Riyadh boundaries) means **50 Invoices
+calls + 50 Details calls**, i.e. 50 lookups. It is counted from what actually
+left the server — `ejar_api_logs` rows for those two endpoints with a
+`balady*` env, summing `attempts` (blocked rows don't count) — never from a
+counter. A lookup is refused with 429 `{code:"budget_exhausted"}` and nothing
+sent unless BOTH endpoints have a call of headroom (unknown numbers spend
+Invoices only, so the two can drift apart) and the account is under
+`EJAR_LOOKUP_LIMIT_PER_ACCOUNT` (optional; the account is the scope owner, so
+employees share it). These two endpoints are `noRetry`: a 5xx/429 is returned,
+not retried (a retry is a second billable call); the one token-refresh retry on
+a Balady 401 is still made and is counted in `attempts`. Check-and-call runs
+under a session advisory lock (own aux pool, like the ZATCA chain lock) plus an
+in-process queue, so concurrent lookups — across containers too — cannot
+overshoot. Gateway failures surface as 502 with the upstream status in the
+body (a passed-through 401/429 would read as "logged out" / "budget used up").
+
+**Saved lookups and the import.** A successful lookup is saved in
+`ejar_lookups` (one row per account + contract number: UUID, raw Invoices and
+Details bodies, who looked it up). Repeat lookups within
+`EJAR_LOOKUP_CACHE_HOURS` (default 24) are served from it for free unless
+`refresh: true`. `POST /ejar/import` builds the record from that saved lookup
+plus the user's completion and **never calls Ejar**: 409 without a saved lookup
+or when already imported; every `existingId` must belong to `scopeId(user)`;
+`required[]` (returned by the lookup, decided server-side from the DB NOT NULLs
+and what POST /properties, /units and the contract wizard require) must be met
+or it answers 400 `{code:"missing_fields", missing}`. The rent schedule is
+Ejar's invoices (custom schedule), the deposit is Details', rent VAT is derived
+from usage as on a manual contract. Property/unit/deed typed in by the user are
+written with `ejar_source = null`, so the Ejar field locks don't freeze them;
+landlord/tenant keep only what Ejar said in `ejar_raw`, so a typed ID number
+stays editable.
 
 To probe Ejar, run a Node script **inside the API container** (it holds the
 credentials and the allow-listed IP). `curl` is not installed there, and
 `node /dev/stdin` fails on a piped fd — base64 the script to a file first.
 
 **Scoping:** tenant-package accounts are locked to their own CR
-(`ejar.scope.ts`) at `/contracts`, `/preview` **and** `/call`. `/call` is a
-generic passthrough and is the obvious way around the other two — never add a
-new Ejar route without applying the scope. It fails closed when no CR is on
-file; degrading to an unscoped search is the thing it exists to prevent.
+(`ejar.scope.ts`). Since Import v2 that means: a locked account may only look
+up (and import) a contract whose Details parties include its own CR / unified
+number — checked after Details and before anything is saved or returned, and
+again on a cache hit and at import. Never add a new Ejar route without applying
+the scope. It fails closed when no CR is on file; degrading to an unscoped
+search is the thing it exists to prevent.
 
 **Ejar field locks** (`ejar.locks.ts`) are **advisory only** — computed by one
 GET endpoint so the UI can render fields read-only. There is no write-side

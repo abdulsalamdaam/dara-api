@@ -1,0 +1,55 @@
+{
+  "data": [
+    {
+      "type": "rental_invoices_contracts",
+      "id": "11111111-2222-4333-8444-555555555555",
+      "attributes": { "contract_no": "10000000001" },
+      "relationships": { "rental_fee": { "data": { "type": "rental_fees", "id": "900001" } } }
+    }
+  ],
+  "included": [
+    {
+      "type": "rental_fees",
+      "id": "900001",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555",
+        "total_rent_amount": "60000.0",
+        "payment_frequency": { "en": "Recurring payments", "ar": "دفعات متكررة" },
+        "recurring_payment": { "en": "Bi-Annual", "ar": "نصف سنوي" }
+      },
+      "relationships": {
+        "payments": { "data": [{ "type": "payments", "id": "700001" }, { "type": "payments", "id": "700002" }] }
+      }
+    },
+    {
+      "type": "payments",
+      "id": "700002",
+      "attributes": {
+        "rental_fee_id": 900001,
+        "payment_schedule_sequence_number": "2600000000000002",
+        "sequence_number": "2600000000000002",
+        "invoice_due_date": "2027-05-26",
+        "invoice_issue_date": "2027-05-16",
+        "invoice_late_date": "2027-06-05",
+        "invoice_amount": "34500.0",
+        "invoice_remaining_amount": "34500.0",
+        "payment_status": { "en": "Unpaid", "ar": "غير مدفوعة" }
+      }
+    },
+    {
+      "type": "payments",
+      "id": "700001",
+      "attributes": {
+        "rental_fee_id": 900001,
+        "payment_schedule_sequence_number": "2600000000000001",
+        "sequence_number": "2600000000000001",
+        "invoice_due_date": "2026-11-26",
+        "invoice_issue_date": "2026-11-16",
+        "invoice_late_date": "2026-12-06",
+        "invoice_amount": "34500.0",
+        "invoice_remaining_amount": "0.0",
+        "payment_status": { "en": "Paid", "ar": "مدفوعة" }
+      }
+    }
+  ]
+}

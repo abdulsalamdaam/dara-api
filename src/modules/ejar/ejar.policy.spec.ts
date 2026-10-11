@@ -38,9 +38,9 @@ function stubDb(store: Map<string, unknown>) {
 function makeService(opts: { healthy: boolean | null; override?: string }) {
   const store = new Map<string, unknown>();
   const svc = new EjarPolicyService(stubDb(store) as never, {
-    request: async () => {
+    checkToken: async () => {
       if (!opts.healthy) throw Object.assign(new Error("gateway down"), { status: 502 });
-      return { body: null, log: { status: 200 } };
+      return { gateway: "balady", status: 200 };
     },
   } as never);
   const health = opts.healthy === null
@@ -84,10 +84,34 @@ test("never probed yet → stay unlocked rather than locking out a fresh deploy"
 test("a failing probe is recorded, not thrown — the hourly job runs unattended", async () => {
   const store = new Map<string, unknown>();
   const svc = new EjarPolicyService(stubDb(store) as never, {
-    request: async () => { throw Object.assign(new Error("boom"), { status: 403 }); },
+    checkToken: async () => { throw Object.assign(new Error("boom"), { status: 403 }); },
   } as never);
   const state = await svc.refreshHealth();
   assert.equal(state.ok, false);
   assert.equal(state.status, 403);
   assert.ok(state.checkedAt, "the check timestamp is what distinguishes 'down' from 'never checked'");
+});
+
+test("the hourly probe is a token request only — it never spends an Ejar data call", async () => {
+  const store = new Map<string, unknown>();
+  let dataCalls = 0;
+  let tokenChecks = 0;
+  const svc = new EjarPolicyService(stubDb(store) as never, {
+    request: async () => { dataCalls++; throw new Error("the probe must not call a data endpoint"); },
+    checkToken: async () => { tokenChecks++; return { gateway: "balady", status: 200 }; },
+  } as never);
+  const state = await svc.refreshHealth();
+  assert.equal(state.ok, true);
+  assert.equal(tokenChecks, 1);
+  assert.equal(dataCalls, 0);
+});
+
+test("Balady not configured reads as down, so manual entry unlocks", async () => {
+  const { EjarConfigError } = await import("./ejar.client.service");
+  const store = new Map<string, unknown>();
+  const svc = new EjarPolicyService(stubDb(store) as never, {
+    checkToken: async () => { throw new EjarConfigError("Balady gateway is not configured"); },
+  } as never);
+  const state = await svc.refreshHealth();
+  assert.equal(state.ok, false);
 });

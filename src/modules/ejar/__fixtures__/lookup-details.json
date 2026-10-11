@@ -1,0 +1,92 @@
+{
+  "data": {
+    "type": "contracts",
+    "id": "11111111-2222-4333-8444-555555555555",
+    "attributes": {
+      "contract_number": "10000000001",
+      "contract_type": "commercial",
+      "contract_start_date": "2026-11-16",
+      "contract_end_date": "2029-11-15",
+      "state": "registered",
+      "created_at": "2026-07-30T06:07:35.093+00:00",
+      "contract_file": "http://internal.invalid/contract.pdf",
+      "major_version": 1,
+      "minor_version": 0,
+      "security_deposit_amount": "6000.0",
+      "security_deposit_amount_currency": "SAR",
+      "rid_service_enabled": { "en": "Enabled", "ar": "مفعل" }
+    },
+    "relationships": {
+      "contract_parties": {
+        "data": [
+          { "type": "contract_parties", "id": "1" },
+          { "type": "contract_parties", "id": "2" },
+          { "type": "contract_parties", "id": "3" },
+          { "type": "contract_parties", "id": "4" }
+        ]
+      },
+      "financial_information": { "data": { "type": "financial_informations", "id": "42" } }
+    }
+  },
+  "included": [
+    {
+      "type": "contract_parties", "id": "1",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555", "contract_party_role": "tenant",
+        "contract_party_entity_type": "Domain::Contract::Model::ContractPartyOrganizationEntity",
+        "contract_party_entity_id": 501, "approved": false
+      },
+      "relationships": { "organization_entity": { "data": { "type": "contract_organization_entities", "id": "501" } } }
+    },
+    {
+      "type": "contract_organization_entities", "id": "501",
+      "attributes": { "name": "شركة تجريبية للقهوة", "registration_number": "1010000001", "organization_type": "commercial" }
+    },
+    {
+      "type": "contract_parties", "id": "2",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555", "contract_party_role": "lessor",
+        "contract_party_entity_type": "Domain::Contract::Model::ContractPartyOrganizationEntity",
+        "contract_party_entity_id": 502, "approved": false
+      },
+      "relationships": { "organization_entity": { "data": { "type": "contract_organization_entities", "id": "502" } } }
+    },
+    {
+      "type": "contract_organization_entities", "id": "502",
+      "attributes": { "name": "شركة تجريبية للتطوير", "registration_number": "1010000002", "organization_type": "commercial" }
+    },
+    {
+      "type": "contract_parties", "id": "3",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555", "contract_party_role": "lessor_representative",
+        "contract_party_entity_type": "Domain::Contract::Model::ContractPartyIndividualEntity",
+        "contract_party_entity_id": 601, "approved": true
+      },
+      "relationships": { "individual_entity": { "data": { "type": "contract_individual_entities", "id": "601" } } }
+    },
+    {
+      "type": "contract_individual_entities", "id": "601",
+      "attributes": { "full_name": "محمد تجريبي", "id_type": "national_id" }
+    },
+    {
+      "type": "contract_parties", "id": "4",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555", "contract_party_role": "tenant_representative",
+        "contract_party_entity_type": "Domain::Contract::Model::ContractPartyIndividualEntity",
+        "contract_party_entity_id": 602, "approved": true
+      },
+      "relationships": { "individual_entity": { "data": { "type": "contract_individual_entities", "id": "602" } } }
+    },
+    {
+      "type": "contract_individual_entities", "id": "602",
+      "attributes": { "full_name": "خالد تجريبي", "id_type": "national_id" }
+    },
+    {
+      "type": "financial_informations", "id": "42",
+      "attributes": {
+        "security_deposit_amount": "6000.0", "security_deposit_amount_currency": "SAR",
+        "iban_number": "SA0000000000000000000000"
+      }
+    }
+  ]
+}

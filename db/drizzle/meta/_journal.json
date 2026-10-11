@@ -477,6 +477,13 @@
       "when": 1791244800000,
       "tag": "0075_finance_v2_property_commission",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1791763200000,
+      "tag": "0077_ejar_lookups",
+      "breakpoints": true
     }
   ]
 }

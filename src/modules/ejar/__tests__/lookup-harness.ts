@@ -1,0 +1,245 @@
+/**
+ * Test harness for Ejar Import v2: an in-memory EjarLookupStore and a mocked
+ * global fetch that plays the Balady staging gateway. Nothing here can reach
+ * the network — an unexpected URL throws.
+ *
+ * All data is synthetic (public repo).
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { EjarClientService } from "../ejar.client.service";
+import { EjarLookupService } from "../ejar.lookup.service";
+import type { EjarLookupStore, PartyMatch, SavedLookup } from "../ejar.lookup.store";
+import type { EjarScope } from "../ejar.scope";
+import type { LookupUsage } from "../ejar.budget";
+
+export const CN = "10000000001";
+export const UUID = "11111111-2222-4333-8444-555555555555";
+export const STG = "https://apiservicesstg.balady.gov.sa";
+
+export const fixture = (name: string) =>
+  JSON.parse(readFileSync(join(__dirname, "..", "__fixtures__", `${name}.json`), "utf8"));
+
+export const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+export const baladyOk = (result: unknown) =>
+  json(200, { statusDetails: { code: 200, message: "Ok" }, data: { responseCode: "1", responseMessage: "success", responseId: "r-1", result } });
+export const baladyErr = (status: number, responseCode: string, responseMessage: string) =>
+  json(status, { statusDetails: { code: status, message: "Error" }, data: { responseCode, responseMessage } });
+export const tokenOk = () => json(200, { access_token: "tok-1", expires_in: "17999", token_type: "Bearer" });
+
+/** A synthetic UUID per contract number, so several contracts can coexist in one test. */
+export const uuidFor = (n: string) => (n === CN ? UUID : `11111111-2222-4333-8444-${n.padStart(12, "0").slice(-12)}`);
+
+/** The Invoices fixture re-keyed to contract `n`. */
+export function invoicesFor(n: string) {
+  const b = fixture("lookup-invoices");
+  b.data[0].id = uuidFor(n);
+  b.data[0].attributes.contract_no = n;
+  b.included[0].attributes.contract_id = uuidFor(n);
+  return b;
+}
+
+/** The Details fixture re-keyed to contract `n`. */
+export function detailsFor(n: string) {
+  const b = fixture("lookup-details");
+  b.data.id = uuidFor(n);
+  b.data.attributes.contract_number = n;
+  return b;
+}
+
+/** Residential, both parties individuals, no representatives. */
+export function individualDetails(n = CN) {
+  const b = detailsFor(n);
+  b.data.attributes.contract_type = "residential";
+  b.data.attributes.security_deposit_amount = "0.0";
+  b.data.relationships.contract_parties.data = [{ type: "contract_parties", id: "1" }, { type: "contract_parties", id: "2" }];
+  b.included = [
+    {
+      type: "contract_parties", id: "1",
+      attributes: { contract_party_role: "tenant", contract_party_entity_type: "Domain::Contract::Model::ContractPartyIndividualEntity", approved: true },
+      relationships: { individual_entity: { data: { type: "contract_individual_entities", id: "701" } } },
+    },
+    { type: "contract_individual_entities", id: "701", attributes: { full_name: "سارة تجريبية", id_type: "iqama" } },
+    {
+      type: "contract_parties", id: "2",
+      attributes: { contract_party_role: "lessor", contract_party_entity_type: "Domain::Contract::Model::ContractPartyIndividualEntity", approved: true },
+      relationships: { individual_entity: { data: { type: "contract_individual_entities", id: "702" } } },
+    },
+    { type: "contract_individual_entities", id: "702", attributes: { full_name: "فهد تجريبي", id_type: "national_id" } },
+    { type: "financial_informations", id: "42", attributes: { security_deposit_amount: "0.0", iban_number: null } },
+  ];
+  return b;
+}
+
+export interface LogRow {
+  id: number; userId: number | null; env: string; endpoint: string; attempts: number;
+  status: number | null; createdAt: Date; [k: string]: unknown;
+}
+
+/** In-memory EjarLookupStore. `logs` is shared with the client's log service. */
+export class MemStore implements EjarLookupStore {
+  logs: LogRow[] = [];
+  lookups = new Map<string, SavedLookup>();
+  imported = new Map<string, number>();
+  /** user id → account (scope owner) */
+  accountOf: Record<number, number> = {};
+  scopes: Record<number, EjarScope> = {};
+  owners: Array<{ id: number; accountId: number; name: string; idNumber: string | null }> = [];
+  tenants: Array<{ id: number; accountId: number; name: string; nationalId: string | null }> = [];
+  properties: Array<{ id: number; accountId: number; ownerId: number | null; usageLookupId: number | null }> = [];
+  units: Array<{ id: number; propertyId: number; unitNumber: string; usageLookupId: number | null }> = [];
+  lookupRows: Array<{ id: number; category: string; key: string; labelAr?: string }> = [
+    { id: 1, category: "property_type", key: "apartment_building" },
+    { id: 2, category: "property_usage", key: "commercial" },
+    { id: 3, category: "property_usage", key: "families" },
+    { id: 4, category: "property_usage", key: "mixed" },
+    { id: 5, category: "unit_type", key: "shop" },
+    { id: 6, category: "city", key: "riyadh", labelAr: "الرياض" },
+  ];
+  private chain: Promise<unknown> = Promise.resolve();
+  private nextId = 1;
+  locksTaken = 0;
+
+  logService = {
+    insert: async (rec: Record<string, unknown>) => {
+      const row = { ...rec, id: this.logs.length + 1, createdAt: new Date() } as LogRow;
+      this.logs.push(row);
+      return row;
+    },
+  };
+
+  withBudgetLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = () => { this.locksTaken++; return fn(); };
+    const next = this.chain.then(run, run);
+    this.chain = next.catch(() => undefined);
+    return next;
+  }
+
+  async usage(since: Date | null, accountId: number): Promise<LookupUsage> {
+    const rows = this.logs.filter((l) => l.env.startsWith("balady") && (!since || l.createdAt >= since));
+    const sum = (endpoint: string, acct?: number) =>
+      rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct))
+        .reduce((s, l) => s + l.attempts, 0);
+    return {
+      invoices: sum("rentalContractInvoices"),
+      details: sum("contractDetails"),
+      account: Math.max(sum("rentalContractInvoices", accountId), sum("contractDetails", accountId)),
+    };
+  }
+
+  async scope(accountId: number): Promise<EjarScope> { return this.scopes[accountId] ?? { locked: false, idNumber: null }; }
+  async getLookup(accountId: number, n: string) { return this.lookups.get(`${accountId}:${n}`) ?? null; }
+  async saveLookup(row: Omit<SavedLookup, "id" | "createdAt">) {
+    const saved = { ...row, id: this.nextId++, createdAt: new Date() };
+    this.lookups.set(`${row.accountId}:${row.contractNumber}`, saved);
+    return saved;
+  }
+  async findImported(accountId: number, n: string) {
+    const id = this.imported.get(`${accountId}:${n}`);
+    return id ? { contractId: id } : null;
+  }
+  async findMatches(accountId: number, landlordIds: string[], tenantIds: string[]) {
+    const o = this.owners.find((r) => r.accountId === accountId && r.idNumber && landlordIds.includes(r.idNumber));
+    const t = this.tenants.find((r) => r.accountId === accountId && r.nationalId && tenantIds.includes(r.nationalId));
+    return { landlord: o ? { id: o.id, name: o.name } : null, tenant: t ? { id: t.id, name: t.name } : null };
+  }
+  async landlord(accountId: number, id: number): Promise<PartyMatch | null> {
+    const o = this.owners.find((r) => r.id === id && r.accountId === accountId);
+    return o ? { id: o.id, name: o.name } : null;
+  }
+  async tenant(accountId: number, id: number): Promise<PartyMatch | null> {
+    const t = this.tenants.find((r) => r.id === id && r.accountId === accountId);
+    return t ? { id: t.id, name: t.name } : null;
+  }
+  async property(accountId: number, id: number) {
+    const p = this.properties.find((r) => r.id === id && r.accountId === accountId);
+    return p ? { id: p.id, ownerId: p.ownerId, usageLookupId: p.usageLookupId } : null;
+  }
+  async unit(accountId: number, id: number) {
+    const u = this.units.find((r) => r.id === id);
+    if (!u || !this.properties.some((p) => p.id === u.propertyId && p.accountId === accountId)) return null;
+    return { id: u.id, propertyId: u.propertyId, usageLookupId: u.usageLookupId };
+  }
+  async unitNumberTaken(propertyId: number, unitNumber: string) {
+    return this.units.find((u) => u.propertyId === propertyId && u.unitNumber === unitNumber)?.id ?? null;
+  }
+  async lookupRow(id: number) {
+    const r = this.lookupRows.find((x) => x.id === id);
+    return r ? { id: r.id, category: r.category, key: r.key } : null;
+  }
+  async resolveLookup(category: string, value: string) {
+    return this.lookupRows.find((x) => x.category === category && (x.key === value || x.labelAr === value))?.id ?? null;
+  }
+}
+
+const ENV_KEYS = [
+  "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
+  "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
+  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS",
+  "EJAR_LOOKUP_LIMIT", "EJAR_LOOKUP_WINDOW", "EJAR_LOOKUP_LIMIT_PER_ACCOUNT", "EJAR_LOOKUP_CACHE_HOURS",
+];
+
+export interface Call { url: string; init: RequestInit }
+
+/**
+ * One isolated Balady-staging world. Call `restore()` in afterEach.
+ * `respond` decides each DATA call; the token endpoint always answers.
+ */
+export function world(opts: { env?: Record<string, string>; delayMs?: number } = {}) {
+  const realFetch = globalThis.fetch;
+  const saved: Record<string, string | undefined> = {};
+  for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  process.env.EJAR_BALADY_BASE_URL = STG;
+  process.env.EJAR_BALADY_CLIENT_ID = "fake-id";
+  process.env.EJAR_BALADY_CLIENT_SECRET = "fake-secret";
+  for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
+
+  const calls: Call[] = [];
+  const known = new Set<string>([CN]);
+  const details = new Map<string, unknown>();
+  let respond: (url: string) => Response | Promise<Response> = (url) => {
+    const inv = url.match(/\/v1\/ejar-services\/contracts\/(\d+)\/invoices/);
+    if (inv) return known.has(inv[1]) ? baladyOk(invoicesFor(inv[1])) : baladyErr(400, "E1.11", "رقم العقد غير صحيح");
+    const det = url.match(/\/v1\/ejar-services\/contracts\/([0-9a-f-]{36})$/i);
+    if (det) {
+      const n = [...known].find((k) => uuidFor(k) === det[1]);
+      return n ? baladyOk(details.get(n) ?? detailsFor(n)) : baladyErr(500, "E500", "internal");
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  globalThis.fetch = (async (url: string, init: RequestInit) => {
+    const u = String(url);
+    if (!u.startsWith(STG)) throw new Error(`test tried to reach a non-staging host: ${u}`);
+    calls.push({ url: u, init });
+    if (u.endsWith("/oauth/v1/token")) return tokenOk();
+    if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+    return respond(u);
+  }) as typeof fetch;
+
+  const store = new MemStore();
+  const client = new EjarClientService(store.logService as never);
+  const svc = new EjarLookupService(client, store);
+  return {
+    store, client, svc, calls, known, details,
+    /** Data calls only (the OAuth token request is not one). */
+    dataCalls: () => calls.filter((c) => !c.url.endsWith("/oauth/v1/token")),
+    setRespond: (fn: (url: string) => Response | Promise<Response>) => { respond = fn; },
+    restore: () => {
+      globalThis.fetch = realFetch;
+      for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    },
+  };
+}
+
+/** The HTTP status and JSON body of a thrown Nest HttpException. */
+export async function httpError(p: Promise<unknown>): Promise<{ status: number; body: any }> {
+  try {
+    await p;
+  } catch (e: any) {
+    if (typeof e?.getStatus === "function") return { status: e.getStatus(), body: e.getResponse() };
+    throw e;
+  }
+  throw new Error("expected the call to fail");
+}

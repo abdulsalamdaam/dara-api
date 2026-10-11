@@ -54,7 +54,7 @@ export interface BaladyEnvelope<T = Record<string, unknown>> {
   data?: { responseCode?: string; responseMessage?: string; responseId?: string; result?: EjarBody<T> };
 }
 
-/* ── Endpoint registry — the six verified endpoints ── */
+/* ── Endpoint registry — the six NHC endpoints plus Balady's contract details ── */
 
 export type EjarEndpointKey =
   | "getRentalContracts"
@@ -62,7 +62,14 @@ export type EjarEndpointKey =
   | "getUnits"
   | "nationalAddress"
   | "rentalContractInvoices"
-  | "rentalFinancialData";
+  | "rentalFinancialData"
+  | "contractDetails";
+
+/** The two calls one contract lookup makes, in order. Both are budgeted. */
+export const LOOKUP_ENDPOINTS = ["rentalContractInvoices", "contractDetails"] as const;
+
+/** An Ejar contract UUID (the id the invoices call returns). */
+export const EJAR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface EjarEndpointDef {
   method: "GET";
@@ -78,6 +85,16 @@ export interface EjarEndpointDef {
    * left over for the query string.
    */
   balady?: (params: Record<string, string>) => { path: string; query: Record<string, string> };
+  /** Only Balady carries it: no NHC fallback, unconfigured Balady is a config error. */
+  baladyOnly?: boolean;
+  /**
+   * Never retried automatically. These calls are counted against the lookup
+   * budget, so a 5xx/429 retry would silently spend quota. The single
+   * token-refresh retry on a Balady 401 still happens and is counted.
+   */
+  noRetry?: boolean;
+  /** Validate params before anything is sent; return an error message to refuse. */
+  validate?: (params: Record<string, string>) => string | null;
 }
 
 export const EJAR_ENDPOINTS: Record<EjarEndpointKey, EjarEndpointDef> = {
@@ -91,6 +108,20 @@ export const EJAR_ENDPOINTS: Record<EjarEndpointKey, EjarEndpointDef> = {
   rentalContractInvoices: {
     method: "GET", path: "/v1/ejar/RentalContractInvoices", group: "A", required: ["contractNumber"], label: "Rental Contract Invoices",
     balady: ({ contractNumber, ...query }) => ({ path: `/v1/ejar-services/contracts/${encodeURIComponent(contractNumber)}/invoices`, query }),
+    noRetry: true,
+    // Balady only: an NHC fallback would be logged under an NHC env and slip
+    // past the lookup budget, which counts Balady calls.
+    baladyOnly: true,
+    validate: ({ contractNumber }) => (/^\d{5,20}$/.test(contractNumber ?? "") ? null : "contractNumber must be digits only"),
+  },
+  // Balady only. A non-UUID id makes the gateway answer 500, so it is refused
+  // here before anything is sent.
+  contractDetails: {
+    method: "GET", path: "/v1/ejar-services/contracts/{uuid}", group: "A", required: ["uuid"], label: "Contract Details",
+    balady: ({ uuid, ...query }) => ({ path: `/v1/ejar-services/contracts/${encodeURIComponent(uuid)}`, query }),
+    baladyOnly: true,
+    noRetry: true,
+    validate: ({ uuid }) => (EJAR_UUID_RE.test(uuid ?? "") ? null : "uuid must be an Ejar contract UUID"),
   },
   rentalFinancialData: { method: "GET", path: "/v1/ejar/RentalFinancialData", group: "A", required: ["contractNumber"], label: "Rental Financial Data" },
 };

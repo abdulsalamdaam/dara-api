@@ -111,12 +111,40 @@ describe("EjarClientService gateways", () => {
   it("surfaces Balady's business message on an error", async () => {
     setBalady();
     replies.push(tokenOk(), json(400, { statusDetails: { code: 400, message: "Bad Request" }, data: { responseCode: "E1.11", responseMessage: "رقم العقد غير صحيح" } }));
-    await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "1" }), /E1\.11 رقم العقد غير صحيح/);
+    await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "10000000099" }), /E1\.11 رقم العقد غير صحيح/);
+  });
+
+  it("never retries the budgeted lookup endpoints", async () => {
+    setBalady();
+    replies.push(tokenOk(), json(503, { statusDetails: { code: 503, message: "down" } }));
+    const c = client();
+    await assert.rejects(c.request("rentalContractInvoices", { contractNumber: "10000000001" }), (e: unknown) => {
+      assert.equal((e as { status: number }).status, 503);
+      assert.equal(((e as { log: { attempts: number } }).log).attempts, 1);
+      return true;
+    });
+    assert.equal(calls.filter((x) => !x.url.endsWith("/oauth/v1/token")).length, 1);
+  });
+
+  it("still retries the other endpoints on 5xx", async () => {
+    setBalady();
+    replies.push(tokenOk(), json(502, {}), baladyOk());
+    const { log } = await client().request("getRentalContracts", { id_number: "1" });
+    assert.equal((log as { attempts: number }).attempts, 2);
+  });
+
+  it("refuses a malformed contract number before any call", async () => {
+    setBalady();
+    await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "12/../x" }), /digits only/);
+    assert.equal(calls.length, 0);
   });
 
   it("refuses the production Balady gateway", async () => {
     setBalady("https://apiservices.balady.gov.sa/");
     await assert.rejects(client().request("getRentalContracts", { id_number: "1" }), EjarConfigError);
+    await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "10000000001" }), EjarConfigError);
+    await assert.rejects(client().request("contractDetails", { uuid: "11111111-2222-4333-8444-555555555555" }), EjarConfigError);
+    await assert.rejects(client().checkToken(), EjarConfigError);
     assert.equal(calls.length, 0);
   });
 });

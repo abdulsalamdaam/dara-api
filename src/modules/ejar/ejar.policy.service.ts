@@ -25,14 +25,16 @@ export interface ManualAddPolicy {
 
 const KEY_OVERRIDE = "manual_add_override";
 const KEY_HEALTH = "ejar_health";
-/** UAT contract used purely as a cheap "is the gateway answering" ping. */
-const HEALTH_CONTRACT = "10732702933";
 const HOUR_MS = 60 * 60 * 1000;
 
 /**
  * Owns two pieces of state and the rule that combines them:
  *
- *   - the hourly Ejar connectivity check (cached, never blocking a request)
+ *   - the hourly Ejar connectivity check (cached, never blocking a request).
+ *     It is a Balady OAuth token request and nothing else: the probe used to
+ *     call NationalAddress every hour, spending a data call per hour on a
+ *     quota-limited gateway. A token proves the gateway, our credentials and
+ *     our IP; it does not touch the lookup budget.
  *   - the super-admin override
  *
  * Precedence is **admin override > health > default (disabled)**. The default
@@ -64,16 +66,15 @@ export class EjarPolicyService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer);
   }
 
-  /** Ping Ejar and cache the verdict. Never throws — this runs unattended. */
+  /**
+   * Check the gateway with a token request and cache the verdict. Never
+   * throws — this runs unattended. Balady not configured means the two-call
+   * import cannot run at all, so it reads as "down" and manual entry unlocks.
+   */
   async refreshHealth(): Promise<EjarHealthState> {
     let state: EjarHealthState;
     try {
-      const { log } = await this.client.request(
-        "nationalAddress",
-        { contractNumber: HEALTH_CONTRACT, partyType: 0 },
-        { skipLog: true },
-      );
-      const status = (log as { status?: number }).status ?? null;
+      const { status } = await this.client.checkToken();
       state = { ok: true, checkedAt: new Date().toISOString(), status, detail: null };
     } catch (err) {
       const e = err as { status?: number; message?: string };

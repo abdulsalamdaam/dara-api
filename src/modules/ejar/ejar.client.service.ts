@@ -75,7 +75,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const trimUrl = (u: string) => u.replace(/\/+$/, "");
 
 /**
- * Server-side client for the six whitelisted Ejar endpoints, over two gateways
+ * Server-side client for the whitelisted Ejar endpoints, over two gateways
  * that front the same Ejar backend:
  *
  * - **Balady** (MOMRAH, `EJAR_BALADY_*`): OAuth client-credentials → Bearer
@@ -85,7 +85,8 @@ const trimUrl = (u: string) => u.replace(/\/+$/, "");
  *   mandatory (undocumented) `RefId: 1`, and `CallerReqTime` for
  *   `/v1/ejarext/*`. Used for the endpoints Balady does not carry yet.
  *
- * Retries 5xx and 429 with exponential backoff, unwraps either envelope to the
+ * Retries 5xx and 429 with exponential backoff — except the budgeted lookup
+ * endpoints (`noRetry`), which are sent exactly once — unwraps either envelope to the
  * same JSON:API body, records the `X-Global-Transaction-ID`, and persists
  * every call via EjarLogService. Credentials come from the environment and
  * never leave this service.
@@ -127,6 +128,11 @@ export class EjarClientService {
   private route(endpoint: EjarEndpointKey): { gateway: Gateway; cfg: GatewayConfig } {
     const balady = EJAR_ENDPOINTS[endpoint]?.balady ? this.baladyConfig() : null;
     if (balady) return { gateway: "balady", cfg: balady };
+    if (EJAR_ENDPOINTS[endpoint]?.baladyOnly) {
+      throw new EjarConfigError(
+        "This Ejar endpoint is only on the Balady gateway. Set EJAR_BALADY_BASE_URL, EJAR_BALADY_CLIENT_ID and EJAR_BALADY_CLIENT_SECRET.",
+      );
+    }
     const nhc = this.nhcConfig();
     if (nhc) return { gateway: "nhc", cfg: nhc };
     throw new EjarConfigError(
@@ -188,8 +194,9 @@ export class EjarClientService {
     const def = EJAR_ENDPOINTS[endpoint];
     if (!def) throw new EjarConfigError(`Unknown Ejar endpoint: ${endpoint}`);
 
-    // Every outbound call passes through here — the routes, the replay and the
-    // health probe — so this is the one place the access rule cannot be missed.
+    // Every outbound data call passes through here (since Import v2 only the
+    // budgeted lookup makes any), so this is the one place the access rule
+    // cannot be missed.
     // A refused attempt is still logged, so the log shows who tried.
     const denial = ejarAccessDenial(opts.userId);
     if (denial) {
@@ -213,6 +220,9 @@ export class EjarClientService {
     }
     const missing = def.required.filter((r) => !strParams[r]);
     if (missing.length) throw new EjarApiError(`Missing required parameter(s): ${missing.join(", ")}`, 400, null, null);
+    // Refused before anything is sent (and so before anything is counted).
+    const invalid = def.validate?.(strParams);
+    if (invalid) throw new EjarApiError(invalid, 400, null, null);
 
     const target = gateway === "balady" && def.balady ? def.balady(strParams) : { path: def.path, query: strParams };
     const qs = new URLSearchParams(target.query).toString();
@@ -247,11 +257,15 @@ export class EjarClientService {
     const startedAt = Date.now();
     let lastErr: unknown = null;
     let refreshedToken = false;
+    // Budgeted endpoints are never retried: a retry is a second billable call.
+    const maxTries = def.noRetry ? 1 : MAX_RETRIES;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      rec.attempts = attempt;
+    for (let attempt = 1; attempt <= maxTries; attempt++) {
       try {
         if (gateway === "balady") headers.Authorization = `Bearer ${await this.baladyToken(cfg)}`;
+        // `attempts` counts data requests actually sent — including the one
+        // repeated after a token refresh — because the lookup budget sums it.
+        rec.attempts++;
         const res = await fetch(url, { method: def.method, headers, cache: "no-store" });
         rec.status = res.status;
         rec.transactionId = res.headers.get("X-Global-Transaction-ID");
@@ -267,7 +281,7 @@ export class EjarClientService {
           attempt--;
           continue;
         }
-        if ((res.status >= 500 || res.status === 429) && attempt < MAX_RETRIES) {
+        if ((res.status >= 500 || res.status === 429) && attempt < maxTries) {
           lastErr = new EjarApiError(`Ejar ${res.status}`, res.status, rec.transactionId, parsed);
           await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
           continue;
@@ -302,7 +316,7 @@ export class EjarClientService {
       } catch (err) {
         if (err instanceof EjarApiError && err.log !== undefined) throw err;
         lastErr = err;
-        if (attempt < MAX_RETRIES) {
+        if (attempt < maxTries) {
           await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
           continue;
         }
@@ -317,6 +331,21 @@ export class EjarClientService {
       throw lastErr;
     }
     throw new EjarApiError(rec.error, rec.status, rec.transactionId, null, log);
+  }
+
+  /**
+   * A token-only health check: one OAuth client-credentials call to Balady,
+   * no Ejar data request, so it costs nothing against the lookup budget.
+   * Throws when Balady is not configured (the two-call lookup needs it), when
+   * EJAR_ACCESS shuts the probe out, or when the gateway refuses the token.
+   */
+  async checkToken(): Promise<{ gateway: "balady"; status: number }> {
+    const denial = ejarAccessDenial(null);
+    if (denial) throw new EjarAccessError(denial);
+    const cfg = this.baladyConfig();
+    if (!cfg) throw new EjarConfigError("Balady gateway is not configured (EJAR_BALADY_*); Ejar lookups cannot run.");
+    await this.baladyToken(cfg, true);
+    return { gateway: "balady", status: 200 };
   }
 
   /**

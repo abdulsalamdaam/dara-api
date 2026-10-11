@@ -660,6 +660,17 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure finance v2 trust accounts failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
 
+    // Ejar Import v2: saved two-call lookups (and the index the lookup budget
+    // counts with). Idempotent and additive. A failure warns and boots anyway:
+    // only /ejar/lookup and /ejar/import need it, and both fail closed without it.
+    try {
+      const ejarLookups = findSqlFile(join("drizzle", "0077_ejar_lookups.sql"));
+      if (ejarLookups) await client.query(readFileSync(ejarLookups, "utf8"));
+      else log.warn("0077_ejar_lookups.sql not found — ejar_lookups table not ensured");
+    } catch (err: any) {
+      log.warn(`ensure ejar_lookups failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
