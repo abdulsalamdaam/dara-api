@@ -61,14 +61,20 @@ IP NHC whitelisted. Set as **runtime** env vars (never committed):
 - `EJAR_ACCESS` = `all` | `allowlist` | `off`, with `EJAR_ALLOWED_USER_IDS` = `1,5` for
   `allowlist`. Staging runs `allowlist`. Anything else than those three values means `off`.
 
-Ejar Import v2 needs the Balady vars: a lookup is exactly two Balady calls
-(contract invoices, then contract details — the details endpoint has no NHC
-route). The NHC vars are no longer used by any route; keeping them is harmless.
+Ejar Import v2 needs the Balady vars: every lookup call is on Balady (Get
+Contracts and contract details have no NHC route). The NHC vars are no longer
+used by any route; keeping them is harmless.
 
-Lookup budget (one lookup = one Invoices call + one Details call):
+- `EJAR_LOOKUP_SECOND_CALL` = `contracts` (default) | `details`. A lookup is
+  Invoices, then Get Contracts by UUID (`contracts`) — falling back to Details
+  when the list does not hold the contract (a renewed one) — or Invoices then
+  Details (`details`). **Production must run `details`** until MOMRAH
+  subscribes it to Get Contracts (it answers 401 there). A typo means `details`.
 
-- `EJAR_LOOKUP_LIMIT` = lookups per window, default `50` (= at most 50 Invoices
-  calls and 50 Details calls). Unreadable value → `0` (closed).
+Lookup budget, counted per endpoint (Invoices, Get Contracts, Details):
+
+- `EJAR_LOOKUP_LIMIT` = lookups per window, default `50` (= at most 50 calls to
+  each endpoint). Unreadable value → `0` (closed).
 - `EJAR_LOOKUP_WINDOW` = `day` | `month` | `total`, default `month`; day/month
   reset at Asia/Riyadh midnight / the 1st.
 - `EJAR_LOOKUP_LIMIT_PER_ACCOUNT` = optional per-account cap in lookups; unset = none.
@@ -79,4 +85,4 @@ Verify after deploy (needs a user JWT): `GET /api/ejar/health` → `{ "ok": true
 `GET /api/ejar/budget`.
 The `contracts.ejar_source` column + `ejar_api_logs` table are created
 automatically on boot (passive migration `db/sql/2026_07_ejar_integration.sql`),
-and `ejar_lookups` by `db/drizzle/0077_ejar_lookups.sql`.
+and `ejar_lookups` by `db/drizzle/0077_ejar_lookups.sql` (+ `0078` for `contracts_body`).

@@ -1,0 +1,62 @@
+{
+  "data": [
+    {
+      "type": "contracts",
+      "id": "11111111-2222-4333-8444-555555555555",
+      "attributes": {
+        "contract_id": "11111111-2222-4333-8444-555555555555",
+        "contract_number": "10000000001",
+        "contract_type": "commercial",
+        "status": "active",
+        "start_time": "2026-11-16",
+        "end_time": "2029-11-15",
+        "created_time": "2026-07-30",
+        "auto_renewal_enabled": true,
+        "company_cr_number": "1010000009",
+        "broker_national_id": "1000000099",
+        "broker_name": "وسيط تجريبي",
+        "property_id": "aaaaaaaa-1111-4222-8333-444444444444",
+        "property_type": "building",
+        "property_name": "برج تجريبي",
+        "latitude": 24.7,
+        "longitude": 46.6,
+        "region": { "key": "riyadh", "name_ar": "الرياض", "name_en": "Riyadh" },
+        "unit_count": 1,
+        "units": [{ "id": "bbbbbbbb-1111-4222-8333-444444444444", "unit_type": "shop", "unit_number": "S-01" }],
+        "lessors": [
+          {
+            "vat": "300000000000003", "name": "شركة تجريبية للتطوير", "role": "lessor", "type": "organization",
+            "email": "lessor@example.invalid", "id_type": "cr", "id_number": "1010000002", "phone_number": "0500000001",
+            "unified_number": "QUJDREVGR0hJSktMTU5PUA==\n"
+          },
+          {
+            "vat": 0, "name": "محمد تجريبي", "role": "lessor_representative", "type": "individual",
+            "email": "rep@example.invalid", "id_type": "national_id", "id_number": "1000000003", "phone_number": "0500000003"
+          }
+        ],
+        "tenants": [
+          {
+            "vat": 0, "name": "سارة تجريبية", "role": "tenant", "type": "individual",
+            "email": "Tenant@Example.invalid", "id_type": "national_id", "id_number": "1000000004", "phone_number": "+966500000004"
+          }
+        ],
+        "lessor_count": 2,
+        "tenant_count": 1,
+        "total_value": 60000,
+        "installment_value": null,
+        "payment_frequency": "semi_annually",
+        "security_deposit_value": 6000,
+        "contract_creation_ejar_fee": 125,
+        "payment_history": [],
+        "installment_count": 6,
+        "sublease_allowed": false,
+        "classification": false,
+        "days_remaining": 1000,
+        "period": 1095,
+        "contract_activities": [],
+        "unified_number": "QUJDREVGR0hJSktMTU5PUA==\n"
+      }
+    }
+  ],
+  "meta": { "count": 1 }
+}

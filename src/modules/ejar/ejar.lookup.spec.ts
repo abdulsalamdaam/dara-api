@@ -1,5 +1,9 @@
 /**
- * Ejar Import v2 — the two-call lookup and its budget.
+ * Ejar Import v2 — the lookup and its budget.
+ *
+ * The blocks up to "Get Contracts mode" run with EJAR_LOOKUP_SECOND_CALL=
+ * details (Invoices → Details, what production uses); the Get Contracts mode
+ * (the default) has its own block below.
  *
  * Drives the real EjarLookupService and the real EjarClientService against a
  * mocked Balady staging gateway (no network) and an in-memory store, so every
@@ -10,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   CN, STG, UUID, world, httpError, individualDetails, baladyErr, baladyOk, json, fixture, invoicesFor, detailsFor,
+  contractsFor, PROPERTY_UUID, UNIT_UUID,
 } from "./__tests__/lookup-harness";
 import { computeBudget, lookupConfig, windowBounds } from "./ejar.budget";
 import { EjarConfigError, EjarApiError } from "./ejar.client.service";
@@ -20,10 +25,13 @@ const OTHER = { id: 2 } as never;
 
 let w: ReturnType<typeof world>;
 afterEach(() => w?.restore());
+/** A world in Details mode (Invoices → Details). */
+const dworld = (opts: { env?: Record<string, string>; delayMs?: number } = {}) =>
+  world({ ...opts, env: { EJAR_LOOKUP_SECOND_CALL: "details", ...(opts.env ?? {}) } });
 
 describe("POST /ejar/lookup — the two calls", () => {
   it("happy path: exactly Invoices then Details, with the right URLs and headers", async () => {
-    w = world();
+    w = dworld();
     const res = await w.svc.lookup(USER, { contract_number: CN });
     const data = w.dataCalls();
     assert.equal(data.length, 2, "one lookup = two data calls");
@@ -51,24 +59,24 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.deepEqual(res.invoices.map((i) => i.status), ["paid", "unpaid"]);
     assert.equal(res.logs.length, 2);
     assert.equal(res.alreadyImported, null);
-    assert.deepEqual(res.budget.used, { invoices: 1, details: 1 });
+    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 0, details: 1 });
     assert.equal(res.budget.remaining, 49);
     assert.ok(w.store.lookups.get(`1:${CN}`), "the lookup is saved for the import");
   });
 
   it("a cache hit spends nothing", async () => {
-    w = world();
+    w = dworld();
     await w.svc.lookup(USER, { contract_number: CN });
     const before = w.calls.length;
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.equal(w.calls.length, before, "no call at all, not even a token");
     assert.equal(res.source, "cache");
     assert.deepEqual(res.logs, []);
-    assert.deepEqual(res.budget.used, { invoices: 1, details: 1 });
+    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 0, details: 1 });
   });
 
   it("refresh: true spends a fresh lookup", async () => {
-    w = world();
+    w = dworld();
     await w.svc.lookup(USER, { contract_number: CN });
     const res = await w.svc.lookup(USER, { contract_number: CN, refresh: true });
     assert.equal(res.source, "ejar");
@@ -76,7 +84,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("a stale saved lookup (past EJAR_LOOKUP_CACHE_HOURS) calls Ejar again", async () => {
-    w = world({ env: { EJAR_LOOKUP_CACHE_HOURS: "1" } });
+    w = dworld({ env: { EJAR_LOOKUP_CACHE_HOURS: "1" } });
     await w.svc.lookup(USER, { contract_number: CN });
     w.store.lookups.get(`1:${CN}`)!.createdAt = new Date(Date.now() - 2 * 3_600_000);
     const res = await w.svc.lookup(USER, { contract_number: CN });
@@ -84,14 +92,14 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("the cache is per account", async () => {
-    w = world();
+    w = dworld();
     await w.svc.lookup(USER, { contract_number: CN });
     const res = await w.svc.lookup(OTHER, { contract_number: CN });
     assert.equal(res.source, "ejar");
   });
 
   it("an unknown number spends one call and answers 404 not_found", async () => {
-    w = world();
+    w = dworld();
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000099" }));
     assert.equal(status, 404);
     assert.equal(body.code, "not_found");
@@ -102,7 +110,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("an Invoices 200 that carries no contract is also not_found, with no Details call", async () => {
-    w = world();
+    w = dworld();
     w.setRespond(() => json(200, { statusDetails: { code: 200 }, data: { result: { data: [], included: [] } } }));
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 404);
@@ -110,7 +118,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("a bad number format spends nothing", async () => {
-    w = world();
+    w = dworld();
     for (const bad of ["", "12ab", "abc", "1234", "1".repeat(25), null, { x: 1 }]) {
       const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: bad }));
       assert.equal(status, 400, String(bad));
@@ -125,7 +133,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("no automatic retries: a 5xx on Invoices is one call and a 502", async () => {
-    w = world();
+    w = dworld();
     w.setRespond(() => baladyErr(503, "E503", "unavailable"));
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 502);
@@ -134,7 +142,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("no automatic retries: a 5xx on Details is still two calls in total", async () => {
-    w = world();
+    w = dworld();
     w.setRespond((url) => (url.endsWith("/invoices") ? (fixtureOk()) : baladyErr(500, "E500", "boom")));
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 502);
@@ -143,7 +151,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("a 429 from the gateway is not retried either", async () => {
-    w = world();
+    w = dworld();
     w.setRespond(() => baladyErr(429, "E429", "rate"));
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 502, "never confused with our own budget_exhausted 429");
@@ -152,7 +160,7 @@ describe("POST /ejar/lookup — the two calls", () => {
   });
 
   it("the single token-refresh retry on 401 is counted in attempts", async () => {
-    w = world();
+    w = dworld();
     let first = true;
     w.setRespond((url) => {
       if (url.endsWith("/invoices") && first) { first = false; return baladyErr(401, "401-01", "token"); }
@@ -161,13 +169,13 @@ describe("POST /ejar/lookup — the two calls", () => {
     const res = await w.svc.lookup(USER, { contract_number: CN });
     const inv = w.store.logs.find((l) => l.endpoint === "rentalContractInvoices")!;
     assert.equal(inv.attempts, 2, "both sent requests are counted");
-    assert.deepEqual(res.budget.used, { invoices: 2, details: 1 });
+    assert.deepEqual(res.budget.used, { invoices: 2, contracts: 0, details: 1 });
   });
 });
 
 describe("the lookup budget", () => {
   it("budget exhausted: 429, nothing sent", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "1" } });
     w.known.add("10000000002");
     await w.svc.lookup(USER, { contract_number: CN });
     const sent = w.calls.length;
@@ -179,14 +187,14 @@ describe("the lookup budget", () => {
   });
 
   it("a cache hit still works with the budget exhausted", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "1" } });
     await w.svc.lookup(USER, { contract_number: CN });
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.equal(res.source, "cache");
   });
 
   it("is counted per endpoint: limit 2 allows at most 2 Invoices and 2 Details calls", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "2" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "2" } });
     for (const n of ["10000000002", "10000000003", "10000000004"]) w.known.add(n);
     await w.svc.lookup(USER, { contract_number: "10000000002" });
     await w.svc.lookup(USER, { contract_number: "10000000003" });
@@ -198,11 +206,11 @@ describe("the lookup budget", () => {
   });
 
   it("unknown numbers use up Invoices headroom even though Details is untouched", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "2" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "2" } });
     await httpError(w.svc.lookup(USER, { contract_number: "10000000098" }));
     await httpError(w.svc.lookup(USER, { contract_number: "10000000099" }));
     const budget = await w.svc.budget(1);
-    assert.deepEqual(budget.used, { invoices: 2, details: 0 });
+    assert.deepEqual(budget.used, { invoices: 2, contracts: 0, details: 0 });
     assert.equal(budget.remaining, 0);
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 429, "a lookup needs headroom on BOTH endpoints");
@@ -210,7 +218,7 @@ describe("the lookup budget", () => {
   });
 
   it("per-account cap: one account's lookups don't spend another's", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT_PER_ACCOUNT: "1" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT_PER_ACCOUNT: "1" } });
     w.known.add("10000000002");
     w.store.accountOf[7] = 1; // user 7 is an employee of account 1
     await w.svc.lookup(USER, { contract_number: CN });
@@ -226,7 +234,7 @@ describe("the lookup budget", () => {
   });
 
   it("concurrent lookups cannot exceed the limit", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" }, delayMs: 15 });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "1" }, delayMs: 15 });
     const nums = ["10000000002", "10000000003", "10000000004", "10000000005"];
     for (const n of nums) w.known.add(n);
     const results = await Promise.allSettled(nums.map((n) => w.svc.lookup(USER, { contract_number: n })));
@@ -239,19 +247,19 @@ describe("the lookup budget", () => {
   });
 
   it("GET /ejar/budget reports the documented shape", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "5", EJAR_LOOKUP_WINDOW: "day" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "5", EJAR_LOOKUP_WINDOW: "day" } });
     await w.svc.lookup(USER, { contract_number: CN });
     const b = await w.svc.budget(1);
     assert.equal(b.limit, 5);
     assert.equal(b.window, "day");
-    assert.deepEqual(b.used, { invoices: 1, details: 1 });
+    assert.deepEqual(b.used, { invoices: 1, contracts: 0, details: 1 });
     assert.equal(b.remaining, 4);
     assert.ok(b.resetsAt);
     assert.deepEqual(b.perAccount, { limit: null, used: 1, remaining: null });
   });
 
   it("blocked attempts are not counted", async () => {
-    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" } });
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "1" } });
     w.store.logs.push({ id: 1, userId: 1, env: "blocked", endpoint: "rentalContractInvoices", attempts: 0, status: 403, createdAt: new Date() });
     w.store.logs.push({ id: 2, userId: 1, env: "uat", endpoint: "rentalContractInvoices", attempts: 3, status: 200, createdAt: new Date() });
     const res = await w.svc.lookup(USER, { contract_number: CN });
@@ -261,7 +269,9 @@ describe("the lookup budget", () => {
 
 describe("budget configuration", () => {
   it("defaults: 50 per month, no per-account cap, 24 h cache", () => {
-    assert.deepEqual(lookupConfig({}), { limit: 50, window: "month", perAccount: null, cacheHours: 24 });
+    assert.deepEqual(lookupConfig({}), { limit: 50, window: "month", perAccount: null, cacheHours: 24, secondCall: "contracts" });
+    assert.equal(lookupConfig({ EJAR_LOOKUP_SECOND_CALL: "details" }).secondCall, "details");
+    assert.equal(lookupConfig({ EJAR_LOOKUP_SECOND_CALL: "contrcts" }).secondCall, "details", "a typo picks the call prod is subscribed to");
   });
 
   it("a typo closes the budget rather than opening it", () => {
@@ -282,24 +292,25 @@ describe("budget configuration", () => {
   });
 
   it("remaining = limit - max(used), min'd with the account's remaining", () => {
-    const cfg = { limit: 10, window: "month" as const, perAccount: 3, cacheHours: 24 };
-    const b = computeBudget(cfg, { invoices: 4, details: 2, account: 1 });
+    const cfg = { limit: 10, window: "month" as const, perAccount: 3, cacheHours: 24, secondCall: "contracts" as const };
+    const acct = (n: number) => ({ invoices: n, contracts: 0, details: 0 });
+    const b = computeBudget(cfg, { invoices: 4, contracts: 3, details: 2, account: acct(1) });
     assert.equal(b.remaining, 2);
-    assert.equal(computeBudget({ ...cfg, perAccount: null }, { invoices: 4, details: 2, account: 1 }).remaining, 6);
-    assert.equal(computeBudget(cfg, { invoices: 12, details: 2, account: 0 }).remaining, 0, "never negative");
+    assert.equal(computeBudget({ ...cfg, perAccount: null }, { invoices: 4, contracts: 5, details: 2, account: acct(1) }).remaining, 5);
+    assert.equal(computeBudget(cfg, { invoices: 12, contracts: 0, details: 2, account: acct(0) }).remaining, 0, "never negative");
   });
 });
 
 describe("access, scope and gateway guards", () => {
   it("the EJAR_ACCESS gate stands in front of the lookup (and its cache)", async () => {
-    w = world({ env: { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" } });
+    w = dworld({ env: { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" } });
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 403);
     assert.equal(w.calls.length, 0);
   });
 
   it("a locked account may only look up a contract it is a party to", async () => {
-    w = world();
+    w = dworld();
     w.store.scopes[1] = { locked: true, idNumber: "7000000009" };
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 403);
@@ -308,14 +319,14 @@ describe("access, scope and gateway guards", () => {
   });
 
   it("a locked account whose CR is on the contract gets it", async () => {
-    w = world();
+    w = dworld();
     w.store.scopes[1] = { locked: true, idNumber: "1010000001" }; // the tenant's CR
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.equal(res.parties.tenant?.crNumber, "1010000001");
   });
 
   it("the production Balady host stays blocked — no call is made", async () => {
-    w = world({ env: { EJAR_BALADY_BASE_URL: "https://apiservices.balady.gov.sa/" } });
+    w = dworld({ env: { EJAR_BALADY_BASE_URL: "https://apiservices.balady.gov.sa/" } });
     const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 503);
     assert.equal(w.calls.length, 0);
@@ -324,7 +335,7 @@ describe("access, scope and gateway guards", () => {
   });
 
   it("contractDetails refuses a non-UUID before anything is sent", async () => {
-    w = world();
+    w = dworld();
     await assert.rejects(w.client.request("contractDetails", { uuid: "10000000001" }), (e: unknown) => {
       assert.ok(e instanceof EjarApiError);
       assert.equal((e as EjarApiError).status, 400);
@@ -334,7 +345,7 @@ describe("access, scope and gateway guards", () => {
   });
 
   it("contractDetails has no NHC fallback", async () => {
-    w = world();
+    w = dworld();
     delete process.env.EJAR_BALADY_BASE_URL;
     process.env.EJAR_BASE_URL = "https://integration-gw.housingapps.sa/nhc/uat";
     process.env.EJAR_CLIENT_ID = "x";
@@ -344,7 +355,7 @@ describe("access, scope and gateway guards", () => {
   });
 
   it("checkToken makes a token request and nothing else", async () => {
-    w = world();
+    w = dworld();
     await w.client.checkToken();
     assert.equal(w.calls.length, 1);
     assert.ok(w.calls[0].url.endsWith("/oauth/v1/token"));
@@ -354,7 +365,7 @@ describe("access, scope and gateway guards", () => {
 
 describe("matches, alreadyImported and required[]", () => {
   it("matches existing landlord/tenant by CR and flags an existing contract", async () => {
-    w = world();
+    w = dworld();
     w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر محلي", idNumber: "1010000002" });
     w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر محلي", nationalId: "1010000001" });
     w.store.tenants.push({ id: 22, accountId: 2, name: "حساب آخر", nationalId: "1010000001" });
@@ -429,3 +440,194 @@ describe("mapping the Details parties", () => {
 
 function fixtureOk() { return baladyOk(invoicesFor(CN)); }
 function detailsOk() { return baladyOk(detailsFor(CN)); }
+
+describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", () => {
+  const LIST_URL = `${STG}/v1/ejar-services/contracts?id_number=1&contract_ids=${UUID}&skip_filter_id_number=true&page%5Bnumber%5D=1&page%5Bsize%5D=10`;
+
+  it("happy path: exactly Invoices then Get Contracts, with the exact URL and params", async () => {
+    w = world();
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    const data = w.dataCalls();
+    assert.equal(data.length, 2);
+    assert.equal(data[0].url, `${STG}/v1/ejar-services/contracts/${CN}/invoices`);
+    assert.equal(data[1].url, LIST_URL);
+    const h = data[1].init.headers as Record<string, string>;
+    assert.equal(h.Authorization, "Bearer tok-1");
+    assert.equal(h.RefId, "1");
+    assert.equal(h.Accept, "application/json");
+    assert.equal(w.store.logs[1].endpoint, "getRentalContracts");
+
+    assert.equal(res.contract.source, "contracts");
+    assert.equal(res.contract.ejarId, UUID);
+    assert.equal(res.contract.status, "active");
+    assert.equal(res.contract.startDate, "2026-11-16");
+    assert.equal(res.contract.securityDeposit, 6000, "deposit from security_deposit_value");
+    assert.equal(res.contract.totalValue, 60000);
+    assert.equal(res.contract.paymentFrequency, "semi_annually");
+    assert.equal(res.contract.autoRenewal, true);
+    assert.deepEqual(res.contract.broker, { name: "وسيط تجريبي", nationalId: "1000000099" });
+
+    const { lessor, tenant, lessorRepresentative, tenantRepresentative } = res.parties;
+    assert.equal(lessor?.kind, "organization");
+    assert.equal(lessor?.crNumber, "1010000002");
+    assert.equal(lessor?.unifiedNumber, null, "an encrypted blob is never an identifier");
+    assert.equal(lessor?.vatNumber, "300000000000003");
+    assert.equal(lessor?.phone, "0500000001");
+    assert.equal(tenant?.kind, "individual");
+    assert.equal(tenant?.idNumber, "1000000004");
+    assert.equal(tenant?.email, "Tenant@Example.invalid");
+    assert.equal(lessorRepresentative?.idNumber, "1000000003");
+    assert.equal(tenantRepresentative, null);
+
+    assert.deepEqual(res.property, {
+      ejarId: PROPERTY_UUID, name: "برج تجريبي", type: "building",
+      region: { key: "riyadh", nameAr: "الرياض", nameEn: "Riyadh" },
+      latitude: 24.7, longitude: 46.6, mapsUrl: "https://www.google.com/maps?q=24.7,46.6",
+    });
+    assert.deepEqual(res.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop" }]);
+    assert.equal(res.invoices.length, 2, "Invoices stay the payment schedule");
+    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 1, details: 0 });
+    assert.equal((res as unknown as Record<string, unknown>).contractsResource, undefined, "internal, not in the response");
+
+    const saved = w.store.lookups.get(`1:${CN}`)!;
+    assert.ok(saved.contractsBody);
+    assert.equal(saved.detailsBody, null);
+  });
+
+  it("required[] shrinks to nothing when Ejar gave everything that resolves", async () => {
+    w = world();
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(res.required.filter((r) => r.required).map((r) => r.key), []);
+    for (const k of ["property.name", "property.propertyTypeId", "property.usageId", "property.city", "unit.unitNumber", "unit.unitTypeId"]) {
+      assert.equal(res.required.find((r) => r.key === k)?.required, false, k);
+    }
+    assert.ok(!res.required.some((r) => r.key === "landlord.idNumber" || r.key === "tenant.idNumber"));
+    assert.ok(!res.required.some((r) => r.key === "tenant.phone"), "Ejar gave the phone");
+  });
+
+  it("what does not resolve stays required", async () => {
+    w = world();
+    const list = contractsFor(CN);
+    list.data[0].attributes.units[0].unit_type = "spaceship";
+    list.data[0].attributes.region = { key: "nowhere", name_ar: "لا مكان", name_en: "Nowhere" };
+    list.data[0].attributes.tenants[0].id_number = null;
+    w.setRespond((url) => (url.includes("/invoices") ? baladyOk(invoicesFor(CN)) : baladyOk(list)));
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(res.required.filter((r) => r.required).map((r) => r.key).sort(), ["property.city", "tenant.idNumber", "unit.unitTypeId"]);
+  });
+
+  it("falls back to Details when Get Contracts holds no such contract: 3 calls", async () => {
+    w = world();
+    w.listOnly(); // a renewed contract: the list query by the Invoices UUID comes back empty
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    const urls = w.dataCalls().map((c) => c.url);
+    assert.deepEqual(urls, [`${STG}/v1/ejar-services/contracts/${CN}/invoices`, LIST_URL, `${STG}/v1/ejar-services/contracts/${UUID}`]);
+    assert.equal(res.contract.source, "details");
+    assert.equal(res.property, null);
+    assert.deepEqual(res.units, []);
+    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 1, details: 1 });
+  });
+
+  it("a list entry for another contract number also falls back", async () => {
+    w = world();
+    const list = contractsFor(CN);
+    list.data[0].id = "99999999-2222-4333-8444-555555555555";
+    list.data[0].attributes.contract_id = "99999999-2222-4333-8444-555555555555";
+    list.data[0].attributes.contract_number = "10000000555";
+    w.setRespond((url) => (url.includes("/invoices") ? baladyOk(invoicesFor(CN)) : url.includes("?") ? baladyOk(list) : baladyOk(detailsFor(CN))));
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.contract.source, "details");
+    assert.equal(w.dataCalls().length, 3);
+  });
+
+  it("without Details headroom the fallback is not made: 429 details_unavailable, nothing saved", async () => {
+    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" } });
+    w.store.logs.push({ id: 1, userId: 9, env: "balady-stg", endpoint: "contractDetails", attempts: 1, status: 200, createdAt: new Date() });
+    w.listOnly();
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "details_unavailable");
+    assert.equal(w.dataCalls().length, 2, "Invoices + Get Contracts, no third call");
+    assert.equal(w.store.lookups.size, 0);
+  });
+
+  it("the budget is counted per endpoint, fallback included", async () => {
+    w = world({ env: { EJAR_LOOKUP_LIMIT: "2" } });
+    for (const n of ["10000000002", "10000000003", "10000000004"]) w.known.add(n);
+    w.listOnly("10000000002", "10000000004");
+    await w.svc.lookup(USER, { contract_number: "10000000002" }); // 2 calls
+    await w.svc.lookup(USER, { contract_number: "10000000003" }); // 3 calls (fallback)
+    const b = await w.svc.budget(1);
+    assert.deepEqual(b.used, { invoices: 2, contracts: 2, details: 1 });
+    assert.equal(b.remaining, 0);
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000004" }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "budget_exhausted");
+    assert.equal(w.dataCalls().length, 5);
+  });
+
+  it("a lookup needs headroom on the second call it will make", async () => {
+    w = world({ env: { EJAR_LOOKUP_LIMIT: "1" } });
+    w.store.logs.push({ id: 1, userId: 9, env: "balady-stg", endpoint: "getRentalContracts", attempts: 1, status: 200, createdAt: new Date() });
+    assert.equal((await httpError(w.svc.lookup(USER, { contract_number: CN }))).status, 429);
+    assert.equal(w.calls.length, 0);
+  });
+
+  it("a Get Contracts failure is not retried and does not fall back", async () => {
+    w = world();
+    w.setRespond((url) => (url.includes("/invoices") ? baladyOk(invoicesFor(CN)) : baladyErr(401, "401-01", "API authorization failed")));
+    const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 502);
+    // Invoices + Get Contracts + the one token-refresh resend of Get Contracts.
+    assert.deepEqual(w.dataCalls().map((c) => c.url.includes("?")), [false, true, true]);
+    assert.equal(w.store.logs.find((l) => l.endpoint === "getRentalContracts")!.attempts, 2);
+  });
+
+  it("EJAR_LOOKUP_SECOND_CALL=details skips Get Contracts", async () => {
+    w = world({ env: { EJAR_LOOKUP_SECOND_CALL: "details" } });
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(w.dataCalls().map((c) => c.url), [`${STG}/v1/ejar-services/contracts/${CN}/invoices`, `${STG}/v1/ejar-services/contracts/${UUID}`]);
+    assert.equal(res.contract.source, "details");
+    assert.equal(res.budget.secondCall, "details");
+  });
+
+  it("matches existing landlord/tenant by their real IDs and property/unit by Ejar UUID", async () => {
+    w = world();
+    w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر", idNumber: "1010000002" });
+    w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر", nationalId: "1000000004" });
+    w.store.properties.push({ id: 31, accountId: 1, ownerId: 11, usageLookupId: 2, ejarId: PROPERTY_UUID, name: "عقاري" });
+    w.store.units.push({ id: 41, propertyId: 31, unitNumber: "S-01", usageLookupId: null, ejarId: UNIT_UUID });
+    w.store.properties.push({ id: 32, accountId: 2, ownerId: null, usageLookupId: null, ejarId: PROPERTY_UUID, name: "حساب آخر" });
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(res.matches.landlord, { id: 11, name: "مؤجر" });
+    assert.deepEqual(res.matches.tenant, { id: 21, name: "مستأجر" });
+    assert.deepEqual(res.matches.property, { id: 31, name: "عقاري" });
+    assert.equal(res.matches.unit?.id, 41);
+    assert.ok(!res.required.some((r) => r.section === "property" || r.section === "unit"), "matched sections need nothing");
+  });
+
+  it("a locked account is checked against the list parties' real IDs", async () => {
+    w = world();
+    w.store.scopes[1] = { locked: true, idNumber: "1000000004" }; // the tenant's ID
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.contract.source, "contracts");
+    w.store.scopes[2] = { locked: true, idNumber: "7000000009" };
+    assert.equal((await httpError(w.svc.lookup(OTHER, { contract_number: CN }))).status, 403);
+  });
+
+  it("the production host stays blocked in this mode too", async () => {
+    w = world({ env: { EJAR_BALADY_BASE_URL: "https://apiservices.balady.gov.sa" } });
+    assert.equal((await httpError(w.svc.lookup(USER, { contract_number: CN }))).status, 503);
+    await assert.rejects(
+      w.client.request("getRentalContracts", { id_number: "1", contract_ids: UUID, skip_filter_id_number: "true" }), EjarConfigError,
+    );
+    assert.equal(w.calls.length, 0);
+  });
+
+  it("Get Contracts is refused without a UUID contract_ids (it would list the whole dataset)", async () => {
+    w = world();
+    await assert.rejects(w.client.request("getRentalContracts", { id_number: "1", skip_filter_id_number: "true" }), /contract_ids/);
+    await assert.rejects(w.client.request("getRentalContracts", { id_number: "1", contract_ids: "10000000001" }), /UUID/);
+    assert.equal(w.calls.length, 0);
+  });
+});

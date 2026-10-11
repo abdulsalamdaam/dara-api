@@ -6,6 +6,7 @@ import { EjarAccessError, EjarClientService, EjarConfigError, ejarAccessDenial }
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+const U1 = "11111111-2222-4333-8444-555555555555";
 const BODY = { data: [{ type: "contracts", id: "u1", attributes: { contract_number: "10603093808" } }], meta: { count: 1 } };
 const baladyOk = (result = BODY) =>
   json(200, { statusDetails: { code: 200, message: "Ok" }, data: { responseCode: "1", responseMessage: "success", responseId: "r-1", result } });
@@ -54,11 +55,11 @@ describe("EjarClientService gateways", () => {
   it("sends contracts to Balady with a bearer token and unwraps data.result", async () => {
     setNhc(); setBalady();
     replies.push(tokenOk(), baladyOk());
-    const { body, log } = await client().request("getRentalContracts", { id_number: "1050000008", "page[size]": 10 });
+    const { body, log } = await client().request("getRentalContracts", { id_number: "1050000008", contract_ids: U1, "page[size]": 10 });
     assert.deepEqual(body, BODY);
     assert.equal(calls[0].url, "https://apiservicesstg.balady.gov.sa/oauth/v1/token");
     assert.equal((calls[0].init.headers as Record<string, string>).Authorization, `Basic ${Buffer.from("bal-id:bal-secret").toString("base64")}`);
-    assert.equal(calls[1].url, "https://apiservicesstg.balady.gov.sa/v1/ejar-services/contracts?id_number=1050000008&page%5Bsize%5D=10");
+    assert.equal(calls[1].url, `https://apiservicesstg.balady.gov.sa/v1/ejar-services/contracts?id_number=1050000008&contract_ids=${U1}&page%5Bsize%5D=10`);
     const h = calls[1].init.headers as Record<string, string>;
     assert.equal(h.Authorization, "Bearer tok-1");
     assert.equal(h.RefId, "1");
@@ -78,15 +79,15 @@ describe("EjarClientService gateways", () => {
     setBalady();
     const c = client();
     replies.push(tokenOk(), baladyOk(), baladyOk());
-    await c.request("getRentalContracts", { id_number: "1" });
-    await c.request("getRentalContracts", { id_number: "2" });
+    await c.request("getRentalContracts", { id_number: "1", contract_ids: U1 });
+    await c.request("getRentalContracts", { id_number: "2", contract_ids: U1 });
     assert.equal(calls.filter((x) => x.url.endsWith("/oauth/v1/token")).length, 1);
   });
 
   it("fetches a fresh token once when Balady answers 401", async () => {
     setBalady();
     replies.push(tokenOk("old"), json(401, { statusDetails: { code: 401, message: "API authorization failed" } }), tokenOk("new"), baladyOk());
-    const { body } = await client().request("getRentalContracts", { id_number: "1" });
+    const { body } = await client().request("getRentalContracts", { id_number: "1", contract_ids: U1 });
     assert.deepEqual(body, BODY);
     assert.equal((calls[3].init.headers as Record<string, string>).Authorization, "Bearer new");
   });
@@ -101,11 +102,10 @@ describe("EjarClientService gateways", () => {
     assert.equal((log as { env: string }).env, "uat");
   });
 
-  it("falls back to NHC for contracts when Balady is not configured", async () => {
+  it("no longer falls back to NHC for contracts: Get Contracts is Balady-only", async () => {
     setNhc();
-    replies.push(json(200, { Header: { Status: { Code: 200 } }, Body: BODY }));
-    await client().request("getRentalContracts", { id_number: "1" });
-    assert.ok(calls[0].url.includes("/v1/ejarext/GetRentalContracts"));
+    await assert.rejects(client().request("getRentalContracts", { id_number: "1", contract_ids: U1 }), EjarConfigError);
+    assert.equal(calls.length, 0);
   });
 
   it("surfaces Balady's business message on an error", async () => {
@@ -126,10 +126,17 @@ describe("EjarClientService gateways", () => {
     assert.equal(calls.filter((x) => !x.url.endsWith("/oauth/v1/token")).length, 1);
   });
 
-  it("still retries the other endpoints on 5xx", async () => {
+  it("never retries Get Contracts either", async () => {
     setBalady();
-    replies.push(tokenOk(), json(502, {}), baladyOk());
-    const { log } = await client().request("getRentalContracts", { id_number: "1" });
+    replies.push(tokenOk(), json(502, {}));
+    await assert.rejects(client().request("getRentalContracts", { id_number: "1", contract_ids: U1 }));
+    assert.equal(calls.length, 2);
+  });
+
+  it("still retries the non-budgeted NHC endpoints on 5xx", async () => {
+    setNhc();
+    replies.push(json(502, {}), json(200, { Header: { Status: { Code: 200 } }, Body: BODY }));
+    const { log } = await client().request("getProperties", { id_number: "1" });
     assert.equal((log as { attempts: number }).attempts, 2);
   });
 
@@ -141,7 +148,7 @@ describe("EjarClientService gateways", () => {
 
   it("refuses the production Balady gateway", async () => {
     setBalady("https://apiservices.balady.gov.sa/");
-    await assert.rejects(client().request("getRentalContracts", { id_number: "1" }), EjarConfigError);
+    await assert.rejects(client().request("getRentalContracts", { id_number: "1", contract_ids: U1 }), EjarConfigError);
     await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "10000000001" }), EjarConfigError);
     await assert.rejects(client().request("contractDetails", { uuid: "11111111-2222-4333-8444-555555555555" }), EjarConfigError);
     await assert.rejects(client().checkToken(), EjarConfigError);
@@ -193,7 +200,7 @@ describe("EjarClientService access gate", () => {
     globalThis.fetch = (async () => { fetched++; throw new Error("no"); }) as typeof fetch;
     const logged: { userId: number | null; env: string; error: string | null }[] = [];
     const c = new EjarClientService({ insert: async (r: never) => { logged.push(r); return r; } } as never);
-    await assert.rejects(c.request("getRentalContracts", { id_number: "1" }, { userId: 34 }), (e: unknown) => {
+    await assert.rejects(c.request("getRentalContracts", { id_number: "1", contract_ids: U1 }, { userId: 34 }), (e: unknown) => {
       assert.ok(e instanceof EjarAccessError);
       assert.equal((e as EjarAccessError).status, 403);
       return true;

@@ -670,6 +670,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) {
       log.warn(`ensure ejar_lookups failed: ${err?.message || err}`);
     }
+    // 0078: the lookup's Get Contracts body. After 0077, same rules.
+    try {
+      const ejarLookupsContracts = findSqlFile(join("drizzle", "0078_ejar_lookups_contracts_body.sql"));
+      if (ejarLookupsContracts) await client.query(readFileSync(ejarLookupsContracts, "utf8"));
+      else log.warn("0078_ejar_lookups_contracts_body.sql not found — ejar_lookups.contracts_body not ensured");
+    } catch (err: any) {
+      log.warn(`ensure ejar_lookups.contracts_body failed: ${err?.message || err}`);
+    }
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

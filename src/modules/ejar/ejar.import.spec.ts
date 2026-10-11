@@ -17,7 +17,9 @@ import {
   contractUnitsTable, usersTable, lookupsTable,
 } from "@dara/database";
 
-import { CN, UUID, world, httpError, invoicesFor, detailsFor, individualDetails, fixture } from "./__tests__/lookup-harness";
+import {
+  CN, UUID, world, httpError, invoicesFor, detailsFor, individualDetails, fixture, contractsFor, PROPERTY_UUID, UNIT_UUID,
+} from "./__tests__/lookup-harness";
 import { EjarImportService, EjarImportRunner, type EjarImportRunnerLike } from "./ejar.import.service";
 import { DrizzleEjarLookupStore } from "./ejar.lookup.store";
 import type { ImportPlan, ImportResult } from "./ejar.import.writer";
@@ -197,12 +199,13 @@ describe("POST /ejar/import (service)", () => {
     assert.equal(ll.raw.id_number, undefined, "a typed ID is not Ejar data, so it does not lock");
   });
 
-  it("a new property and unit need name, type, usage, city and number, type", async () => {
+  it("a Details snapshot: a new property and unit need name, type, city and number, type", async () => {
     await seed();
     const { status, body } = await httpError(svc.import(USER, { contract_number: CN, landlord: {}, tenant: {} }));
     assert.equal(status, 400);
+    // Usage follows Ejar's contract type (commercial), so it is not asked for.
     assert.deepEqual([...body.missing].sort(), [
-      "property.city", "property.name", "property.propertyTypeId", "property.usageId", "unit.unitNumber", "unit.unitTypeId",
+      "property.city", "property.name", "property.propertyTypeId", "unit.unitNumber", "unit.unitTypeId",
     ]);
   });
 
@@ -273,6 +276,116 @@ describe("POST /ejar/import (service)", () => {
     const fees = [{ id: "f1", typeKey: "maintenance", name: "صيانة", amount: "500", recurrence: "one_time" }];
     await svc.import(USER, { ...baseBody(), additionalFees: fees });
     assert.deepEqual(runner.plans[0].additionalFees, fees);
+  });
+});
+
+describe("POST /ejar/import from a Get Contracts snapshot", () => {
+  let w: ReturnType<typeof world>;
+  let runner: RecordingRunner;
+  let svc: EjarImportService;
+  const seed = (list: unknown = contractsFor(CN)) =>
+    w.store.saveLookup({ accountId: 1, contractNumber: CN, ejarUuid: UUID, invoicesBody: invoicesFor(CN), detailsBody: null, contractsBody: list as never, lookedUpBy: 1 });
+
+  beforeEach(() => {
+    w = world();
+    w.setRespond((url) => { throw new Error(`the import called Ejar: ${url}`); });
+    runner = new RecordingRunner();
+    svc = new EjarImportService(w.store, runner);
+  });
+  afterEach(() => {
+    assert.equal(w.calls.length, 0, "the import never calls Ejar");
+    w.restore();
+  });
+
+  it("needs nothing typed: property, unit and parties come from Ejar with their IDs", async () => {
+    await seed();
+    await svc.import(USER, { contract_number: CN });
+    const plan = runner.plans[0];
+    const ll = (plan.landlord as { party: any; rep: any });
+    assert.equal(ll.party.partyType, "organization");
+    assert.equal(ll.party.registrationNumber, "1010000002");
+    assert.equal(ll.party.unifiedNumber, "300000000000003", "the real VAT number goes to tax_number");
+    assert.equal(ll.party.phone, "500000001", "canonical phone, as the manual forms store it");
+    assert.equal(ll.party.email, "lessor@example.invalid");
+    assert.equal(ll.rep.idNumber, "1000000003");
+    const tn = (plan.tenant as { party: any }).party;
+    assert.equal(tn.idNumber, "1000000004");
+    assert.equal(tn.phone, "500000004");
+    assert.equal(tn.email, "tenant@example.invalid");
+    assert.equal(tn.raw.id_number, "1000000004", "Ejar's ID is Ejar data, so it locks");
+
+    const prop = (plan.property as { create: any }).create;
+    assert.equal(prop.p.ejarId, PROPERTY_UUID, "reused by Ejar UUID in upsertProperty");
+    assert.equal(prop.p.name, "برج تجريبي");
+    assert.equal(prop.p.propertyType, "building", "mapped by EJAR_PROPERTY_TYPE in upsertProperty");
+    assert.equal(prop.p.regionKey, "riyadh");
+    assert.equal(prop.raw.property_id, PROPERTY_UUID);
+    assert.deepEqual(prop.overrides, { usageLookupId: 2, cityLookupId: 6 }, "usage from the contract type, city from the region; ejar_source stays");
+
+    const unit = (plan.unit as { ejar: any }).ejar;
+    assert.deepEqual(unit.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop" }]);
+    assert.deepEqual(unit.raw[UNIT_UUID], { id: UNIT_UUID, unit_number: "S-01", unit_type: "shop" });
+    assert.deepEqual(unit.linkIds, []);
+    assert.equal(unit.overrides.status, "rented");
+
+    assert.equal(plan.contract.depositAmount, "6000");
+    assert.equal(plan.contract.vatEnabled, true);
+    assert.equal(plan.contract.status, "active");
+    assert.equal(plan.contract.customSchedule.length, 2, "the schedule is still Ejar's invoices");
+    assert.equal((plan.contract.ejarRaw as any).lookupSource, "contracts");
+  });
+
+  it("the user's input fills gaps but never overrides what Ejar said", async () => {
+    const list = contractsFor(CN);
+    list.data[0].attributes.units[0].unit_type = "spaceship";
+    list.data[0].attributes.tenants[0].id_number = null;
+    await seed(list);
+    const { body: err } = await httpError(svc.import(USER, { contract_number: CN }));
+    assert.deepEqual([...err.missing].sort(), ["tenant.idNumber", "unit.unitTypeId"]);
+    await svc.import(USER, {
+      contract_number: CN,
+      landlord: { idNumber: "1999999999", phone: "0599999999" },
+      tenant: { idNumber: "2000000002" },
+      property: { new: { name: "اسم آخر", district: "حي تجريبي" } },
+      unit: { new: { unitTypeId: 5 } },
+    });
+    const plan = runner.plans[0];
+    assert.equal((plan.tenant as { party: any }).party.idNumber, "2000000002", "a gap Ejar left is filled");
+    assert.equal((plan.landlord as { party: any }).party.phone, "500000001", "Ejar's phone stands");
+    const prop = (plan.property as { create: any }).create;
+    assert.equal(prop.p.name, "برج تجريبي", "Ejar's name stands");
+    assert.equal(prop.p.district, "حي تجريبي", "a field Ejar does not have is filled");
+    assert.equal((plan.unit as { ejar: any }).ejar.overrides.typeLookupId, 5);
+  });
+
+  it("an existing property with the same unit number links that unit instead of duplicating it", async () => {
+    await seed();
+    w.store.properties.push({ id: 31, accountId: 1, ownerId: null, usageLookupId: 2 });
+    w.store.units.push({ id: 41, propertyId: 31, unitNumber: "S-01", usageLookupId: null });
+    await svc.import(USER, { contract_number: CN, property: { existingId: 31 } });
+    const plan = runner.plans[0];
+    assert.deepEqual(plan.property, { existingId: 31 });
+    assert.deepEqual((plan.unit as { ejar: any }).ejar.linkIds, [41]);
+    assert.deepEqual((plan.unit as { ejar: any }).ejar.units, []);
+  });
+
+  it("a property and unit already in the account (by Ejar UUID) need nothing", async () => {
+    await seed();
+    w.store.properties.push({ id: 31, accountId: 1, ownerId: null, usageLookupId: 2, ejarId: PROPERTY_UUID, name: "x" });
+    w.store.units.push({ id: 41, propertyId: 31, unitNumber: "S-01", usageLookupId: null, ejarId: UNIT_UUID });
+    await svc.import(USER, { contract_number: CN });
+    const unit = (runner.plans[0].unit as { ejar: any }).ejar;
+    assert.equal(unit.units.length, 1, "upsertUnits finds it by Ejar UUID under the property");
+    assert.deepEqual(unit.linkIds, []);
+  });
+
+  it("existingIds still win, and must still be the account's", async () => {
+    await seed();
+    w.store.owners.push({ id: 11, accountId: 2, name: "x", idNumber: null });
+    assert.equal((await httpError(svc.import(USER, { contract_number: CN, landlord: { existingId: 11 } }))).status, 404);
+    w.store.owners.push({ id: 12, accountId: 1, name: "مؤجر", idNumber: null });
+    await svc.import(USER, { contract_number: CN, landlord: { existingId: 12 } });
+    assert.deepEqual(runner.plans[0].landlord, { existingId: 12 });
   });
 });
 
@@ -368,5 +481,61 @@ describe("POST /ejar/import (database, rolled back)", { skip: !HAS_DB && "DATABA
     const rent = out.payments.filter((p: any) => String(p.description ?? "").startsWith("فاتورة إيجار"));
     assert.equal(out.payments.length, 2, "one installment per Ejar invoice");
     assert.equal(rent.length, 2, "both carry the Ejar invoice identity");
+  });
+
+  it("from a Get Contracts snapshot: property, unit and parties from Ejar, locked as Ejar data; re-import reuses them", async () => {
+    assert.ok(userId, "needs at least one user row");
+    const out = await inRollback(async (tx) => {
+      const t = tx as never as typeof db;
+      const store = new DrizzleEjarLookupStore(t as never);
+      const snap = (n: string) => ({
+        id: 1, accountId: userId, contractNumber: n, ejarUuid: UUID, invoicesBody: invoicesFor(n), detailsBody: null,
+        contractsBody: (() => { const b = contractsFor(n); return b; })(), lookedUpBy: userId, createdAt: new Date(),
+      });
+      store.findImported = async () => null;
+      store.scope = async () => ({ locked: false, idNumber: null });
+      const svc = new EjarImportService(store, new EjarImportRunner(t as never));
+      store.getLookup = async (_a, n) => snap(n);
+      const first = await svc.import({ id: userId } as never, { contract_number: "10000000881" });
+      const second = await svc.import({ id: userId } as never, { contract_number: "10000000882" });
+      const one = async (table: any, id: number | null) => (id ? (await t.select().from(table).where(eq(table.id, id)).limit(1))[0] : null);
+      return {
+        first, second,
+        property: await one(propertiesTable, first.propertyId) as any,
+        unit: await one(unitsTable, first.unitIds[0]) as any,
+        landlord: await one(ownersTable, first.landlordId) as any,
+        tenant: await one(tenantsTable, first.tenantId) as any,
+        contract: await one(contractsTable, first.contractId) as any,
+        payments: await t.select().from(paymentsTable).where(eq(paymentsTable.contractId, first.contractId)),
+      };
+    });
+    assert.equal(out.property.ejarId, PROPERTY_UUID);
+    assert.equal(out.property.name, "برج تجريبي");
+    assert.equal(out.property.ejarSource, "ejar");
+    assert.ok(out.property.typeLookupId, "building → apartment_building lookup");
+    assert.ok(out.property.usageLookupId, "commercial contract → commercial usage");
+    assert.ok(out.property.cityLookupId, "region riyadh → city riyadh");
+    assert.ok(String(out.property.mapUrl).includes("24.7,46.6"));
+    assert.equal(out.property.ownerId, out.landlord.id);
+    assert.equal(out.unit.ejarId, UNIT_UUID);
+    assert.equal(out.unit.unitNumber, "S-01");
+    assert.ok(out.unit.typeLookupId, "shop → unit_type shop");
+    assert.equal(out.landlord.idNumber, "1010000002");
+    assert.equal(out.landlord.type, "company");
+    assert.equal(out.landlord.taxNumber, "300000000000003");
+    assert.equal(out.landlord.phone, "500000001");
+    assert.equal(out.landlord.originalOwnerIdNumber, "1000000003", "the representative, with Ejar's ID");
+    assert.equal(out.tenant.nationalId, "1000000004");
+    assert.equal(out.tenant.email, "tenant@example.invalid");
+    assert.equal(out.contract.tenantIdNumber, "1000000004");
+    assert.equal(out.contract.vatEnabled, true);
+    assert.equal(String(out.contract.depositAmount), "6000.00");
+    assert.equal(out.payments.length, 2);
+    // The second contract on the same Ejar property/unit/parties reuses all of them.
+    assert.equal(out.second.propertyId, out.first.propertyId);
+    assert.deepEqual(out.second.unitIds, out.first.unitIds);
+    assert.equal(out.second.landlordId, out.first.landlordId);
+    assert.equal(out.second.tenantId, out.first.tenantId);
+    assert.deepEqual(out.second.created, ["contract"]);
   });
 });

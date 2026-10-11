@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EjarClientService } from "../ejar.client.service";
 import { EjarLookupService } from "../ejar.lookup.service";
-import type { EjarLookupStore, PartyMatch, SavedLookup } from "../ejar.lookup.store";
+import type { EjarLookupStore, LookupMatches, MatchKeys, PartyMatch, SavedLookup } from "../ejar.lookup.store";
 import type { EjarScope } from "../ejar.scope";
 import type { LookupUsage } from "../ejar.budget";
 
@@ -47,6 +47,18 @@ export function detailsFor(n: string) {
   b.data.attributes.contract_number = n;
   return b;
 }
+
+/** The Get Contracts fixture re-keyed to contract `n`. */
+export function contractsFor(n: string) {
+  const b = fixture("lookup-contracts");
+  b.data[0].id = uuidFor(n);
+  b.data[0].attributes.contract_id = uuidFor(n);
+  b.data[0].attributes.contract_number = n;
+  return b;
+}
+export const EMPTY_CONTRACTS = { data: [], meta: { count: 0 } };
+export const PROPERTY_UUID = "aaaaaaaa-1111-4222-8333-444444444444";
+export const UNIT_UUID = "bbbbbbbb-1111-4222-8333-444444444444";
 
 /** Residential, both parties individuals, no representatives. */
 export function individualDetails(n = CN) {
@@ -87,8 +99,8 @@ export class MemStore implements EjarLookupStore {
   scopes: Record<number, EjarScope> = {};
   owners: Array<{ id: number; accountId: number; name: string; idNumber: string | null }> = [];
   tenants: Array<{ id: number; accountId: number; name: string; nationalId: string | null }> = [];
-  properties: Array<{ id: number; accountId: number; ownerId: number | null; usageLookupId: number | null }> = [];
-  units: Array<{ id: number; propertyId: number; unitNumber: string; usageLookupId: number | null }> = [];
+  properties: Array<{ id: number; accountId: number; ownerId: number | null; usageLookupId: number | null; ejarId?: string | null; name?: string }> = [];
+  units: Array<{ id: number; propertyId: number; unitNumber: string; usageLookupId: number | null; ejarId?: string | null }> = [];
   lookupRows: Array<{ id: number; category: string; key: string; labelAr?: string }> = [
     { id: 1, category: "property_type", key: "apartment_building" },
     { id: 2, category: "property_usage", key: "commercial" },
@@ -96,6 +108,7 @@ export class MemStore implements EjarLookupStore {
     { id: 4, category: "property_usage", key: "mixed" },
     { id: 5, category: "unit_type", key: "shop" },
     { id: 6, category: "city", key: "riyadh", labelAr: "الرياض" },
+    { id: 7, category: "property_usage", key: "individuals" },
   ];
   private chain: Promise<unknown> = Promise.resolve();
   private nextId = 1;
@@ -123,8 +136,13 @@ export class MemStore implements EjarLookupStore {
         .reduce((s, l) => s + l.attempts, 0);
     return {
       invoices: sum("rentalContractInvoices"),
+      contracts: sum("getRentalContracts"),
       details: sum("contractDetails"),
-      account: Math.max(sum("rentalContractInvoices", accountId), sum("contractDetails", accountId)),
+      account: {
+        invoices: sum("rentalContractInvoices", accountId),
+        contracts: sum("getRentalContracts", accountId),
+        details: sum("contractDetails", accountId),
+      },
     };
   }
 
@@ -139,10 +157,20 @@ export class MemStore implements EjarLookupStore {
     const id = this.imported.get(`${accountId}:${n}`);
     return id ? { contractId: id } : null;
   }
-  async findMatches(accountId: number, landlordIds: string[], tenantIds: string[]) {
-    const o = this.owners.find((r) => r.accountId === accountId && r.idNumber && landlordIds.includes(r.idNumber));
-    const t = this.tenants.find((r) => r.accountId === accountId && r.nationalId && tenantIds.includes(r.nationalId));
-    return { landlord: o ? { id: o.id, name: o.name } : null, tenant: t ? { id: t.id, name: t.name } : null };
+  async findMatches(accountId: number, keys: MatchKeys): Promise<LookupMatches> {
+    const o = this.owners.find((r) => r.accountId === accountId && r.idNumber && keys.landlord.includes(r.idNumber));
+    const t = this.tenants.find((r) => r.accountId === accountId && r.nationalId && keys.tenant.includes(r.nationalId));
+    const p = keys.propertyEjarId ? this.properties.find((r) => r.accountId === accountId && r.ejarId === keys.propertyEjarId) : null;
+    const mine = new Set(this.properties.filter((r) => r.accountId === accountId).map((r) => r.id));
+    const units = this.units
+      .filter((u) => mine.has(u.propertyId) && u.ejarId && keys.unitEjarIds.includes(u.ejarId))
+      .map((u) => ({ id: u.id, unitNumber: u.unitNumber, propertyId: u.propertyId, ejarId: u.ejarId ?? null }));
+    return {
+      landlord: o ? { id: o.id, name: o.name } : null,
+      tenant: t ? { id: t.id, name: t.name } : null,
+      property: p ? { id: p.id, name: p.name ?? "" } : null,
+      units,
+    };
   }
   async landlord(accountId: number, id: number): Promise<PartyMatch | null> {
     const o = this.owners.find((r) => r.id === id && r.accountId === accountId);
@@ -153,6 +181,7 @@ export class MemStore implements EjarLookupStore {
     return t ? { id: t.id, name: t.name } : null;
   }
   async property(accountId: number, id: number) {
+
     const p = this.properties.find((r) => r.id === id && r.accountId === accountId);
     return p ? { id: p.id, ownerId: p.ownerId, usageLookupId: p.usageLookupId } : null;
   }
@@ -177,7 +206,7 @@ const ENV_KEYS = [
   "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
   "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
   "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS",
-  "EJAR_LOOKUP_LIMIT", "EJAR_LOOKUP_WINDOW", "EJAR_LOOKUP_LIMIT_PER_ACCOUNT", "EJAR_LOOKUP_CACHE_HOURS",
+  "EJAR_LOOKUP_LIMIT", "EJAR_LOOKUP_WINDOW", "EJAR_LOOKUP_LIMIT_PER_ACCOUNT", "EJAR_LOOKUP_CACHE_HOURS", "EJAR_LOOKUP_SECOND_CALL",
 ];
 
 export interface Call { url: string; init: RequestInit }
@@ -198,9 +227,18 @@ export function world(opts: { env?: Record<string, string>; delayMs?: number } =
   const calls: Call[] = [];
   const known = new Set<string>([CN]);
   const details = new Map<string, unknown>();
+  /** Contract numbers Get Contracts holds (default: every known one). Remove one to make it answer count 0. */
+  const listed = new Set<string>();
+  let listAll = true;
   let respond: (url: string) => Response | Promise<Response> = (url) => {
     const inv = url.match(/\/v1\/ejar-services\/contracts\/(\d+)\/invoices/);
     if (inv) return known.has(inv[1]) ? baladyOk(invoicesFor(inv[1])) : baladyErr(400, "E1.11", "رقم العقد غير صحيح");
+    const list = url.match(/\/v1\/ejar-services\/contracts\?(.*)$/);
+    if (list) {
+      const q = new URLSearchParams(list[1]);
+      const n = [...known].find((k) => uuidFor(k) === q.get("contract_ids"));
+      return baladyOk(n && (listAll || listed.has(n)) ? contractsFor(n) : EMPTY_CONTRACTS);
+    }
     const det = url.match(/\/v1\/ejar-services\/contracts\/([0-9a-f-]{36})$/i);
     if (det) {
       const n = [...known].find((k) => uuidFor(k) === det[1]);
@@ -223,6 +261,8 @@ export function world(opts: { env?: Record<string, string>; delayMs?: number } =
   const svc = new EjarLookupService(client, store);
   return {
     store, client, svc, calls, known, details,
+    /** Make Get Contracts hold only these contract numbers (others answer count 0). */
+    listOnly: (...ns: string[]) => { listAll = false; listed.clear(); for (const n of ns) listed.add(n); },
     /** Data calls only (the OAuth token request is not one). */
     dataCalls: () => calls.filter((c) => !c.url.endsWith("/oauth/v1/token")),
     setRespond: (fn: (url: string) => Response | Promise<Response>) => { respond = fn; },

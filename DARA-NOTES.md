@@ -148,60 +148,76 @@ since 2026-10-08. The hourly health probe is a Balady **token request only**
 a data call per hour on a quota-limited gateway. Balady not configured reads
 as "down", which unlocks manual entry (the import cannot work without it).
 
-**Ejar Import v2 — the two-call lookup (staging, Oct 2026).** The six-call
-flow is retired: `/ejar/contracts`, the old `/ejar/preview`, `/ejar/call` and
+**Ejar Import v2 — the lookup (staging, Oct 2026).** The six-call flow is
+retired: `/ejar/contracts`, the old `/ejar/preview`, `/ejar/call` and
 `/ejar/logs/:id/replay` are removed, and the only code that calls Ejar is
-`EjarLookupService`. A lookup is exactly two Balady calls, in order:
+`EjarLookupService`. All lookup calls are Balady-only and `noRetry`:
 
 1. Invoices — `GET /v1/ejar-services/contracts/{contractNumber}/invoices`
-   (`rentalContractInvoices`): returns the contract **UUID** and the payment
-   schedule. Unknown number → staging answers 400 "رقم العقد غير صحيح"; we
-   answer 404 `{code:"not_found"}` (1 call spent, Details never called).
-2. Details — `GET /v1/ejar-services/contracts/{uuid}` (`contractDetails`,
-   Balady-only, no NHC route): contract facts, parties, deposit, IBAN. A
-   non-UUID makes Balady answer 500, so the client refuses it before sending.
+   (`rentalContractInvoices`): the contract **UUID** (`data[0].id`) and the
+   payment schedule. Unknown number → staging answers 400 "رقم العقد غير صحيح";
+   we answer 404 `{code:"not_found"}` (1 call spent).
+2. `EJAR_LOOKUP_SECOND_CALL=contracts` (default): Get Contracts by UUID —
+   `GET /v1/ejar-services/contracts?id_number=1&contract_ids={uuid}&skip_filter_id_number=true&page[number]=1&page[size]=10`
+   (`getRentalContracts`; verified on staging 11 Oct 2026: count 1, the
+   `contracts` resource whose id = the UUID). It is the old list resource —
+   contract facts, `property_*`, `region`, `units[]`, and `lessors[]`/`tenants[]`
+   **with id_number, phone, email**. `id_number=1` is a placeholder the gateway
+   wants; the client refuses this call without a UUID `contract_ids`, because
+   `skip_filter_id_number=true` alone returns the whole dataset.
+   **Renewed contracts:** the list holds the older version's id, so the query
+   by the Invoices UUID returns count 0 (verified on 10963452116). Then — and
+   when no resource's contract_number matches — the lookup falls back to
+   Details (a third call). **Production:** Get Contracts answers 401 "API
+   authorization failed" (Invoices + Details work) → prod must run
+   `EJAR_LOOKUP_SECOND_CALL=details` until MOMRAH enables it.
+3. Details — `GET /v1/ejar-services/contracts/{uuid}` (`contractDetails`): the
+   `details` mode's second call and the fallback. A non-UUID makes Balady
+   answer 500, so the client refuses it before sending. Its parties carry
+   **name + id type only — no ID number, phone or email**, and there is no
+   property or unit.
 
-Parties come back as organizations (name + CR + org type) or individuals
-(**name + id type only — no ID number, no phone, no email anywhere**), roles
-`lessor` / `tenant` / `*_representative`. So an individual party needs its ID
-typed at import, or an existing record picked.
-
-**Budget semantics.** `EJAR_LOOKUP_LIMIT=50` (per `EJAR_LOOKUP_WINDOW`
-`day|month|total`, default month, Riyadh boundaries) means **50 Invoices
-calls + 50 Details calls**, i.e. 50 lookups. It is counted from what actually
-left the server — `ejar_api_logs` rows for those two endpoints with a
-`balady*` env, summing `attempts` (blocked rows don't count) — never from a
-counter. A lookup is refused with 429 `{code:"budget_exhausted"}` and nothing
-sent unless BOTH endpoints have a call of headroom (unknown numbers spend
-Invoices only, so the two can drift apart) and the account is under
-`EJAR_LOOKUP_LIMIT_PER_ACCOUNT` (optional; the account is the scope owner, so
-employees share it). These two endpoints are `noRetry`: a 5xx/429 is returned,
-not retried (a retry is a second billable call); the one token-refresh retry on
-a Balady 401 is still made and is counted in `attempts`. Check-and-call runs
-under a session advisory lock (own aux pool, like the ZATCA chain lock) plus an
-in-process queue, so concurrent lookups — across containers too — cannot
-overshoot. Gateway failures surface as 502 with the upstream status in the
-body (a passed-through 401/429 would read as "logged out" / "budget used up").
+**Budget semantics.** Still "one lookup = one Ejar request", counted **per
+endpoint**: `EJAR_LOOKUP_LIMIT=50` (per `EJAR_LOOKUP_WINDOW` `day|month|total`,
+default month, Riyadh boundaries) means at most 50 Invoices + 50 Get Contracts
++ 50 Details calls; `remaining = limit − max(the three)`, min'd with the
+account's. Counted from what actually left the server — `ejar_api_logs` rows
+for those endpoints with a `balady*` env, summing `attempts` (blocked rows
+don't count). A lookup starts only with a call of headroom on Invoices AND on
+the second call it will make (and under `EJAR_LOOKUP_LIMIT_PER_ACCOUNT`,
+optional; the account is the scope owner, so employees share it); otherwise
+429 `{code:"budget_exhausted"}` and nothing is sent. The Details fallback needs
+its own headroom; without it the lookup stops with 429
+`{code:"details_unavailable"}` — no third call, nothing saved. 5xx/429 are
+returned, not retried; the one token-refresh resend on a Balady 401 is made
+and counted in `attempts`. Check-and-call runs under a session advisory lock
+(own aux pool, like the ZATCA chain lock) plus an in-process queue, so
+concurrent lookups — across containers too — cannot overshoot. Gateway
+failures surface as 502 with the upstream status in the body (a passed-through
+401/429 would read as "logged out" / "budget used up").
 
 **Saved lookups and the import.** A successful lookup is saved in
-`ejar_lookups` (one row per account + contract number: UUID, raw Invoices and
-Details bodies, who looked it up). Repeat lookups within
-`EJAR_LOOKUP_CACHE_HOURS` (default 24) are served from it for free unless
-`refresh: true`. `POST /ejar/import` builds the record from that saved lookup
-plus the user's completion and **never calls Ejar**: 409 without a saved lookup
-or when already imported; every `existingId` must belong to `scopeId(user)`;
-`required[]` (returned by the lookup, decided server-side from the DB NOT NULLs
-and what POST /properties, /units and the contract wizard require) must be met
-or it answers 400 `{code:"missing_fields", missing}`. The rent schedule is
-Ejar's invoices (custom schedule), the deposit is Details', rent VAT is derived
-from usage as on a manual contract. Property/unit/deed typed in by the user are
-written with `ejar_source = null`, so the Ejar field locks don't freeze them;
-landlord/tenant keep only what Ejar said in `ejar_raw`, so a typed ID number
-stays editable.
-
-To probe Ejar, run a Node script **inside the API container** (it holds the
-credentials and the allow-listed IP). `curl` is not installed there, and
-`node /dev/stdin` fails on a piped fd — base64 the script to a file first.
+`ejar_lookups` (one row per account + contract number: UUID and the raw
+Invoices, Get Contracts — `contracts_body`, 0078 — and Details bodies). Repeat
+lookups within `EJAR_LOOKUP_CACHE_HOURS` (default 24) are served from it for
+free unless `refresh: true`. `POST /ejar/import` builds the record from that
+saved lookup plus the user's completion and **never calls Ejar**: 409 without a
+saved lookup or when already imported; every `existingId` must belong to
+`scopeId(user)`. `required[]` is decided server-side (same code for lookup and
+import) from what manual creation needs, minus what Ejar gave and what
+resolves: party ID numbers are only required when Ejar sent none; property
+name/type and unit number/type come from Get Contracts (types through
+`EJAR_PROPERTY_TYPE`/`EJAR_UNIT_TYPE`), usage from the contract type
+(residential/commercial), city from the region when a city option has that
+key/name; a landlord/tenant matched by CR/ID and a property/unit matched by
+Ejar UUID need nothing. Unmet keys → 400 `{code:"missing_fields", missing}`.
+From a Get Contracts snapshot the import creates or reuses (by Ejar UUID) the
+property and units with `ejar_source = 'ejar'` and the Ejar attributes in
+`ejar_raw` (so they lock like before), and the parties with Ejar's IDs, phones
+(canonicalised) and emails; typed input only fills gaps. The rent schedule is
+Ejar's invoices (custom schedule), the deposit is Ejar's, rent VAT is derived
+from usage as on a manual contract. A property/unit/deed the user typed in is
+written with `ejar_source = null`, so nothing freezes it.
 
 **Scoping:** tenant-package accounts are locked to their own CR
 (`ejar.scope.ts`). Since Import v2 that means: a locked account may only look

@@ -3,11 +3,11 @@ import { usersTable } from "./users";
 
 /**
  * Saved Ejar lookups (Ejar Import v2). One row per (account, contract number)
- * holding the raw bodies of the two calls a lookup makes — Invoices and
- * Details — so the import, and any repeat lookup within
+ * holding the raw bodies of the calls a lookup made — Invoices, Get Contracts
+ * and/or Details — so the import, and any repeat lookup within
  * EJAR_LOOKUP_CACHE_HOURS, is served from here without calling Ejar.
  *
- * Created at boot by db/drizzle/0077_ejar_lookups.sql.
+ * Created at boot by db/drizzle/0077_ejar_lookups.sql (+ 0078 contracts_body).
  */
 export const ejarLookupsTable = pgTable("ejar_lookups", {
   id: serial("id").primaryKey(),
@@ -17,6 +17,8 @@ export const ejarLookupsTable = pgTable("ejar_lookups", {
   ejarUuid: text("ejar_uuid").notNull(),
   invoicesBody: jsonb("invoices_body").$type<Record<string, unknown>>(),
   detailsBody: jsonb("details_body").$type<Record<string, unknown>>(),
+  /** Get Contracts (by UUID) body — added by 0078; null for Details-mode lookups. */
+  contractsBody: jsonb("contracts_body").$type<Record<string, unknown>>(),
   lookedUpBy: integer("looked_up_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({

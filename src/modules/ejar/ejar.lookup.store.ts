@@ -30,6 +30,13 @@ function getLockPool(): pg.Pool {
   return lockPool;
 }
 
+/** Tests only: close the lock pool so the process can exit. */
+export async function closeEjarLookupLockPool(): Promise<void> {
+  const p = lockPool;
+  lockPool = null;
+  await p?.end();
+}
+
 export interface SavedLookup {
   id: number;
   accountId: number;
@@ -37,11 +44,23 @@ export interface SavedLookup {
   ejarUuid: string;
   invoicesBody: Record<string, unknown> | null;
   detailsBody: Record<string, unknown> | null;
+  /** Get Contracts body; absent/null for Details-mode (and pre-0078) lookups. */
+  contractsBody?: Record<string, unknown> | null;
   lookedUpBy: number | null;
   createdAt: Date;
 }
 
 export interface PartyMatch { id: number; name: string }
+export interface UnitMatch { id: number; unitNumber: string; propertyId: number; ejarId: string | null }
+export interface LookupMatches {
+  landlord: PartyMatch | null;
+  tenant: PartyMatch | null;
+  /** The account's property already carrying this Ejar property UUID. */
+  property: PartyMatch | null;
+  /** The account's units already carrying these Ejar unit UUIDs. */
+  units: UnitMatch[];
+}
+export interface MatchKeys { landlord: string[]; tenant: string[]; propertyEjarId: string | null; unitEjarIds: string[] }
 
 /** Everything the lookup and import need from the database, behind one seam so tests can fake it. */
 export interface EjarLookupStore {
@@ -53,7 +72,7 @@ export interface EjarLookupStore {
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
   findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null>;
-  findMatches(accountId: number, landlordIds: string[], tenantIds: string[]): Promise<{ landlord: PartyMatch | null; tenant: PartyMatch | null }>;
+  findMatches(accountId: number, keys: MatchKeys): Promise<LookupMatches>;
   landlord(accountId: number, id: number): Promise<PartyMatch | null>;
   tenant(accountId: number, id: number): Promise<PartyMatch | null>;
   property(accountId: number, id: number): Promise<{ id: number; ownerId: number | null; usageLookupId: number | null } | null>;
@@ -120,12 +139,13 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
        group by l.endpoint`);
     const rows: Array<{ endpoint: string; total: number; account: number }> = Array.isArray(res) ? res : res?.rows ?? [];
     const get = (e: string) => rows.find((r) => r.endpoint === e);
-    const inv = get("rentalContractInvoices");
-    const det = get("contractDetails");
+    const total = (e: string) => Number(get(e)?.total ?? 0);
+    const acct = (e: string) => Number(get(e)?.account ?? 0);
     return {
-      invoices: Number(inv?.total ?? 0),
-      details: Number(det?.total ?? 0),
-      account: Math.max(Number(inv?.account ?? 0), Number(det?.account ?? 0)),
+      invoices: total("rentalContractInvoices"),
+      contracts: total("getRentalContracts"),
+      details: total("contractDetails"),
+      account: { invoices: acct("rentalContractInvoices"), contracts: acct("getRentalContracts"), details: acct("contractDetails") },
     };
   }
 
@@ -153,6 +173,7 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
           ejarUuid: row.ejarUuid,
           invoicesBody: row.invoicesBody as never,
           detailsBody: row.detailsBody as never,
+          contractsBody: (row.contractsBody ?? null) as never,
           lookedUpBy: row.lookedUpBy,
           createdAt: values.createdAt,
         },
@@ -175,7 +196,8 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
     return row ? { contractId: row.id } : null;
   }
 
-  async findMatches(accountId: number, landlordIds: string[], tenantIds: string[]) {
+  async findMatches(accountId: number, keys: MatchKeys): Promise<LookupMatches> {
+    const { landlord: landlordIds, tenant: tenantIds } = keys;
     const landlord = landlordIds.length
       ? (await this.db
           .select({ id: ownersTable.id, name: ownersTable.name })
@@ -190,7 +212,24 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
           .where(and(eq(tenantsTable.userId, accountId), inArray(tenantsTable.nationalId, tenantIds), isNull(tenantsTable.deletedAt)))
           .limit(1))[0] ?? null
       : null;
-    return { landlord, tenant };
+    const property = keys.propertyEjarId
+      ? (await this.db
+          .select({ id: propertiesTable.id, name: propertiesTable.name })
+          .from(propertiesTable)
+          .where(and(eq(propertiesTable.userId, accountId), eq(propertiesTable.ejarId, keys.propertyEjarId), isNull(propertiesTable.deletedAt)))
+          .limit(1))[0] ?? null
+      : null;
+    const units = keys.unitEjarIds.length
+      ? await this.db
+          .select({ id: unitsTable.id, unitNumber: unitsTable.unitNumber, propertyId: unitsTable.propertyId, ejarId: unitsTable.ejarId })
+          .from(unitsTable)
+          .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
+          .where(and(
+            eq(propertiesTable.userId, accountId), inArray(unitsTable.ejarId, keys.unitEjarIds),
+            isNull(unitsTable.deletedAt), isNull(propertiesTable.deletedAt),
+          ))
+      : [];
+    return { landlord, tenant, property, units };
   }
 
   async landlord(accountId: number, id: number) {

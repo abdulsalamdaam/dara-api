@@ -567,18 +567,25 @@ export class EjarImportWriter {
       }
       linked.push("property");
     } else {
-      const { p, overrides, deed } = plan.property.create;
+      const { p, overrides, deed, raw } = plan.property.create;
       const lessor = "existingId" in plan.landlord ? null : plan.landlord.party;
       deedId = deed ? await this.upsertDeed(ownerId, deed, landlordId, lessor, created, linked, "typed") : null;
       // The deed is linked after the insert: properties.deed_id is unique, and a
       // reused deed may already belong to another property.
-      propertyId = await this.upsertProperty(ownerId, p, landlordId, null, null, created, linked, overrides);
+      propertyId = await this.upsertProperty(ownerId, p, landlordId, null, raw ?? null, created, linked, overrides);
       if (propertyId && deedId) await this.linkDeed(propertyId, deedId);
     }
 
     // 4) Unit
     let unitIds: number[];
     if ("existingId" in plan.unit) { unitIds = [plan.unit.existingId]; linked.push("unit"); }
+    else if ("ejar" in plan.unit) {
+      // Ejar's units: reused by Ejar UUID under the property (upsertUnits), or
+      // linked when the same number already exists there.
+      const { units, raw, overrides, linkIds } = plan.unit.ejar;
+      for (const _ of linkIds) linked.push("unit");
+      unitIds = [...linkIds, ...(await this.upsertUnits(ownerId, propertyId, units, raw, created, linked, overrides))];
+    }
     else unitIds = await this.upsertUnits(ownerId, propertyId, [plan.unit.create.u], {}, created, linked, plan.unit.create.overrides);
 
     // 5) Tenant
@@ -698,8 +705,28 @@ export interface ImportPlan {
   tenant: PartyChoice;
   property:
     | { existingId: number }
-    | { create: { p: Record<string, unknown>; overrides: PropertyOverrides; deed: { deedNumber: string; deedType: string | null } | null } };
-  unit: { existingId: number } | { create: { u: Record<string, unknown>; overrides: UnitOverrides } };
+    | {
+        create: {
+          p: Record<string, unknown>;
+          overrides: PropertyOverrides;
+          deed: { deedNumber: string; deedType: string | null } | null;
+          /** Ejar's own attributes (Get Contracts) — persisted as ejar_raw, which drives the field locks. */
+          raw?: Record<string, unknown> | null;
+        };
+      };
+  unit:
+    | { existingId: number }
+    | { create: { u: Record<string, unknown>; overrides: UnitOverrides } }
+    | {
+        ejar: {
+          units: Array<Record<string, unknown>>;
+          /** Ejar unit UUID → its attributes, persisted as ejar_raw. */
+          raw: Record<string, Record<string, unknown>>;
+          overrides: UnitOverrides;
+          /** Units already on the property under the same number. */
+          linkIds: number[];
+        };
+      };
   contract: {
     startDate: string;
     endDate: string;

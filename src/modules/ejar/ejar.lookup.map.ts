@@ -1,11 +1,13 @@
 /**
  * Ejar Import v2 — reading the two lookup bodies.
  *
- * A lookup is exactly two Balady calls: Invoices (by contract number; carries
- * the contract UUID and the payment schedule) and Details (by UUID; carries
- * the contract facts and the parties). Both arrive as JSON:API bodies. This
- * file turns them into the lookup response, and decides what the user still
- * has to supply before the contract can be imported (`required[]`).
+ * A lookup is Invoices (by contract number; carries the contract UUID and the
+ * payment schedule) and then either Get Contracts by UUID (the list resource:
+ * contract facts, property, units and parties WITH their ID numbers, phones
+ * and emails) or Details by UUID (contract facts and parties, names only).
+ * All arrive as JSON:API bodies. This file turns them into the lookup
+ * response, and decides what the user still has to supply before the
+ * contract can be imported (`required[]`).
  *
  * Pure: no database, no network.
  */
@@ -22,9 +24,14 @@ export interface LookupParty {
   unifiedNumber: string | null;
   organizationType: string | null;
   idType: string | null;
-  /** Ejar does not send an individual's ID number today; kept if it ever does. */
+  /** Get Contracts sends it; Details never does. */
   idNumber: string | null;
   approved: boolean | null;
+  /** Get Contracts only. */
+  phone: string | null;
+  email: string | null;
+  /** A 15-digit VAT number, when Get Contracts sends one. */
+  vatNumber: string | null;
 }
 
 export interface LookupParties {
@@ -36,6 +43,8 @@ export interface LookupParties {
 }
 
 export interface LookupContract {
+  /** Which call the contract facts and parties came from. */
+  source: "contracts" | "details";
   ejarId: string | null;
   contractNumber: string | null;
   contractType: string | null;
@@ -47,7 +56,26 @@ export interface LookupContract {
   securityDeposit: number | null;
   currency: string | null;
   ridServiceEnabled: boolean | null;
+  /** Ejar's raw status (Get Contracts `status`, Details `state`). */
+  status: string | null;
+  /** Get Contracts only — null from Details. */
+  totalValue: number | null;
+  paymentFrequency: string | null;
+  autoRenewal: boolean | null;
+  broker: { name: string | null; nationalId: string | null } | null;
 }
+
+export interface LookupProperty {
+  ejarId: string | null;
+  name: string | null;
+  type: string | null;
+  region: { key: string | null; nameAr: string | null; nameEn: string | null } | null;
+  latitude: number | null;
+  longitude: number | null;
+  mapsUrl: string | null;
+}
+
+export interface LookupUnit { ejarId: string | null; unitNumber: string | null; unitType: string | null }
 
 export interface LookupInvoice {
   id: string;
@@ -76,6 +104,11 @@ export interface MappedLookup {
   parties: LookupParties;
   financial: LookupFinancial;
   invoices: LookupInvoice[];
+  /** Get Contracts only — null / [] when the lookup used Details. */
+  property: LookupProperty | null;
+  units: LookupUnit[];
+  /** The Get Contracts resource the mapping used (the import persists from it). */
+  contractsResource: JsonApiResource | null;
 }
 
 export type RequiredSection = "landlord" | "tenant" | "property" | "unit" | "contract";
@@ -194,6 +227,9 @@ function mapParty(details: EjarBody | null | undefined, cp: JsonApiResource): Lo
     idType: isOrg ? null : str(e.id_type),
     idNumber: isOrg ? null : str(e.id_number) ?? str(e.national_id),
     approved: typeof a.approved === "boolean" ? a.approved : null,
+    phone: null,
+    email: null,
+    vatNumber: null,
   };
 }
 
@@ -227,21 +263,157 @@ function ridEnabled(v: unknown): boolean | null {
   return null;
 }
 
-export function mapLookup(invoicesBody: EjarBody | null | undefined, detailsBody: EjarBody | null | undefined): MappedLookup {
+/** Only plain digits count as an identifier: Ejar sends some numbers as encrypted blobs. */
+const digits = (v: unknown, min = 5): string | null => {
+  const t = str(v);
+  return t && new RegExp(`^\\d{${min},20}$`).test(t) ? t : null;
+};
+
+/** One `lessors[]` / `tenants[]` entry of a Get Contracts resource. */
+function mapListParty(p: Attrs, fallbackRole: string): LookupParty {
+  const type = str(p.type)?.toLowerCase() ?? null;
+  const isOrg = type ? type !== "individual" : !!digits(p.registration_number);
+  const vat = digits(p.vat, 15);
+  return {
+    role: str(p.role)?.toLowerCase() ?? fallbackRole,
+    kind: isOrg ? "organization" : "individual",
+    name: str(p.name) ?? str(p.full_name),
+    crNumber: isOrg ? digits(p.registration_number) ?? digits(p.cr_number) ?? digits(p.commercial_registration) ?? digits(p.id_number) : null,
+    unifiedNumber: isOrg ? digits(p.unified_number) : null,
+    organizationType: isOrg ? str(p.organization_type) ?? (type && type !== "organization" ? type : null) : null,
+    idType: str(p.id_type),
+    idNumber: isOrg ? null : digits(p.id_number),
+    approved: typeof p.approved === "boolean" ? p.approved : null,
+    phone: str(p.phone_number) ?? str(p.phone),
+    email: str(p.email),
+    vatNumber: vat && vat.length === 15 ? vat : null,
+  };
+}
+
+function listParties(r: JsonApiResource): LookupParties {
+  const a = r.attributes || {};
+  const out: LookupParties = { lessor: null, tenant: null, lessorRepresentative: null, tenantRepresentative: null, others: [] };
+  const slot: Record<string, keyof Omit<LookupParties, "others">> = {
+    lessor: "lessor", tenant: "tenant",
+    lessor_representative: "lessorRepresentative", tenant_representative: "tenantRepresentative",
+  };
+  const all = [
+    ...asArray(a.lessors as Attrs[] | null).map((p) => mapListParty(p, "lessor")),
+    ...asArray(a.tenants as Attrs[] | null).map((p) => mapListParty(p, "tenant")),
+  ];
+  for (const p of all) {
+    const k = slot[p.role];
+    if (k && !out[k]) out[k] = p;
+    else out.others.push(p);
+  }
+  return out;
+}
+
+/**
+ * The Get Contracts resource for this contract: the one whose contract number
+ * (or id) matches. Null when the body holds none — a renewed contract's list
+ * entry carries the older version's id, so the query by the Invoices UUID
+ * comes back empty (verified on staging).
+ */
+export function pickContractsResource(body: EjarBody | null | undefined, contractNumber: string | null, uuid?: string | null): JsonApiResource | null {
+  const data = asArray(body?.data as JsonApiResource | JsonApiResource[] | null | undefined);
+  return (
+    data.find((r) => contractNumber && str(r.attributes?.contract_number) === contractNumber) ??
+    data.find((r) => uuid && (String(r.id) === uuid || str(r.attributes?.contract_id) === uuid)) ??
+    null
+  );
+}
+
+export function mapsUrl(lat: number | null, lng: number | null): string | null {
+  if (lat == null || lng == null || (lat === 0 && lng === 0)) return null;
+  return `https://www.google.com/maps?q=${lat},${lng}`;
+}
+
+const boolOf = (v: unknown): boolean | null =>
+  typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : null;
+
+export function mapLookup(
+  invoicesBody: EjarBody | null | undefined,
+  detailsBody: EjarBody | null | undefined,
+  contractsBody?: EjarBody | null,
+  contractNumber?: string | null,
+): MappedLookup {
+  const fee = byType(invoicesBody, "rental_fees")[0]?.attributes || {};
+  const invoices = mapLookupInvoices(invoicesBody);
+  const financialBase = {
+    totalRentAmount: num(fee.total_rent_amount),
+    paymentFrequency: bilingual(fee.payment_frequency),
+    recurringPayment: bilingual(fee.recurring_payment),
+    invoiceCount: invoices.length,
+    invoiceTotal: round2(invoices.reduce((s, i) => s + (i.amount ?? 0), 0)),
+    invoiceRemaining: round2(invoices.reduce((s, i) => s + (i.remaining ?? 0), 0)),
+  };
+
+  const listed = contractsBody ? pickContractsResource(contractsBody, contractNumber ?? null, lookupUuid(invoicesBody, contractNumber ?? "")) : null;
+  if (listed) {
+    const a = listed.attributes || {};
+    const region = a.region && typeof a.region === "object" ? (a.region as Attrs) : null;
+    const lat = num(a.latitude);
+    const lng = num(a.longitude);
+    const brokerName = str(a.broker_name);
+    const brokerId = digits(a.broker_national_id);
+    return {
+      contract: {
+        source: "contracts",
+        ejarId: str(a.contract_id) ?? String(listed.id),
+        contractNumber: str(a.contract_number),
+        contractType: str(a.contract_type)?.toLowerCase() ?? null,
+        state: str(a.status),
+        status: str(a.status),
+        startDate: date10(a.start_time ?? a.start_date),
+        endDate: date10(a.end_time ?? a.end_date),
+        registeredAt: str(a.created_time),
+        version: null,
+        securityDeposit: num(a.security_deposit_value),
+        currency: null,
+        ridServiceEnabled: null,
+        totalValue: num(a.total_value),
+        paymentFrequency: str(a.payment_frequency),
+        autoRenewal: boolOf(a.auto_renewal_enabled),
+        broker: brokerName || brokerId ? { name: brokerName, nationalId: brokerId } : null,
+      },
+      parties: listParties(listed),
+      financial: { ...financialBase, iban: null },
+      invoices,
+      property: str(a.property_id) || str(a.property_name)
+        ? {
+            ejarId: str(a.property_id),
+            name: str(a.property_name),
+            type: str(a.property_type),
+            region: region ? { key: str(region.key), nameAr: str(region.name_ar), nameEn: str(region.name_en) } : null,
+            latitude: lat,
+            longitude: lng,
+            mapsUrl: mapsUrl(lat, lng),
+          }
+        : null,
+      units: asArray(a.units as Attrs[] | null).map((u) => ({
+        ejarId: str(u.id) ?? str(u.unit_id),
+        unitNumber: str(u.unit_number),
+        unitType: str(u.unit_type),
+      })),
+      contractsResource: listed,
+    };
+  }
+
   const contract = asArray(detailsBody?.data as JsonApiResource | JsonApiResource[] | null | undefined)[0] ?? null;
   const a = contract?.attributes || {};
   const fin = find(detailsBody, relOne(contract, "financial_information")) ?? byType(detailsBody, "financial_informations")[0] ?? null;
   const f = fin?.attributes || {};
-  const fee = byType(invoicesBody, "rental_fees")[0]?.attributes || {};
-  const invoices = mapLookupInvoices(invoicesBody);
   const major = str(a.major_version);
   const minor = str(a.minor_version);
   return {
     contract: {
+      source: "details",
       ejarId: contract ? String(contract.id) : null,
       contractNumber: str(a.contract_number),
       contractType: str(a.contract_type)?.toLowerCase() ?? null,
       state: str(a.state),
+      status: str(a.state),
       startDate: date10(a.contract_start_date),
       endDate: date10(a.contract_end_date),
       registeredAt: str(a.created_at),
@@ -249,18 +421,17 @@ export function mapLookup(invoicesBody: EjarBody | null | undefined, detailsBody
       securityDeposit: num(a.security_deposit_amount) ?? num(f.security_deposit_amount),
       currency: str(a.security_deposit_amount_currency) ?? str(f.security_deposit_amount_currency),
       ridServiceEnabled: ridEnabled(a.rid_service_enabled),
+      totalValue: null,
+      paymentFrequency: null,
+      autoRenewal: null,
+      broker: null,
     },
     parties: mapLookupParties(detailsBody),
-    financial: {
-      totalRentAmount: num(fee.total_rent_amount),
-      paymentFrequency: bilingual(fee.payment_frequency),
-      recurringPayment: bilingual(fee.recurring_payment),
-      iban: str(f.iban_number),
-      invoiceCount: invoices.length,
-      invoiceTotal: round2(invoices.reduce((s, i) => s + (i.amount ?? 0), 0)),
-      invoiceRemaining: round2(invoices.reduce((s, i) => s + (i.remaining ?? 0), 0)),
-    },
+    financial: { ...financialBase, iban: str(f.iban_number) },
     invoices,
+    property: null,
+    units: [],
+    contractsResource: null,
   };
 }
 
@@ -278,54 +449,100 @@ export function allPartyIdentifiers(parties: LookupParties): string[] {
 
 const PICK = "pick an existing record instead to skip this";
 
+/** What the server could already resolve from Ejar's values (lookup ids) and the account (matches). */
+export interface RequiredContext {
+  resolved?: {
+    propertyTypeId: number | null;
+    usageId: number | null;
+    cityId: number | null;
+    /** One per Ejar unit, in order. */
+    unitTypeIds: Array<number | null>;
+  };
+  matches?: {
+    landlord: unknown | null;
+    tenant: unknown | null;
+    property: unknown | null;
+    /** Ejar unit UUIDs already in the account. */
+    unitEjarIds?: string[];
+  };
+}
+
 /**
  * What the user still has to supply before an import can run.
  *
  * Decided from what a manually created contract has (ContractWizardV2 + the
- * create endpoints) against what Ejar gives:
+ * create endpoints) against what Ejar gave:
  *  - the property needs a landlord, and the contract a tenant record (wizard
- *    step 2). Ejar names both, but gives an individual no ID number at all —
- *    so an individual party needs one typed, or an existing record picked.
- *    An organization arrives with its CR and needs nothing.
+ *    step 2). An organization arrives with its CR. An individual arrives with
+ *    an ID number from Get Contracts, but NOT from Details — then it has to be
+ *    typed, or an existing record picked. A party already in the account
+ *    (matched by CR / ID) is linked automatically.
  *  - property: name, type and city are what POST /properties requires; usage
- *    is what decides rent VAT (DARA-NOTES §4) — Ejar gives none of them.
- *  - unit: number and type are what POST /properties/:id/units requires; a
- *    mixed-use property also needs the unit's own usage (checked at import).
+ *    is what decides rent VAT (DARA-NOTES §4). Get Contracts gives the name
+ *    and type, usage follows the contract type and the city the region when
+ *    those resolve to lookup options; Details gives none of it.
+ *  - unit: number and type are what POST /properties/:id/units requires; Get
+ *    Contracts gives both. A mixed-use property also needs the unit's own
+ *    usage (checked at import).
  *  - contract: dates, rent schedule and deposit all come from Ejar. VAT is
  *    derived from usage; only when usage cannot decide (no usage, or mixed
  *    with no unit usage) must the user choose it (checked at import).
  * Phone/email are never required — no manual path requires them either.
  */
-export function computeRequired(parties: LookupParties): RequiredEntry[] {
+export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredContext = {}): RequiredEntry[] {
+  // Back-compat: a bare parties object means a Details lookup with no context.
+  const mapped: Pick<MappedLookup, "parties" | "property" | "units"> =
+    "parties" in m ? m : { parties: m, property: null, units: [] };
+  const { parties } = mapped;
   const out: RequiredEntry[] = [];
-  const partyEntries = (section: "landlord" | "tenant", p: LookupParty | null) => {
+  const partyEntries = (section: "landlord" | "tenant", p: LookupParty | null, matched: boolean) => {
     const who = section === "landlord" ? "lessor" : "tenant";
+    if (matched) return; // linked to the account's own record automatically
     if (!p) {
       out.push({ key: `${section}.name`, section, required: true, reason: `Ejar lists no ${who} on this contract; ${PICK}.` });
       out.push({ key: `${section}.idNumber`, section, required: false, reason: `Ejar lists no ${who}; the ID number is optional.` });
     } else if (p.kind === "individual" && !p.idNumber) {
-      out.push({ key: `${section}.idNumber`, section, required: true, reason: `Ejar does not return an individual ${who}'s ID number; type it, or ${PICK}.` });
+      out.push({ key: `${section}.idNumber`, section, required: true, reason: `Ejar did not return this ${who}'s ID number; type it, or ${PICK}.` });
     }
-    out.push({ key: `${section}.phone`, section, required: false, reason: "Ejar does not return contact details." });
-    out.push({ key: `${section}.email`, section, required: false, reason: "Ejar does not return contact details." });
+    if (!p?.phone) out.push({ key: `${section}.phone`, section, required: false, reason: "Ejar did not return a phone number." });
+    if (!p?.email) out.push({ key: `${section}.email`, section, required: false, reason: "Ejar did not return an email." });
   };
-  partyEntries("landlord", parties.lessor);
-  partyEntries("tenant", parties.tenant);
+  partyEntries("landlord", parties.lessor, !!ctx.matches?.landlord);
+  partyEntries("tenant", parties.tenant, !!ctx.matches?.tenant);
 
-  const noProp = "Ejar's contract details do not include the property";
-  out.push({ key: "property.name", section: "property", required: true, reason: `${noProp}; ${PICK}.` });
-  out.push({ key: "property.propertyTypeId", section: "property", required: true, reason: `A property needs a type (as when added manually); ${PICK}.` });
-  out.push({ key: "property.usageId", section: "property", required: true, reason: `Usage decides whether rent carries VAT; ${PICK}.` });
-  out.push({ key: "property.city", section: "property", required: true, reason: `A property needs a city (as when added manually); ${PICK}.` });
-  for (const k of ["district", "address", "deedNumber", "deedType"]) {
-    out.push({ key: `property.${k}`, section: "property", required: false, reason: `${noProp}.` });
+  const r = ctx.resolved;
+  const ejarProp = mapped.property?.ejarId || mapped.property?.name ? mapped.property : null;
+  if (!ctx.matches?.property) {
+    const noProp = ejarProp ? "Ejar's value could not be matched to an option" : "Ejar did not return the property";
+    const need = (key: string, have: boolean, why: string) =>
+      out.push({ key, section: "property", required: !have, reason: have ? "From Ejar; a value here overrides it." : `${why}; ${PICK}.` });
+    need("property.name", !!ejarProp?.name, ejarProp ? "Ejar returned no property name" : noProp);
+    need("property.propertyTypeId", !!(ejarProp && r?.propertyTypeId), `A property needs a type (as when added manually) — ${noProp}`);
+    need("property.usageId", !!r?.usageId, "Usage decides whether rent carries VAT");
+    need("property.city", !!r?.cityId, "A property needs a city (as when added manually)");
+    for (const k of ["district", "address", "deedNumber", "deedType"]) {
+      out.push({ key: `property.${k}`, section: "property", required: false, reason: "Ejar does not return it." });
+    }
   }
-  const noUnit = "Ejar's contract details do not include the unit";
-  out.push({ key: "unit.unitNumber", section: "unit", required: true, reason: `${noUnit}; ${PICK}.` });
-  out.push({ key: "unit.unitTypeId", section: "unit", required: true, reason: `A unit needs a type (as when added manually); ${PICK}.` });
-  out.push({ key: "unit.usageId", section: "unit", required: false, reason: "Required only when the property's usage is mixed (سكني - تجاري)." });
-  out.push({ key: "unit.floor", section: "unit", required: false, reason: `${noUnit}.` });
-  out.push({ key: "unit.area", section: "unit", required: false, reason: `${noUnit}.` });
+  const ejarUnits = mapped.units.filter((u) => u.unitNumber);
+  const matchedUnits = new Set(ctx.matches?.unitEjarIds ?? []);
+  const allUnitsMatched = ejarUnits.length > 0 && ejarUnits.every((u) => u.ejarId && matchedUnits.has(u.ejarId));
+  if (!allUnitsMatched) {
+    const typesKnown = ejarUnits.length > 0 && mapped.units.every((u, i) => (u.ejarId && matchedUnits.has(u.ejarId)) || r?.unitTypeIds?.[i]);
+    out.push({
+      key: "unit.unitNumber", section: "unit", required: ejarUnits.length === 0,
+      reason: ejarUnits.length ? "From Ejar." : `Ejar did not return the unit; ${PICK}.`,
+    });
+    out.push({
+      key: "unit.unitTypeId", section: "unit", required: !typesKnown,
+      reason: typesKnown ? "From Ejar; a value here overrides it." : `A unit needs a type (as when added manually); ${PICK}.`,
+    });
+    out.push({ key: "unit.usageId", section: "unit", required: false, reason: "Required only when the property's usage is mixed (سكني - تجاري)." });
+    if (!ejarUnits.length) {
+      out.push({ key: "unit.floor", section: "unit", required: false, reason: "Ejar does not return it." });
+      out.push({ key: "unit.area", section: "unit", required: false, reason: "Ejar does not return it." });
+    }
+  }
   out.push({
     key: "contract.vatEnabled", section: "contract", required: false,
     reason: "Required only when the chosen property/unit usage cannot decide rent VAT (no usage, or mixed-use with no unit usage).",

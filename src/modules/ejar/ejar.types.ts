@@ -65,8 +65,12 @@ export type EjarEndpointKey =
   | "rentalFinancialData"
   | "contractDetails";
 
-/** The two calls one contract lookup makes, in order. Both are budgeted. */
-export const LOOKUP_ENDPOINTS = ["rentalContractInvoices", "contractDetails"] as const;
+/**
+ * The calls a contract lookup can make, all budgeted: Invoices, then Get
+ * Contracts (or Details), with Details as the fallback when Get Contracts
+ * does not hold the contract.
+ */
+export const LOOKUP_ENDPOINTS = ["rentalContractInvoices", "getRentalContracts", "contractDetails"] as const;
 
 /** An Ejar contract UUID (the id the invoices call returns). */
 export const EJAR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -98,9 +102,17 @@ export interface EjarEndpointDef {
 }
 
 export const EJAR_ENDPOINTS: Record<EjarEndpointKey, EjarEndpointDef> = {
+  // Since Import v2 only the lookup uses it, by UUID, on Balady. It must name
+  // a contract: with skip_filter_id_number=true and no contract_ids the
+  // gateway returns the entire dataset, so a missing/non-UUID contract_ids is
+  // refused before sending.
   getRentalContracts: {
-    method: "GET", path: "/v1/ejarext/GetRentalContracts", group: "B", required: ["id_number"], label: "Get Rental Contracts",
+    method: "GET", path: "/v1/ejarext/GetRentalContracts", group: "B", required: ["id_number", "contract_ids"], label: "Get Rental Contracts",
     balady: (query) => ({ path: "/v1/ejar-services/contracts", query }),
+    baladyOnly: true,
+    noRetry: true,
+    validate: ({ contract_ids }) =>
+      (contract_ids ?? "").split(",").every((id) => EJAR_UUID_RE.test(id.trim())) ? null : "contract_ids must be Ejar contract UUIDs",
   },
   getProperties: { method: "GET", path: "/v1/ejarext/GetProperties", group: "B", required: ["id_number"], label: "Get Properties" },
   getUnits: { method: "GET", path: "/v1/ejarext/GetUnits", group: "B", required: ["id_number"], label: "Get Units" },
