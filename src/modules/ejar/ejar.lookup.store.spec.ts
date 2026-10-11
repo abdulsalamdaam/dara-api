@@ -43,9 +43,16 @@ describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "D
         row("contractDetails", "blocked", 0),
         row("rentalContractInvoices", "uat", 5),
         row("getProperties", "balady-stg", 9),
+        { ...row("rentalContractInvoices", "balady-stg", 1), status: 400 }, // a wrong number: free
+        { ...row("rentalContractInvoices", "balady-stg", 1), status: 404 }, // also a wrong number
       ]);
-      return { now: await store.usage(new Date(Date.now() - 60_000), userId), future: await store.usage(new Date(Date.now() + 3_600_000), userId) };
+      return {
+        now: await store.usage(new Date(Date.now() - 60_000), userId),
+        future: await store.usage(new Date(Date.now() + 3_600_000), userId),
+        wrong: await store.wrongNumbers(new Date(Date.now() - 60_000), userId),
+      };
     });
+    assert.equal(out.wrong, 2, "the two wrong numbers count against the daily cap only");
     assert.equal(out.now.invoices, 3, "a system (null user) call counts globally");
     assert.equal(out.now.contracts, 1);
     assert.equal(out.now.details, 1);

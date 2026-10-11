@@ -70,6 +70,10 @@ used by any route; keeping them is harmless.
   when the list does not hold the contract (a renewed one) — or Invoices then
   Details (`details`). **Production must run `details`** until MOMRAH
   subscribes it to Get Contracts (it answers 401 there). A typo means `details`.
+- `EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY` (default 20; `off` = no cap). Wrong
+  contract numbers are free for the user (not counted toward the budget) but
+  still reach Ejar, so they are capped per account per Riyadh day; at the cap
+  every lookup answers 429 `too_many_wrong_numbers` with nothing sent.
 
 Lookup budget, counted per endpoint (Invoices, Get Contracts, Details):
 

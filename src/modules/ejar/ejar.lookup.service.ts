@@ -105,6 +105,7 @@ type Outcome =
   | { kind: "exhausted"; budget: EjarBudget }
   | { kind: "not_found"; logs: unknown[] }
   | { kind: "details_unavailable"; logs: unknown[] }
+  | { kind: "wrong_number_cap" }
   | { kind: "scope_mismatch"; logs: unknown[] }
   | { kind: "error"; err: unknown; logs: unknown[] };
 
@@ -167,6 +168,10 @@ export class EjarLookupService {
     const outcome = await this.store.withBudgetLock<Outcome>(async () => {
       const usage = await this.store.usage(start, accountId);
       if (!canLookup(cfg, usage)) return { kind: "exhausted", budget: computeBudget(cfg, usage) };
+      if (cfg.wrongNumbersPerDay != null) {
+        const { start: today } = windowBounds("day");
+        if ((await this.store.wrongNumbers(today!, accountId)) >= cfg.wrongNumbersPerDay) return { kind: "wrong_number_cap" };
+      }
 
       const logs: unknown[] = [];
       const call = async (endpoint: EjarEndpointKey, params: Record<string, string>) => {
@@ -245,6 +250,16 @@ export class EjarLookupService {
           logs: outcome.logs,
           budget: await this.budget(accountId, cfg),
         });
+      case "wrong_number_cap":
+        throw new HttpException(
+          {
+            code: "too_many_wrong_numbers",
+            message:
+              "تجاوزت عدد محاولات الأرقام غير الصحيحة اليوم — حاول غداً · Too many wrong contract numbers today; try again tomorrow.",
+            limit: cfg.wrongNumbersPerDay,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
       case "details_unavailable":
         throw new HttpException(
           {

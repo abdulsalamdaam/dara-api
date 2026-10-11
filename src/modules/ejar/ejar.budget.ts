@@ -27,6 +27,13 @@ export interface LookupConfig {
   /** How long a saved lookup is reused instead of calling Ejar again. */
   cacheHours: number;
   secondCall: SecondCall;
+  /**
+   * Wrong contract numbers (Ejar answered "no such contract") per account per
+   * Riyadh day. They don't count toward the lookup budget, so this is the only
+   * thing that stops someone burning the gateway quota on random numbers;
+   * null = no cap.
+   */
+  wrongNumbersPerDay: number | null;
 }
 
 /** Calls counted so far in the current window, per endpoint. */
@@ -64,6 +71,13 @@ function intEnv(raw: string | undefined, dflt: number): number {
   return Number.isInteger(n) && n >= 0 ? n : 0;
 }
 
+/** Unset → 20; "off" / "none" → no cap; anything unreadable → 0 (closed). */
+function wrongNumberCap(raw: string | undefined): number | null {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "off" || v === "none") return null;
+  return intEnv(v, 20);
+}
+
 export function lookupConfig(env: Record<string, string | undefined> = process.env): LookupConfig {
   const w = (env.EJAR_LOOKUP_WINDOW ?? "").trim().toLowerCase();
   const window: LookupWindow = w === "day" || w === "total" ? w : "month";
@@ -79,6 +93,7 @@ export function lookupConfig(env: Record<string, string | undefined> = process.e
     perAccount: pa === "" ? null : intEnv(pa, 0),
     cacheHours: Number.isFinite(hours) && hours >= 0 ? hours : 24,
     secondCall,
+    wrongNumbersPerDay: wrongNumberCap(env.EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY),
   };
 }
 

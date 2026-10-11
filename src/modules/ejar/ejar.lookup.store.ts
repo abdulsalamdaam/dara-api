@@ -68,6 +68,8 @@ export interface EjarLookupStore {
   withBudgetLock<T>(fn: () => Promise<T>): Promise<T>;
   /** Calls actually sent in the window (null = all time), and this account's share. */
   usage(since: Date | null, accountId: number): Promise<LookupUsage>;
+  /** Invoices calls Ejar answered "no such contract" for this account since `since`. */
+  wrongNumbers(since: Date, accountId: number): Promise<number>;
   scope(accountId: number): Promise<EjarScope>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
@@ -82,6 +84,14 @@ export interface EjarLookupStore {
   /** A global lookup option by key or Arabic label. */
   resolveLookup(category: string, value: string): Promise<number | null>;
 }
+
+/**
+ * An Invoices call Ejar answered "no such contract" (staging: 400 "رقم العقد غير
+ * صحيح"). A wrong number is free for the user — it is left out of the lookup
+ * budget — and counted only against the daily wrong-number cap.
+ */
+// coalesce: a call with no HTTP status (network failure) must stay counted — `not (null)` is null in SQL.
+const WRONG_NUMBER_SQL = sql`(l.endpoint = 'rentalContractInvoices' and coalesce(l.status, 0) in (400, 404))`;
 
 @Injectable()
 export class DrizzleEjarLookupStore implements EjarLookupStore {
@@ -126,6 +136,19 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
     return next;
   }
 
+  async wrongNumbers(since: Date, accountId: number): Promise<number> {
+    const res: any = await this.db.execute(sql`
+      select coalesce(sum(l.attempts), 0)::int as n
+        from ejar_api_logs l
+        left join users u on u.id = l.user_id
+       where l.env like 'balady%'
+         and ${WRONG_NUMBER_SQL}
+         and coalesce(u.owner_user_id, u.id) = ${accountId}
+         and l.created_at >= ${since.toISOString()}::timestamptz`);
+    const rows: Array<{ n: number }> = Array.isArray(res) ? res : res?.rows ?? [];
+    return Number(rows[0]?.n ?? 0);
+  }
+
   async usage(since: Date | null, accountId: number): Promise<LookupUsage> {
     const res: any = await this.db.execute(sql`
       select l.endpoint,
@@ -135,6 +158,7 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
         left join users u on u.id = l.user_id
        where l.endpoint in (${sql.join(LOOKUP_ENDPOINTS.map((e) => sql`${e}`), sql`, `)})
          and l.env like 'balady%'
+         and not ${WRONG_NUMBER_SQL}
          and (${since ? since.toISOString() : null}::timestamptz is null or l.created_at >= ${since ? since.toISOString() : null}::timestamptz)
        group by l.endpoint`);
     const rows: Array<{ endpoint: string; total: number; account: number }> = Array.isArray(res) ? res : res?.rows ?? [];

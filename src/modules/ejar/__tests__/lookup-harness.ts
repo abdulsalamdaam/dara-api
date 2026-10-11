@@ -84,6 +84,10 @@ export function individualDetails(n = CN) {
   return b;
 }
 
+/** Mirrors WRONG_NUMBER_SQL in the real store. */
+const isWrongNumber = (l: { endpoint: string; status: number | null }) =>
+  l.endpoint === "rentalContractInvoices" && (l.status === 400 || l.status === 404);
+
 export interface LogRow {
   id: number; userId: number | null; env: string; endpoint: string; attempts: number;
   status: number | null; createdAt: Date; [k: string]: unknown;
@@ -129,8 +133,15 @@ export class MemStore implements EjarLookupStore {
     return next;
   }
 
+  async wrongNumbers(since: Date, accountId: number): Promise<number> {
+    return this.logs
+      .filter((l) => l.env.startsWith("balady") && isWrongNumber(l) && l.createdAt >= since
+        && (this.accountOf[l.userId ?? -1] ?? l.userId) === accountId)
+      .reduce((s, l) => s + l.attempts, 0);
+  }
+
   async usage(since: Date | null, accountId: number): Promise<LookupUsage> {
-    const rows = this.logs.filter((l) => l.env.startsWith("balady") && (!since || l.createdAt >= since));
+    const rows = this.logs.filter((l) => l.env.startsWith("balady") && !isWrongNumber(l) && (!since || l.createdAt >= since));
     const sum = (endpoint: string, acct?: number) =>
       rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct))
         .reduce((s, l) => s + l.attempts, 0);
@@ -206,7 +217,7 @@ const ENV_KEYS = [
   "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
   "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
   "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS",
-  "EJAR_LOOKUP_LIMIT", "EJAR_LOOKUP_WINDOW", "EJAR_LOOKUP_LIMIT_PER_ACCOUNT", "EJAR_LOOKUP_CACHE_HOURS", "EJAR_LOOKUP_SECOND_CALL",
+  "EJAR_LOOKUP_LIMIT", "EJAR_LOOKUP_WINDOW", "EJAR_LOOKUP_LIMIT_PER_ACCOUNT", "EJAR_LOOKUP_CACHE_HOURS", "EJAR_LOOKUP_SECOND_CALL", "EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY",
 ];
 
 export interface Call { url: string; init: RequestInit }

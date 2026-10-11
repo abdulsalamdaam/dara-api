@@ -98,13 +98,14 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(res.source, "ejar");
   });
 
-  it("an unknown number spends one call and answers 404 not_found", async () => {
+  it("an unknown number makes one call, answers 404 not_found, and is free for the user", async () => {
     w = dworld();
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000099" }));
     assert.equal(status, 404);
     assert.equal(body.code, "not_found");
     assert.equal(w.dataCalls().length, 1, "Details is never called without a UUID");
-    assert.equal(body.budget.used.invoices, 1);
+    assert.equal(body.budget.used.invoices, 0, "a wrong number is not counted toward the budget");
+    assert.equal(body.budget.remaining, 50);
     assert.equal(body.budget.used.details, 0);
     assert.equal(w.store.lookups.size, 0);
   });
@@ -205,16 +206,40 @@ describe("the lookup budget", () => {
     assert.equal(by("det"), 2);
   });
 
-  it("unknown numbers use up Invoices headroom even though Details is untouched", async () => {
+  it("unknown numbers don't use up the budget", async () => {
     w = dworld({ env: { EJAR_LOOKUP_LIMIT: "2" } });
     await httpError(w.svc.lookup(USER, { contract_number: "10000000098" }));
     await httpError(w.svc.lookup(USER, { contract_number: "10000000099" }));
     const budget = await w.svc.budget(1);
-    assert.deepEqual(budget.used, { invoices: 2, contracts: 0, details: 0 });
-    assert.equal(budget.remaining, 0);
-    const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
-    assert.equal(status, 429, "a lookup needs headroom on BOTH endpoints");
-    assert.equal(w.dataCalls().length, 2);
+    assert.deepEqual(budget.used, { invoices: 0, contracts: 0, details: 0 });
+    assert.equal(budget.remaining, 2);
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.source, "ejar", "the real lookup still has its full budget");
+  });
+
+  it("wrong numbers are capped per account per day, without spending a call once the cap is hit", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY: "2" } });
+    await httpError(w.svc.lookup(USER, { contract_number: "10000000097" }));
+    await httpError(w.svc.lookup(USER, { contract_number: "10000000098" }));
+    const before = w.dataCalls().length;
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000099" }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "too_many_wrong_numbers");
+    assert.equal(w.dataCalls().length, before, "nothing is sent once the cap is reached");
+    assert.equal((await w.svc.budget(1)).remaining, 50, "the cap is separate from the lookup budget");
+  });
+
+  it("another account's wrong numbers don't count toward this account's cap", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY: "1" } });
+    await httpError(w.svc.lookup(OTHER, { contract_number: "10000000098" }));
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.source, "ejar");
+  });
+
+  it("EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY=off removes the cap; default is 20", () => {
+    assert.equal(lookupConfig({ EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY: "off" }).wrongNumbersPerDay, null);
+    assert.equal(lookupConfig({}).wrongNumbersPerDay, 20);
+    assert.equal(lookupConfig({ EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY: "oops" }).wrongNumbersPerDay, 0, "a typo closes it");
   });
 
   it("per-account cap: one account's lookups don't spend another's", async () => {
@@ -268,8 +293,8 @@ describe("the lookup budget", () => {
 });
 
 describe("budget configuration", () => {
-  it("defaults: 50 per month, no per-account cap, 24 h cache", () => {
-    assert.deepEqual(lookupConfig({}), { limit: 50, window: "month", perAccount: null, cacheHours: 24, secondCall: "contracts" });
+  it("defaults: 50 per month, no per-account cap, 24 h cache, 20 wrong numbers a day", () => {
+    assert.deepEqual(lookupConfig({}), { limit: 50, window: "month", perAccount: null, cacheHours: 24, secondCall: "contracts", wrongNumbersPerDay: 20 });
     assert.equal(lookupConfig({ EJAR_LOOKUP_SECOND_CALL: "details" }).secondCall, "details");
     assert.equal(lookupConfig({ EJAR_LOOKUP_SECOND_CALL: "contrcts" }).secondCall, "details", "a typo picks the call prod is subscribed to");
   });
@@ -292,7 +317,7 @@ describe("budget configuration", () => {
   });
 
   it("remaining = limit - max(used), min'd with the account's remaining", () => {
-    const cfg = { limit: 10, window: "month" as const, perAccount: 3, cacheHours: 24, secondCall: "contracts" as const };
+    const cfg = { limit: 10, window: "month" as const, perAccount: 3, cacheHours: 24, secondCall: "contracts" as const, wrongNumbersPerDay: 20 };
     const acct = (n: number) => ({ invoices: n, contracts: 0, details: 0 });
     const b = computeBudget(cfg, { invoices: 4, contracts: 3, details: 2, account: acct(1) });
     assert.equal(b.remaining, 2);
