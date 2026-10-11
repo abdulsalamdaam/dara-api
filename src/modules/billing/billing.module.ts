@@ -715,12 +715,12 @@ class SimpleInvoicesController {
    * to agree on one number, which is why it lives here rather than being
    * rebuilt per handler.
    */
-  private async notesAdjustmentFor(uid: number, doc: { type: string; number: string }): Promise<number> {
+  private async notesAdjustmentFor(uid: number, doc: { type: string; number: string }, db: Pick<typeof this.db, "select"> = this.db): Promise<number> {
     if (doc.type !== "invoice") return 0;
-    const [c] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+    const [c] = await db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
       .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "credit"),
         eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
-    const [d] = await this.db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
+    const [d] = await db.select({ total: sum(simpleInvoicesTable.total) }).from(simpleInvoicesTable)
       .where(and(eq(simpleInvoicesTable.userId, uid), eq(simpleInvoicesTable.type, "debit"),
         eq(simpleInvoicesTable.billingReference, doc.number), eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
     return round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
@@ -2014,7 +2014,10 @@ class SimpleInvoicesController {
     const [priorAgg] = await tx.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
     const alreadyCollected = round2(Number(priorAgg?.total ?? 0));
-    const netTotal = round2(Number(doc.total) + (await this.notesAdjustmentFor(uid, doc)));
+    // On the transaction's own connection: a second pool connection taken while
+    // this one is held waits out the 10s pool timeout once the pool is busy, and
+    // the collection fails with a 500 (accountant, 10 Oct 2026).
+    const netTotal = round2(Number(doc.total) + (await this.notesAdjustmentFor(uid, doc, tx)));
     const invoiceRemaining = round2(netTotal - alreadyCollected);
     if (invoiceRemaining <= 0.01) throw new BadRequestException("تم تحصيل هذه الفاتورة بالكامل");
     let toCollect = body?.amount != null ? round2(Number(body.amount)) : invoiceRemaining;
