@@ -110,12 +110,13 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(w.store.lookups.size, 0);
   });
 
-  it("an Invoices 200 that carries no contract is also not_found, with no Details call", async () => {
+  it("an Invoices 200 that carries no contract (staging's answer to a wrong number) is not_found, and free", async () => {
     w = dworld();
-    w.setRespond(() => json(200, { statusDetails: { code: 200 }, data: { result: { data: [], included: [] } } }));
-    const { status } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    w.setRespond(() => json(200, { statusDetails: { code: 200 }, data: { result: { data: [], meta: { count: 0 }, included: [] } } }));
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 404);
     assert.equal(w.dataCalls().length, 1);
+    assert.equal(body.budget.used.invoices, 0, "the empty 200 is a wrong number too");
   });
 
   it("a bad number format spends nothing", async () => {

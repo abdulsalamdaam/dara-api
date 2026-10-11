@@ -85,8 +85,12 @@ export function individualDetails(n = CN) {
 }
 
 /** Mirrors WRONG_NUMBER_SQL in the real store. */
-const isWrongNumber = (l: { endpoint: string; status: number | null }) =>
-  l.endpoint === "rentalContractInvoices" && (l.status === 400 || l.status === 404);
+const isWrongNumber = (l: { endpoint: string; status: number | null; responseBody?: unknown }) => {
+  if (l.endpoint !== "rentalContractInvoices") return false;
+  if (l.status === 400 || l.status === 404) return true;
+  const data = (l.responseBody as { data?: { result?: { data?: unknown } } } | null)?.data?.result?.data;
+  return l.status === 200 && Array.isArray(data) && data.length === 0;
+};
 
 export interface LogRow {
   id: number; userId: number | null; env: string; endpoint: string; attempts: number;

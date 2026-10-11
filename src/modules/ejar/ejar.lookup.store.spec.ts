@@ -45,6 +45,11 @@ describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "D
         row("getProperties", "balady-stg", 9),
         { ...row("rentalContractInvoices", "balady-stg", 1), status: 400 }, // a wrong number: free
         { ...row("rentalContractInvoices", "balady-stg", 1), status: 404 }, // also a wrong number
+        // staging's answer to a wrong number: 200 with an empty result
+        { ...row("rentalContractInvoices", "balady-stg", 1), status: 200,
+          responseBody: { statusDetails: { code: 200 }, data: { result: { data: [], meta: { count: 0 }, included: [] } } } },
+        // a truncated body is stored as a string: it stays counted
+        { ...row("rentalContractInvoices", "balady-stg", 1), status: 200, responseBody: "{\"data\": …[truncated]" },
       ]);
       return {
         now: await store.usage(new Date(Date.now() - 60_000), userId),
@@ -52,11 +57,11 @@ describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "D
         wrong: await store.wrongNumbers(new Date(Date.now() - 60_000), userId),
       };
     });
-    assert.equal(out.wrong, 2, "the two wrong numbers count against the daily cap only");
-    assert.equal(out.now.invoices, 3, "a system (null user) call counts globally");
+    assert.equal(out.wrong, 3, "400, 404 and the empty 200 count against the daily cap only");
+    assert.equal(out.now.invoices, 4, "a system (null user) call and the truncated-body call count globally");
     assert.equal(out.now.contracts, 1);
     assert.equal(out.now.details, 1);
-    assert.deepEqual(out.now.account, { invoices: 1, contracts: 1, details: 1 });
+    assert.deepEqual(out.now.account, { invoices: 2, contracts: 1, details: 1 });
     assert.deepEqual(out.future, { invoices: 0, contracts: 0, details: 0, account: { invoices: 0, contracts: 0, details: 0 } });
   });
 

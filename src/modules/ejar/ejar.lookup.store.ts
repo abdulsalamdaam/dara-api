@@ -86,12 +86,16 @@ export interface EjarLookupStore {
 }
 
 /**
- * An Invoices call Ejar answered "no such contract" (staging: 400 "رقم العقد غير
- * صحيح"). A wrong number is free for the user — it is left out of the lookup
- * budget — and counted only against the daily wrong-number cap.
+ * An Invoices call Ejar answered "no such contract". Balady staging answers an
+ * unknown number with 200 and an empty result (`data: []`, verified 12 Oct
+ * 2026); 400 "رقم العقد غير صحيح" and 404 mean the same. A wrong number is free
+ * for the user — left out of the lookup budget — and counted only against the
+ * daily wrong-number cap. coalesce: a call with no HTTP status (network
+ * failure) or an unreadable body must stay counted — `not (null)` is null.
  */
-// coalesce: a call with no HTTP status (network failure) must stay counted — `not (null)` is null in SQL.
-const WRONG_NUMBER_SQL = sql`(l.endpoint = 'rentalContractInvoices' and coalesce(l.status, 0) in (400, 404))`;
+const WRONG_NUMBER_SQL = sql`(l.endpoint = 'rentalContractInvoices' and (
+  coalesce(l.status, 0) in (400, 404)
+  or (l.status = 200 and coalesce(l.response_body #> '{data,result,data}' = '[]'::jsonb, false))))`;
 
 @Injectable()
 export class DrizzleEjarLookupStore implements EjarLookupStore {
