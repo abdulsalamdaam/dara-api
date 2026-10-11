@@ -16,7 +16,11 @@ export interface TrustTransferProposal {
   from: Array<{ accountId: number; code: string; name: string; nameEn: string | null; amount: string }>;
   /** The R16 entries it covers. */
   entries: Array<{ entryId: number; entryNo: string; date: string; amount: string }>;
+  /** A transfer drafted from here and not posted yet (draft, submitted, approved or rejected): no second one is drafted. */
+  pendingDraftId: number | null;
 }
+
+const MEMO_AR = "تحويل أموال العملاء إلى حساب الأمانات";
 
 /**
  * Accountant round 4: "R16 — the trust account is at zero because the earlier collections went into the
@@ -36,7 +40,8 @@ export class TrustTransferService {
   ) {}
 
   async proposal(scope: number, asOf = riyadhToday()): Promise<TrustTransferProposal> {
-    const empty: TrustTransferProposal = { amount: "0.00", trustAccountId: null, from: [], entries: [] };
+    const pendingDraftId = await this.pendingDraft(scope);
+    const empty: TrustTransferProposal = { amount: "0.00", trustAccountId: null, from: [], entries: [], pendingDraftId };
     const [st] = (await this.pool.query(`select accounting_mode as mode from finance_settings where account_user_id = $1`, [scope])).rows;
     const r16 = await new ExtraChecks(this.pool).r16(scope, asOf, st?.mode ?? null);
     const shortfall = -h(r16.difference ?? "0");
@@ -78,24 +83,35 @@ export class TrustTransferService {
       trustAccountId: Number(trust.id),
       from,
       entries: ids.map((x) => ({ entryId: x.entryId, entryNo: x.entryNo, date: x.date, amount: fromHalalas(-h(x.difference)) })),
+      pendingDraftId,
     };
   }
 
   /** Body: { entryDate? } — a manual-journal draft for the proposal. 400 when there is nothing to move. */
   async createDraft(scope: number, user: AuthUser, body: any) {
     const p = await this.proposal(scope);
+    if (p.pendingDraftId != null) {
+      throw new BadRequestException({ error: "TRANSFER_PENDING", draftId: p.pendingDraftId, message: `قيد التحويل رقم ${p.pendingDraftId} لم يُعتمد بعد · Transfer draft #${p.pendingDraftId} is not approved yet` });
+    }
     if (h(p.amount) <= 0 || p.trustAccountId == null) {
       throw new BadRequestException({ error: "NOTHING_TO_MOVE", message: "لا توجد أموال عملاء خارج حساب الأمانات · No client money outside the trust account" });
     }
     const refs = p.entries.map((e) => e.entryNo).join("، ");
     return this.mj.create(scope, user, {
       entryDate: body?.entryDate || riyadhToday(),
-      memo: `تحويل أموال العملاء إلى حساب الأمانات (${refs}) · Move client money into the trust account`,
+      memo: `${MEMO_AR} (${refs}) · Move client money into the trust account`,
       lines: [
         { accountId: p.trustAccountId, debit: p.amount, credit: "0", memo: "حساب الأمانات · Trust account" },
         ...p.from.map((f) => ({ accountId: f.accountId, debit: "0", credit: f.amount, memo: f.name })),
       ],
     });
+  }
+
+  private async pendingDraft(scope: number): Promise<number | null> {
+    const [r] = (await this.pool.query(
+      `select id from manual_journals where user_id = $1 and kind = 'manual' and status in ('draft', 'submitted', 'approved', 'rejected')
+          and memo like $2 order by id desc limit 1`, [scope, `${MEMO_AR}%`])).rows;
+    return r ? Number(r.id) : null;
   }
 
   private async trustGlIds(scope: number): Promise<number[]> {
