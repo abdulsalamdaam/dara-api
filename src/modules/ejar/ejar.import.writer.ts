@@ -7,7 +7,7 @@ import { buildInstallments } from "../contracts/installments";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import type { Drizzle } from "../../database/database.module";
 import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "../finance-v2/hooks/classify"; // finance-v2: 11a/11b/11i — one reading of Ejar invoices for both paths
-import { ejarRentVat } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
+import { ejarRentVatVerdict } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
 import type { EjarPartyInfo, EjarInvoiceRow } from "./ejar.map";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
@@ -594,7 +594,8 @@ export class EjarImportWriter {
     else tenantId = await this.upsertTenant(ownerId, plan.tenant.party, plan.tenant.rep, {}, created, linked);
 
     // finance-v2: 11g — rent VAT follows the property/unit usage (DARA-NOTES §4), as a manual contract; Ejar's amounts stay VAT-inclusive
-    const rentVat = c.vatEnabled ?? (await ejarRentVat(this.db, propertyId, unitIds));
+    // Never the client's choice: usage first, then Ejar's contract type.
+    const rentVat = (await ejarRentVatVerdict(this.db, propertyId, unitIds)) ?? c.vatFallback;
 
     // The contract's party columns are a snapshot of the records, exactly as
     // the manual wizard copies them from the picked tenant and landlord.
@@ -738,8 +739,12 @@ export interface ImportPlan {
     /** Ejar's payment frequency text; only used when there is no schedule. */
     frequencyHint: string | null;
     depositAmount: string | null;
-    /** null = derive from usage, like the manual wizard. */
-    vatEnabled: boolean | null;
+    /**
+     * Rent VAT when the property/unit usage cannot decide it: from Ejar's
+     * contract type (commercial → 15%, residential → exempt). The usage
+     * verdict always wins; the client never chooses.
+     */
+    vatFallback: boolean;
     notes: string | null;
     ejarRaw: Record<string, unknown> | null;
   };

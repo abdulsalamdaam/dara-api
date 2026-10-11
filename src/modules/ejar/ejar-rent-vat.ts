@@ -20,9 +20,18 @@ import type { Drizzle } from "../../database/database.module";
  * gross), never grossed up a second time.
  */
 export async function ejarRentVat(db: Drizzle, propertyId: number | null, unitIds: number[]): Promise<boolean> {
-  if (propertyId == null) return false;
+  return (await ejarRentVatVerdict(db, propertyId, unitIds)) === true;
+}
+
+/**
+ * The same usage rule, but `null` when usage does not decide (no property, no
+ * usage, or mixed-use with no unit usage) — so the Ejar import can fall back
+ * to Ejar's own contract type instead of silently defaulting.
+ */
+export async function ejarRentVatVerdict(db: Drizzle, propertyId: number | null, unitIds: number[]): Promise<boolean | null> {
+  if (propertyId == null) return null;
   const [prop] = await db.select({ usage: propertiesTable.usageLookupId }).from(propertiesTable).where(eq(propertiesTable.id, propertyId));
-  if (!prop) return false;
+  if (!prop) return null;
   let unitUsage: number | null = null;
   if (unitIds.length) {
     const units = await db.select({ id: unitsTable.id, usage: unitsTable.usageLookupId }).from(unitsTable).where(inArray(unitsTable.id, unitIds));
@@ -39,5 +48,14 @@ export async function ejarRentVat(db: Drizzle, propertyId: number | null, unitId
     prop.usage != null ? keyById.get(prop.usage) ?? null : null,
     unitUsage != null ? keyById.get(unitUsage) ?? null : null,
   );
-  return verdict === true;
+  return verdict;
+}
+
+/**
+ * Rent VAT from Ejar's contract type when usage cannot decide: commercial
+ * rent is standard-rated (15%), residential is exempt — the same split the
+ * manual wizard makes. An unknown type stays at the import's old default, no VAT.
+ */
+export function vatFromContractType(contractType: string | null | undefined): boolean {
+  return String(contractType ?? "").trim().toLowerCase() === "commercial";
 }

@@ -143,7 +143,13 @@ export class EjarClientService {
   }
 
   private envLabel(gateway: Gateway, baseUrl: string): string {
-    if (gateway === "balady") return /apiservicesstg\./i.test(baseUrl) ? "balady-stg" : "balady-prod";
+    if (gateway === "balady") {
+      if (/apiservicesstg\./i.test(baseUrl)) return "balady-stg";
+      // A loopback mock (the e2e harness). Still a `balady*` env, so the
+      // lookup budget counts it exactly like the real gateway.
+      if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(baseUrl)) return "balady-local";
+      return "balady-prod";
+    }
     if (/\/prod(\/|$)/i.test(baseUrl)) return "prod";
     return "uat";
   }

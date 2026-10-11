@@ -24,6 +24,7 @@ import { EjarImportService, EjarImportRunner, type EjarImportRunnerLike } from "
 import { DrizzleEjarLookupStore } from "./ejar.lookup.store";
 import type { ImportPlan, ImportResult } from "./ejar.import.writer";
 import { mapEjarToContract } from "./ejar.map";
+import { computeRequired, mapLookup } from "./ejar.lookup.map";
 import type { EjarBody, JsonApiResource } from "./ejar.types";
 
 const USER = { id: 1 } as never;
@@ -99,7 +100,7 @@ describe("POST /ejar/import (service)", () => {
     assert.deepEqual(c.customSchedule, [{ dueDate: "2026-11-26", amount: "34500" }, { dueDate: "2027-05-26", amount: "34500" }]);
     assert.equal(c.depositAmount, "6000");
     assert.equal(c.monthlyRent, String(Math.round((60000 / 36) * 1e6) / 1e6), "total rent over 36 months, ex-VAT");
-    assert.equal(c.vatEnabled, true, "commercial usage → VAT, as on a manual contract");
+    assert.equal(c.vatFallback, true, "commercial contract → 15% when usage cannot decide (the writer applies usage first)");
     assert.equal(plan.invoices.length, 2);
     assert.ok(plan.invoices.every((i) => i.number), "the Ejar invoice numbers travel to the attach step");
   });
@@ -137,7 +138,7 @@ describe("POST /ejar/import (service)", () => {
     w.store.tenants.push({ id: 21, accountId: 2, name: "x", nationalId: null });
     w.store.properties.push({ id: 31, accountId: 2, ownerId: null, usageLookupId: 2 });
     w.store.units.push({ id: 41, propertyId: 31, unitNumber: "1", usageLookupId: null });
-    for (const [section, id] of [["landlord", 11], ["tenant", 21], ["property", 31], ["unit", 41]] as const) {
+    for (const [section, id] of [["property", 31], ["unit", 41]] as const) {
       const body: any = baseBody();
       body[section] = { existingId: id };
       if (section === "unit") body.property = { existingId: 31 };
@@ -156,22 +157,33 @@ describe("POST /ejar/import (service)", () => {
     assert.equal(status, 400);
   });
 
-  it("links the account's own records and then needs nothing for those sections", async () => {
+  it("refuses to link an existing landlord or tenant, even the account's own (400)", async () => {
     await seed(individualDetails());
     w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر", idNumber: "1000000001" });
     w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر", nationalId: "2000000002" });
+    for (const [section, id] of [["landlord", 11], ["tenant", 21]] as const) {
+      const { status, body } = await httpError(svc.import(USER, { ...baseBody(), [section]: { existingId: id } }));
+      assert.equal(status, 400, section);
+      assert.equal(body.code, "invalid_field");
+      assert.equal(body.key, `${section}.existingId`);
+    }
+    assert.equal(runner.plans.length, 0);
+  });
+
+  it("links the account's own property and unit; parties are new records from Ejar + what was typed", async () => {
+    await seed(individualDetails());
     w.store.properties.push({ id: 31, accountId: 1, ownerId: 11, usageLookupId: 3 });
     w.store.units.push({ id: 41, propertyId: 31, unitNumber: "1", usageLookupId: null });
     await svc.import(USER, {
-      contract_number: CN, landlord: { existingId: 11 }, tenant: { existingId: 21 },
+      contract_number: CN, landlord: { idNumber: "1000000001" }, tenant: { idNumber: "2000000002" },
       property: { existingId: 31 }, unit: { existingId: 41 },
     });
     const plan = runner.plans[0];
-    assert.deepEqual(plan.landlord, { existingId: 11 });
-    assert.deepEqual(plan.tenant, { existingId: 21 });
+    assert.equal((plan.landlord as { party: any }).party.name, "فهد تجريبي");
+    assert.equal((plan.landlord as { party: any }).party.idNumber, "1000000001");
     assert.deepEqual(plan.property, { existingId: 31 });
     assert.deepEqual(plan.unit, { existingId: 41 });
-    assert.equal(plan.contract.vatEnabled, false, "families usage → residential → no VAT");
+    assert.equal(plan.contract.vatFallback, false, "residential contract → exempt");
     assert.equal(plan.contract.depositAmount, null, "a zero deposit is no deposit");
   });
 
@@ -238,18 +250,26 @@ describe("POST /ejar/import (service)", () => {
     assert.deepEqual(err.missing, ["unit.usageId"]);
     body.unit.new.usageId = 3; // families
     await svc.import(USER, body);
-    assert.equal(runner.plans[0].contract.vatEnabled, false);
     assert.equal((runner.plans[0].unit as { create: any }).create.overrides.usageLookupId, 3);
   });
 
-  it("when usage cannot decide VAT, the user must choose it", async () => {
-    await seed();
-    w.store.properties.push({ id: 31, accountId: 1, ownerId: null, usageLookupId: null });
-    const body: any = { ...baseBody(), property: { existingId: 31 } };
-    const { body: err } = await httpError(svc.import(USER, body));
-    assert.deepEqual(err.missing, ["contract.vatEnabled"]);
-    await svc.import(USER, { ...body, contract: { vatEnabled: true } });
-    assert.equal(runner.plans[0].contract.vatEnabled, true);
+  it("VAT is never asked and a client-sent vatEnabled is ignored", async () => {
+    await seed(individualDetails()); // residential
+    w.store.properties.push({ id: 31, accountId: 1, ownerId: null, usageLookupId: null }); // usage cannot decide
+    const body: any = {
+      ...baseBody(), landlord: { idNumber: "1000000001" }, tenant: { idNumber: "2000000002" },
+      property: { existingId: 31 }, contract: { vatEnabled: true },
+    };
+    await svc.import(USER, body);
+    const c = runner.plans[0].contract as Record<string, unknown>;
+    assert.equal(c.vatFallback, false, "residential → exempt, whatever the client sent");
+    assert.equal("vatEnabled" in c, false);
+  });
+
+  it("required[] has no contract.vatEnabled any more", () => {
+    const keys = computeRequired(mapLookup(invoicesFor(CN), detailsFor(CN))).map((r) => r.key);
+    assert.ok(!keys.includes("contract.vatEnabled"));
+    assert.ok(!keys.some((k) => k.startsWith("contract.")));
   });
 
   it("a new unit number that already exists on the picked property is a 409", async () => {
@@ -329,7 +349,7 @@ describe("POST /ejar/import from a Get Contracts snapshot", () => {
     assert.equal(unit.overrides.status, "rented");
 
     assert.equal(plan.contract.depositAmount, "6000");
-    assert.equal(plan.contract.vatEnabled, true);
+    assert.equal(plan.contract.vatFallback, true);
     assert.equal(plan.contract.status, "active");
     assert.equal(plan.contract.customSchedule.length, 2, "the schedule is still Ejar's invoices");
     assert.equal((plan.contract.ejarRaw as any).lookupSource, "contracts");
@@ -379,13 +399,12 @@ describe("POST /ejar/import from a Get Contracts snapshot", () => {
     assert.deepEqual(unit.linkIds, []);
   });
 
-  it("existingIds still win, and must still be the account's", async () => {
+  it("a landlord existingId is refused here too, even for the account's own record", async () => {
     await seed();
-    w.store.owners.push({ id: 11, accountId: 2, name: "x", idNumber: null });
-    assert.equal((await httpError(svc.import(USER, { contract_number: CN, landlord: { existingId: 11 } }))).status, 404);
-    w.store.owners.push({ id: 12, accountId: 1, name: "مؤجر", idNumber: null });
-    await svc.import(USER, { contract_number: CN, landlord: { existingId: 12 } });
-    assert.deepEqual(runner.plans[0].landlord, { existingId: 12 });
+    w.store.owners.push({ id: 12, accountId: 1, name: "مؤجر", idNumber: "1010000002" });
+    const { status, body } = await httpError(svc.import(USER, { contract_number: CN, landlord: { existingId: 12 } }));
+    assert.equal(status, 400);
+    assert.equal(body.key, "landlord.existingId");
   });
 });
 

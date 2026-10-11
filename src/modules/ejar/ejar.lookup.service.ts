@@ -26,8 +26,9 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
   budget: EjarBudget;
   alreadyImported: { contractId: number } | null;
   matches: {
-    landlord: PartyMatch | null;
-    tenant: PartyMatch | null;
+    /** Always null: parties are not linked to existing records (kept for the web's shape). */
+    landlord: null;
+    tenant: null;
     /** The account's property with this Ejar property UUID. */
     property: PartyMatch | null;
     /** The first matched unit (by Ejar unit UUID), and all of them. */
@@ -60,9 +61,12 @@ export async function lookupContext(
   };
   const p = mapped.property;
   const [matches, propertyTypeId, usageId, cityId, unitTypeIds] = await Promise.all([
+    // No landlord/tenant matching is offered: parties always come from Ejar
+    // as new records (the writer dedupes by ID/CR on its own). Only the
+    // property and units are matched, by Ejar UUID.
     store.findMatches(accountId, {
-      landlord: partyIdentifiers(mapped.parties.lessor),
-      tenant: partyIdentifiers(mapped.parties.tenant),
+      landlord: [],
+      tenant: [],
       propertyEjarId: p?.ejarId ?? null,
       unitEjarIds: mapped.units.map((u) => u.ejarId).filter((v): v is string => !!v),
     }),
@@ -277,7 +281,7 @@ export class EjarLookupService {
       budget,
       alreadyImported,
       ...mapped,
-      matches: { ...matches, unit: matches.units[0] ?? null },
+      matches: { ...matches, landlord: null, tenant: null, unit: matches.units[0] ?? null },
       required: computeRequired({ ...mapped, contractsResource: _internal }, {
         resolved,
         matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) },

@@ -209,14 +209,27 @@ resolves: party ID numbers are only required when Ejar sent none; property
 name/type and unit number/type come from Get Contracts (types through
 `EJAR_PROPERTY_TYPE`/`EJAR_UNIT_TYPE`), usage from the contract type
 (residential/commercial), city from the region when a city option has that
-key/name; a landlord/tenant matched by CR/ID and a property/unit matched by
-Ejar UUID need nothing. Unmet keys → 400 `{code:"missing_fields", missing}`.
+key/name; a property/unit matched by Ejar UUID needs nothing. Unmet keys → 400 `{code:"missing_fields", missing}`.
+**Account holder's rules (12 Oct 2026).** (1) Parties are never linked to an
+existing landlord/tenant: `landlord.existingId` / `tenant.existingId` → 400
+`invalid_field`, and the lookup's `matches.landlord` / `matches.tenant` are
+always null. What Ejar lacks the user types for a new record. The writer still
+reuses a row with the same ID/CR number in the account (dedupe, so a second
+contract with the same parties creates no duplicates). Property/unit linking
+is unchanged. (2) Rent VAT is never the user's choice: there is no
+`contract.vatEnabled` in `required[]`, and a client-sent value is ignored. The
+usage rule decides it on the final property/unit (`ejarRentVatVerdict`); when
+usage cannot, Ejar's contract type does — commercial 15%, residential exempt.
+(3) The import sends nothing: no file on its path imports a sender, and a
+DB-backed test spies on the email/SMS/Twilio senders, records every outbound
+fetch and counts the notification tables (`ejar.import.messages.spec.ts`).
+
 From a Get Contracts snapshot the import creates or reuses (by Ejar UUID) the
 property and units with `ejar_source = 'ejar'` and the Ejar attributes in
 `ejar_raw` (so they lock like before), and the parties with Ejar's IDs, phones
 (canonicalised) and emails; typed input only fills gaps. The rent schedule is
 Ejar's invoices (custom schedule), the deposit is Ejar's, rent VAT is derived
-from usage as on a manual contract. A property/unit/deed the user typed in is
+from usage as on a manual contract, else from Ejar's contract type. A property/unit/deed the user typed in is
 written with `ejar_source = null`, so nothing freezes it.
 
 **Scoping:** tenant-package accounts are locked to their own CR

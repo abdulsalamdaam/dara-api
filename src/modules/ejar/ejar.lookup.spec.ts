@@ -364,15 +364,15 @@ describe("access, scope and gateway guards", () => {
 });
 
 describe("matches, alreadyImported and required[]", () => {
-  it("matches existing landlord/tenant by CR and flags an existing contract", async () => {
+  it("never offers existing landlords/tenants, and flags an existing contract", async () => {
     w = dworld();
     w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر محلي", idNumber: "1010000002" });
     w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر محلي", nationalId: "1010000001" });
     w.store.tenants.push({ id: 22, accountId: 2, name: "حساب آخر", nationalId: "1010000001" });
     w.store.imported.set(`1:${CN}`, 99);
     const res = await w.svc.lookup(USER, { contract_number: CN });
-    assert.deepEqual(res.matches.landlord, { id: 11, name: "مؤجر محلي" });
-    assert.deepEqual(res.matches.tenant, { id: 21, name: "مستأجر محلي" }, "never another account's record");
+    assert.equal(res.matches.landlord, null, "existing landlords are never offered for linking");
+    assert.equal(res.matches.tenant, null, "existing tenants are never offered for linking");
     assert.deepEqual(res.alreadyImported, { contractId: 99 });
   });
 });
@@ -413,7 +413,8 @@ describe("mapping the Details parties", () => {
     for (const k of ["property.name", "property.propertyTypeId", "property.usageId", "property.city", "unit.unitNumber", "unit.unitTypeId"]) {
       assert.ok(required.includes(k), k);
     }
-    for (const k of ["landlord.phone", "tenant.email", "unit.usageId", "contract.vatEnabled"]) {
+    assert.ok(!req.some((r) => r.key === "contract.vatEnabled"), "rent VAT is decided server-side");
+    for (const k of ["landlord.phone", "tenant.email", "unit.usageId"]) {
       const e = req.find((r) => r.key === k);
       assert.ok(e && e.required === false, `${k} is listed, not required`);
     }
@@ -591,7 +592,7 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     assert.equal(res.budget.secondCall, "details");
   });
 
-  it("matches existing landlord/tenant by their real IDs and property/unit by Ejar UUID", async () => {
+  it("matches property/unit by Ejar UUID but never landlord/tenant", async () => {
     w = world();
     w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر", idNumber: "1010000002" });
     w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر", nationalId: "1000000004" });
@@ -599,8 +600,8 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     w.store.units.push({ id: 41, propertyId: 31, unitNumber: "S-01", usageLookupId: null, ejarId: UNIT_UUID });
     w.store.properties.push({ id: 32, accountId: 2, ownerId: null, usageLookupId: null, ejarId: PROPERTY_UUID, name: "حساب آخر" });
     const res = await w.svc.lookup(USER, { contract_number: CN });
-    assert.deepEqual(res.matches.landlord, { id: 11, name: "مؤجر" });
-    assert.deepEqual(res.matches.tenant, { id: 21, name: "مستأجر" });
+    assert.equal(res.matches.landlord, null, "parties are not offered for linking");
+    assert.equal(res.matches.tenant, null);
     assert.deepEqual(res.matches.property, { id: 31, name: "عقاري" });
     assert.equal(res.matches.unit?.id, 41);
     assert.ok(!res.required.some((r) => r.section === "property" || r.section === "unit"), "matched sections need nothing");

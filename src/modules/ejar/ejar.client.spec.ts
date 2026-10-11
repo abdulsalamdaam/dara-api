@@ -146,6 +146,14 @@ describe("EjarClientService gateways", () => {
     assert.equal(calls.length, 0);
   });
 
+  it("labels a loopback mock balady-local (counted by the budget like the real one)", async () => {
+    setBalady("http://127.0.0.1:58081");
+    replies.push(tokenOk(), baladyOk());
+    const { log } = await client().request("rentalContractInvoices", { contractNumber: "10000000001" });
+    assert.equal((log as { env: string }).env, "balady-local");
+    assert.equal(calls[1].url, "http://127.0.0.1:58081/v1/ejar-services/contracts/10000000001/invoices");
+  });
+
   it("refuses the production Balady gateway", async () => {
     setBalady("https://apiservices.balady.gov.sa/");
     await assert.rejects(client().request("getRentalContracts", { id_number: "1", contract_ids: U1 }), EjarConfigError);

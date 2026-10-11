@@ -475,8 +475,8 @@ export interface RequiredContext {
  *  - the property needs a landlord, and the contract a tenant record (wizard
  *    step 2). An organization arrives with its CR. An individual arrives with
  *    an ID number from Get Contracts, but NOT from Details — then it has to be
- *    typed, or an existing record picked. A party already in the account
- *    (matched by CR / ID) is linked automatically.
+ *    typed for a new record (parties are never linked to existing ones; the
+ *    writer only dedupes by ID/CR).
  *  - property: name, type and city are what POST /properties requires; usage
  *    is what decides rent VAT (DARA-NOTES §4). Get Contracts gives the name
  *    and type, usage follows the contract type and the city the region when
@@ -484,9 +484,10 @@ export interface RequiredContext {
  *  - unit: number and type are what POST /properties/:id/units requires; Get
  *    Contracts gives both. A mixed-use property also needs the unit's own
  *    usage (checked at import).
- *  - contract: dates, rent schedule and deposit all come from Ejar. VAT is
- *    derived from usage; only when usage cannot decide (no usage, or mixed
- *    with no unit usage) must the user choose it (checked at import).
+ *  - contract: dates, rent schedule and deposit all come from Ejar. Rent VAT
+ *    is never asked: usage decides it, else Ejar's contract type.
+ *  - landlord/tenant are never linked to existing records: a matched party
+ *    in ctx is ignored for that reason by the callers (they pass none).
  * Phone/email are never required — no manual path requires them either.
  */
 export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredContext = {}): RequiredEntry[] {
@@ -543,10 +544,8 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
       out.push({ key: "unit.area", section: "unit", required: false, reason: "Ejar does not return it." });
     }
   }
-  out.push({
-    key: "contract.vatEnabled", section: "contract", required: false,
-    reason: "Required only when the chosen property/unit usage cannot decide rent VAT (no usage, or mixed-use with no unit usage).",
-  });
+  // No contract.* keys: dates, schedule and deposit are Ejar's, and rent VAT
+  // is decided server-side (usage, else the Ejar contract type).
   return out;
 }
 

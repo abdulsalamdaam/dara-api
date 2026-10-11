@@ -4,7 +4,8 @@ import {
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { dateOnly, email as emailOf, nationalId, partyIdentityNumber, saudiPhone, text, LIMITS } from "../../common/validation";
-import { MIXED_USAGE_KEY, rentVatFromUsage } from "../../common/usage-vat";
+import { MIXED_USAGE_KEY } from "../../common/usage-vat";
+import { vatFromContractType } from "./ejar-rent-vat";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import {
@@ -172,8 +173,18 @@ export class EjarImportService {
       if (!row) throw notInAccount(`${section}.existingId`);
       return row;
     };
-    const landlordRow = await existing("landlord", (id) => this.store.landlord(accountId, id));
-    const tenantRow = await existing("tenant", (id) => this.store.tenant(accountId, id));
+    // Parties always come from Ejar: they cannot be linked to an existing
+    // landlord or tenant (the account holder's rule). The writer still reuses
+    // a row with the same ID / CR number in this account, to avoid duplicates.
+    for (const section of ["landlord", "tenant"] as const) {
+      if (!blank(body?.[section]?.existingId)) {
+        throw new BadRequestException({
+          code: "invalid_field", key: `${section}.existingId`,
+          message: `لا يمكن ربط ${section === "landlord" ? "المؤجر" : "المستأجر"} بسجل موجود — يُؤخذ من إيجار · The ${section} comes from Ejar and cannot be linked to an existing record.`,
+        });
+      }
+    }
+
     const propertyRow = await existing("property", (id) => this.store.property(accountId, id));
     const unitRow = await existing("unit", (id) => this.store.unit(accountId, id));
     if (unitRow && (!propertyRow || unitRow.propertyId !== propertyRow.id)) {
@@ -214,14 +225,11 @@ export class EjarImportService {
     // wins; otherwise Ejar's contract type (residential / commercial).
     const propUsageId = propertyRow ? propertyRow.usageLookupId : propUsage?.id ?? resolved.usageId;
     const propUsageKey = propertyRow ? await keyOf(propertyRow.usageLookupId) : propUsage?.key ?? (await keyOf(resolved.usageId));
-    const unitUsageKey = unitRow ? await keyOf(unitRow.usageLookupId) : unitUsage?.key ?? null;
     if (propUsageKey === MIXED_USAGE_KEY && !unitRow && !unitUsage) missing.add("unit.usageId");
-    const derivedVat = rentVatFromUsage(propUsageKey, unitUsageKey);
-    const chosenVat = typeof body?.contract?.vatEnabled === "boolean" ? body.contract.vatEnabled : null;
-    // Ask for the VAT choice only when no missing usage would have decided it.
-    if (derivedVat === null && chosenVat === null && !missing.has("property.usageId") && !missing.has("unit.usageId")) {
-      missing.add("contract.vatEnabled");
-    }
+    // Rent VAT is never the user's choice (a client-sent vatEnabled is
+    // ignored): the writer applies the usage rule on the final property/unit,
+    // and where usage cannot decide, Ejar's contract type.
+    const vatFallback = vatFromContractType(mapped.contract.contractType);
 
     if (missing.size) {
       throw new BadRequestException({
@@ -244,12 +252,8 @@ export class EjarImportService {
         email: emailOf(s.email, `بريد ${label} الإلكتروني`),
       };
     };
-    const landlord: PartyChoice = landlordRow
-      ? { existingId: landlordRow.id }
-      : { party: partyInfo(mapped.parties.lessor, "lessor", typedParty("landlord", mapped.parties.lessor)), rep: repInfo(mapped.parties.lessorRepresentative, "lessor") };
-    const tenant: PartyChoice = tenantRow
-      ? { existingId: tenantRow.id }
-      : { party: partyInfo(mapped.parties.tenant, "tenant", typedParty("tenant", mapped.parties.tenant)), rep: repInfo(mapped.parties.tenantRepresentative, "tenant") };
+    const landlord: PartyChoice = { party: partyInfo(mapped.parties.lessor, "lessor", typedParty("landlord", mapped.parties.lessor)), rep: repInfo(mapped.parties.lessorRepresentative, "lessor") };
+    const tenant: PartyChoice = { party: partyInfo(mapped.parties.tenant, "tenant", typedParty("tenant", mapped.parties.tenant)), rep: repInfo(mapped.parties.tenantRepresentative, "tenant") };
 
     // City: a lookup id, or a lookup key / Arabic label; else Ejar's region if it resolved.
     let cityLookupId: number | null = null;
@@ -383,7 +387,7 @@ export class EjarImportService {
     const plan: ImportPlan = {
       contractNumber,
       landlord, tenant, property, unit,
-      contract: this.contractFields(mapped, startDate, endDate, status, chosenVat ?? derivedVat, body?.contract?.notes),
+      contract: this.contractFields(mapped, startDate, endDate, status, vatFallback, body?.contract?.notes),
       additionalFees: Array.isArray(body?.additionalFees) ? body.additionalFees : [],
       invoices: summarizeInvoices(saved.invoicesBody as EjarBody | null),
     };
@@ -391,7 +395,7 @@ export class EjarImportService {
   }
 
   private contractFields(
-    m: MappedLookup, startDate: string, endDate: string, status: string, vat: boolean | null, notes: unknown,
+    m: MappedLookup, startDate: string, endDate: string, status: string, vatFallback: boolean, notes: unknown,
   ): ImportPlan["contract"] {
     const customSchedule = m.invoices
       .filter((i) => i.dueDate && (i.amount ?? 0) > 0)
@@ -407,7 +411,7 @@ export class EjarImportService {
       customSchedule,
       frequencyHint: m.financial.recurringPayment?.en ?? m.contract.paymentFrequency ?? m.financial.paymentFrequency?.en ?? null,
       depositAmount: m.contract.securityDeposit != null && m.contract.securityDeposit > 0 ? String(m.contract.securityDeposit) : null,
-      vatEnabled: vat,
+      vatFallback,
       notes: text(notes, "الملاحظات", LIMITS.notes),
       ejarRaw: {
         source: "ejar-lookup-v2",
