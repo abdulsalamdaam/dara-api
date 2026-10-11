@@ -77,7 +77,8 @@ export interface TrustAccount {
 }
 
 export interface CollectContext {
-  paymentId: number;
+  /** Null for the contract-level context (a receipt voucher names a contract, not an installment). */
+  paymentId: number | null;
   contractId: number | null;
   mode: "owner" | "manager";
   treatment: "principal" | "agent" | null;
@@ -118,6 +119,17 @@ export async function collectContext(q: Sql, scope: number, paymentId: number): 
   if (!p) return null;
   const contractId = p.contract_id == null ? null : Number(p.contract_id);
   const deposit = installmentNature(p.description) === "deposit";
+  return buildCollectContext(q, scope, paymentId, contractId, deposit);
+}
+
+/** GET /finance/v2/installments/contract/:contractId/collect-context — the receipt-voucher dialog (accountant round 4). Null when not in scope. */
+export async function contractCollectContext(q: Sql, scope: number, contractId: number): Promise<CollectContext | null> {
+  const [c] = await q.rows(`select id from contracts where id = $1 and user_id = $2 and deleted_at is null`, [contractId, scope]);
+  if (!c) return null;
+  return buildCollectContext(q, scope, null, contractId, false);
+}
+
+async function buildCollectContext(q: Sql, scope: number, paymentId: number | null, contractId: number | null, deposit: boolean): Promise<CollectContext> {
   const { mode, ctx, treatment, required } = await clientMoney(q, scope, contractId, deposit);
   const trust = required ? await activeTrustAccounts(q, scope) : [];
   // Manager mode always has one (seeded at enable, 0076, and the default cannot be removed); an account

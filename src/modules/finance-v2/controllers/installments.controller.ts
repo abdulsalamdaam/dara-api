@@ -11,6 +11,7 @@ import { InstallmentDocsService } from "../installment-docs.service";
  *  GET  /finance/v2/installments/document-routes?contractIds=  payments.view    which document "create invoice" issues per contract
  *  POST /finance/v2/installments/rent-receipt                   invoices.write   {paymentIds, issueDate?} — create + approve an RR-
  *  GET  /finance/v2/installments/:paymentId/collect-context     payments.view    trust account / residential hints for the collect dialog
+ *  GET  /finance/v2/installments/contract/:contractId/collect-context  payments.view  the same for a receipt voucher (contract only)
  * 404 while the flag is off (the guard), so a flag-off web never changes path.
  */
 @Controller("finance/v2/installments")
@@ -29,6 +30,12 @@ export class FinanceV2InstallmentsController {
   @RequirePermissions(PERMISSIONS.INVOICES_WRITE)
   rentReceipt(@Req() req: Fv2Request, @Body() body: any) {
     return this.svc.issueRentReceipt(scopeId(req.user!), req.user!, body);
+  }
+
+  @Get("contract/:contractId/collect-context")
+  @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW)
+  contractCollectContext(@Req() req: Fv2Request, @Param("contractId", ParseIntPipe) contractId: number) {
+    return this.svc.contractCollectContext(scopeId(req.user!), contractId);
   }
 
   @Get(":paymentId/collect-context")

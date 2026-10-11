@@ -3,6 +3,7 @@ import { JwtAuthGuard } from "../../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../../common/scope";
 import { FinanceV2Guard, RequireCapability, type Fv2Request } from "../finance-v2.guard";
 import { ControlChecksService } from "../controls.service";
+import { TrustTransferService } from "../trust-transfer.service";
 import { isoDate } from "../audit";
 import { riyadhToday } from "../dates";
 
@@ -13,7 +14,22 @@ import { riyadhToday } from "../dates";
 @Controller("finance/v2")
 @UseGuards(JwtAuthGuard, FinanceV2Guard)
 export class FinanceV2ControlsController {
-  constructor(private readonly controls: ControlChecksService) {}
+  constructor(private readonly controls: ControlChecksService, private readonly trust: TrustTransferService) {}
+
+  /** R16: client money collected outside the trust account, and the transfer that moves it in (accountant round 4). */
+  @Get("control-checks/trust-transfer")
+  @RequireCapability("view")
+  trustTransfer(@Req() req: Fv2Request) {
+    return this.trust.proposal(scopeId(req.user!));
+  }
+
+  /** Body: { entryDate? } — drafts that transfer as a manual journal (submit / approve as usual). */
+  @Post("control-checks/trust-transfer")
+  @HttpCode(201)
+  @RequireCapability("draft")
+  trustTransferDraft(@Req() req: Fv2Request, @Body() body: any) {
+    return this.trust.createDraft(scopeId(req.user!), req.user!, body);
+  }
 
   /** ?asOf&lang — the 21 checks (and v2's R4–R7) computed now, plus the last stored run. */
   @Get("reports/control-checks")

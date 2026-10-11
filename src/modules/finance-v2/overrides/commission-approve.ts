@@ -139,9 +139,11 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
           + "The landlord is VAT-registered (a standard invoice) and his national address is incomplete: the invoice approves, but its ZATCA clearance needs the address",
       });
     }
-  } else if (office.vatRegistered) {
-    notices.push({
-      code: "OFFICE_REGISTERED_NOT_LINKED",
+  } else if (office.vatRegistered && doc?.type === "invoice") {
+    // Accountant round 4 (COM-000002): a notice let this approve as a non-tax document. A registered office never
+    // issues its commission without VAT, so it is refused until the document carries 15%.
+    blockers.push({
+      code: "COMMISSION_VAT_MISSING",
       message: "المكتب مسجّل ضريبياً ويلزمه إصدار فاتورة ضريبية بنسبة 15%، وهذا المستند بلا ضريبة (أُنشئ قبل التعديل)؛ ألغِه وأعد إصدار العمولة لتصدر فاتورة ضريبية · "
         + "The office is VAT-registered and must issue a 15% tax invoice; this document carries no VAT (created before the change): cancel it and re-issue the commission as a tax invoice",
     });
@@ -168,7 +170,7 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
  */
 export async function guardCommissionSeller(q: Sql, scope: number, doc: any): Promise<void> {
   if (doc?.kind !== "commission" || doc?.type !== "invoice") return;
-  if (!carriesVat(doc)) return;
+  if (!carriesVat(doc) && !(await accountVatRegistered(q, scope))) return; // a registered office's VAT-less commission is refused too (round 4)
   const check = await commissionSellerCheck(q, scope, doc);
   if (check.ok) return;
   throw new ConflictException({

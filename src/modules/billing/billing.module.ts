@@ -399,6 +399,13 @@ class SimpleInvoicesController {
       conds.push(eq(simpleInvoicesTable.status, "confirmed") as any);
       conds.push(isNull(simpleInvoicesTable.paidDate) as any);
       conds.push(isNull(simpleInvoicesTable.receiptNumber) as any);
+      // finance-v2: R4-3 — not when every installment behind it is already paid (collected another way, e.g. a voucher)
+      const behind = (a: string) => sql`(${sql.raw(a)}.id = ${simpleInvoicesTable.paymentId} or coalesce(${simpleInvoicesTable.paymentIds}, '[]'::jsonb) @> jsonb_build_array(${sql.raw(a)}.id))`;
+      conds.push(sql`(not exists (select 1 from payments p0 where p0.user_id = ${simpleInvoicesTable.userId} and ${behind("p0")})
+        or exists (select 1 from payments p1 where p1.user_id = ${simpleInvoicesTable.userId} and p1.deleted_at is null
+                     and p1.status::text not in ('paid', 'settled_external') and ${behind("p1")}))` as any);
+      // finance-v2: R4-3 — under v2 a confirmed commission was settled from the landlord's dues at approval
+      if ((await this.fv2h?.resolve(scopeId(user))) === true) conds.push(or(isNull(simpleInvoicesTable.kind), ne(simpleInvoicesTable.kind, "commission")) as any);
     }
     // Money actually received against it.
     if (flag(rawQuery?.collected)) conds.push(isNotNull(simpleInvoicesTable.paidDate) as any);
@@ -521,8 +528,11 @@ class SimpleInvoicesController {
       }
     }
 
+    const listFv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: R4-3
+    const instCollected = await this.installmentCollectedFor(this.db, scopeId(user), (rows as any[]).filter((r) => r.type === "invoice").map((r) => Number(r.id))); // finance-v2: R4-3
     const data = (rows as any[]).map((r) => {
-      const collected = round2(collMap.get(r.id) ?? 0);
+      const settledByDues = SimpleInvoicesController.settledByDues(listFv2, r); // finance-v2: R4-3
+      const collected = SimpleInvoicesController.effectiveCollected(round2(collMap.get(r.id) ?? 0), instCollected.get(Number(r.id)), round2(Number(r.total) + (r.type === "invoice" ? round2(noteMap.get(r.number) ?? 0) : 0)), settledByDues); // finance-v2: R4-3
       const isVoucherDoc = r.kind === "receipt" || r.kind === "deposit";
       const linkedInvoiceNumber = isVoucherDoc && r.paymentId != null ? payToInvoice.get(Number(r.paymentId)) ?? null : null;
       const voucherAmount = isVoucherDoc
@@ -532,7 +542,7 @@ class SimpleInvoicesController {
       const netTotal = round2(Number(r.total) + notesAdjustment);
       const balanceDue = Math.max(0, round2(netTotal - collected));
       const relatedNotes = r.type === "invoice" ? notesByInvoice.get(r.number) ?? [] : [];
-      return { ...r, collectedAmount: collected, voucherAmount, notesAdjustment, netTotal, balanceDue, linkedInvoiceNumber, relatedNotes };
+      return { ...r, collectedAmount: collected, voucherAmount, notesAdjustment, netTotal, balanceDue, linkedInvoiceNumber, relatedNotes, settledByDues }; // finance-v2: R4-3 settledByDues
     });
     return { data, page: q.page, pageSize: q.pageSize, total, stats };
   }
@@ -726,6 +736,52 @@ class SimpleInvoicesController {
     return round2(-Number(c?.total ?? 0) + Number(d?.total ?? 0));
   }
 
+  /**
+   * finance-v2: R4-3 (accountant round 4, flag off too) — what was collected on the
+   * installments behind each document by any path: the installment's own collect,
+   * a receipt voucher, or this document. RR-000001 was approved, then its installment
+   * was collected by voucher RV-000001, and the document stayed "awaiting collection"
+   * because only collections tagged with its own id counted. Collections booked
+   * against a DIFFERENT invoice are not counted here.
+   */
+  private async installmentCollectedFor(db: Pick<typeof this.db, "execute">, uid: number, docIds: number[]): Promise<Map<number, number>> {
+    const out = new Map<number, number>();
+    if (!docIds.length) return out;
+    const res: any = await db.execute(sql`
+      select d.id, coalesce(sum(pc.amount), 0) as total
+        from simple_invoices d
+        join lateral (
+          select distinct x::int as pid
+            from jsonb_array_elements_text(case
+              when jsonb_typeof(d.payment_ids) = 'array' and jsonb_array_length(d.payment_ids) > 0 then d.payment_ids
+              when d.payment_id is not null then jsonb_build_array(d.payment_id)
+              else '[]'::jsonb end) x
+        ) ps on true
+        join payment_collections pc on pc.payment_id = ps.pid and pc.user_id = d.user_id
+        left join simple_invoices o on o.id = pc.invoice_id and o.user_id = d.user_id
+       where d.user_id = ${uid} and d.id in (${sql.join(docIds.map((i) => sql`${i}`), sql`, `)})
+         and d.type = 'invoice' and coalesce(d.kind, '') not in ('receipt', 'deposit')
+         and (pc.invoice_id is null or pc.invoice_id = d.id or o.kind in ('receipt', 'deposit'))
+       group by d.id`);
+    for (const r of (Array.isArray(res) ? res : (res?.rows ?? [])) as Array<{ id: number; total: string }>) out.set(Number(r.id), Number(r.total ?? 0));
+    return out;
+  }
+
+  /**
+   * finance-v2: R4-3 — under v2 a confirmed commission document is settled when it is
+   * approved: E15 takes it from the landlord's dues (Dr 2121 / Cr 4210), so there is
+   * nothing to collect and it must not wait in "awaiting collection" (COM-000001).
+   */
+  private static settledByDues(fv2: boolean, doc: { kind?: string | null; status?: string | null }): boolean {
+    return fv2 && doc.kind === "commission" && doc.status === "confirmed";
+  }
+
+  /** finance-v2: R4-3 — the collected figure every read path reports. */
+  private static effectiveCollected(own: number, viaInstallments: number | undefined, netTotal: number, settledByDues: boolean): number {
+    if (settledByDues) return netTotal;
+    return round2(Math.max(own, Math.min(netTotal, viaInstallments ?? 0)));
+  }
+
   @Get(":id")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
@@ -735,10 +791,13 @@ class SimpleInvoicesController {
     const uid = scopeId(user);
     const [agg] = await this.db.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
-    const collected = round2(Number(agg?.total ?? 0));
+    const ownCollected = round2(Number(agg?.total ?? 0)); // finance-v2: R4-3 — see installmentCollectedFor
     // Net of confirmed credit/debit notes referencing this invoice (immutable).
     const notesAdjustment = await this.notesAdjustmentFor(uid, doc);
     const netTotal = round2(Number(doc.total) + notesAdjustment);
+    const fv2 = (await this.fv2h?.resolve(uid)) === true; // finance-v2: R4-3
+    const settledByDues = SimpleInvoicesController.settledByDues(fv2, doc); // finance-v2: R4-3
+    const collected = SimpleInvoicesController.effectiveCollected(ownCollected, (await this.installmentCollectedFor(this.db, uid, [doc.id])).get(doc.id), netTotal, settledByDues); // finance-v2: R4-3
     const balanceDue = Math.max(0, round2(netTotal - collected));
     // Numbers of the confirmed credit/debit notes referencing this invoice — a
     // plain "this invoice has note X" hint (no amount) shown on the invoice.
@@ -751,7 +810,7 @@ class SimpleInvoicesController {
           eq(simpleInvoicesTable.billingReference, doc.number),
           eq(simpleInvoicesTable.status, "confirmed"), isNull(simpleInvoicesTable.deletedAt)));
     }
-    return { ...doc, collectedAmount: collected, notesAdjustment, netTotal, balanceDue, relatedNotes };
+    return { ...doc, collectedAmount: collected, notesAdjustment, netTotal, balanceDue, relatedNotes, settledByDues }; // finance-v2: R4-3 settledByDues
   }
 
   /**
@@ -2013,6 +2072,7 @@ class SimpleInvoicesController {
     // has to let the amount it added be collected.
     const [priorAgg] = await tx.select({ total: sum(paymentCollectionsTable.amount) })
       .from(paymentCollectionsTable).where(eq(paymentCollectionsTable.invoiceId, doc.id));
+    if (SimpleInvoicesController.settledByDues(fv2, doc)) throw new BadRequestException("العمولة مخصومة من مستحقات المؤجر عند الاعتماد — لا تُحصَّل · The commission was taken from the landlord's dues on approval; there is nothing to collect"); // finance-v2: R4-3
     const alreadyCollected = round2(Number(priorAgg?.total ?? 0));
     // On the transaction's own connection: a second pool connection taken while
     // this one is held waits out the 10s pool timeout once the pool is busy, and

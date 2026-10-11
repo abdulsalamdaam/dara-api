@@ -18,6 +18,7 @@ import { RecognizerService } from "./recognizer.service";
 import { FinanceV2HooksModule } from "./hooks/hooks.module";
 import { BackfillService } from "./backfill/backfill.service";
 import { ManualJournalsService } from "./manual-journals.service";
+import { TrustTransferService } from "./trust-transfer.service";
 import { JournalQueryService } from "./journal-query.service";
 import { PeriodCloseService } from "./period-close.service";
 import { VatReturnsService } from "./vat-returns.service";
@@ -82,7 +83,7 @@ import { InstallmentDocsService } from "./installment-docs.service";
   providers: [
     ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
-    BackfillService, ManualJournalsService, JournalQueryService, PeriodCloseService, VatReturnsService,
+    BackfillService, ManualJournalsService, TrustTransferService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
     BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
     ApService, JournalExportService, FinanceSettingsService,

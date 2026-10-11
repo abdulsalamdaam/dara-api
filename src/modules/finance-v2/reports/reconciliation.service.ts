@@ -242,7 +242,12 @@ export class ReconciliationService {
     const r = await this.pool.query(
       `select pc.id, pc.payment_id, pc.amount::text as amount, pc.method, pc.notes, to_char(pc.collected_date, 'YYYY-MM-DD') as d,
               p.contract_id as p_contract, p.description as p_desc, si.kind as doc_kind, si.contract_id as doc_contract,
-              to_char(si.issue_date, 'YYYY-MM-DD') as doc_issue, si.id as doc_id, m.classification, m.bank_account_id
+              to_char(si.issue_date, 'YYYY-MM-DD') as doc_issue, si.id as doc_id, m.classification,
+              -- No account named: the one the engine posted to at the time, not today's default (accountant round 4: trust
+              -- routing switched on later re-sent every old cash-box collection to trust here, and R4 showed a 0.00 "difference").
+              coalesce(m.bank_account_id, (select l.bank_account_id from journal_entries e join journal_lines l on l.entry_id = e.id and l.user_id = e.user_id
+                 where e.user_id = pc.user_id and e.source_type = 'payment_collection' and e.source_id = pc.id and e.status = 'posted'
+                   and e.origin <> 'reversal' and l.bank_account_id is not null order by e.id desc limit 1)) as bank_account_id
          from payment_collections pc
          left join payments p on p.id = pc.payment_id and p.user_id = pc.user_id
          left join simple_invoices si on si.id = pc.invoice_id and si.user_id = pc.user_id
@@ -395,7 +400,9 @@ export class ReconciliationService {
               to_char((v.updated_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as upd,
               (select coalesce(sum(pc.amount), 0) from payment_collections pc where pc.user_id = v.user_id and pc.invoice_id = v.id and pc.payment_id is not null)::text as linked,
               exists (select 1 from finance_deposit_refunds r where r.user_id = v.user_id and v.id = any(r.voucher_ids)) as v2_refund,
-              dm.bank_account_id
+              coalesce(dm.bank_account_id, (select l.bank_account_id from journal_entries e join journal_lines l on l.entry_id = e.id and l.user_id = e.user_id
+                 where e.user_id = v.user_id and e.source_type = 'simple_invoice' and e.source_id = v.id and e.status = 'posted'
+                   and e.origin <> 'reversal' and l.bank_account_id is not null order by e.id desc limit 1)) as bank_account_id -- as for collections above
          from simple_invoices v left join contracts c on c.id = v.contract_id and c.user_id = v.user_id
          left join finance_document_meta dm on dm.document_id = v.id and dm.user_id = v.user_id
         where v.user_id = $1 and v.kind = 'deposit' and v.deleted_at is null

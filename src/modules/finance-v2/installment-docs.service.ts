@@ -6,7 +6,7 @@ import { sqlOf } from "./hooks/sql";
 import { auditRow } from "./audit";
 import { LOCK_KEYS } from "./lock-keys";
 import { createRentReceipt } from "./overrides/documents-v2";
-import { collectContext, documentRoutes, notFound, parseIds } from "./overrides/installment-docs";
+import { collectContext, contractCollectContext, documentRoutes, notFound, parseIds } from "./overrides/installment-docs";
 import type { BillingPort } from "./auto-invoice/auto-invoice.service";
 
 /**
@@ -45,6 +45,13 @@ export class InstallmentDocsService {
   async collectContext(scope: number, paymentId: number) {
     const out = await collectContext(sqlOf(this.pool as any), scope, paymentId);
     if (!out) notFound("Installment");
+    return out;
+  }
+
+  /** GET …/installments/contract/:contractId/collect-context */
+  async contractCollectContext(scope: number, contractId: number) {
+    const out = await contractCollectContext(sqlOf(this.pool as any), scope, contractId);
+    if (!out) notFound("Contract");
     return out;
   }
 

@@ -335,7 +335,7 @@ export class ExtraChecks {
 
     // Classify each entry's residual (trust movement − liability movement − transit).
     const COMMISSION = new Set(["E15", "E16", "E36"]);
-    let commission = 0, officePaid = 0, transfers = 0, billsFlow = 0, opening = 0, depositsToOffice = 0;
+    let commission = 0, officePaid = 0, transfers = 0, billsFlow = 0, opening = 0, depositsToOffice = 0, transfersIn = 0;
     // A principal deposit forfeited, turned into revenue or applied to the office's own arrears (E11 / E12 / E12B) stops
     // being client money while the cash stays in trust: it is the office's money, not yet transferred (round 3).
     const DEPOSIT_TO_OFFICE = new Set(["E11", "E12", "E12B"]);
@@ -352,10 +352,16 @@ export class ExtraChecks {
       if (e.rule === "E39") { billsFlow += r; continue; }
       if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; continue; }
       // A transfer between the trust account and the office's own cash/bank accounts (a manual journal, both sides cash).
-      if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { transfers += r; continue; }
+      if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { if (r > 0) transfersIn += r; else transfers += r; continue; }
       unexplained.push({ entryId: e.entryId, entryNo: e.entryNo, date: e.date, rule: e.rule, sourceType: e.sourceType, sourceId: e.sourceId,
         trust: money(e.trust), liability: money(e.liab), difference: money(r) });
     }
+    // Money moved INTO trust from the office's accounts first covers client money that was collected outside trust
+    // (the unexplained entries, e.g. rent and deposits taken into the cash box before trust routing — accountant
+    // round 4); only what is left over is the office's own money sitting in trust.
+    const shortfall = Math.max(0, -unexplained.reduce((t, x) => t + h(x.difference), 0));
+    const movedIntoTrust = Math.min(transfersIn, shortfall);
+    transfers += transfersIn - movedIntoTrust;
     // Supplier payments from trust to landlord bills reduce the unpaid bills; from the office account they move to office money.
     // billsFlow carries the E38 (+) and E39 from trust (−) residuals; what is still open is `unpaidBills`, the rest is office-paid.
     const officeFromBills = billsFlow - unpaidBills;
@@ -364,7 +370,7 @@ export class ExtraChecks {
     unexplained.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.entryId - b.entryId));
     return {
       status: trustBal === v2 ? "ok" : "difference", ledger: money(trustBal), subLedger: money(v2), difference: money(trustBal - v2),
-      rows: unexplained.slice(0, LIST_LIMIT),
+      rows: trustBal === v2 ? [] : unexplained.slice(0, LIST_LIMIT),
       explanations: [
         {
           code: "trust_components", count: 0, amount: null, items: [{
@@ -374,6 +380,7 @@ export class ExtraChecks {
           }],
         },
         { code: "unexplained_entries", count: unexplained.length, amount: money(unexplained.reduce((t, x) => t + h(x.difference), 0)) },
+        { code: "client_money_moved_into_trust", count: 0, amount: money(movedIntoTrust) },
         { code: "landlord_bills_unpaid", count: bills.length, amount: money(unpaidBills), items: bills.slice(0, LIST_LIMIT).map((b: any) => ({ billId: b.id, number: b.number, ownerId: b.owner_id, remaining: money(h(b.open)) })) },
       ],
       notes: ["tenant advances on managed rent are part of 2121 in v2 (credited on collection)"],
