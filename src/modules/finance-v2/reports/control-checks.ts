@@ -281,7 +281,9 @@ export class ExtraChecks {
    * − the part of that office money that never entered trust: while client money collected outside trust is not
    *   moved in yet, the office's share of it (commission, landlord expenses it recovers) stays outside with it, so
    *   the expected figure is the client money itself (2121 + 2141 net) plus only the office money left in trust.
-   *   This is account-wide, like the rest of the check (not per landlord).
+   *   Only a landlord's own money outside trust can hold the office's share of it (per landlord, by the owner on the
+   *   2121 / 2141 lines), and the office money left in trust is never below zero: taking out more than the office
+   *   earned is client money leaving trust.
    * Tenant advances need no line of their own: in v2 an advance on managed rent is credited to 2121 on collection.
    * Every other entry that moves the trust account and the client liabilities by different amounts is the difference,
    * listed entry by entry (e.g. managed rent collected into the office's own account).
@@ -313,18 +315,30 @@ export class ExtraChecks {
         where l.user_id = $1 and l.entry_date <= $2::date
           and (l.account_id = any($3::int[]) or l.account_id = any($4::int[]) or a.system_key in ('landlord_payable','deposits_held','cash_in_transit'))`,
       [scope, asOf, trustAccts, own])).rows;
-    type E = { entryId: number; entryNo: string; date: string; rule: string | null; origin: string; sourceType: string; sourceId: number; trust: number; liab: number; transit: number; office: number; landlordLp: number };
+    type E = { entryId: number; entryNo: string; date: string; rule: string | null; origin: string; sourceType: string; sourceId: number; trust: number; liab: number; transit: number; office: number; landlordLp: number; byOwner: Map<number | null, number> };
     const ents = new Map<number, E>();
+    const ownerOf = (x: any): number | null => (x.owner_id == null ? null : Number(x.owner_id));
+    const addTo = (m: Map<number | null, number>, k: number | null, v: number) => { if (v) m.set(k, (m.get(k) ?? 0) + v); };
+    // An entry's residual split over the landlords whose 2121 / 2141 / transit lines it moves (in proportion; the
+    // rounding remainder, and an entry with no such line, go to the unattributed bucket `null`).
+    const spread = (e: E, r: number, into: Map<number | null, number>) => {
+      let left = r;
+      const base = e.liab - e.transit;
+      if (base !== 0) for (const [o, v] of e.byOwner) { if (o == null) continue; const part = Math.round((r * v) / base); addTo(into, o, part); left -= part; }
+      addTo(into, null, left);
+    };
+    // Per landlord: the office money taken out of their client money, and their client money collected outside trust.
+    const officeBy = new Map<number | null, number>(), outsideBy = new Map<number | null, number>();
     let trustBal = 0, lp = 0, dep = 0, transit = 0;
     for (const x of lines) {
       const id = Number(x.entry_id);
-      const e = ents.get(id) ?? { entryId: id, entryNo: x.entry_no, date: x.d, rule: x.rule ?? null, origin: x.root_origin, sourceType: x.source_type, sourceId: Number(x.source_id), trust: 0, liab: 0, transit: 0, office: 0, landlordLp: 0 };
+      const e = ents.get(id) ?? { entryId: id, entryNo: x.entry_no, date: x.d, rule: x.rule ?? null, origin: x.root_origin, sourceType: x.source_type, sourceId: Number(x.source_id), trust: 0, liab: 0, transit: 0, office: 0, landlordLp: 0, byOwner: new Map() };
       ents.set(id, e);
       const v = h(x.dc);
       if (trustAccts.includes(x.account_id)) { e.trust += v; trustBal += v; }
-      else if (x.sk === "landlord_payable") { e.liab -= v; e.landlordLp -= v; lp -= v; }
-      else if (x.sk === "deposits_held") { e.liab -= v; dep -= v; }
-      else if (x.sk === "cash_in_transit") { if (agent(x.owner_id)) { e.transit += v; transit += v; } }
+      else if (x.sk === "landlord_payable") { e.liab -= v; e.landlordLp -= v; lp -= v; addTo(e.byOwner, ownerOf(x), -v); }
+      else if (x.sk === "deposits_held") { e.liab -= v; dep -= v; addTo(e.byOwner, ownerOf(x), -v); }
+      else if (x.sk === "cash_in_transit") { if (agent(x.owner_id)) { e.transit += v; transit += v; addTo(e.byOwner, ownerOf(x), -v); } }
       else if (own.includes(x.account_id)) e.office += v;
     }
     // Landlord-charged supplier bills still open at asOf (their E38 debited 2121; the cash is still in trust until paid).
@@ -347,16 +361,17 @@ export class ExtraChecks {
     for (const e of ents.values()) {
       const r = e.trust - e.liab + e.transit;
       if (r === 0) continue;
-      if (e.rule && COMMISSION.has(e.rule)) { commission += r; continue; }
+      if (e.rule && COMMISSION.has(e.rule)) { commission += r; spread(e, r, officeBy); continue; }
       if (e.origin === "opening") { opening += r; continue; }
       // The commission transfer (E15T, 0070): trust → the office's operating account, the office money moving out.
       if (e.rule === "E15T") { transfers += r; continue; }
       // A landlord expense (E18) or bill payment (E39) settled from the office's own account: the office's money is owed back from trust.
-      if ((e.rule === "E18" || e.rule === "E38") && e.trust === 0) { if (e.rule === "E38") billsFlow += r; else officePaid += r; continue; }
-      if (e.rule === "E39") { billsFlow += r; continue; }
-      if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; continue; }
+      if ((e.rule === "E18" || e.rule === "E38") && e.trust === 0) { if (e.rule === "E38") billsFlow += r; else officePaid += r; spread(e, r, officeBy); continue; }
+      if (e.rule === "E39") { billsFlow += r; spread(e, r, officeBy); continue; }
+      if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; spread(e, r, officeBy); continue; }
       // A transfer between the trust account and the office's own cash/bank accounts (a manual journal, both sides cash).
       if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { if (r > 0) transfersIn += r; else transfers += r; continue; }
+      spread(e, -r, outsideBy);
       unexplained.push({ entryId: e.entryId, entryNo: e.entryNo, date: e.date, rule: e.rule, sourceType: e.sourceType, sourceId: e.sourceId,
         trust: money(e.trust), liability: money(e.liab), difference: money(r) });
     }
@@ -375,12 +390,19 @@ export class ExtraChecks {
     // money still outside (accountant round 5: "expected should be 5,215 dues + 3,000 deposit = 8,215 — it does not
     // deduct the 575 cleaning and the 210 commission"). So the client money still outside trust (net of transfers
     // in) absorbs the office money first, and only what is left of it is expected in trust.
+    // Only a landlord's own money outside trust can hold the office's share of it: commission earned on rent that did
+    // reach trust is in trust, even while another landlord's rent sits in the cash box.
+    for (const b of bills) addTo(officeBy, Number(b.owner_id), -h(b.open));
+    let attributable = 0;
+    for (const [o, out] of outsideBy) attributable += Math.min(Math.max(0, officeBy.get(o) ?? 0), Math.max(0, out));
     const stillOutside = shortfall - movedIntoTrust;
-    const officeOutsideTrust = Math.max(0, Math.min(officeMoney, stillOutside));
+    const officeOutsideTrust = Math.max(0, Math.min(officeMoney, stillOutside, attributable));
     // The client money held: the net credit balances of 2121 and 2141 (after commission, landlord expenses, payouts
     // and refunds), less Ejar transit, plus landlord bills still to be paid from it.
     const clientMoney = lp + dep - transit + unpaidBills;
-    const v2 = clientMoney + officeMoney - officeOutsideTrust + opening;
+    // Office money is never negative in trust: more taken out of trust than the office earned is client money gone.
+    const officeInTrust = Math.max(0, officeMoney - officeOutsideTrust);
+    const v2 = clientMoney + officeInTrust + opening;
     unexplained.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.entryId - b.entryId));
     return {
       status: trustBal === v2 ? "ok" : "difference", ledger: money(trustBal), subLedger: money(v2), difference: money(trustBal - v2),
