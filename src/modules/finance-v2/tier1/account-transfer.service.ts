@@ -38,6 +38,9 @@ const optText = (v: unknown, field: string, max: number): string | null => {
   return s || null;
 };
 
+/** 999,999,999.99 SAR. */
+const MAX_TRANSFER_HALALAS = 99_999_999_999;
+
 /** A positive amount with at most 2 decimals, in halalas. */
 export function transferAmount(v: unknown): number {
   if (v === undefined || v === null || v === "" || (typeof v !== "string" && typeof v !== "number")) {
@@ -50,6 +53,8 @@ export function transferAmount(v: unknown): number {
     throw bad("BAD_AMOUNT", "المبلغ رقم موجب بخانتين عشريتين على الأكثر · amount must be a positive decimal with at most 2 places");
   }
   if (!(x > 0)) throw bad("BAD_AMOUNT", "المبلغ يجب أن يكون أكبر من صفر · amount must be greater than zero");
+  // Well under the ledger columns' range, so an absurd amount is a 400, not a 500.
+  if (x > MAX_TRANSFER_HALALAS) throw bad("BAD_AMOUNT", "المبلغ أكبر من الحد المسموح · amount is too large");
   return x;
 }
 

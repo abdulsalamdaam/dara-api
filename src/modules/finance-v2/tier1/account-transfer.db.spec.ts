@@ -108,7 +108,7 @@ describe("finance v2 transfer between accounts (real Postgres)", { skip: fv2DbSk
   it("validation: same account, bad amounts, future date, missing ids", async () => {
     const base = { fromBankAccountId: box[U].cash, toBankAccountId: box[U].trust, amount: "10" };
     await assert.rejects(svc.create(U, holder(U), { ...base, toBankAccountId: box[U].cash }), fails("SAME_ACCOUNT", 400));
-    for (const amount of ["0", "-5", "12.345", "abc", "", null, "1e3"]) {
+    for (const amount of ["0", "-5", "12.345", "abc", "", null, "1e3", "1000000000", "1000000000000"]) {
       await assert.rejects(svc.create(U, holder(U), { ...base, amount }), fails("BAD_AMOUNT", 400), String(amount));
     }
     await assert.rejects(svc.create(U, holder(U), { ...base, date: tomorrow }), fails("FUTURE_DATE", 400));
