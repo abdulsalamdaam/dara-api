@@ -13,6 +13,7 @@ import { PeriodCloseService } from "./period-close.service";
 import { FinanceV2ControlsController } from "./controllers/controls.controller";
 import { FinanceV2Guard } from "./finance-v2.guard";
 import { DEPOSIT_DESC } from "./hooks/classify";
+import { TrustTransferService } from "./trust-transfer.service";
 
 /**
  * The accountant's control checks (R9–R21, his sheet "فحوصات الرقابة"), the
@@ -25,6 +26,7 @@ const U_T = 7602; // R16 trust
 const U_B = 7603; // R13, R15
 const U_G = 7604; // the close gate
 const U_O = 7605; // owner mode
+const U_R = 7606; // R16 round 5: rent in the cash box, commission and cleaning charged to the landlord
 const ASOF = "2026-03-31";
 
 const ALL = ["reports.view", "payments.view", "invoices.view", "invoices.write", "expenses.write", "expenses.approve", "invoices.delete", "payments.write"];
@@ -68,7 +70,7 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
     recon = new ReconciliationService(t.pool);
     controls = new ControlChecksService(t.pool, recon);
     const chart = new ChartService(t.pool);
-    for (const [u, mode] of [[U_A, "manager"], [U_T, "manager"], [U_B, "manager"], [U_G, "manager"], [U_O, "owner"]] as const) {
+    for (const [u, mode] of [[U_A, "manager"], [U_T, "manager"], [U_B, "manager"], [U_G, "manager"], [U_O, "owner"], [U_R, "manager"]] as const) {
       await q(`insert into users (id, email, password_hash, name, user_type) values ($1, $2, 'x', 'Synthetic Co', 'company')`, [u, `fv2-ctl-${u}@example.test`]);
       await q(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, ledger_started_at) values ($1, true, $2, now())`, [u, mode]);
       await withTx(t.pool, (c) => chart.seedChart(c, u));
@@ -233,7 +235,8 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["ok", "2140.00", "2140.00", "0.00"]);
       assert.deepEqual(r.explanations[0].items[0], {
         landlordPayable: "700.00", depositsHeld: "1200.00", cashInTransit: "0.00", commissionDeducted: "100.00", landlordExpensesPaidByOffice: "0.00",
-        depositsKeptByOffice: "0.00", transfersToOffice: "-60.00", officeMoneyNotTransferred: "40.00", landlordBillsUnpaid: "200.00", openingBalanceDifference: "0.00",
+        depositsKeptByOffice: "0.00", transfersToOffice: "-60.00", officeMoneyNotTransferred: "40.00", officeMoneyOutsideTrust: "0.00", landlordBillsUnpaid: "200.00",
+        openingBalanceDifference: "0.00", clientMoneyHeld: "2100.00",
       });
     });
 
@@ -253,7 +256,10 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       const d = { ownerId: O2 };
       const e = await post(u, "2026-03-10", [L(u, "1113", "dr", "300.00", d), L(u, "1122", "cr", "300.00", d), L(u, "2122", "dr", "300.00", d), L(u, "2121", "cr", "300.00", d)], { rule: "E03" });
       const r = await check(u, "R16");
-      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "1940.00", "2240.00", "-300.00"]);
+      // Client money 2121 1000 + 2141 1200 = 2200. The office's 40 (commission less the 60 transfer) is netted against
+      // the 300 outside trust (round 5): the trust account is 260 short of the client money, not 300.
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "1940.00", "2200.00", "-260.00"]);
+      assert.equal(r.explanations[0].items[0].officeMoneyOutsideTrust, "-40.00");
       assert.deepEqual(r.rows.map((x: any) => [x.entryId, x.rule, x.trust, x.liability, x.difference]), [[Number(e.id), "E03", "0.00", "300.00", "-300.00"]]);
       // A bank fee taken from the trust account also shows (the office must cover it).
       await post(u, "2026-03-11", [L(u, "5270", "dr", "5.00"), L(u, "1114", "cr", "5.00")], { origin: "manual" });
@@ -267,13 +273,79 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       const diff0 = (await check(u, "R16")).difference;
       await post(u, "2026-03-20", [L(u, "2121", "dr", "115.00", { ownerId: O2 }), L(u, "4210", "cr", "100.00", { ownerId: O2 }), L(u, "2151", "cr", "15.00", { ownerId: O2 })], { rule: "E15" });
       const mid = await check(u, "R16");
-      assert.equal(mid.difference, diff0, "posted, not yet transferred: explained as office money");
+      // Round 5: with 305 of client money still outside trust, the commission is the office's share of that money,
+      // not office money in trust — 2121 drops by 115 and so does the shortfall.
+      assert.equal(h(mid.difference) - h(diff0), 11500, "posted with client money outside trust: 2121 and the shortfall both drop");
       assert.equal(h(mid.explanations[0].items[0].commissionDeducted) - h(before.commissionDeducted), 11500);
       await post(u, "2026-03-21", [L(u, "1113", "dr", "115.00"), L(u, "1114", "cr", "115.00")], { rule: "E15T", sourceType: "commission_transfer" });
       const after = await check(u, "R16");
+      // Taking the commission out of trust as well leaves trust short by it again.
       assert.deepEqual([after.difference, after.rows.length], [diff0, 2]);
       assert.equal(h(after.explanations[0].items[0].transfersToOffice) - h(before.transfersToOffice), -11500);
       assert.equal(after.explanations[0].items[0].officeMoneyNotTransferred, before.officeMoneyNotTransferred);
+    });
+  });
+
+  // ─────────────────────── R16, accountant round 5 ───────────────────────
+  describe("R16 expected = net client money: commission and landlord expenses reduce it, payouts and refunds too", () => {
+    // The staging case (accountant-empty): 6,000 rent for a third-party landlord collected into the cash box before the
+    // trust account existed, a 3,000 deposit into trust, 210 commission and a 575 cleaning bill charged to the landlord.
+    // His note: expected = dues 5,215 (6,000 − 575 − 210) + deposit 3,000 = 8,215, not 9,000.
+    let O: number;
+    const trust = new (TrustTransferService as any)(undefined, undefined) as TrustTransferService;
+    before(async () => {
+      const u = U_R;
+      (trust as any).pool = t.pool;
+      O = await one(`insert into owners (user_id, name) values ($1, 'Synthetic Third-Party Landlord') returning id`, [u]);
+      await q(`insert into bank_accounts (user_id, kind, name_ar, is_trust, is_active, is_default, gl_account_id) values ($1, 'bank', 'أمانات', true, true, true, $2)`, [u, acc[u]["1114"]]);
+      await q(`update finance_settings set agency_collections_to_trust = true where account_user_id = $1`, [u]);
+      const d = { ownerId: O };
+      await post(u, "2026-01-05", [L(u, "1111", "dr", "6000.00", d), L(u, "1122", "cr", "6000.00", d), L(u, "2122", "dr", "6000.00", d), L(u, "2121", "cr", "6000.00", d)], { rule: "E03" });
+      await post(u, "2026-01-06", [L(u, "1114", "dr", "3000.00", d), L(u, "2141", "cr", "3000.00", d)], { rule: "E09" });
+      await post(u, "2026-01-31", [L(u, "2121", "dr", "210.00", d), L(u, "4210", "cr", "210.00")], { rule: "E15" });
+      await post(u, "2026-02-03", [L(u, "2121", "dr", "575.00", d), L(u, "1111", "cr", "575.00")], { rule: "E18" });
+    });
+
+    it("expected is 5,215 net dues + 3,000 deposit = 8,215; the trust account is 5,215 short", async () => {
+      const r = await check(U_R, "R16");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "3000.00", "8215.00", "-5215.00"]);
+      const c = r.explanations[0].items[0];
+      assert.deepEqual([c.landlordPayable, c.depositsHeld, c.clientMoneyHeld, c.officeMoneyNotTransferred, c.officeMoneyOutsideTrust], ["5215.00", "3000.00", "8215.00", "785.00", "-785.00"]);
+      // The proposed transfer moves the landlord's money only, not the office's commission or the cleaning it paid.
+      const p = await trust.proposal(U_R, ASOF);
+      assert.deepEqual([p.amount, p.from.map((f) => [f.code, f.amount])], ["5215.00", [["1111", "5215.00"]]]);
+    });
+
+    it("a payout from the cash box reduces expected; moving the rest into trust passes", async () => {
+      const u = U_R;
+      await post(u, "2026-02-10", [L(u, "2121", "dr", "1000.00", { ownerId: O }), L(u, "1111", "cr", "1000.00")], { rule: "E19" });
+      let r = await check(u, "R16");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "3000.00", "7215.00", "-4215.00"]);
+      assert.equal((await trust.proposal(u, ASOF)).amount, "4215.00");
+      await post(u, "2026-02-11", [L(u, "1114", "dr", "4215.00"), L(u, "1111", "cr", "4215.00")], { origin: "manual" });
+      r = await check(u, "R16");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference, r.rows.length], ["ok", "7215.00", "7215.00", "0.00", 0]);
+      assert.equal((await trust.proposal(u, ASOF)).amount, "0.00");
+    });
+
+    it("a payout and a deposit refund from trust reduce both sides and it still passes", async () => {
+      const u = U_R;
+      await post(u, "2026-03-01", [L(u, "2121", "dr", "500.00", { ownerId: O }), L(u, "1114", "cr", "500.00")], { rule: "E19" });
+      await post(u, "2026-03-02", [L(u, "2141", "dr", "1000.00", { ownerId: O }), L(u, "1114", "cr", "1000.00")], { rule: "E10" });
+      const r = await check(u, "R16");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["ok", "5715.00", "5715.00", "0.00"]);
+      const c = r.explanations[0].items[0];
+      assert.deepEqual([c.landlordPayable, c.depositsHeld], ["3715.00", "2000.00"]);
+    });
+
+    it("rent collected into trust: the commission not yet transferred is still office money expected in trust", async () => {
+      const u = U_R;
+      const d = { ownerId: O };
+      await post(u, "2026-03-05", [L(u, "1114", "dr", "1000.00", d), L(u, "1122", "cr", "1000.00", d), L(u, "2122", "dr", "1000.00", d), L(u, "2121", "cr", "1000.00", d)], { rule: "E03" });
+      await post(u, "2026-03-31", [L(u, "2121", "dr", "50.00", d), L(u, "4210", "cr", "50.00")], { rule: "E15" });
+      const r = await check(u, "R16");
+      // Trust 6,715 = client money 6,665 (2121 4,665 + 2141 2,000) + the 50 commission still in trust.
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.explanations[0].items[0].clientMoneyHeld], ["ok", "6715.00", "6715.00", "6665.00"]);
     });
   });
 
@@ -398,10 +470,10 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       await q(`update finance_settings set ledger_started_at = null where account_user_id = $1`, [U_O]);
       const before = Number((await q(`select count(*)::int n from finance_control_runs`)).rows[0].n);
       const n = await controls.runNightly("2026-05-02");
-      assert.equal(n, 4, "U_A, U_T, U_B, U_G; U_O has not started");
-      assert.equal(Number((await q(`select count(*)::int n from finance_control_runs where trigger = 'nightly'`)).rows[0].n), 4);
+      assert.equal(n, 5, "U_A, U_T, U_B, U_G, U_R; U_O has not started");
+      assert.equal(Number((await q(`select count(*)::int n from finance_control_runs where trigger = 'nightly'`)).rows[0].n), 5);
       assert.equal(await controls.runNightly("2026-05-02"), 0, "once a day");
-      assert.equal(Number((await q(`select count(*)::int n from finance_control_runs`)).rows[0].n), before + 4);
+      assert.equal(Number((await q(`select count(*)::int n from finance_control_runs`)).rows[0].n), before + 5);
       const [row] = (await q(`select results from finance_control_runs where user_id = $1 and trigger = 'nightly'`, [U_T])).rows;
       assert.equal(row.results.find((x: any) => x.no === 16).status, "difference");
     });
