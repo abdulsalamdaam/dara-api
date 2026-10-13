@@ -305,7 +305,7 @@ export class ExtraChecks {
     // Per entry: the trust movement, the client-liability movement, the transit movement and the office-cash movement.
     const lines = (await this.pool.query(
       `select l.entry_id, e.entry_no, to_char(e.entry_date, 'YYYY-MM-DD') as d, e.origin, coalesce(e.payload->>'rule', o.payload->>'rule') as rule,
-              coalesce(o.origin, e.origin) as root_origin, e.source_type, e.source_id,
+              coalesce(o.origin, e.origin) as root_origin, e.source_type, e.source_id, e.reversal_of is not null as is_reversal,
               a.system_key as sk, l.account_id, l.owner_id, (l.debit - l.credit)::text as dc
          from journal_lines l join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
          join accounts a on a.id = l.account_id and a.user_id = l.user_id
@@ -313,12 +313,12 @@ export class ExtraChecks {
         where l.user_id = $1 and l.entry_date <= $2::date
           and (l.account_id = any($3::int[]) or l.account_id = any($4::int[]) or a.system_key in ('landlord_payable','deposits_held','cash_in_transit'))`,
       [scope, asOf, trustAccts, own])).rows;
-    type E = { entryId: number; entryNo: string; date: string; rule: string | null; origin: string; sourceType: string; sourceId: number; trust: number; liab: number; transit: number; office: number; landlordLp: number };
+    type E = { entryId: number; entryNo: string; date: string; rule: string | null; origin: string; sourceType: string; sourceId: number; reversal: boolean; trust: number; liab: number; transit: number; office: number; landlordLp: number };
     const ents = new Map<number, E>();
     let trustBal = 0, lp = 0, dep = 0, transit = 0;
     for (const x of lines) {
       const id = Number(x.entry_id);
-      const e = ents.get(id) ?? { entryId: id, entryNo: x.entry_no, date: x.d, rule: x.rule ?? null, origin: x.root_origin, sourceType: x.source_type, sourceId: Number(x.source_id), trust: 0, liab: 0, transit: 0, office: 0, landlordLp: 0 };
+      const e = ents.get(id) ?? { entryId: id, entryNo: x.entry_no, date: x.d, rule: x.rule ?? null, origin: x.root_origin, sourceType: x.source_type, sourceId: Number(x.source_id), reversal: x.is_reversal === true, trust: 0, liab: 0, transit: 0, office: 0, landlordLp: 0 };
       ents.set(id, e);
       const v = h(x.dc);
       if (trustAccts.includes(x.account_id)) { e.trust += v; trustBal += v; }
@@ -356,7 +356,9 @@ export class ExtraChecks {
       if (e.rule === "E39") { billsFlow += r; continue; }
       if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; continue; }
       // A transfer between the trust account and the office's own cash/bank accounts (a manual journal, both sides cash).
-      if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { if (r > 0) transfersIn += r; else transfers += r; continue; }
+      // A reversal undoes its original in the original's bucket: reversing a transfer INTO trust takes back money moved in
+      // (not office money moved out of trust), and reversing one OUT of trust gives back office money (not client money moved in).
+      if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { if (e.reversal ? r < 0 : r > 0) transfersIn += r; else transfers += r; continue; }
       unexplained.push({ entryId: e.entryId, entryNo: e.entryNo, date: e.date, rule: e.rule, sourceType: e.sourceType, sourceId: e.sourceId,
         trust: money(e.trust), liability: money(e.liab), difference: money(r) });
     }

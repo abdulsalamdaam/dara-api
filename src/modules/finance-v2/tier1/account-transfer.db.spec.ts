@@ -218,7 +218,9 @@ describe("finance v2 transfer between accounts (real Postgres)", { skip: fv2DbSk
     assert.equal(await bal(U, box[U].cash), "5425.00");
     assert.equal(await bal(U, box[U].trust), "0.00");
     assert.equal((await q(`select status from manual_journals where id = $1`, [transferMj]))[0].status, "void");
-    // R16 is not asserted here: it reads the reversal as a transfer out of trust (its logic is being revised separately).
+    // R16 reads the reversal as undoing the money moved in, not as office money moved out of trust: short 5,215 again.
+    const r16 = await checks.r16(U, today, "manager");
+    assert.deepEqual([r16.status, r16.ledger, r16.subLedger, r16.difference], ["difference", "0.00", "5215.00", "-5215.00"]);
   });
 
   it("the ledger must have started", async () => {
@@ -228,5 +230,105 @@ describe("finance v2 transfer between accounts (real Postgres)", { skip: fv2DbSk
 
   it("the route needs the `money` capability", () => {
     assert.equal(Reflect.getMetadata("fv2:capability", (FinanceV2Tier1Controller.prototype as any).transfer), "money");
+  });
+});
+
+/**
+ * R16 with the accountant's round-5 figures, on a fresh account: deposits 3,000 collected into trust; rent 6,000
+ * collected into the cash box, less 210 commission (E15) and 575 cleaning paid from the cash box (E18), so the cash
+ * box holds 5,215 of landlord dues. Expected client money in trust is 8,215 throughout; the trust balance moves with
+ * the transfer and its reversal, and a commission transfer trust → office (and its reversal) keeps R16 balanced.
+ */
+describe("finance v2 transfer between accounts: R16 through transfer and reversal (real Postgres)", { skip: fv2DbSkip }, () => {
+  const W = 7803;
+  let t: TestDb;
+  let svc: AccountTransferService;
+  let jq: JournalQueryService;
+  let reports: AcctReportsService;
+  let checks: ExtraChecks;
+  let acc: Record<string, number> = {};
+  let box = { cash: 0, bank: 0, trust: 0 };
+  let n = 0;
+  const q = async (sql: string, p: unknown[] = []) => (await t.pool.query(sql, p)).rows;
+  let repo: JournalRepository;
+  const post = (lines: LineInput[], rule: string) =>
+    withTx(t.pool, (c) => repo.post(c, { userId: W, entryDate: monthStart, origin: "auto", sourceType: "test", sourceId: ++n, event: "posted", lines, payload: { rule } }));
+  const dr = (id: number, amt: string): LineInput => ({ accountId: id, debit: toHalalas(amt) });
+  const cr = (id: number, amt: string): LineInput => ({ accountId: id, credit: toHalalas(amt) });
+  const r16 = async () => { const r = await checks.r16(W, today, "manager"); return [r.status, r.ledger, r.subLedger, r.difference]; };
+
+  before(async () => {
+    t = await withDb({ legacy: "full" });
+    const periods = new PeriodsService(t.pool);
+    repo = new JournalRepository(periods);
+    const setup = new FinanceSetupService(new ChartService(t.pool), periods);
+    const banks = new BankAccountsService(t.pool);
+    svc = new AccountTransferService(t.pool, repo, periods);
+    jq = new JournalQueryService(t.pool, new PostingEngine(t.pool, repo, periods));
+    reports = new AcctReportsService(t.pool);
+    checks = new ExtraChecks(t.pool);
+    await q(`insert into users (id, email, password_hash, name, user_type) values ($1, $2, 'x', 'Synthetic Co', 'company')`, [W, `fv2-trf-${W}@example.test`]);
+    await withTx(t.pool, async (c) => {
+      await c.query(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, enabled_at, ledger_started_at) values ($1, true, 'manager', now(), now())`, [W]);
+      await setup.firstEnable(c, W, null);
+    });
+    await q(`update finance_settings set agency_collections_to_trust = true where account_user_id = $1`, [W]);
+    acc = Object.fromEntries((await q(`select coalesce(system_key, code) as k, id from accounts where user_id = $1`, [W])).map((r: any) => [r.k, Number(r.id)]));
+    const codes = Object.fromEntries((await q(`select code, id from accounts where user_id = $1`, [W])).map((r: any) => [r.code, Number(r.id)]));
+    const list = await banks.list(W);
+    box = { cash: list.find((b) => b.glCode === "1111")!.id, bank: list.find((b) => b.glCode === "1113")!.id, trust: list.find((b) => b.glCode === "1114")!.id };
+    await post([dr(codes["1114"], "3000.00"), cr(acc.deposits_held, "3000.00")], "E05");
+    await post([dr(codes["1111"], "6000.00"), cr(acc.landlord_payable, "6000.00")], "E03");
+    await post([dr(acc.landlord_payable, "210.00"), cr(codes["4390"], "210.00")], "E15");
+    await post([dr(acc.landlord_payable, "575.00"), cr(codes["1111"], "575.00")], "E18");
+  });
+  after(async () => { await t?.drop(); });
+
+  it("before: actual 3,000, expected 8,215", async () => {
+    assert.deepEqual(await r16(), ["difference", "3000.00", "8215.00", "-5215.00"]);
+  });
+
+  let inEntry = 0;
+  it("after moving 5,215 cash → trust: balanced", async () => {
+    inEntry = (await svc.create(W, holder(W), { fromBankAccountId: box.cash, toBankAccountId: box.trust, amount: "5215" })).entryId;
+    assert.deepEqual(await r16(), ["ok", "8215.00", "8215.00", "0.00"]);
+  });
+
+  it("after reversing that transfer: back to −5,215 (not ok)", async () => {
+    await jq.reverse(W, holder(W), inEntry, { reason: "undo" });
+    assert.deepEqual(await r16(), ["difference", "3000.00", "8215.00", "-5215.00"]);
+  });
+
+  it("transfer again, then commission trust → office: balanced, and its reversal stays balanced", async () => {
+    await svc.create(W, holder(W), { fromBankAccountId: box.cash, toBankAccountId: box.trust, amount: "5215" });
+    const codes = Object.fromEntries((await q(`select code, id from accounts where user_id = $1`, [W])).map((r: any) => [r.code, Number(r.id)]));
+    await post([dr(codes["1114"], "1000.00"), cr(acc.landlord_payable, "1000.00")], "E03");
+    await post([dr(acc.landlord_payable, "100.00"), cr(codes["4390"], "100.00")], "E15");
+    assert.deepEqual(await r16(), ["ok", "9215.00", "9215.00", "0.00"]);
+    const out = await svc.create(W, holder(W), { fromBankAccountId: box.trust, toBankAccountId: box.bank, amount: "100" });
+    assert.deepEqual(await r16(), ["ok", "9115.00", "9115.00", "0.00"]);
+    const cf: any = await reports.cashFlow(W, { from: monthStart, to: today });
+    assert.equal(cf.internalTransfers.amount, "0.00");
+    assert.equal(cf.internalTransfers.restricted, "5115.00", "trust in 5,215 (twice, one reversed) less 100 out");
+    assert.equal(cf.internalTransfers.own, "-5115.00");
+    await jq.reverse(W, holder(W), out.entryId, { reason: "undo" });
+    assert.deepEqual(await r16(), ["ok", "9215.00", "9215.00", "0.00"]);
+    // Taking more than the commission out of trust is client money leaving: flagged.
+    await svc.create(W, holder(W), { fromBankAccountId: box.trust, toBankAccountId: box.bank, amount: "400" });
+    assert.deepEqual(await r16(), ["difference", "8815.00", "9115.00", "-300.00"]);
+  });
+
+  it("A → B and B → A at once both post (one lock per account, no deadlock)", async () => {
+    const [a, b] = await Promise.all([
+      svc.create(W, holder(W), { fromBankAccountId: box.cash, toBankAccountId: box.bank, amount: "10" }),
+      svc.create(W, holder(W), { fromBankAccountId: box.bank, toBankAccountId: box.cash, amount: "10" }),
+    ]);
+    assert.notEqual(a.entryNo, b.entryNo);
+  });
+
+  it("a closed period takes a transfer from a `settings` holder, as an approved manual journal does", async () => {
+    await q(`update fiscal_periods set status = 'closed' where user_id = $1 and starts_on = $2`, [W, prevMonth]);
+    const r = await svc.create(W, holder(W), { fromBankAccountId: box.cash, toBankAccountId: box.bank, amount: "1", date: prevMonth });
+    assert.equal(r.date, prevMonth);
   });
 });
