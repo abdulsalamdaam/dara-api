@@ -400,7 +400,7 @@ class PaymentsController {
           and d.status = 'confirmed' and d.deleted_at is null
           and (d.payment_id = ${paymentCollectionsTable.paymentId}
                or (jsonb_typeof(d.payment_ids) = 'array'
-                   and exists (select 1 from jsonb_array_elements_text(d.payment_ids) x where x::int = ${paymentCollectionsTable.paymentId})))
+                   and exists (select 1 from jsonb_array_elements_text(d.payment_ids) x where x = ${paymentCollectionsTable.paymentId}::text)))
         order by d.confirmed_at desc nulls last, d.id desc limit 1))`; // finance-v2: C-1
     const collectionsQ = this.db
       .select({

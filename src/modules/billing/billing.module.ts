@@ -511,20 +511,39 @@ class SimpleInvoicesController {
     // the first installment invoice is approved, its paymentIds cover that
     // payment — so the Receipt Vouchers page can show the invoice number on the
     // advance voucher (instead of "—").
-    const voucherPayIds = (rows as any[])
-      .filter((r) => (r.kind === "receipt" || r.kind === "deposit") && r.paymentId != null)
-      .map((r) => Number(r.paymentId));
+    // finance-v2: C-1 — a voucher from POST receipt-voucher carries no payment_id of its own (RV-000003 on
+    // finance-v2: RR-000002's installment showed "—"): its installments are the ones its collections were
+    // finance-v2: booked on (payment_collections.invoice_id = the voucher), in the order they were booked.
+    const voucherRows = (rows as any[]).filter((r) => r.kind === "receipt" || r.kind === "deposit"); // finance-v2: C-1
+    const voucherColl = voucherRows.length // finance-v2: C-1
+      ? await this.db.select({ invoiceId: paymentCollectionsTable.invoiceId, paymentId: paymentCollectionsTable.paymentId }) // finance-v2: C-1
+          .from(paymentCollectionsTable) // finance-v2: C-1
+          .where(and(eq(paymentCollectionsTable.userId, scopeId(user)), inArray(paymentCollectionsTable.invoiceId, voucherRows.map((r) => Number(r.id))), isNotNull(paymentCollectionsTable.paymentId))) // finance-v2: C-1
+          .orderBy(asc(paymentCollectionsTable.id)) // finance-v2: C-1
+      : []; // finance-v2: C-1
+    const voucherPays = new Map<number, number[]>(voucherRows.map((r) => [Number(r.id), r.paymentId != null ? [Number(r.paymentId)] : []])); // finance-v2: C-1
+    for (const c of voucherColl as Array<{ invoiceId: number | null; paymentId: number | null }>) voucherPays.get(Number(c.invoiceId))?.push(Number(c.paymentId)); // finance-v2: C-1
+    const voucherPayIds = [...new Set([...voucherPays.values()].flat())]; // finance-v2: C-1 — the voucher's own payment_id and its collections' installments
     const payToInvoice = new Map<number, string>();
+    const payToInvoiceId = new Map<number, number>(); // finance-v2: C-1 — so the screen can open the linked document
     if (voucherPayIds.length) {
+      // finance-v2: C-1 (accountant, 14 Oct 2026; flag off too) — the linked document is resolved like the
+      // finance-v2: Collections screen's: any confirmed, non-deleted type 'invoice' that is not a voucher or a
+      // finance-v2: commission (so an RR- rent receipt counts, not only kind-less INV-), its payment_ids or
+      // finance-v2: payment_id holding the voucher's installment; the latest confirmed wins. Only the
+      // finance-v2: documents behind THIS page's vouchers are read, not every invoice of the account.
+      const pidText = sql.join([...new Set(voucherPayIds)].map((i) => sql`${String(i)}`), sql`, `); // finance-v2: C-1
       const rentInvs = await this.db
-        .select({ number: simpleInvoicesTable.number, paymentId: simpleInvoicesTable.paymentId, paymentIds: simpleInvoicesTable.paymentIds })
+        .select({ id: simpleInvoicesTable.id, number: simpleInvoicesTable.number, paymentId: simpleInvoicesTable.paymentId, paymentIds: simpleInvoicesTable.paymentIds }) // finance-v2: C-1 — + id
         .from(simpleInvoicesTable)
-        .where(and(base, eq(simpleInvoicesTable.type, "invoice"), isNull(simpleInvoicesTable.kind), eq(simpleInvoicesTable.status, "confirmed")));
+        .where(and(base, eq(simpleInvoicesTable.type, "invoice"), eq(simpleInvoicesTable.status, "confirmed"), // finance-v2: C-1
+          sql`coalesce(${simpleInvoicesTable.kind}, '') not in ('receipt', 'deposit', 'commission')`, // finance-v2: C-1 — not only kind IS NULL
+          sql`(${simpleInvoicesTable.paymentId} in (${sql.join(voucherPayIds.map((i) => sql`${i}`), sql`, `)}) or (jsonb_typeof(${simpleInvoicesTable.paymentIds}) = 'array'
+            and exists (select 1 from jsonb_array_elements_text(${simpleInvoicesTable.paymentIds}) x where x in (${pidText}))))`)) // finance-v2: C-1
+        .orderBy(sql`${simpleInvoicesTable.confirmedAt} desc nulls last`, desc(simpleInvoicesTable.id)); // finance-v2: C-1 — first seen = latest confirmed
       for (const inv of rentInvs as any[]) {
-        const pids: number[] = Array.isArray(inv.paymentIds) && inv.paymentIds.length
-          ? inv.paymentIds.map((n: any) => Number(n))
-          : inv.paymentId != null ? [Number(inv.paymentId)] : [];
-        for (const pid of pids) if (!payToInvoice.has(pid)) payToInvoice.set(pid, inv.number);
+        const pids: number[] = [...(Array.isArray(inv.paymentIds) ? inv.paymentIds.map((n: any) => Number(n)) : []), ...(inv.paymentId != null ? [Number(inv.paymentId)] : [])]; // finance-v2: C-1 — payment_ids or payment_id, as Collections
+        for (const pid of pids) if (!payToInvoice.has(pid)) { payToInvoice.set(pid, inv.number); payToInvoiceId.set(pid, Number(inv.id)); } // finance-v2: C-1
       }
     }
 
@@ -534,7 +553,9 @@ class SimpleInvoicesController {
       const settledByDues = SimpleInvoicesController.settledByDues(listFv2, r); // finance-v2: R4-3
       const collected = SimpleInvoicesController.effectiveCollected(round2(collMap.get(r.id) ?? 0), instCollected.get(Number(r.id)), round2(Number(r.total) + (r.type === "invoice" ? round2(noteMap.get(r.number) ?? 0) : 0)), settledByDues); // finance-v2: R4-3
       const isVoucherDoc = r.kind === "receipt" || r.kind === "deposit";
-      const linkedInvoiceNumber = isVoucherDoc && r.paymentId != null ? payToInvoice.get(Number(r.paymentId)) ?? null : null;
+      const linkedPay = isVoucherDoc ? (voucherPays.get(Number(r.id)) ?? []).find((p) => payToInvoice.has(p)) : undefined; // finance-v2: C-1 — the first of its installments a document covers
+      const linkedInvoiceNumber = linkedPay != null ? payToInvoice.get(linkedPay) ?? null : null; // finance-v2: C-1
+      const linkedInvoiceId = linkedPay != null ? payToInvoiceId.get(linkedPay) ?? null : null; // finance-v2: C-1
       const voucherAmount = isVoucherDoc
         ? round2(Number(r.total))
         : (r.receiptNumber ? round2(voucherMap.get(`${r.id}|${r.receiptNumber}`) ?? collected) : collected);
@@ -542,7 +563,7 @@ class SimpleInvoicesController {
       const netTotal = round2(Number(r.total) + notesAdjustment);
       const balanceDue = Math.max(0, round2(netTotal - collected));
       const relatedNotes = r.type === "invoice" ? notesByInvoice.get(r.number) ?? [] : [];
-      return { ...r, collectedAmount: collected, voucherAmount, notesAdjustment, netTotal, balanceDue, linkedInvoiceNumber, relatedNotes, settledByDues }; // finance-v2: R4-3 settledByDues
+      return { ...r, collectedAmount: collected, voucherAmount, notesAdjustment, netTotal, balanceDue, linkedInvoiceNumber, linkedInvoiceId, relatedNotes, settledByDues }; // finance-v2: R4-3 settledByDues; C-1 linkedInvoiceId
     });
     return { data, page: q.page, pageSize: q.pageSize, total, stats };
   }

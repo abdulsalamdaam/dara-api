@@ -168,6 +168,45 @@ describe("fv2 C-1: Collections shows the document each collection paid", { skip:
     assert.ok(Number(byNo.get("INV-900003")?.id) < 0, "the free-invoice branch keeps its negative id space");
   });
 
+  /** The Receipt Vouchers screen's row for a voucher (GET /simple-invoices with that screen's query). */
+  const voucherRow = async (u: number, number: string) => {
+    const res: any = await env.billing.list(userFor(u), { page: "1", pageSize: "100", type: "invoice", status: "confirmed", excludeDeposit: "false", hasReceipt: "true" });
+    const rows = res.data.filter((r: any) => r.number === number);
+    assert.equal(rows.length, 1, `one Receipt Vouchers row for ${number}`);
+    return rows[0];
+  };
+
+  it("Receipt Vouchers: a voucher on an RR's installment links the RR (number and id); none when no document covers it", async () => {
+    const k = await contract(U, sU, "2500");
+    const rr: any = (await svc.issueRentReceipt(U, userFor(U), { paymentIds: [k.p[0]] })).document;
+    const rv: any = await env.billing.createReceiptVoucher(userFor(U), { paymentId: k.p[0], amount: 2500, method: "cash", paidDate: today });
+    const row = await voucherRow(U, rv.number);
+    assert.equal(row.linkedInvoiceNumber, rr.number);
+    assert.equal(Number(row.linkedInvoiceId), Number(rr.id));
+    // A voucher on an installment nothing covers: genuinely none.
+    const rv2: any = await env.billing.createReceiptVoucher(userFor(U), { paymentId: k.p[1], amount: 2500, method: "cash", paidDate: today });
+    const row2 = await voucherRow(U, rv2.number);
+    assert.equal(row2.linkedInvoiceNumber, null);
+    assert.equal(row2.linkedInvoiceId, null);
+    // A cancelled RR is no longer the linked document.
+    await env.q(`update simple_invoices set status = 'cancelled' where id = $1`, [rr.id]);
+    assert.equal((await voucherRow(U, rv.number)).linkedInvoiceNumber, null);
+  });
+
+  it("Receipt Vouchers, flag off: a voucher on an INV- installment still links it; a commission covering it does not", async () => {
+    const k = await contract(F, sF, "900");
+    const ins = (n: string, kind: string | null) => env.q(
+      `insert into simple_invoices (user_id, number, type, kind, status, contract_id, payment_id, payment_ids, tenant_name, items, subtotal, total, issue_date, confirmed_at)
+       values ($1, $2, 'invoice', $3, 'confirmed', $4, $5, $6::jsonb, 'Synthetic Tenant', '[]'::jsonb, 900, 900, $7, now()) returning id`,
+      [F, n, kind, k.id, k.p[0], JSON.stringify([k.p[0]]), today]).then((r) => Number(r[0].id));
+    const inv = await ins("INV-900101", null);
+    await ins("COM-900101", "commission");
+    const rv: any = await env.billing.createReceiptVoucher(userFor(F), { paymentId: k.p[0], amount: 900, method: "cash", paidDate: today });
+    const row = await voucherRow(F, rv.number);
+    assert.equal(row.linkedInvoiceNumber, "INV-900101");
+    assert.equal(Number(row.linkedInvoiceId), inv);
+  });
+
   it("nothing was sent", () => {
     assert.deepEqual(sends, { email: 0, sms: 0, fetch: 0 });
   });
