@@ -13,6 +13,7 @@ const MAINTENANCE_STATUS_AR: Record<string, string> = {
   in_progress: "قيد التنفيذ",
   pending_approval: "قيد التنفيذ",
   completed: "مكتمل",
+  cancelled: "ملغى",
 };
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -300,8 +301,8 @@ class MaintenanceController {
       await notifyTenant(this.db, {
         userId: row.userId,
         tenantId: row.tenantId,
-        title: "تحديث على طلب الصيانة",
-        body: `تم تحديث حالة طلب الصيانة${row.unitLabel ? ` (${row.unitLabel})` : ""} إلى: ${label}`,
+        title: row.status === "completed" ? "نبشرك، الصيانة اكتملت" : "تحديث على طلب الصيانة",
+        body: `طلب الصيانة${row.unitLabel ? ` لـ ${row.unitLabel}` : ""} صار «${label}».`,
         type: "maintenance_status",
         data: { maintenanceId: row.id, status: row.status },
       });
