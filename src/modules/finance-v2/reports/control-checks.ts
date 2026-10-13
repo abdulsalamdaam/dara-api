@@ -278,6 +278,10 @@ export class ExtraChecks {
    *   expenses the office paid from its own accounts, less the transfers between the trust account and the office's
    *   own accounts, the commission transfer E15T among them ("office money not yet transferred")
    * + landlord-charged supplier bills not yet paid ("landlord expenses not yet paid")
+   * − the part of that office money that never entered trust: while client money collected outside trust is not
+   *   moved in yet, the office's share of it (commission, landlord expenses it recovers) stays outside with it, so
+   *   the expected figure is the client money itself (2121 + 2141 net) plus only the office money left in trust.
+   *   This is account-wide, like the rest of the check (not per landlord).
    * Tenant advances need no line of their own: in v2 an advance on managed rent is credited to 2121 on collection.
    * Every other entry that moves the trust account and the client liabilities by different amounts is the difference,
    * listed entry by entry (e.g. managed rent collected into the office's own account).
@@ -366,7 +370,17 @@ export class ExtraChecks {
     // billsFlow carries the E38 (+) and E39 from trust (−) residuals; what is still open is `unpaidBills`, the rest is office-paid.
     const officeFromBills = billsFlow - unpaidBills;
     const officeMoney = commission + officePaid + officeFromBills + transfers + depositsToOffice;
-    const v2 = lp + dep - transit + officeMoney + unpaidBills + opening;
+    // Office money only sits in trust when the client money it came out of did. Commission on rent collected into the
+    // cash box, or a landlord expense recovered from such rent, never entered trust: it is the office's share of the
+    // money still outside (accountant round 5: "expected should be 5,215 dues + 3,000 deposit = 8,215 — it does not
+    // deduct the 575 cleaning and the 210 commission"). So the client money still outside trust (net of transfers
+    // in) absorbs the office money first, and only what is left of it is expected in trust.
+    const stillOutside = shortfall - movedIntoTrust;
+    const officeOutsideTrust = Math.max(0, Math.min(officeMoney, stillOutside));
+    // The client money held: the net credit balances of 2121 and 2141 (after commission, landlord expenses, payouts
+    // and refunds), less Ejar transit, plus landlord bills still to be paid from it.
+    const clientMoney = lp + dep - transit + unpaidBills;
+    const v2 = clientMoney + officeMoney - officeOutsideTrust + opening;
     unexplained.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.entryId - b.entryId));
     return {
       status: trustBal === v2 ? "ok" : "difference", ledger: money(trustBal), subLedger: money(v2), difference: money(trustBal - v2),
@@ -376,7 +390,7 @@ export class ExtraChecks {
           code: "trust_components", count: 0, amount: null, items: [{
             landlordPayable: money(lp), depositsHeld: money(dep), cashInTransit: money(0 - transit), commissionDeducted: money(commission),
             landlordExpensesPaidByOffice: money(officePaid + officeFromBills), depositsKeptByOffice: money(depositsToOffice), transfersToOffice: money(transfers), officeMoneyNotTransferred: money(officeMoney),
-            landlordBillsUnpaid: money(unpaidBills), openingBalanceDifference: money(opening),
+            officeMoneyOutsideTrust: money(-officeOutsideTrust), landlordBillsUnpaid: money(unpaidBills), openingBalanceDifference: money(opening), clientMoneyHeld: money(clientMoney),
           }],
         },
         { code: "unexplained_entries", count: unexplained.length, amount: money(unexplained.reduce((t, x) => t + h(x.difference), 0)) },
