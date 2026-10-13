@@ -495,10 +495,10 @@ export class PaymentConfirmationsController {
         userId: row.userId,
         tenantId: row.tenantId,
         type: approved ? "payment_approved" : "payment_rejected",
-        title: approved ? "تم اعتماد الدفعة" : "تم رفض طلب الدفع",
+        title: approved ? "تم اعتماد دفعتك" : "للأسف، لم تُعتمد دفعتك",
         body: approved
-          ? `تم اعتماد دفعتك بمبلغ ${amount} ر.س وجارٍ إصدار الفاتورة وتحصيلها.`
-          : `تم رفض طلب تأكيد الدفع بمبلغ ${amount} ر.س.${note ? ` السبب: ${note}` : ""}`,
+          ? `اعتمد المؤجر دفعتك بمبلغ ${amount} ريال سعودي، وستُصدر الفاتورة قريبًا.`
+          : `لم يعتمد المؤجر دفعتك بمبلغ ${amount} ريال سعودي.${note ? ` السبب: ${note}` : ""}`,
         data: { paymentId: row.paymentId, confirmationId: row.id },
       });
     }

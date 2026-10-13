@@ -17,7 +17,7 @@ import { resolvePackage } from "../../common/packages";
  * rather than a hunt through email bodies — which is exactly how the previous
  * domain ended up hardcoded in a dozen places.
  */
-const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.net";
+const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.com";
 const SITE_URL = process.env.SITE_URL || `https://${SITE_DOMAIN}`;
 
 /** Shown to recipients as the contact address in email bodies. */
@@ -42,6 +42,8 @@ const APP_ANDROID_URL = process.env.APP_ANDROID_URL || SITE_URL;
 
 /** Portal base URL — used to build email-verification links. */
 const APP_PUBLIC_URL = process.env.APP_PUBLIC_URL || `https://app.${SITE_DOMAIN}`;
+/** Where an approved user signs in — the portal itself, not the landing page (which only redirects there). */
+const APP_LOGIN_URL = `${APP_PUBLIC_URL.replace(/\/$/, "")}/login`;
 export function buildVerifyEmailLink(token: string): string {
   return `${APP_PUBLIC_URL.replace(/\/$/, "")}/verify-email?token=${encodeURIComponent(token)}`;
 }
@@ -216,26 +218,21 @@ export class EmailService {
     if (!to) return false;
     const safeCode = escapeHtml(code);
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">رمز الدخول · Login code</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        استخدم الرمز التالي لإكمال تسجيل الدخول. صالح لمدة ${ttlMinutes} دقيقة.<br/>
-        Use the code below to finish signing in. Valid for ${ttlMinutes} minutes.
-      </p>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">لإكمال تسجيل الدخول إلى حسابك، أدخل الرمز التالي:</p>
       <div style="margin:24px 0;text-align:center;">
         <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#010f35;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
           ${safeCode}
         </div>
       </div>
       <p style="margin:0 0 6px;color:#64748b;font-size:13px;">
-        إذا لم تطلب هذا الرمز يمكنك تجاهل هذه الرسالة.<br/>
-        If you didn't request this code, ignore this email.
+        الرمز صالح لمدة ${minutesAr(ttlMinutes)}. إذا لم تطلب تسجيل الدخول، يمكنك تجاهل هذه الرسالة.
       </p>
     `);
     return this.send({
       to,
-      subject: `رمز الدخول · Dara login code: ${code}`,
+      subject: "رمز تسجيل الدخول إلى دارا",
       html,
-      text: `Your Dara login code: ${code}\nValid for ${ttlMinutes} minutes.`,
+      text: `لإكمال تسجيل الدخول إلى حسابك، أدخل الرمز التالي: ${code}\nالرمز صالح لمدة ${minutesAr(ttlMinutes)}. إذا لم تطلب تسجيل الدخول، يمكنك تجاهل هذه الرسالة.`,
       category: "otp_login",
     });
   }
@@ -249,29 +246,28 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const safeCode = escapeHtml(code);
     const intro = isEmployee
-      ? "تمت إضافتك كموظف. لتفعيل دخولك، أدخل رمز التأكيد التالي في صفحة التحقق."
-      : "شكراً لتسجيلك في دارا. لتأكيد بريدك الإلكتروني، أدخل رمز التحقق التالي.";
+      ? "تمت إضافتك إلى فريق العمل في حساب على منصة دارا. لتأكيد بريدك الإلكتروني وتفعيل دخولك، أدخل الرمز التالي في صفحة التحقق:"
+      : "شكرًا لتسجيلك في دارا. لتأكيد بريدك الإلكتروني، أدخل الرمز التالي:";
+    const ignore = isEmployee
+      ? "إذا وصلتك هذه الدعوة بالخطأ، يمكنك تجاهل الرسالة."
+      : "إذا لم تطلب إنشاء حساب، يمكنك تجاهل هذه الرسالة.";
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        ${intro}<br/>
-        Enter the verification code below to confirm your email. Valid for ${ttlMinutes} minutes.
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">${intro}</p>
       <div style="margin:24px 0;text-align:center;">
         <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#010f35;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
           ${safeCode}
         </div>
       </div>
       <p style="margin:0 0 6px;color:#64748b;font-size:13px;">
-        رمز التأكيد صالح لمدة ${ttlMinutes} دقيقة. إذا لم تطلب هذا، تجاهل الرسالة.<br/>
-        If you didn't request this, you can ignore this email.
+        الرمز صالح لمدة ${minutesAr(ttlMinutes)}. ${ignore}
       </p>
     `);
     return this.send({
       to,
-      subject: `رمز تأكيد البريد · Dara verification code: ${code}`,
+      subject: isEmployee ? "تأكيد بريدك الإلكتروني لتفعيل دخولك إلى دارا" : "تأكيد بريدك الإلكتروني في دارا",
       html,
-      text: `مرحباً ${name}، رمز تأكيد بريدك في دارا: ${code} (صالح ${ttlMinutes} دقيقة).`,
+      text: `${greetingAr(name)}،\n${intro} ${code}\n\nالرمز صالح لمدة ${minutesAr(ttlMinutes)}. ${ignore}`,
     });
   }
 
@@ -284,23 +280,20 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        يسعدنا انضمامك إلى <strong>دارا</strong>. لمتابعة عقد إيجارك ومدفوعاتك وتقديم طلبات الصيانة بسهولة، حمّل تطبيق دارا على جوالك.
-      </p>
-      <p style="margin:0 0 4px;color:#334155;line-height:1.7;">
-        Welcome aboard! Download the Dara app to follow your lease, payments and maintenance requests on the go.
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">هلا بك في <strong>دارا</strong>.</p>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">تابع عقد إيجارك ومدفوعاتك، وقدّم طلبات الصيانة من تطبيق واحد يجمع كل ما تحتاجه.</p>
+      <p style="margin:16px 0 0;color:#334155;font-weight:700;">حمّل تطبيق دارا:</p>
       ${appButtons()}
       <p style="margin:16px 0 0;color:#64748b;font-size:13px;">
-        إذا واجهت أي مشكلة لا تتردد في التواصل معنا على ${SUPPORT_EMAIL}.
+        للمساعدة والدعم، تواصل معنا على: ${SUPPORT_EMAIL}
       </p>
     `);
     return this.send({
       to,
-      subject: "أهلاً بك في دارا · Welcome to Dara",
+      subject: "هلا بك في دارا | عقدك ومدفوعاتك في مكان واحد",
       html,
-      text: `مرحباً ${name}، يسعدنا انضمامك إلى دارا. حمّل التطبيق: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
+      text: `${greetingAr(name)}،\nهلا بك في دارا.\nتابع عقد إيجارك ومدفوعاتك، وقدّم طلبات الصيانة من تطبيق واحد يجمع كل ما تحتاجه.\n\nحمّل تطبيق دارا: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}\n\nللمساعدة والدعم، تواصل معنا على: ${SUPPORT_EMAIL}`,
     });
   }
 
@@ -312,20 +305,17 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">حمّل تطبيق دارا 📱</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        مرحباً ${safeName}، هذا تذكير ودّي بتحميل تطبيق <strong>دارا</strong>. عبر التطبيق يمكنك متابعة عقدك ومدفوعاتك وتقديم طلبات الصيانة في أي وقت.
-      </p>
-      <p style="margin:0 0 4px;color:#334155;line-height:1.7;">
-        Hi ${safeName}, a friendly reminder to download the Dara app to manage your lease, payments and maintenance requests anytime.
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <h2 style="color:#010f35;margin:0 0 12px;font-size:18px;">متابعة إيجارك من تطبيق دارا أسهل لك</h2>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">تابع عقدك ومدفوعاتك، وقدّم طلبات الصيانة بسهولة من جوالك، في أي وقت.</p>
+      <p style="margin:16px 0 0;color:#334155;font-weight:700;">حمّل تطبيق دارا:</p>
       ${appButtons()}
     `);
     return this.send({
       to,
-      subject: "تذكير بتحميل تطبيق دارا · Get the Dara app",
+      subject: "حمّل تطبيق دارا لمتابعة تفاصيل إيجارك بضغطة زر!",
       html,
-      text: `${name}، حمّل تطبيق دارا: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
+      text: `${greetingAr(name)}،\nمتابعة إيجارك من تطبيق دارا أسهل لك\nتابع عقدك ومدفوعاتك، وقدّم طلبات الصيانة بسهولة من جوالك، في أي وقت.\n\nحمّل تطبيق دارا: iOS ${APP_IOS_URL} | Android ${APP_ANDROID_URL}`,
     });
   }
 
@@ -368,51 +358,50 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const link = buildVerifyEmailLink(token);
     const intro = isEmployee
-      ? "تمت إضافتك كموظف في حساب على منصة <strong>دارا</strong>. لتفعيل دخولك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه."
-      : "شكراً لتسجيلك في <strong>دارا</strong>. لإكمال طلبك، يرجى تأكيد بريدك الإلكتروني بالضغط على الزر أدناه، ثم سيقوم فريقنا بمراجعة الحساب وتفعيله.";
+      ? "تمت إضافتك إلى فريق العمل في حساب على منصة <strong>دارا</strong>. لتفعيل دخولك، أكّد بريدك الإلكتروني من هنا:"
+      : "شكرًا لتسجيلك في <strong>دارا</strong>. لإكمال طلبك، أكّد بريدك الإلكتروني من هنا:";
+    const ignore = isEmployee
+      ? "إذا وصلتك هذه الدعوة بالخطأ، يمكنك تجاهل الرسالة."
+      : "إذا لم تطلب إنشاء حساب، يمكنك تجاهل هذه الرسالة.";
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">مرحباً ${safeName} 👋</h1>
-      <p style="margin:0 0 18px;color:#334155;line-height:1.7;">${intro}</p>
-      <p style="margin:0 0 24px;text-align:center;">
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">${intro}</p>
+      <p style="margin:12px 0 24px;text-align:center;">
         <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
           تأكيد البريد الإلكتروني
         </a>
       </p>
-      <p style="margin:0 0 8px;color:#64748b;font-size:13px;">أو انسخ الرابط التالي والصقه في المتصفح:</p>
+      <p style="margin:0 0 8px;color:#64748b;font-size:13px;">يمكنك أيضًا نسخ الرابط التالي ولصقه في المتصفح:</p>
       <p style="margin:0 0 16px;word-break:break-all;"><a href="${link}" style="color:#042698;font-size:13px;">${link}</a></p>
-      <p style="margin:24px 0 0;color:#94a3b8;font-size:12px;">الرابط صالح لمدة 7 أيام. إذا لم تطلب هذا، يمكنك تجاهل الرسالة.</p>
+      <p style="margin:24px 0 0;color:#94a3b8;font-size:12px;">الرابط صالح لمدة 7 أيام. ${ignore}</p>
     `);
     return this.send({
       to,
-      subject: "تأكيد بريدك الإلكتروني · دارا",
+      subject: isEmployee ? "تأكيد بريدك الإلكتروني لتفعيل دخولك إلى دارا" : "تأكيد بريدك الإلكتروني في دارا",
       html,
-      text: `مرحباً ${name}، يرجى تأكيد بريدك الإلكتروني عبر الرابط: ${link} (صالح 7 أيام).`,
+      text: `${greetingAr(name)}،\n${intro.replace(/<\/?strong>/g, "")}\n${link}\n\nالرابط صالح لمدة 7 أيام. ${ignore}`,
     });
   }
 
   async sendMaintenanceAcknowledgment(to: string, payload: MaintenanceEmailPayload): Promise<boolean> {
     if (!to) return false;
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تم استلام طلب الصيانة ✅</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        شكراً لتواصلك معنا. تم تسجيل طلب الصيانة الخاص بك (رقم <strong>#${payload.id}</strong>) وسيتم التواصل معك في أقرب وقت ممكن.
-      </p>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">سجّلنا طلب الصيانة برقم <strong>${payload.id}</strong>، وسنتواصل معك بخصوصه في أقرب وقت ممكن.</p>
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">بيانات طلبك</div>
       ${row("الوحدة", payload.unitLabel || "—")}
-      ${row("الأولوية", payload.priority || "medium")}
-      ${row("الحالة الحالية", payload.status || "open")}
-      <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#64748b;font-size:12px;margin-bottom:6px;">تفاصيل طلبك</div>
+      ${row("الأولوية", priorityLabel(payload.priority))}
+      ${row("حالة الطلب", maintenanceStatusLabel(payload.status))}
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">تفاصيل طلبك</div>
+      <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        هذه رسالة تأكيد تلقائية — لا حاجة للرد عليها.
-      </p>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">هذه رسالة تلقائية لتأكيد استلام طلبك، وما تحتاج ترد عليها.</p>
     `);
     return this.send({
       to,
-      subject: `تأكيد استلام طلب الصيانة #${payload.id}`,
+      subject: `وصلنا طلب الصيانة رقم ${payload.id}`,
       html,
-      text: `تم استلام طلب الصيانة رقم #${payload.id}. سيتم التواصل معك قريباً.`,
+      text: `سجّلنا طلب الصيانة برقم ${payload.id}، وسنتواصل معك بخصوصه في أقرب وقت ممكن.\n\nالوحدة: ${payload.unitLabel || "—"}\nالأولوية: ${priorityLabel(payload.priority)}\nحالة الطلب: ${maintenanceStatusLabel(payload.status)}\n\nتفاصيل طلبك:\n${payload.description}`,
     });
   }
 
@@ -423,40 +412,24 @@ export class EmailService {
    */
   async sendMaintenanceStatusChanged(to: string, payload: MaintenanceEmailPayload & { previousStatus?: string | null }): Promise<boolean> {
     if (!to) return false;
-    const statusLabels: Record<string, string> = {
-      open:              "مفتوحة",
-      in_progress:       "قيد التنفيذ",
-      pending_approval:  "بانتظار الموافقة",
-      completed:         "مكتملة",
-      cancelled:         "ملغاة",
-    };
-    const newLabel = statusLabels[String(payload.status)] || String(payload.status || "—");
+    const newLabel = maintenanceStatusLabel(payload.status);
+    const done = payload.status === "completed";
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تحديث على طلب الصيانة #${payload.id}</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        نود إعلامك بأن حالة طلب الصيانة الخاص بك قد تم تحديثها.
-      </p>
-      <div style="margin:16px 0;padding:14px 16px;background:linear-gradient(135deg,#eff6ff,#e0e7ff);border:1px solid #c7d2fe;border-radius:10px;text-align:center;">
-        <div style="color:#475569;font-size:12px;margin-bottom:4px;">الحالة الحالية</div>
-        <div style="color:#1e3a8a;font-size:20px;font-weight:700;">${escapeHtml(newLabel)}</div>
-      </div>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">حالة طلبك رقم <strong>${payload.id}</strong> صارت «${escapeHtml(newLabel)}».</p>
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">بيانات طلبك</div>
       ${row("الوحدة", payload.unitLabel || "—")}
-      ${row("الأولوية", payload.priority || "medium")}
-      <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#64748b;font-size:12px;margin-bottom:6px;">طلبك الأصلي</div>
+      ${row("الأولوية", priorityLabel(payload.priority))}
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">تفاصيل طلبك</div>
+      <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        ${payload.status === "completed"
-          ? "تم إكمال الطلب. إذا كانت لديك أي ملاحظات يسعدنا تواصلك معنا."
-          : "سنواصل تحديثك بأي تغييرات على هذا الطلب."}
-      </p>
+      ${done ? `<p style="margin:24px 0 0;color:#64748b;font-size:13px;">نبشرك، الصيانة اكتملت. إذا عندك أي ملاحظات، يسعدنا تواصلك معنا.</p>` : ""}
     `);
     return this.send({
       to,
-      subject: `تحديث طلب الصيانة #${payload.id} — ${newLabel}`,
+      subject: `تحديث بخصوص طلب الصيانة رقم ${payload.id} | ${newLabel}`,
       html,
-      text: `تم تحديث طلب الصيانة #${payload.id} إلى: ${newLabel}.`,
+      text: `حالة طلبك رقم ${payload.id} صارت «${newLabel}».\n\nالوحدة: ${payload.unitLabel || "—"}\nالأولوية: ${priorityLabel(payload.priority)}\n\nتفاصيل طلبك:\n${payload.description}${done ? "\n\nنبشرك، الصيانة اكتملت. إذا عندك أي ملاحظات، يسعدنا تواصلك معنا." : ""}`,
     });
   }
 
@@ -489,9 +462,10 @@ export class EmailService {
     const html = layout(`
       <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">فاتورة اشتراكك 🧾</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        مرحباً ${safeName}،<br/>
-        تم استلام دفعة اشتراكك في <strong>دارا · Dara</strong> بنجاح. تجد الفاتورة الضريبية مرفقة بهذه الرسالة بصيغة PDF.
+        ${greetingAr(safeName)}،<br/>
+        استلمنا دفعة اشتراكك في <strong>دارا</strong> بنجاح، وتجد الفاتورة الضريبية مرفقة بهذه الرسالة بصيغة PDF.
       </p>
+      ${en("We've received your Dara subscription payment. Your tax invoice is attached as a PDF.")}
       <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;color:#334155;">
         <tr><td style="padding:8px 0;color:#64748b;">رقم الفاتورة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${number}</td></tr>
         <tr><td style="padding:8px 0;color:#64748b;">الباقة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${plan} — ${cycleLabel}</td></tr>
@@ -500,19 +474,20 @@ export class EmailService {
       </table>
       <div style="margin:24px 0;text-align:center;">
         <a href="${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
-          فتح لوحة التحكم
+          فتح لوحة التحكم · Open dashboard
         </a>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        يمكنك تنزيل هذه الفاتورة وأي فاتورة سابقة في أي وقت من الإعدادات ← الاشتراك والفواتير.
+        يمكنك تنزيل هذه الفاتورة وفواتيرك السابقة في أي وقت من الإعدادات ← الاشتراك والفوترة.
         لأي استفسار عن الفوترة راسلنا على ${SUPPORT_EMAIL}.
       </p>
+      ${en(`Download this and past invoices anytime from Settings → Subscription &amp; Billing. Billing questions: ${SUPPORT_EMAIL}.`, "muted")}
     `);
     return this.send({
       to,
-      subject: `فاتورة اشتراك دارا · ${payload.invoiceNumber}`,
+      subject: `فاتورة اشتراك دارا · Dara subscription invoice ${payload.invoiceNumber}`,
       html,
-      text: `تم استلام دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة الضريبية مرفقة بصيغة PDF.`,
+      text: `استلمنا دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة الضريبية مرفقة بصيغة PDF.\n\nWe've received your Dara subscription payment (invoice ${payload.invoiceNumber}). Your tax invoice is attached as a PDF.`,
       category: "subscription-invoice",
       attachments: [{ filename: `${payload.invoiceNumber}.pdf`, content: pdf, contentType: "application/pdf" }],
     });
@@ -525,25 +500,21 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تم تفعيل حسابك ✅</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        مرحباً ${safeName}،<br/>
-        يسعدنا إعلامك بأن حسابك في <strong>دارا · Dara</strong> قد تم تفعيله بنجاح. يمكنك الآن تسجيل الدخول وإدارة عقاراتك.
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <h2 style="color:#010f35;margin:0 0 12px;font-size:18px;">حسابك جاهز لإدارة عقاراتك</h2>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">فعّلنا حسابك في <strong>دارا</strong>. تقدر الحين تسجّل الدخول وتبدأ تدير عقاراتك بأدوات متكاملة في مكان واحد.</p>
       <div style="margin:24px 0;text-align:center;">
-        <a href="${SITE_URL}/login" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+        <a href="${APP_LOGIN_URL}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
           تسجيل الدخول
         </a>
       </div>
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        إذا واجهت أي مشكلة في الدخول لا تتردد في التواصل معنا على ${SUPPORT_EMAIL}.
-      </p>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">للمساعدة في الدخول إلى حسابك، تواصل معنا على: ${SUPPORT_EMAIL}</p>
     `);
     return this.send({
       to,
-      subject: "تم تفعيل حسابك في دارا · Account approved",
+      subject: "تم تفعيل حسابك في دارا",
       html,
-      text: `مرحباً ${name}، تم تفعيل حسابك في دارا. يمكنك الآن تسجيل الدخول عبر ${SITE_URL}/login`,
+      text: `${greetingAr(name)}،\nحسابك جاهز لإدارة عقاراتك\nفعّلنا حسابك في دارا. تقدر الحين تسجّل الدخول وتبدأ تدير عقاراتك بأدوات متكاملة في مكان واحد.\n\nتسجيل الدخول: ${APP_LOGIN_URL}\n\nللمساعدة في الدخول إلى حسابك، تواصل معنا على: ${SUPPORT_EMAIL}`,
     });
   }
 
@@ -556,26 +527,21 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const safeReason = reason ? escapeHtml(reason) : "";
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">طلب التسجيل</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        ${safeName}،<br/>
-        نعتذر، لم نتمكّن من قبول طلب تسجيلك في <strong>دارا · Dara</strong> في الوقت الحالي.
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">نعتذر منك، ما تمكّنا من قبول طلب تسجيلك في <strong>دارا</strong> حاليًا.</p>
       ${safeReason
         ? `<div style="margin-top:16px;padding:12px;background:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
-             <div style="color:#991b1b;font-size:12px;margin-bottom:6px;">السبب</div>
+             <div style="color:#991b1b;font-size:12px;margin-bottom:6px;">سبب عدم القبول</div>
              <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${safeReason}</div>
            </div>`
         : ""}
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        إذا كان لديك أي استفسار يمكنك التواصل مع فريقنا على ${SUPPORT_EMAIL}.
-      </p>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">إذا عندك أي استفسار عن طلبك، يسعدنا تواصلك معنا على: ${SUPPORT_EMAIL}</p>
     `);
     return this.send({
       to,
-      subject: "بشأن طلب تسجيلك في دارا",
+      subject: "تحديث بخصوص طلب تسجيلك في دارا",
       html,
-      text: `${name}، نعتذر، لم نتمكّن من قبول طلب تسجيلك في دارا في الوقت الحالي.${reason ? ` السبب: ${reason}` : ""}`,
+      text: `${greetingAr(name)}،\nنعتذر منك، ما تمكّنا من قبول طلب تسجيلك في دارا حاليًا.${reason ? `\nسبب عدم القبول: ${reason}` : ""}\n\nإذا عندك أي استفسار عن طلبك، يسعدنا تواصلك معنا على: ${SUPPORT_EMAIL}`,
     });
   }
 
@@ -587,23 +553,19 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(payload.name || "");
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">شكراً لتواصلك معنا</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        ${safeName ? `${safeName}، ` : ""}استلمنا رسالتك (رقم <strong>#${payload.id}</strong>) وسيقوم فريقنا بالرد عليك في أقرب وقت ممكن.
-      </p>
-      <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#64748b;font-size:12px;margin-bottom:6px;">نسخة من رسالتك</div>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">شكرًا لتواصلك مع <strong>دارا</strong>. استلمنا رسالتك برقم <strong>${payload.id}</strong>، وسيرد عليك فريقنا في أقرب وقت ممكن.</p>
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">نسخة من رسالتك:</div>
+      <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
-      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
-        إذا أردت إضافة معلومات يمكنك الرد على هذا البريد مباشرة.
-      </p>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لإضافة أي تفاصيل، تقدر ترد على هذا البريد مباشرة.</p>
     `);
     return this.send({
       to,
-      subject: `استلمنا رسالتك #${payload.id} — دارا`,
+      subject: `استلمنا رسالتك | رقم ${payload.id}`,
       html,
-      text: `استلمنا رسالتك رقم #${payload.id}. سنرد عليك قريباً.`,
+      text: `${greetingAr(payload.name || "")}،\nشكرًا لتواصلك مع دارا. استلمنا رسالتك برقم ${payload.id}، وسيرد عليك فريقنا في أقرب وقت ممكن.\n\nنسخة من رسالتك:\n${payload.description}\n\nلإضافة أي تفاصيل، تقدر ترد على هذا البريد مباشرة.`,
     });
   }
 
@@ -614,21 +576,22 @@ export class EmailService {
       return false;
     }
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">طلب صيانة جديد #${payload.id}</h1>
-      ${row("الوحدة", payload.unitLabel || "—")}
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">سجّلنا طلب صيانة بالبيانات التالية:</p>
+      ${row("رقم الطلب", String(payload.id))}
       ${row("العقار", payload.propertyName || "—")}
+      ${row("الوحدة", payload.unitLabel || "—")}
       ${row("المستأجر", payload.tenantName || "—")}
-      ${row("رقم المستأجر", payload.tenantPhone || "—")}
-      ${row("الأولوية", payload.priority || "medium")}
-      ${row("الحالة", payload.status || "open")}
-      <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#64748b;font-size:12px;margin-bottom:6px;">الوصف</div>
+      ${row("رقم التواصل", payload.tenantPhone || "—")}
+      ${row("الأولوية", priorityLabel(payload.priority))}
+      ${row("حالة الطلب", maintenanceStatusLabel(payload.status))}
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">تفاصيل الطلب:</div>
+      <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
     `);
     return this.send({
       to: recipient,
-      subject: `طلب صيانة جديد #${payload.id} — ${payload.unitLabel || "وحدة"}`,
+      subject: `وصلنا طلب صيانة جديد رقم ${payload.id} | ${payload.unitLabel || "—"}`,
       html,
     });
   }
@@ -640,19 +603,20 @@ export class EmailService {
       return false;
     }
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">رسالة جديدة من نموذج التواصل #${payload.id}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">وصلتك رسالة عبر نموذج التواصل</h1>
+      ${row("رقم الرسالة", String(payload.id))}
       ${row("الاسم", payload.name || "—")}
-      ${row("البريد", payload.email || "—")}
-      ${row("الجوال", payload.phone || "—")}
-      ${row("المصدر", payload.source || "—")}
-      <div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-        <div style="color:#64748b;font-size:12px;margin-bottom:6px;">الرسالة</div>
+      ${row("البريد الإلكتروني", payload.email || "—")}
+      ${row("رقم الجوال", payload.phone || "—")}
+      ${row("مصدر الرسالة", payload.source || "—")}
+      <div style="margin:20px 0 8px;color:#010f35;font-size:14px;font-weight:700;">نص الرسالة</div>
+      <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.description)}</div>
       </div>
     `);
     return this.send({
       to: recipient,
-      subject: `رسالة تواصل جديدة #${payload.id}${payload.name ? ` — ${payload.name}` : ""}`,
+      subject: `رسالة جديدة من ${payload.name || "—"} | رقم ${payload.id}`,
       html,
       replyTo: payload.email || undefined,
     });
@@ -773,22 +737,21 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard/settings?section=support`;
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">رد جديد على تذكرة الدعم #${ticketId}</h1>
-      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
-        ${safeName ? `${safeName}، ` : ""}وصلك رد من فريق الدعم على تذكرتك رقم <strong>#${ticketId}</strong>:
-      </p>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(safeName)}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">ردّ فريق الدعم على طلبك رقم <strong>${ticketId}</strong>:</p>
       <div style="margin-top:8px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
         <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(message)}</div>
       </div>
-      <div style="margin-top:20px;text-align:center;">
-        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:600;padding:12px 22px;border-radius:10px;font-size:14px;">عرض المحادثة والرد</a>
+      <p style="margin:20px 0 12px;color:#334155;line-height:1.7;">تقدر تطّلع على المحادثة وترد من هنا:</p>
+      <div style="text-align:center;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">عرض المحادثة والرد</a>
       </div>
     `);
     return this.send({
       to,
-      subject: `رد على تذكرة الدعم #${ticketId} — دارا`,
+      subject: `وصلك رد على طلب الدعم رقم ${ticketId}`,
       html,
-      text: `وصلك رد على تذكرة الدعم #${ticketId}:\n\n${message}`,
+      text: `${greetingAr(name)}،\nردّ فريق الدعم على طلبك رقم ${ticketId}:\n\n${message}\n\nتقدر تطّلع على المحادثة وترد من هنا: ${link}`,
     });
   }
 }
@@ -834,6 +797,55 @@ function riyadhTimestamp(value: Date | string | null | undefined): string {
   }).formatToParts(d);
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+}
+
+/**
+ * An English paragraph inside the RTL layout. `dir="ltr"` keeps trailing
+ * punctuation and Latin runs in the right order; `tone` matches the muted /
+ * faint footnote styles used for the Arabic lines it sits under. Trusted
+ * template HTML only — escape any user value before passing it in.
+ */
+function en(html: string, tone: "body" | "muted" | "faint" = "body"): string {
+  const style = tone === "muted" ? "margin:0 0 6px;color:#64748b;font-size:13px;"
+    : tone === "faint" ? "margin:4px 0 0;color:#94a3b8;font-size:12px;"
+    : "margin:0 0 12px;color:#334155;line-height:1.7;";
+  return `<p dir="ltr" lang="en" style="${style}text-align:left;">${html}</p>`;
+}
+
+/** "يا هلا فلان", or just "يا هلا" when the name is blank (no dangling space). */
+function greetingAr(name: string): string {
+  const n = String(name ?? "").trim();
+  return n ? `يا هلا ${n}` : "يا هلا";
+}
+
+/** Arabic count agreement for minutes: دقيقة واحدة / دقيقتين / 3–10 دقائق / 11+ دقيقة. */
+function minutesAr(n: number): string {
+  if (n === 1) return "دقيقة واحدة";
+  if (n === 2) return "دقيقتين";
+  if (n >= 3 && n <= 10) return `${n} دقائق`;
+  return `${n} دقيقة`;
+}
+
+
+/** Same wording as the portal (dara-web `maintenance.*`), so the email matches the screen. */
+const PRIORITY_AR: Record<string, string> = { low: "منخفضة", medium: "متوسطة", high: "عالية", urgent: "عاجلة" };
+const MAINTENANCE_STATUS_AR: Record<string, string> = {
+  open:             "جديد",
+  in_progress:      "قيد التنفيذ",
+  pending_approval: "بانتظار الموافقة",
+  completed:        "مكتمل",
+  cancelled:        "ملغى",
+};
+
+/** The raw enum used to reach the recipient as "medium" / "open"; show the Arabic label instead. */
+function priorityLabel(value: string | null | undefined): string {
+  const v = String(value || "medium");
+  return PRIORITY_AR[v] || v;
+}
+
+function maintenanceStatusLabel(value: string | null | undefined): string {
+  const v = String(value || "open");
+  return MAINTENANCE_STATUS_AR[v] || v;
 }
 
 /** Two app-store call-to-action buttons used in tenant-facing emails. */
