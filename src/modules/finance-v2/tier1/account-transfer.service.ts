@@ -20,6 +20,8 @@ export interface AccountTransferOut {
   to: { bankAccountId: number; glCode: string; nameAr: string; nameEn: string | null; balance: string };
   /** Non-blocking: e.g. SOURCE_BALANCE_NEGATIVE when the source account's book balance goes below zero. */
   warnings: string[];
+  /** True when this is the transfer an earlier request with the same requestId already posted. */
+  replayed?: boolean;
 }
 
 const bad = (error: string, message: string) => new BadRequestException({ error, message });
@@ -100,6 +102,9 @@ export class AccountTransferService {
     if (date > today) throw bad("FUTURE_DATE", "لا يمكن أن يكون تاريخ التحويل في المستقبل · The transfer date cannot be in the future");
     const note = optText(body?.note, "note", 500);
     const reference = optText(body?.reference, "reference", 100);
+    // The form's per-open id: a double click or a retry after a timeout sends the same one, and gets the first transfer back.
+    const requestId = body?.requestId == null || body.requestId === "" ? null : String(body.requestId);
+    if (requestId != null && !/^[A-Za-z0-9_-]{8,64}$/.test(requestId)) throw bad("BAD_INPUT", "requestId must be 8–64 letters, digits, - or _");
 
     try {
       return await withTx(this.pool, async (c) => {
@@ -108,6 +113,15 @@ export class AccountTransferService {
           `select finance_v2_enabled as enabled, ledger_started_at is not null as started from finance_settings where account_user_id = $1`, [scope])).rows;
         if (!st?.enabled || !st.started) {
           throw new ConflictException({ error: "LEDGER_NOT_STARTED", message: "لم يبدأ دفتر الأستاذ بعد · The ledger has not started yet" });
+        }
+
+        if (requestId) {
+          const [prev] = (await c.query(
+            `select e.id, e.entry_no, e.entry_date::text as d, e.memo, (e.payload->>'manualJournalId')::int as mj, e.payload->'transfer' as t
+               from journal_entries e
+              where e.user_id = $1 and e.source_type = 'manual_journal' and e.payload->'transfer'->>'requestId' = $2
+              order by e.id limit 1`, [scope, requestId])).rows;
+          if (prev) return this.replay(c, scope, prev, today);
         }
 
         const boxes = (await c.query(
@@ -159,7 +173,7 @@ export class AccountTransferService {
         const mjId = Number(ins.rows[0].id);
         const res = await this.journal.post(c, {
           userId: scope, entryDate: date, origin: "manual", sourceType: "manual_journal", sourceId: mjId, event: "posted", memo,
-          payload: { manualJournalId: mjId, draftedBy: user.id, transfer: { fromBankAccountId: fromId, toBankAccountId: toId, reference, note } },
+          payload: { manualJournalId: mjId, draftedBy: user.id, transfer: { fromBankAccountId: fromId, toBankAccountId: toId, reference, note, amount: fromHalalas(amount), requestId } },
           warnings, createdBy: user.id,
           lines: [
             { accountId: Number(to.gl_account_id), debit: amount, credit: 0, memo: to.name_ar, bankAccountId: toId },
@@ -183,5 +197,23 @@ export class AccountTransferService {
     } catch (err) {
       mapLedgerError(err);
     }
+  }
+
+  /** The transfer an earlier request with the same requestId posted, in the shape `create` returns. */
+  private async replay(c: any, scope: number, prev: any, today: string): Promise<AccountTransferOut> {
+    const t = prev.t ?? {};
+    const boxes = (await c.query(
+      `select b.id, b.name_ar, b.name_en, b.gl_account_id, a.code from bank_accounts b join accounts a on a.id = b.gl_account_id and a.user_id = b.user_id
+        where b.user_id = $1 and b.id = any($2::int[])`, [scope, [Number(t.fromBankAccountId), Number(t.toBankAccountId)]])).rows;
+    const side = async (id: number) => {
+      const b = boxes.find((x: any) => Number(x.id) === id);
+      const v = b ? (await c.query(`select coalesce(sum(debit - credit), 0)::text as v from journal_lines where user_id = $1 and account_id = $2 and entry_date <= $3::date`,
+        [scope, b.gl_account_id, today])).rows[0].v : "0";
+      return { bankAccountId: id, glCode: b?.code ?? "", nameAr: b?.name_ar ?? "", nameEn: b?.name_en ?? null, balance: fromHalalas(toHalalas(v)) };
+    };
+    return {
+      manualJournalId: Number(prev.mj), entryId: Number(prev.id), entryNo: prev.entry_no, date: prev.d, amount: String(t.amount ?? ""), memo: prev.memo,
+      from: await side(Number(t.fromBankAccountId)), to: await side(Number(t.toBankAccountId)), warnings: [], replayed: true,
+    } as AccountTransferOut;
   }
 }

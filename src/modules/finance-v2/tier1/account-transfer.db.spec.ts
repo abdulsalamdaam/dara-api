@@ -231,6 +231,26 @@ describe("finance v2 transfer between accounts (real Postgres)", { skip: fv2DbSk
   it("the route needs the `money` capability", () => {
     assert.equal(Reflect.getMetadata("fv2:capability", (FinanceV2Tier1Controller.prototype as any).transfer), "money");
   });
+
+  it("a repeated requestId (double click, retry, or both at once) posts once and returns the first transfer", async () => {
+    await q(`update finance_settings set finance_v2_enabled = true, ledger_started_at = coalesce(ledger_started_at, now()) where account_user_id = $1`, [V]);
+    const before = await bal(V, box[V].bank);
+    const body = { fromBankAccountId: box[V].bank, toBankAccountId: box[V].cash, amount: "7.00", requestId: "dbl-click-0001" };
+    const [a, b] = await Promise.all([svc.create(V, holder(V), body), svc.create(V, holder(V), body)]);
+    const c = await svc.create(V, holder(V), body);
+    assert.equal(a.entryId, b.entryId);
+    assert.equal(a.entryId, c.entryId);
+    assert.equal([a, b].filter((r) => r.replayed).length, 1);
+    assert.equal(c.replayed, true);
+    assert.equal(c.amount, "7.00");
+    assert.equal(toHalalas(await bal(V, box[V].bank)), toHalalas(before) - toHalalas("7.00"));
+    const n = await q(`select count(*)::int as n from journal_entries where user_id = $1 and payload->'transfer'->>'requestId' = 'dbl-click-0001'`, [V]);
+    assert.equal(n[0].n, 1);
+    // A new request id is a new transfer; a malformed one is refused.
+    const d = await svc.create(V, holder(V), { ...body, requestId: "dbl-click-0002" });
+    assert.notEqual(d.entryId, a.entryId);
+    await assert.rejects(svc.create(V, holder(V), { ...body, requestId: "bad id!" }), fails("BAD_INPUT", 400));
+  });
 });
 
 /**
