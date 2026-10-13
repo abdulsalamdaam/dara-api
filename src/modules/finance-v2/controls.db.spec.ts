@@ -349,6 +349,82 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
     });
   });
 
+  // ─────────────── R16 round 5 review: office money is netted per landlord, never below zero ───────────────
+  describe("R16: only a landlord's own money outside trust holds the office's share of it", () => {
+    const trust = new (TrustTransferService as any)(undefined, undefined) as TrustTransferService;
+    // Separate accounts, not started (ledger_started_at null) so the nightly-run counts below are unchanged.
+    const mk = async (u: number, n: number) => {
+      await q(`insert into users (id, email, password_hash, name, user_type) values ($1, $2, 'x', 'Synthetic Co', 'company')`, [u, `fv2-ctl-${u}@example.test`]);
+      await q(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, agency_collections_to_trust) values ($1, true, 'manager', true)`, [u]);
+      await withTx(t.pool, (c) => new ChartService(t.pool).seedChart(c, u));
+      acc[u] = Object.fromEntries((await q(`select code, id from accounts where user_id = $1`, [u])).rows.map((r: any) => [r.code, r.id]));
+      await q(`insert into bank_accounts (user_id, kind, name_ar, is_trust, is_active, is_default, gl_account_id) values ($1, 'bank', 'أمانات', true, true, true, $2)`, [u, acc[u]["1114"]]);
+      const os: number[] = [];
+      for (let i = 0; i < n; i++) os.push(await one(`insert into owners (user_id, name) values ($1, 'Synthetic Agent Landlord') returning id`, [u]));
+      return os;
+    };
+    const rent = (u: number, o: number, into: string, amt: string) => post(u, "2026-01-05",
+      [L(u, into, "dr", amt, { ownerId: o }), L(u, "1122", "cr", amt, { ownerId: o }), L(u, "2122", "dr", amt, { ownerId: o }), L(u, "2121", "cr", amt, { ownerId: o })], { rule: "E03" });
+    const comm = (u: number, o: number, amt: string) => post(u, "2026-01-31", [L(u, "2121", "dr", amt, { ownerId: o }), L(u, "4210", "cr", amt)], { rule: "E15" });
+    const figures = async (u: number) => { const r = await check(u, "R16"); return [r.status, r.ledger, r.subLedger, r.difference, (await trust.proposal(u, ASOF)).amount]; };
+    before(() => { (trust as any).pool = t.pool; });
+
+    it("commission on rent that reached trust is in trust, even while another landlord's rent is in the cash box", async () => {
+      const u = 7611;
+      const [A, B] = await mk(u, 2);
+      await rent(u, A, "1114", "10000.00");
+      await comm(u, A, "500.00");
+      await rent(u, B, "1111", "6000.00");
+      // Client money 9,500 + 6,000; the office's 500 is in trust. B's 6,000 is all outside: move all of it, not 5,500.
+      assert.deepEqual(await figures(u), ["difference", "10000.00", "16000.00", "-6000.00", "6000.00"]);
+      await post(u, "2026-02-20", [L(u, "1114", "dr", "6000.00"), L(u, "1111", "cr", "6000.00")], { origin: "manual" });
+      assert.deepEqual(await figures(u), ["ok", "16000.00", "16000.00", "0.00", "0.00"]);
+      // The office then takes its commission out: still balanced (it was 500 short before this fix).
+      await post(u, "2026-02-25", [L(u, "1113", "dr", "500.00"), L(u, "1114", "cr", "500.00")], { rule: "E15T", sourceType: "commission_transfer" });
+      assert.deepEqual(await figures(u), ["ok", "15500.00", "15500.00", "0.00", "0.00"]);
+    });
+
+    it("two landlords: only the cash-box landlord's commission is netted against the money outside", async () => {
+      const u = 7612;
+      const [A, B] = await mk(u, 2);
+      await rent(u, A, "1114", "5000.00");
+      await comm(u, A, "250.00");
+      await rent(u, B, "1111", "3000.00");
+      await comm(u, B, "150.00");
+      // Client money 4,750 + 2,850 = 7,600, plus A's 250 commission in trust = 7,850. B's 2,850 dues are outside.
+      assert.deepEqual(await figures(u), ["difference", "5000.00", "7850.00", "-2850.00", "2850.00"]);
+      // A third landlord's Ejar rent settled into the office's bank (transit lines carry the landlord): 1,900 more short.
+      const [C] = (await q(`insert into owners (user_id, name) values ($1, 'Synthetic Agent Landlord') returning id`, [u])).rows.map((x: any) => Number(x.id));
+      const c = { ownerId: C };
+      await post(u, "2026-02-01", [L(u, "1116", "dr", "2000.00", c), L(u, "2121", "cr", "2000.00", c)], { rule: "E04" });
+      await post(u, "2026-02-03", [L(u, "1113", "dr", "2000.00", c), L(u, "1116", "cr", "2000.00", c)], { rule: "E31" });
+      await comm(u, C, "100.00");
+      const r = await check(u, "R16");
+      assert.deepEqual([r.ledger, r.subLedger, r.difference], ["5000.00", "9750.00", "-4750.00"]);
+    });
+
+    it("client money moved back out of trust, or the office taking more than it earned, is a shortfall", async () => {
+      const u = 7613;
+      const [A] = await mk(u, 1);
+      await rent(u, A, "1111", "6000.00");
+      await comm(u, A, "785.00");
+      await post(u, "2026-02-20", [L(u, "1114", "dr", "5215.00"), L(u, "1111", "cr", "5215.00")], { origin: "manual" });
+      assert.deepEqual(await figures(u), ["ok", "5215.00", "5215.00", "0.00", "0.00"]);
+      // 1,000 of the landlord's money back to the cash box: trust is 1,000 short (it said 785 before this fix).
+      await post(u, "2026-02-21", [L(u, "1111", "dr", "1000.00"), L(u, "1114", "cr", "1000.00")], { origin: "manual" });
+      assert.deepEqual(await figures(u), ["difference", "4215.00", "5215.00", "-1000.00", "1000.00"]);
+
+      const v = 7614;
+      const [C] = await mk(v, 1);
+      await rent(v, C, "1114", "1000.00");
+      await comm(v, C, "100.00");
+      // 150 taken against 100 earned: trust 850 against client money 900 (it passed before this fix).
+      await post(v, "2026-02-20", [L(v, "1113", "dr", "150.00"), L(v, "1114", "cr", "150.00")], { origin: "manual" });
+      const r = await check(v, "R16");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.difference], ["difference", "850.00", "900.00", "-50.00"]);
+    });
+  });
+
   // ─────────────────────────────── R17–R21 ───────────────────────────────
   describe("R17–R21 count checks", () => {
     let C: number, T: number;
