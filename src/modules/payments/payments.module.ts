@@ -366,7 +366,7 @@ class PaymentsController {
 
     // ── Source 1: real collections ────────────────────────────────────────
     const collConds: any[] = [eq(paymentCollectionsTable.userId, uid)];
-    if (s) collConds.push(or(ilike(paymentCollectionsTable.receiptNumber, s), ilike(contractsTable.tenantName, s), ilike(contractsTable.contractNumber, s), ilike(simpleInvoicesTable.number, s)));
+    if (s) collConds.push(or(ilike(paymentCollectionsTable.receiptNumber, s), ilike(contractsTable.tenantName, s), ilike(contractsTable.contractNumber, s), ilike(simpleInvoicesTable.number, s), sql`"paid_doc"."number" ilike ${s}`)); // finance-v2: C-1 — also the paid document's number
     // Match the payment's contract OR the invoice's contract, so invoice-only
     // collections (e.g. a collected commission invoice, paymentId = null) aren't
     // dropped when filtering Collections by landlord/property/unit.
@@ -381,6 +381,27 @@ class PaymentsController {
     // For invoice-only collections the contract/tenant come from the invoice,
     // not the payment.
     const invContract = alias(contractsTable, "inv_contract");
+    // finance-v2: C-1 (accountant, 14 Oct 2026; flag off too) — the document a collection PAID. The
+    // finance-v2: collection's own invoice_id is that document when it is a real one (INV-/COM-/RR-
+    // finance-v2: collected on the document itself). When it is NULL (the installment's own collect)
+    // finance-v2: or a receipt/deposit voucher (RV-000003 collecting RR-000002's installment, R4-3),
+    // finance-v2: the document is the one covering the installment, by the same rules as
+    // finance-v2: installmentCollectedFor in billing: type 'invoice', not a voucher (nor a commission,
+    // finance-v2: which is the landlord's and never covers the tenant's installment), payment_ids or
+    // finance-v2: payment_id holding the collection's payment. Only confirmed, non-deleted ones; a
+    // finance-v2: payment is normally on ONE such document (issuing refuses a second), and if a
+    // finance-v2: re-issue ever leaves two, the latest confirmed is the live one — id breaks ties.
+    const paidDoc = alias(simpleInvoicesTable, "paid_doc"); // finance-v2: C-1
+    const paidDocOn = sql`${paidDoc.id} = coalesce(
+      case when ${simpleInvoicesTable.id} is not null and coalesce(${simpleInvoicesTable.kind}, '') not in ('receipt', 'deposit') then ${simpleInvoicesTable.id} end,
+      (select d.id from simple_invoices d
+        where ${paymentCollectionsTable.paymentId} is not null and d.user_id = ${paymentCollectionsTable.userId}
+          and d.type = 'invoice' and coalesce(d.kind, '') not in ('receipt', 'deposit', 'commission')
+          and d.status = 'confirmed' and d.deleted_at is null
+          and (d.payment_id = ${paymentCollectionsTable.paymentId}
+               or (jsonb_typeof(d.payment_ids) = 'array'
+                   and exists (select 1 from jsonb_array_elements_text(d.payment_ids) x where x::int = ${paymentCollectionsTable.paymentId})))
+        order by d.confirmed_at desc nulls last, d.id desc limit 1))`; // finance-v2: C-1
     const collectionsQ = this.db
       .select({
         id: paymentCollectionsTable.id,
@@ -400,12 +421,15 @@ class PaymentsController {
         // The key the list is ordered by: creation time, falling back to the
         // collection date. Mirrors what the JavaScript sort used to do.
         sortAt: sql<Date | null>`coalesce(${paymentCollectionsTable.createdAt}, ${paymentCollectionsTable.collectedDate}::timestamptz)`.as("sort_at"),
+        docId: sql<number | null>`${paidDoc.id}`.as("doc_id"), // finance-v2: C-1 — the document this collection paid
+        docNumber: sql<string | null>`${paidDoc.number}`.as("doc_number"), // finance-v2: C-1
       })
       .from(paymentCollectionsTable)
       .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
       .leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
       .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
       .leftJoin(invContract, eq(simpleInvoicesTable.contractId, invContract.id))
+      .leftJoin(paidDoc, paidDocOn) // finance-v2: C-1
       .where(and(...collConds));
 
     // ── Source 2: confirmed invoices with no installment ──────────────────
@@ -451,6 +475,8 @@ class PaymentsController {
         invoiceId: simpleInvoicesTable.id,
         invoiceNumber: simpleInvoicesTable.number,
         sortAt: sql<Date | null>`coalesce(${simpleInvoicesTable.confirmedAt}, ${simpleInvoicesTable.paidDate}::timestamptz)`.as("sort_at"),
+        docId: sql<number | null>`${simpleInvoicesTable.id}`.as("doc_id"), // finance-v2: C-1 — a free invoice is its own document
+        docNumber: sql<string | null>`${simpleInvoicesTable.number}`.as("doc_number"), // finance-v2: C-1
       })
       .from(simpleInvoicesTable)
       .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id))
@@ -487,8 +513,10 @@ class PaymentsController {
           contractId: sql<number | null>`max(${merged.contractId})`,
           contractNumber: sql<string | null>`max(${merged.contractNumber})`,
           tenantName: sql<string | null>`max(${merged.tenantName})`,
-          invoiceId: sql<number | null>`max(${merged.invoiceId})`,
-          invoiceNumber: sql<string | null>`max(${merged.invoiceNumber})`,
+          // finance-v2: C-1 — the document the group paid (not the voucher it was booked on), id and
+          // finance-v2: number taken from the SAME row so they always match; the group key is unchanged.
+          invoiceId: sql<number | null>`(array_agg(${merged.docId} order by ${merged.docId} desc) filter (where ${merged.docId} is not null))[1]`,
+          invoiceNumber: sql<string | null>`(array_agg(${merged.docNumber} order by ${merged.docId} desc) filter (where ${merged.docId} is not null))[1]`,
         })
         .from(merged)
         .groupBy(groupKey)

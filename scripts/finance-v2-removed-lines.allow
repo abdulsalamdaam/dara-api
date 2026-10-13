@@ -14,3 +14,5 @@ src/modules/billing/billing.module.ts	d31a3aa3cc262a58	R4-1: debit-note sum on t
 src/modules/billing/billing.module.ts	20e5209b99bc548a	R4-3 (flag off too): GET collectedAmount counts the installment's own/voucher collections; v2 commission settled from dues
 src/modules/billing/billing.module.ts	bb058a302b743d7e	R4-3: GET carries settledByDues
 src/modules/billing/billing.module.ts	b76628d929f53538	R4-1 (flag off too): collect computes the notes adjustment on its own transaction
+src/modules/payments/payments.module.ts	f24ee111c93edfba	C-1 (flag off too, accountant 14 Oct 2026): Collections search also matches the number of the document the collection paid (RR-/INV- behind a voucher)
+src/modules/payments/payments.module.ts	5df119bd988cfad2	C-1 (flag off too): collections-all invoiceId/invoiceNumber = the document the collection paid (own non-voucher invoice, else the confirmed document covering its installment), not the RV- voucher or NULL; grouping unchanged
