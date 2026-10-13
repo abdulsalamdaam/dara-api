@@ -40,6 +40,7 @@ import { FinanceV2BugsController } from "./controllers/bugs.controller";
 import { FinanceV2Tier1Controller } from "./controllers/tier1.controller";
 import { FinanceV2Tier2Controller } from "./controllers/tier2.controller";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
+import { AccountTransferService } from "./tier1/account-transfer.service";
 import { ExpensesV2Service } from "./tier1/expenses-v2.service";
 import { TenantCreditsService } from "./tier1/tenant-credits.service";
 import { BankRecService } from "./tier2/bank-rec.service";
@@ -85,7 +86,7 @@ import { InstallmentDocsService } from "./installment-docs.service";
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, TrustTransferService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
-    BankAccountsService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
+    BankAccountsService, AccountTransferService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
     ApService, JournalExportService, FinanceSettingsService,
     ControlChecksService,
     AcctReportsService,

@@ -37,6 +37,8 @@ export const LOCK_KEYS = {
   COMMISSION_RUN: -170,
   /** TRF- commission transfer numbers and the unsent-commission check. */
   COMMISSION_TRANSFER: -171,
+  /** Transfer between the account's own bank accounts / cash boxes: the source-balance check and the post, serialised per account. */
+  ACCOUNT_TRANSFER: -172,
   /** The installments screen's rent receipt (accountant #3): the coverage check and the RR- insert, serialised per account. */
   INSTALLMENT_RR: -190,
 } as const;

@@ -3,6 +3,7 @@ import { JwtAuthGuard } from "../../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../../common/scope";
 import { FinanceV2Guard, RequireCapability, type Fv2Request } from "../finance-v2.guard";
 import { BankAccountsService } from "../tier1/bank-accounts.service";
+import { AccountTransferService } from "../tier1/account-transfer.service";
 import { ExpensesV2Service } from "../tier1/expenses-v2.service";
 import { TenantCreditsService } from "../tier1/tenant-credits.service";
 
@@ -24,6 +25,7 @@ export class FinanceV2Tier1Controller {
     private readonly banks: BankAccountsService,
     private readonly expenses: ExpensesV2Service,
     private readonly credits: TenantCreditsService,
+    private readonly transfers: AccountTransferService,
   ) {}
 
   // ── Bank accounts and cash boxes (§8.2 a) ──
@@ -40,6 +42,16 @@ export class FinanceV2Tier1Controller {
   @RequireCapability("view")
   validateIban(@Query("iban") iban?: string) {
     return this.banks.validateIban(iban);
+  }
+
+  /**
+   * Transfer between accounts (تحويل بين الحسابات): {fromBankAccountId, toBankAccountId, amount, date?, note?, reference?}
+   * → one posted entry, Dr destination / Cr source. Reversed like any manual entry (POST /journal/:id/reverse).
+   */
+  @Post("bank-accounts/transfer")
+  @RequireCapability("money")
+  transfer(@Req() req: Fv2Request, @Body() body: any) {
+    return this.transfers.create(scopeId(req.user!), req.user!, body);
   }
 
   @Get("bank-accounts/:id")
