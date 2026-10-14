@@ -185,4 +185,21 @@ describe("fv2 landlord payout: trust by default, PV- voucher, idempotent (real P
     assert.equal((await env.q(`select count(*)::int as n from finance_payout_vouchers where user_id = $1`, [off]))[0].n, 0);
     assert.equal((await env.q(`select count(*)::int as n from finance_payout_meta where user_id = $1`, [off]))[0].n, 0);
   });
+  it("two payouts racing past the net due: exactly one is paid, the other 409 (the dues are re-counted under the lock)", async () => {
+    assert.equal(await due(), 1699.5);
+    const body = (k: string) => ({ ownerId: s.agent, amount: "1000", transferDate: today, requestId: `req-race-${k}-0001` });
+    const rs: any[] = await Promise.all([attempt(() => env.reports.createPayout(user, body("a"))), attempt(() => env.reports.createPayout(user, body("b")))]);
+    assert.equal(rs.filter((r) => r?.voucherNumber).length, 1);
+    assert.deepEqual(rs.filter((r) => r?.status === 409).map((r) => [r.body.error, r.body.netDue]), [["PAYOUT_EXCEEDS_DUE", "699.50"]]);
+    assert.equal(await due(), 699.5);
+  });
+
+  it("as many payouts at once as the pool has connections all finish (the dues report never runs under the lock)", async () => {
+    const max = (env.t.pool as any).options.max as number;
+    const all = Promise.all(Array.from({ length: max }, (_, i) =>
+      attempt(() => env.reports.createPayout(user, { ownerId: s.agent, amount: "1", transferDate: today, requestId: `req-starve-${i}-0001` }))));
+    const r = await Promise.race([all.then(() => "done"), new Promise((ok) => setTimeout(() => ok("starved"), 10_000).unref())]);
+    assert.equal(r, "done");
+    assert.equal(await due(), 699.5 - max);
+  });
 });

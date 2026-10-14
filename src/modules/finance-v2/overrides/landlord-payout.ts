@@ -3,7 +3,7 @@ import type { AuthUser } from "../../../common/guards/jwt-auth.guard";
 import { withTx, type Fv2Pool } from "../db";
 import type { LedgerEmitter } from "../ledger-emitter.service";
 import { LOCK_KEYS } from "../lock-keys";
-import { fromHalalas } from "../money";
+import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { isoDate } from "../audit";
 import { nextPvNumber } from "../pv-number";
@@ -96,6 +96,16 @@ export async function createPayoutV2(
     bankAccountId = n;
   }
 
+  // The dues report runs on the shared pool, so it is read BEFORE the transaction: run under the payout lock it
+  // needs a second connection while every waiter holds one, and pool-size concurrent payouts starve the whole API.
+  // Under the lock only the payouts committed since that read are re-counted (the report's `transferred` is their sum).
+  const allowAdvance = body?.allowAdvance === true;
+  let report: any = null;
+  if (!allowAdvance) {
+    const q = sqlOf(deps.pool as any);
+    const [o] = (await loadSettings(q, scope))?.mode === "owner" ? [] : await q.rows(`select is_account_holder from owners where id = $1 and user_id = $2`, [ownerId, scope]);
+    if (o && o.is_account_holder !== true) report = await accounting(); // the same cases assertPayoutWithinDue checks
+  }
   const out = await withTx(deps.pool, async (c) => {
     await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.LANDLORD_PAYOUT]);
     if (requestId) {
@@ -118,7 +128,20 @@ export async function createPayoutV2(
       }
     }
     // Under the lock: an earlier payout of this account has committed before this check reads the dues.
-    await assertPayoutWithinDue(sqlOf(c), scope, ownerId, Number(amount), body?.allowAdvance === true, accounting);
+    await assertPayoutWithinDue(sqlOf(c), scope, ownerId, Number(amount), allowAdvance, async () => {
+      if (!report) report = await accounting(); // only if the mode or the holder flag changed since the read above
+      const [p] = (await c.query(
+        `select coalesce(sum(amount), 0)::text as amt from landlord_payouts where user_id = $1 and owner_id = $2 and deleted_at is null`, [scope, ownerId])).rows;
+      const paidNow = toHalalas(p?.amt ?? "0");
+      return {
+        ...report,
+        landlordDues: (report?.landlordDues ?? []).map((d: any) => {
+          if (Number(d.ownerId) !== ownerId) return d;
+          const since = paidNow - toHalalas(Number(d.transferred ?? 0).toFixed(2));
+          return { ...d, transferred: Number(fromHalalas(paidNow)), remaining: Number(fromHalalas(toHalalas(Number(d.remaining ?? 0).toFixed(2)) - since)) };
+        }),
+      };
+    });
 
     const [row] = (await c.query(
       `insert into landlord_payouts (user_id, owner_id, amount, transfer_date, method, reference, notes)
