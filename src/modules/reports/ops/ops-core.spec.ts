@@ -36,6 +36,11 @@ describe("dates", () => {
     assert.equal(isIsoDate("2026-02-30"), false);
     assert.equal(isIsoDate("2026-2-3"), false);
     assert.equal(isIsoDate(20260101), false);
+    // Date.UTC maps years 0–99 onto the 1900s; such dates are refused, not shrunk.
+    assert.equal(isIsoDate("0001-01-01"), false);
+    assert.equal(isIsoDate("1899-12-31"), false);
+    assert.equal(isIsoDate("9999-12-31"), false);
+    assert.equal(isIsoDate("1900-01-01"), true);
   });
   it("day arithmetic is calendar based", () => {
     assert.equal(daysBetween("2026-01-31", "2026-03-01"), 29);
@@ -151,5 +156,17 @@ describe("contracts and occupancy", () => {
     const cs = [lease({ id: 1, unitIds: [1], endDate: "2026-03-15" }), lease({ id: 2, unitIds: [2], startDate: "2026-03-31" }), lease({ id: 3, unitIds: [3, 4] })];
     assert.deepEqual([...occupiedUnits(cs, "2026-03-31")].sort(), [2, 3, 4]);
     assert.deepEqual([...occupiedUnits(cs, "2026-03-31", new Set([1, 2, 3]))].sort(), [2, 3]);
+  });
+});
+
+describe("completion with a refund (negative collection)", () => {
+  it("paid then partly refunded is open again, not paid on the first day", () => {
+    const i = inst({ amount: 300, dueDate: "2026-06-01", status: "partially_paid", collections: [{ date: "2026-06-02", amount: 300 }, { date: "2026-06-10", amount: -150 }] });
+    assert.equal(collectedOf(i), 150);
+    assert.equal(completionDate(i), null);
+  });
+  it("refunded then collected again completes on the later day", () => {
+    const i = inst({ amount: 300, dueDate: "2026-06-01", status: "paid", collections: [{ date: "2026-05-30", amount: 300 }, { date: "2026-06-03", amount: -300 }, { date: "2026-06-05", amount: 300 }] });
+    assert.equal(completionDate(i), "2026-06-05");
   });
 });

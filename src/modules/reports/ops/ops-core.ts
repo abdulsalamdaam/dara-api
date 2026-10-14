@@ -86,6 +86,10 @@ export function pct(numerator: number, denominator: number): number | null {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export function isIsoDate(v: unknown): v is string {
   if (typeof v !== "string" || !DATE_RE.test(v)) return false;
+  // Date.UTC maps years 0–99 onto 1900–1999, which would silently shrink a
+  // month range; nothing in a lease predates 1900 or runs past 2199.
+  const y = Number(v.slice(0, 4));
+  if (y < 1900 || y > 2199) return false;
   const d = new Date(`${v}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
@@ -250,15 +254,23 @@ export function remainingOf(i: Installment, asOf?: string): number {
   return round2(Math.max(0, i.amount - collectedOf(i, asOf)));
 }
 
-/** The date the installment became fully collected, or null if it never did. */
+/**
+ * The date the installment became fully collected (and stayed so), or null if
+ * it is not fully collected now. Collections can be negative — a refund is
+ * recorded as a mirrored negative row — so the first day the running sum
+ * reached the amount is not enough: a row paid and then partly refunded is
+ * open again, and is fully collected only from the LAST time it got back up.
+ */
 export function completionDate(i: Installment): string | null {
   if (i.status === "cancelled") return null;
   let run = 0;
+  let since: string | null = null;
   for (const e of moneyEvents(i)) {
     run += e.amount;
-    if (run >= i.amount - EPS) return e.date;
+    if (run >= i.amount - EPS) since ??= e.date;
+    else since = null;
   }
-  return null;
+  return since;
 }
 
 /** Report status keys for an installment — the shared live-status helper, renamed for the UI. */

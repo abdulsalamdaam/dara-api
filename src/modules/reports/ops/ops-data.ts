@@ -69,6 +69,8 @@ const dstr = (v: unknown): string => String(v).slice(0, 10);
 
 export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promise<OpsDataset> {
   const filtered = o.ownerId != null || o.propertyId != null;
+  // Drafts are not leases yet — every report leaves them out (said in the notes).
+  const contractScope = and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt), eq(contractsTable.isDraft, false));
 
   const [propsRaw, unitsRaw, ownersRaw, tenantsRaw, contractsRaw] = await Promise.all([
     db.select({
@@ -95,8 +97,7 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
       startDate: contractsTable.startDate, endDate: contractsTable.endDate, monthlyRent: contractsTable.monthlyRent,
       paymentFrequency: contractsTable.paymentFrequency, status: contractsTable.status, updatedAt: contractsTable.updatedAt,
     }).from(contractsTable)
-      // Drafts are not leases yet — every report leaves them out (said in the notes).
-      .where(and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt), eq(contractsTable.isDraft, false)))
+      .where(contractScope)
       .orderBy(asc(contractsTable.id)),
   ]);
 
@@ -135,10 +136,13 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
   const unitById = new Map(allUnits.map((u) => [u.id, u]));
 
   // contract ↔ unit links, only to units inside the account's own scope.
-  const contractIds = contractsRaw.map((c) => c.id);
-  const links = contractIds.length
+  // Joined to the scoped contract set rather than passed as `IN (<ids>)`: an
+  // id list is bound one parameter per id, and Postgres refuses a statement
+  // with more than 65,535 parameters — a large account would 500.
+  const links = contractsRaw.length
     ? await db.select({ contractId: contractUnitsTable.contractId, unitId: contractUnitsTable.unitId })
-      .from(contractUnitsTable).where(inArray(contractUnitsTable.contractId, contractIds))
+      .from(contractUnitsTable)
+      .innerJoin(contractsTable, and(eq(contractUnitsTable.contractId, contractsTable.id), contractScope))
       .orderBy(asc(contractUnitsTable.id))
     : [];
   const unitsOf = new Map<number, number[]>();
@@ -168,7 +172,16 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
   const propSet = new Set(properties.map((p) => p.id));
   const units = filtered ? allUnits.filter((u) => propSet.has(u.propertyId)) : allUnits;
   const unitSet = new Set(units.map((u) => u.id));
-  const contracts = filtered ? allContracts.filter((c) => c.unitIds.some((u) => unitSet.has(u))) : allContracts;
+  // Under a filter a multi-unit contract is attributed to the property of its
+  // first unit INSIDE the filter — otherwise a contract spanning two properties
+  // would count in the filtered collections/balances but show 0 under the very
+  // property that was picked in property_performance / landlord_portfolio.
+  const contracts = filtered
+    ? allContracts.filter((c) => c.unitIds.some((u) => unitSet.has(u))).map((c) => {
+      const first = c.unitIds.find((u) => unitSet.has(u))!;
+      return { ...c, propertyId: unitById.get(first)!.propertyId };
+    })
+    : allContracts;
   const contractSet = new Set(contracts.map((c) => c.id));
   const owners = ownersRaw.filter((ow) => {
     if (o.ownerId != null && ow.id !== o.ownerId) return false;
@@ -178,25 +191,30 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
 
   let installments: Installment[] = [];
   if (o.need.installments && contractSet.size) {
-    const ids = [...contractSet];
-    const pays = await db.select({
-      id: paymentsTable.id, contractId: paymentsTable.contractId, amount: paymentsTable.amount,
-      dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status,
-    }).from(paymentsTable).where(and(
-      eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt), inArray(paymentsTable.contractId, ids),
+    // Every non-deleted rent row of a scoped contract (the same 65,535-parameter
+    // reason as above: a sub-select, never an id list); narrowed to the filtered
+    // contract set in memory.
+    const payScope = and(
+      eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
+      inArray(paymentsTable.contractId, db.select({ id: contractsTable.id }).from(contractsTable).where(contractScope)),
       // Deposits are held trust money, not rent — the Installments tab leaves them out too.
       or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)),
-    )).orderBy(asc(paymentsTable.dueDate), asc(paymentsTable.id));
-    const payIds = pays.map((p) => p.id);
-    const colls = payIds.length
-      ? await db.select({
+    );
+    const [paysAll, colls] = await Promise.all([
+      db.select({
+        id: paymentsTable.id, contractId: paymentsTable.contractId, amount: paymentsTable.amount,
+        dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status,
+      }).from(paymentsTable).where(payScope).orderBy(asc(paymentsTable.dueDate), asc(paymentsTable.id)),
+      db.select({
         paymentId: paymentCollectionsTable.paymentId,
         date: paymentCollectionsTable.collectedDate,
         amount: sql<string>`sum(${paymentCollectionsTable.amount})`,
       }).from(paymentCollectionsTable)
-        .where(and(eq(paymentCollectionsTable.userId, uid), inArray(paymentCollectionsTable.paymentId, payIds)))
-        .groupBy(paymentCollectionsTable.paymentId, paymentCollectionsTable.collectedDate)
-      : [];
+        .innerJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
+        .where(and(eq(paymentCollectionsTable.userId, uid), payScope))
+        .groupBy(paymentCollectionsTable.paymentId, paymentCollectionsTable.collectedDate),
+    ]);
+    const pays = filtered ? paysAll.filter((p) => contractSet.has(p.contractId)) : paysAll;
     const byPay = new Map<number, { date: string; amount: number }[]>();
     for (const c of colls) {
       if (c.paymentId == null) continue;

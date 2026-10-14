@@ -265,4 +265,20 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
       assert.equal(guard.canActivate(ctx(["reports.view"], h)), true);
     }
   });
+
+  it("multi-unit contract under a property filter: the picked property carries its money (mutates the fixtures, so it runs last)", async () => {
+    const q = (s: string, p: unknown[]) => pool.query(s, p as any[]);
+    // U4 (Villa B) first, then U3 (Tower A): unfiltered it belongs to Villa B; filtered to Tower A, to Tower A.
+    const c = (await q(`insert into contracts (user_id, contract_number, tenant_name, start_date, end_date, monthly_rent, status) values ($1, 'MU-1', 'Multi Unit', $2, $3, 100, 'active') returning id`, [A, d(-30), d(300)])).rows[0].id;
+    await q(`insert into contract_units (contract_id, unit_id) values ($1, $2)`, [c, ids.U4]);
+    await q(`insert into contract_units (contract_id, unit_id) values ($1, $2)`, [c, ids.U3]);
+    await q(`insert into payments (user_id, contract_id, amount, due_date, status) values ($1, $2, 1234, $3, 'pending')`, [A, c, d(-3)]);
+    const pp = await run(A, "property_performance", { propertyId: String(ids.P1) });
+    const cs = await run(A, "collections_summary", { propertyId: String(ids.P1) });
+    assert.equal(pp.rows.length, 1);
+    assert.equal(cs.totals!.due, pp.totals!.billed, "property_performance and collections_summary agree under the same filter");
+    assert.ok(cs.charts.find((x) => x.key === "by_property")!.data.every((r) => r.label === "Tower A"));
+    const unf = await run(A, "property_performance");
+    assert.equal(byKey(unf, "property")["Villa B"].billed, 1234);
+  });
 });

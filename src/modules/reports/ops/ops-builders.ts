@@ -93,7 +93,7 @@ const NOTE = {
   dueBasis: { ar: "المحصّل = ما حُصّل حتى الآن مقابل الأقساط المستحقة في الفترة (وليس كل ما قُبض خلال الفترة).", en: "Collected = money received to date against the installments due in the period (not all cash received during it)." },
   occupancy: { ar: "الوحدة مشغولة إذا غطّاها عقد ساري في ذلك اليوم؛ المقام = جميع الوحدات في النطاق دون استثناء.", en: "A unit is occupied when an in-force contract covers it that day; the denominator is every unit in scope, none excluded." },
   terminatedUnlinked: { ar: "العقد المفسوخ تُفك وحداته عند الفسخ، لذا لا يُنسب إلى عقار ولا يظهر عند التصفية بالعقار أو المؤجر.", en: "A terminated contract has its units unlinked at termination, so it cannot be attributed to a property and drops out under a property or landlord filter." },
-  firstUnit: { ar: "العقد متعدد الوحدات يُنسب مالياً إلى عقار أول وحدة فيه.", en: "A multi-unit contract's money is attributed to the property of its first unit." },
+  firstUnit: { ar: "العقد متعدد الوحدات يُنسب مالياً إلى عقار أول وحدة فيه (وعند التصفية: أول وحدة له ضمن التصفية).", en: "A multi-unit contract's money is attributed to the property of its first unit (under a filter, its first unit inside the filter)." },
   annual: { ar: "الإيجار السنوي = الإيجار الشهري × 12 قبل الزيادات.", en: "Annual rent = monthly rent × 12, before escalation." },
 };
 
@@ -673,13 +673,14 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
   const t = money(all);
   const overdue = sum(all.filter((i) => i.dueDate < p.today).map((i) => remainingOf(i)));
   const cById = x.contractById();
-  const byProp = new Map<string, Money>();
+  // Keyed by property id (two properties may share a name); "—" = no linked unit.
+  const byProp = new Map<number | null, Money & { label: string }>();
   for (const i of all) {
     const c = cById.get(i.contractId);
-    const name = c ? x.propertyName(c) : "—";
-    const cur = byProp.get(name) ?? { billed: 0, collected: 0, outstanding: 0 };
+    const key = c?.propertyId ?? null;
+    const cur = byProp.get(key) ?? { label: c ? x.propertyName(c) : "—", billed: 0, collected: 0, outstanding: 0 };
     const mm = money([i]);
-    byProp.set(name, { billed: round2(cur.billed + mm.billed), collected: round2(cur.collected + mm.collected), outstanding: round2(cur.outstanding + mm.outstanding) });
+    byProp.set(key, { label: cur.label, billed: round2(cur.billed + mm.billed), collected: round2(cur.collected + mm.collected), outstanding: round2(cur.outstanding + mm.outstanding) });
   }
   return {
     kpis: [
@@ -700,7 +701,7 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
         key: "by_property", type: "stacked", unit: "sar",
         title: { ar: "التحصيل حسب العقار", en: "Collection by property" },
         series: [{ key: "collected", label: { ar: "المحصّل", en: "Collected" }, color: C.cobalt }, { key: "outstanding", label: { ar: "المتبقي", en: "Outstanding" }, color: C.sky }],
-        data: [...byProp.entries()].sort((a, b) => b[1].billed - a[1].billed).map(([label, v]) => ({ label, collected: v.collected, outstanding: v.outstanding })),
+        data: [...byProp.values()].sort((a, b) => b.billed - a.billed).map((v) => ({ label: v.label, collected: v.collected, outstanding: v.outstanding })),
       },
     ],
     columns: [
@@ -822,17 +823,19 @@ function maintenanceRequests(ds: OpsDataset, p: ResolvedParams): Body {
 }
 
 type Issue = { key: string; entity: string; ar: string; en: string };
-const ISSUES: Issue[] = [
-  { key: "contract_no_ejar", entity: "contract", ar: "رقم عقد إيجار", en: "Ejar contract number" },
-  { key: "contract_no_unit", entity: "contract", ar: "وحدة مرتبطة", en: "Linked unit" },
-  { key: "unit_no_type", entity: "unit", ar: "نوع الوحدة", en: "Unit type" },
-  { key: "unit_no_usage", entity: "unit", ar: "استخدام الوحدة", en: "Unit usage" },
-  { key: "tenant_no_phone", entity: "tenant", ar: "رقم الجوال", en: "Phone" },
-  { key: "tenant_no_id", entity: "tenant", ar: "رقم الهوية", en: "National ID" },
-  { key: "property_no_deed", entity: "property", ar: "الصك", en: "Title deed" },
-  { key: "property_no_landlord", entity: "property", ar: "المؤجر", en: "Landlord" },
-  { key: "landlord_no_iban", entity: "landlord", ar: "الآيبان", en: "IBAN" },
-  { key: "landlord_no_id", entity: "landlord", ar: "رقم الهوية/السجل", en: "ID / CR number" },
+/** `ar`/`en` name the missing field (the row's "missing" cell); `kAr`/`kEn` are the KPI / chart labels. */
+type IssueDef = Issue & { kAr: string; kEn: string };
+const ISSUES: IssueDef[] = [
+  { key: "contract_no_ejar", entity: "contract", ar: "رقم عقد إيجار", en: "Ejar contract number", kAr: "عقود بلا رقم إيجار", kEn: "Contracts without an Ejar number" },
+  { key: "contract_no_unit", entity: "contract", ar: "وحدة مرتبطة", en: "Linked unit", kAr: "عقود سارية بلا وحدة", kEn: "Active contracts without a unit" },
+  { key: "unit_no_type", entity: "unit", ar: "نوع الوحدة", en: "Unit type", kAr: "وحدات بلا نوع", kEn: "Units without a type" },
+  { key: "unit_no_usage", entity: "unit", ar: "استخدام الوحدة", en: "Unit usage", kAr: "وحدات بلا استخدام", kEn: "Units without a usage" },
+  { key: "tenant_no_phone", entity: "tenant", ar: "رقم الجوال", en: "Phone", kAr: "مستأجرون بلا رقم جوال", kEn: "Tenants without a phone" },
+  { key: "tenant_no_id", entity: "tenant", ar: "رقم الهوية", en: "National ID", kAr: "مستأجرون بلا رقم هوية", kEn: "Tenants without a national ID" },
+  { key: "property_no_deed", entity: "property", ar: "الصك", en: "Title deed", kAr: "عقارات بلا صك", kEn: "Properties without a title deed" },
+  { key: "property_no_landlord", entity: "property", ar: "المؤجر", en: "Landlord", kAr: "عقارات بلا مؤجر", kEn: "Properties without a landlord" },
+  { key: "landlord_no_iban", entity: "landlord", ar: "الآيبان", en: "IBAN", kAr: "مؤجرون بلا آيبان", kEn: "Landlords without an IBAN" },
+  { key: "landlord_no_id", entity: "landlord", ar: "رقم الهوية/السجل", en: "ID / CR number", kAr: "مؤجرون بلا رقم هوية/سجل", kEn: "Landlords without an ID / CR number" },
 ];
 
 function dataQuality(ds: OpsDataset, _p: ResolvedParams): Body {
@@ -884,13 +887,13 @@ function dataQuality(ds: OpsDataset, _p: ResolvedParams): Body {
   return {
     kpis: [
       kpi("records", "سجلات ناقصة", "Records with gaps", rows.length, "count", rows.length ? "warn" : "good"),
-      ...ISSUES.map((i) => kpi(i.key, `${ENTITY_MAP[i.entity].ar} بلا ${i.ar}`, `${ENTITY_MAP[i.entity].en} without ${i.en}`, counts[i.key], "count", counts[i.key] ? "warn" : "good")),
+      ...ISSUES.map((i) => kpi(i.key, i.kAr, i.kEn, counts[i.key], "count", counts[i.key] ? "warn" : "good")),
     ],
     charts: [{
       key: "by_issue", type: "hbar", unit: "count",
       title: { ar: "النواقص حسب النوع", en: "Gaps by type" },
       series: [{ key: "records", label: { ar: "السجلات", en: "Records" }, color: C.warn }],
-      data: ISSUES.map((i) => ({ label: `${ENTITY_MAP[i.entity].ar} بلا ${i.ar}`, labelEn: `${ENTITY_MAP[i.entity].en} without ${i.en}`, records: counts[i.key] })),
+      data: ISSUES.map((i) => ({ label: i.kAr, labelEn: i.kEn, records: counts[i.key] })),
     }],
     columns: [
       col("entity", "النوع", "Entity", "status", ENTITY_MAP), col("record", "السجل", "Record", "text"),
