@@ -8,7 +8,7 @@ import { addMonthsFirst, firstOfMonth, lastOfMonth } from "./ops-core";
 type Def = Omit<OpsReportMeta, "defaults"> & { dates: DateDefault; statuses?: readonly string[]; days?: boolean };
 
 export const INST_STATUSES = ["paid", "partial", "pending", "overdue", "cancelled"] as const;
-export const CONTRACT_STATUSES = ["active", "expired", "terminated", "cancelled", "pending"] as const;
+export const CONTRACT_STATUSES = ["active", "upcoming", "expired", "terminated", "cancelled", "pending"] as const;
 export const MAINT_STATUSES = ["open", "in_progress", "pending_approval", "completed"] as const;
 
 export const OPS_DEFS: Def[] = [

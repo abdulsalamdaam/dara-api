@@ -151,8 +151,28 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     const act = await run(A, "contracts_report", { status: "active" });
     assert.deepEqual(act.rows.map((x) => [x.contractNumber, x.daysRemaining, x.status, x.property, x.landlord]), [["C-2", 40, "active", "Tower A", "Landlord One"], ["C-1", 165, "active", "Tower A", "Landlord One"]]);
     assert.equal(act.params.status, "active");
-    assert.ok(act.statusOptions?.length === 5);
+    assert.equal(act.statusOptions?.length, 6);
     await assert.rejects(run(A, "contracts_report", { status: "bogus" }), (e: any) => e.getStatus() === 400);
+  });
+
+  it("contracts_report: the status filter narrows the KPIs and chart, not only the rows", async () => {
+    const exp = await run(A, "contracts_report", { status: "expired" });
+    assert.deepEqual(exp.rows.map((x) => x.contractNumber), ["C-3"]);
+    const k = kpis(exp);
+    assert.deepEqual([k.total, k.active, k.expired, k.terminated, k.cancelled, k.activeAnnualRent], [1, 0, 1, 0, 0, 0]);
+    const donut = exp.charts[0].data.filter((x) => (x.value as number) > 0).map((x) => x.labelEn);
+    assert.deepEqual(donut, ["Expired"]);
+  });
+
+  it("contracts_report: the as-of date moves the status (not started yet / was still in force)", async () => {
+    const r = await run(A, "contracts_report", { asOf: d(-180) });
+    const st = Object.fromEntries(r.rows.map((x) => [x.contractNumber, x.status]));
+    // C-2 starts at -150: not started on -180. C-3 ran -400..-35: active then. C-4 was terminated at -20: in force on -180.
+    assert.deepEqual(st, { "C-1": "active", "C-2": "upcoming", "C-3": "active", "C-4": "active", "C-6": "cancelled" });
+    const act = await run(A, "contracts_report", { asOf: d(-180), status: "active" });
+    assert.deepEqual(act.rows.map((x) => x.contractNumber).sort(), ["C-1", "C-3", "C-4"]);
+    assert.ok(act.rows.every((x) => x.status === "active"));
+    assert.equal(kpis(act).active, 3);
   });
 
   it("expiring_contracts", async () => {
@@ -190,6 +210,11 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     assert.deepEqual(r.totals, { amount: 9800, collected: 5200, remaining: 4600 });
     const od = await run(A, "installments_schedule", { from: d(-200), to: d(30), status: "overdue" });
     assert.deepEqual(od.rows.map((x) => [x.dueDate, x.remaining, x.daysLate]), [[d(-95), 2000, 95], [d(-10), 1000, 10]].sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+    // The status filter narrows the KPIs and the chart too.
+    const ok = kpis(od);
+    assert.deepEqual([ok.paidCount, ok.partialCount, ok.pendingCount, ok.overdueCount, ok.cancelledCount], [0, 0, 0, 2, 0]);
+    assert.deepEqual([ok.due, ok.remaining, ok.overdueAmount], [3000, 3000, 3000]);
+    assert.deepEqual(od.totals, { amount: 3000, collected: 0, remaining: 3000 });
     const lateDays = Object.fromEntries(r.rows.map((x) => [x.dueDate, x.daysLate]));
     assert.deepEqual([lateDays[d(-70)], lateDays[d(-150)], lateDays[d(-100)], lateDays[d(-40)]], [10, 2, null, 40]);
     const def = await run(A, "installments_schedule");
@@ -202,6 +227,8 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     assert.deepEqual([k.total, k.open, k.closed, k.avgResolutionDays], [3, 2, 1, 10]);
     const done = r.rows.find((x) => x.status === "completed")!;
     assert.deepEqual([done.opened, done.closed, done.daysOpen, done.property], [d(-30), d(-20), 10, "Tower A"]);
+    const done1 = await run(A, "maintenance_requests", { status: "completed" });
+    assert.deepEqual([kpis(done1).total, kpis(done1).open, kpis(done1).closed], [1, 0, 1]);
     const p1 = await run(A, "maintenance_requests", { propertyId: String(ids.P1) });
     assert.equal(p1.rows.length, 2);
     assert.ok(!r.rows.some((x) => String(x.description).includes("Bee")));

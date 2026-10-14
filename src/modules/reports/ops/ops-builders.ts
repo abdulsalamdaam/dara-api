@@ -38,6 +38,7 @@ export const INST_STATUS_MAP: Record<string, Lbl & { tone?: Tone }> = {
 };
 export const CONTRACT_STATUS_MAP: Record<string, Lbl & { tone?: Tone }> = {
   active: { ar: "ساري", en: "Active", tone: "good" },
+  upcoming: { ar: "لم يبدأ بعد", en: "Not started yet", tone: "brand" },
   expired: { ar: "منتهي", en: "Expired", tone: "warn" },
   terminated: { ar: "مفسوخ", en: "Terminated", tone: "bad" },
   cancelled: { ar: "ملغى", en: "Cancelled", tone: "neutral" },
@@ -534,20 +535,23 @@ function occupancyTrend(ds: OpsDataset, p: ResolvedParams): Body {
 function contractsReport(ds: OpsDataset, p: ResolvedParams): Body {
   const x = new Ctx(ds);
   const inWindow = ds.contracts.filter((c) => (!p.from || c.endDate >= p.from) && (!p.to || c.startDate <= p.to));
-  const withStatus = inWindow.map((c) => ({ c, st: contractStatusAt(c, p.asOf) }));
+  // The status filter narrows the KPIs and the chart too, not only the table:
+  // "Expired" chosen and the tiles still counting every active lease read as a
+  // filter that did nothing.
+  const withStatus = inWindow.map((c) => ({ c, st: contractStatusAt(c, p.asOf) })).filter((w) => !p.status || w.st === p.status);
   const counts: Record<string, number> = Object.fromEntries(CONTRACT_STATUSES.map((s) => [s, 0]));
   for (const { st } of withStatus) counts[st] = (counts[st] ?? 0) + 1;
   const activeRent = sum(withStatus.filter((w) => w.st === "active").map((w) => w.c.annualRent));
-  const rows = withStatus.filter((w) => !p.status || w.st === p.status).map(({ c, st }) => ({
+  const rows = withStatus.map(({ c, st }) => ({
     contractNumber: c.contractNumber, ejarNumber: c.ejarNumber, tenant: x.tenantName(c), landlord: x.landlordName(c),
     property: x.propertyName(c), unit: x.unitLabel(c), startDate: c.startDate, endDate: c.endDate, annualRent: c.annualRent,
     paymentFrequency: FREQ[c.paymentFrequency]?.ar ?? c.paymentFrequency, paymentFrequencyEn: FREQ[c.paymentFrequency]?.en ?? c.paymentFrequency,
     status: st, daysRemaining: st === "active" ? daysBetween(p.asOf, c.endDate) : null,
   })).sort((a, b) => (a.endDate < b.endDate ? -1 : a.endDate > b.endDate ? 1 : 0));
-  const tone: Record<string, Tone> = { active: "good", expired: "warn", terminated: "bad", cancelled: "neutral", pending: "brand" };
+  const tone: Record<string, Tone> = { active: "good", upcoming: "brand", expired: "warn", terminated: "bad", cancelled: "neutral", pending: "brand" };
   return {
     kpis: [
-      kpi("total", "إجمالي العقود", "Total contracts", inWindow.length, "count", "brand"),
+      kpi("total", "إجمالي العقود", "Total contracts", withStatus.length, "count", "brand"),
       ...CONTRACT_STATUSES.map((s) => kpi(s, CONTRACT_STATUS_MAP[s].ar, CONTRACT_STATUS_MAP[s].en, counts[s], "count", tone[s])),
       kpi("activeAnnualRent", "الإيجار السنوي للعقود السارية", "Annual rent of active contracts", activeRent, "sar", "neutral"),
     ],
@@ -568,8 +572,8 @@ function contractsReport(ds: OpsDataset, p: ResolvedParams): Body {
     rows, totals: { annualRent: sum(rows.map((r) => r.annualRent)) },
     statusOptions: opts(CONTRACT_STATUS_MAP, CONTRACT_STATUSES),
     notes: [
-      { ar: "العقد المسجّل سارياً وقد تجاوز تاريخ نهايته يظهر «منتهياً».", en: "A contract stored active whose end date has passed shows as expired." },
-      { ar: "مؤشرات الحالات لا تتأثر بفلتر الحالة؛ عند تحديد فترة تظهر العقود المتداخلة معها.", en: "Status counts ignore the status filter; a from/to window keeps contracts overlapping it." },
+      { ar: "الحالة محسوبة في تاريخ «كما في»: العقد الذي لم يبدأ بعد يظهر «لم يبدأ بعد»، والذي تجاوز تاريخ نهايته يظهر «منتهياً».", en: "Status is read on the as-of date: a contract that has not started yet shows as not started yet; one past its end date shows as expired." },
+      { ar: "فلتر الحالة يطبّق على المؤشرات والرسم والجدول؛ عند تحديد فترة تظهر العقود المتداخلة معها (السارية في أي يوم منها).", en: "The status filter applies to the KPIs, the chart and the table; a from/to window keeps contracts overlapping it (in force on any day of it)." },
       NOTE.annual, NOTE.terminatedUnlinked, NOTE.drafts,
     ],
   };
@@ -737,10 +741,11 @@ function installmentsSchedule(ds: OpsDataset, p: ResolvedParams): Body {
       dueDate: i.dueDate, amount: i.amount, collected, remaining, status: st as string, daysLate,
     };
   });
-  const live = all.filter((r) => r.status !== "cancelled");
-  const count = (s: string) => all.filter((r) => r.status === s).length;
+  // The status filter narrows the KPIs and the chart too, not only the table.
   const rows = all.filter((r) => !p.status || r.status === p.status);
-  const liveRows = rows.filter((r) => r.status !== "cancelled");
+  const live = rows.filter((r) => r.status !== "cancelled");
+  const count = (s: string) => rows.filter((r) => r.status === s).length;
+  const liveRows = live;
   return {
     kpis: [
       kpi("due", "المستحق", "Due", sum(live.map((r) => r.amount)), "sar", "neutral"),
@@ -766,6 +771,7 @@ function installmentsSchedule(ds: OpsDataset, p: ResolvedParams): Body {
     statusOptions: opts(INST_STATUS_MAP, INST_STATUSES),
     notes: [
       { ar: "الحالة مشتقة لحظياً (توقيت الرياض): القسط غير المسدد بعد تاريخ استحقاقه «متأخر».", en: "Status is derived live (Riyadh time): an unsettled installment past its due date is overdue." },
+      { ar: "فلتر الحالة يطبّق على المؤشرات والرسم والجدول.", en: "The status filter applies to the KPIs, the chart and the table." },
       { ar: "المجاميع تستبعد الأقساط الملغاة؛ أيام التأخير للمتبقي حتى اليوم أو للسداد المتأخر حتى تاريخ اكتماله.", en: "Totals exclude cancelled rows; days late run to today for an open remainder, or to the completion date for a late payment." },
       NOTE.paidNoCollections, NOTE.deposits, NOTE.drafts,
     ],
@@ -787,13 +793,14 @@ function maintenanceRequests(ds: OpsDataset, p: ResolvedParams): Body {
       opened: m.openedOn, closed, daysOpen: daysBetween(m.openedOn, closed ?? p.today),
     };
   });
-  const closedRows = all.filter((r) => r.closed);
-  const count = (k: keyof typeof all[number], v: string) => all.filter((r) => r[k] === v).length;
+  // The status filter narrows the KPIs and the charts too, not only the table.
   const rows = all.filter((r) => !p.status || r.status === p.status).sort((a, b) => (a.opened < b.opened ? 1 : a.opened > b.opened ? -1 : 0));
+  const closedRows = rows.filter((r) => r.closed);
+  const count = (k: keyof typeof all[number], v: string) => rows.filter((r) => r[k] === v).length;
   return {
     kpis: [
-      kpi("total", "إجمالي الطلبات", "Total requests", all.length, "count", "brand"),
-      kpi("open", "مفتوحة", "Open", all.length - closedRows.length, "count", "warn"),
+      kpi("total", "إجمالي الطلبات", "Total requests", rows.length, "count", "brand"),
+      kpi("open", "مفتوحة", "Open", rows.length - closedRows.length, "count", "warn"),
       kpi("closed", "مكتملة", "Completed", closedRows.length, "count", "good"),
       kpi("avgResolutionDays", "متوسط أيام الإنجاز", "Avg resolution days", closedRows.length ? round1(closedRows.reduce((s, r) => s + r.daysOpen, 0) / closedRows.length) : 0, "days", "neutral"),
     ],

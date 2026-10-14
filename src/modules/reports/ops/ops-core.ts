@@ -366,10 +366,22 @@ export function inForceOn(c: ContractLike, d: string): boolean {
   return true;
 }
 
-/** The effective contract status at `asOf`: a stored `active` past its end date reads `expired`. */
-export function contractStatusAt(c: { status: string; endDate: string }, asOf: string): string {
-  if (c.status === "active" && c.endDate < asOf) return "expired";
-  return c.status;
+/**
+ * The effective contract status on `asOf`, so the as-of date moves the status
+ * like it moves every other figure:
+ *  - a lease (`active` / `expired` / `terminated`) that has not started yet on
+ *    `asOf` reads `upcoming` — a contract signed for next month is not in force;
+ *  - `active` / `expired` read from the dates: in force between start and end,
+ *    `expired` after the end (a stored `active` past its end reads `expired`);
+ *  - `terminated` reads `active` while it was still in force (before its
+ *    termination stamp), `expired` if it ran out before that, else `terminated`;
+ *  - `cancelled` and `pending` are kept as stored.
+ */
+export function contractStatusAt(c: { status: string; startDate?: string; endDate: string; endedOn?: string | null }, asOf: string): string {
+  if (!LEASE_STATUSES.has(c.status)) return c.status;
+  if (c.startDate && asOf < c.startDate) return "upcoming";
+  if (c.status === "terminated" && (!c.endedOn || asOf >= c.endedOn)) return "terminated";
+  return asOf > c.endDate ? "expired" : "active";
 }
 
 /** Units (by id) occupied on day `d` — any in-force contract covering them. */

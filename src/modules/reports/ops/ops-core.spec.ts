@@ -146,6 +146,19 @@ describe("contracts and occupancy", () => {
     assert.equal(contractStatusAt({ status: "active", endDate: "2026-03-01" }, "2026-02-01"), "active");
     assert.equal(contractStatusAt({ status: "terminated", endDate: "2026-03-01" }, "2026-02-01"), "terminated");
   });
+  it("the status follows the as-of date: not started yet, in force, ended", () => {
+    const c = { status: "active", startDate: "2026-11-01", endDate: "2027-10-31" };
+    assert.equal(contractStatusAt(c, "2026-10-14"), "upcoming");
+    assert.equal(contractStatusAt(c, "2026-11-01"), "active");
+    assert.equal(contractStatusAt(c, "2027-11-01"), "expired");
+    assert.equal(contractStatusAt({ status: "expired", startDate: "2025-01-01", endDate: "2025-12-31" }, "2025-06-01"), "active");
+    const t = { status: "terminated", startDate: "2026-01-01", endDate: "2026-12-31", endedOn: "2026-05-01" };
+    assert.equal(contractStatusAt(t, "2025-12-01"), "upcoming");
+    assert.equal(contractStatusAt(t, "2026-04-30"), "active");
+    assert.equal(contractStatusAt(t, "2026-05-01"), "terminated");
+    assert.equal(contractStatusAt({ status: "cancelled", startDate: "2027-01-01", endDate: "2027-12-31" }, "2026-01-01"), "cancelled");
+    assert.equal(contractStatusAt({ status: "pending", startDate: "2027-01-01", endDate: "2027-12-31" }, "2026-01-01"), "pending");
+  });
   it("month end measurement: past months use the last day, the current month uses today", () => {
     const today = "2026-10-14";
     assert.equal(occupancyDay({ ym: "2026-09", start: "2026-09-01", end: "2026-09-30" }, today), "2026-09-30");
