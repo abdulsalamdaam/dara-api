@@ -98,6 +98,23 @@ export class BankAccountsService {
     return n;
   }
 
+  /**
+   * Accountant note (15 Oct 2026): the trust account holds landlords' and
+   * tenants' money, so an outflow that is the office's own (an expense with no
+   * landlord, a fixed-asset purchase, a supplier bill with no landlord) can
+   * never be paid from it. A 409 when `id` is an active trust account.
+   */
+  async assertNotTrustForOffice(q: Q, scope: number, id: number | null, field = "bankAccountId"): Promise<void> {
+    if (id == null) return;
+    const r = await q.query(`select is_trust from bank_accounts where id = $1 and user_id = $2`, [id, scope]);
+    if (r.rows[0]?.is_trust === true) {
+      throw new ConflictException({
+        error: "TRUST_FOR_OFFICE_EXPENSE", field,
+        message: "لا يمكن صرف مصروفات المكتب من حساب الأمانات (أموال العملاء)؛ اختر حساباً تشغيلياً أو الصندوق · Office expenses cannot be paid from the trust (client money) account; choose an operating account or cash box",
+      });
+    }
+  }
+
   async create(scope: number, actorId: number, body: any): Promise<BankAccountOut> {
     const kind = body?.kind;
     if (kind !== "bank" && kind !== "cash") throw new BadRequestException({ error: "BAD_INPUT", message: "kind must be bank or cash" });
@@ -169,6 +186,14 @@ export class BankAccountsService {
         if (cur.kind !== "bank") throw new BadRequestException({ error: "BAD_INPUT", message: "Only a bank account can be a trust account" });
         const u = await c.query(`select ${USED_SQL} as used from bank_accounts b where b.id = $1`, [id]);
         if (u.rows[0]?.used) throw new ConflictException({ error: "BANK_ACCOUNT_IN_USE", message: "A used account cannot change between trust and own money" });
+      }
+      if (isTrust && !cur.is_trust) {
+        // finance-v2: the operating default (or the settings default) never becomes trust: money left on "default" would land on the
+        // same GL, now client money (the chart fallback 1113 is this account's GL when it is the main bank account).
+        const st = await c.query(`select 1 from finance_settings where account_user_id = $1 and $2 in (default_bank_account_id, default_cash_account_id)`, [scope, id]);
+        if (cur.is_default || st.rowCount) {
+          throw new ConflictException({ error: "BANK_ACCOUNT_IS_DEFAULT", message: "اجعل حساباً تشغيلياً آخر افتراضياً أولاً · Make another operating account the default first" });
+        }
       }
       if (cur.is_trust && cur.is_default && !isTrust) {
         // Accountant round 3: the default trust account is never left unset (Manager mode requires one).

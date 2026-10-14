@@ -336,6 +336,11 @@ export class ExpensesV2Service {
     }
     const bankIn = body?.bankAccountId;
     const bankAccountId = bankIn === currentBank && currentBank != null ? currentBank : await this.banks.assertUsable(c, scope, bankIn);
+    // Only an agent landlord's expense charged to that landlord may come out of client money (trust); anything the office bears —
+    // no landlord, the account holder's own property, or an agent landlord's expense charged to the company — is the office's own
+    // money (accountant, 15 Oct 2026). chargeTo "landlord" already implies an agent landlord (CHARGE_TO_NOT_ALLOWED above).
+    // Checked on every save, so an edit that clears the landlord or moves the charge to the company while trust stays selected is refused too.
+    if (chargeTo !== "landlord") await this.banks.assertNotTrustForOffice(c, scope, bankAccountId);
     const glAccountId = optId(body?.glAccountId, "glAccountId");
     if (glAccountId != null) {
       const g = (await c.query(`select type, is_group, is_active from accounts where id = $1 and user_id = $2`, [glAccountId, scope])).rows[0];

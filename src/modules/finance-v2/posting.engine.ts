@@ -383,7 +383,8 @@ export class PostingEngine {
         if (t.rows[0]) res = { accountId: t.rows[0].gl_account_id, bankAccountId: t.rows[0].id };
       }
       const cash = String(ref.method ?? "").toLowerCase() === "cash";
-      if (!res) res = await byId(cash ? settings.default_cash_account_id : settings.default_bank_account_id);
+      // The settings default is the operating account: never a trust account (an office expense left on "default" must not land on client money).
+      if (!res) res = await byId(cash ? settings.default_cash_account_id : settings.default_bank_account_id, "and not is_trust");
       if (!res) {
         const id = sysIds.get(cash ? SYS.cash : SYS.bank);
         if (!id) throw new RuleError("MISSING_ACCOUNT", `no ${cash ? "cash" : "bank"} account in the chart`);

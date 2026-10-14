@@ -574,6 +574,9 @@ export class ApService {
             message: `المبلغ يتجاوز المتبقي على ${b.number} (${fromHalalas(open)}) · The amount exceeds what is open on ${b.number} (${fromHalalas(open)})` });
         }
       }
+      // A bill the office bears (no landlord, the account holder's own, or charged to the company) is never paid from client money (trust);
+      // charge_to = 'landlord' is only ever an agent landlord's (CHARGE_TO_NOT_ALLOWED at bill entry).
+      if (allocs.some((a) => byId.get(a.billId!)?.charge_to !== "landlord")) await this.banks.assertNotTrustForOffice(c, scope, bankAccountId);
       const number = await nextPvNumber(c, scope);
       const r = await c.query(
         `insert into supplier_payments (user_id, number, supplier_id, paid_on, amount, bank_account_id, method, reference, created_by)
