@@ -373,7 +373,7 @@ export class ReconciliationService {
       }
       const cash = String(ref.method ?? "").toLowerCase() === "cash";
       const d = banks.get(cash ? st.dc : st.db);
-      if (d?.is_active) return d.gl_account_id;
+      if (d?.is_active && !d.is_trust) return d.gl_account_id; // finance-v2: as the engine, a (stale) trust settings default is skipped
       return sys.get(cash ? "cash" : "bank_default") ?? null;
     };
     const holders = new Set((await this.pool.query(`select id from owners where user_id = $1 and is_account_holder`, [scope])).rows.map((x: any) => x.id));

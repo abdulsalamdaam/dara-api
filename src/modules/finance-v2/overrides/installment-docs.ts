@@ -177,7 +177,7 @@ async function landsInTrust(q: Sql, scope: number, bankAccountId: unknown, metho
   const def = String(method ?? "").toLowerCase() === "cash" ? st?.dc : st?.db;
   if (def) {
     const [b] = await q.rows(`select is_trust from bank_accounts where id = $1 and user_id = $2 and is_active`, [def, scope]);
-    if (b) return b.is_trust === true;
+    if (b) return false; // finance-v2: the engine skips a (stale) trust settings default, so the default never lands in trust
   }
   return false;
 }

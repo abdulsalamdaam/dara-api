@@ -62,9 +62,9 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
     assert.equal(await expenseCount(), before, "no legacy row");
   });
 
-  it("an expense on a landlord (directly, or through the landlord's property) may be paid from trust", async () => {
-    const direct = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "200", ownerId: s.agent, bankAccountId: trustId });
-    const viaProp = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "300", propertyId: s.propA, bankAccountId: trustId });
+  it("an expense charged to an agent landlord (directly, or through the landlord's property) may be paid from trust", async () => {
+    const direct = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "200", ownerId: s.agent, chargeTo: "landlord", bankAccountId: trustId });
+    const viaProp = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "300", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
     assert.equal(direct.details!.bankAccountId, trustId);
     assert.equal(viaProp.ownerId, s.agent, "the landlord comes from the property");
     await drain(env);
@@ -89,26 +89,26 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
     await env.q(`update finance_settings set default_bank_account_id = $2 where account_user_id = $1`, [U, op]);
   });
 
-  it("an unused operating account switched to trust stops being the settings default", async () => {
+  it("the operating default cannot be switched to trust (make another account the default first)", async () => {
     const b = await banks.create(U, U, { kind: "bank", nameAr: "حساب مؤقت", isDefault: true });
     assert.equal((await env.q(`select default_bank_account_id from finance_settings where account_user_id = $1`, [U]))[0].default_bank_account_id, b.id);
-    await banks.update(U, U, b.id, { isTrust: true });
-    assert.equal((await env.q(`select default_bank_account_id from finance_settings where account_user_id = $1`, [U]))[0].default_bank_account_id, null);
-    const e = await expenses.create(U, user, { expenseDate: today, category: "قرطاسية", amount: "70" });
-    await drain(env);
-    const c = await bankCodeOf(e.id, "rev:1");
-    assert.notEqual(c.bank_account_id, b.id, "not the account that became trust");
-    assert.notEqual(c.bank_account_id, trustId);
+    const r: any = await attempt(() => banks.update(U, U, b.id, { isTrust: true }));
+    assert.deepEqual([r.status, r.body?.error], [409, "BANK_ACCOUNT_IS_DEFAULT"]);
+    assert.equal((await env.q(`select is_trust from bank_accounts where id = $1`, [b.id]))[0].is_trust, false);
+    const op = Number((await env.q(`select b.id from bank_accounts b join accounts a on a.id = b.gl_account_id where b.user_id = $1 and a.code = '1113'`, [U]))[0].id);
+    await banks.update(U, U, op, { isDefault: true });
+    const flipped = await banks.update(U, U, b.id, { isTrust: true });
+    assert.equal(flipped.isTrust, true, "once it is no longer the default it may become trust");
   });
 
   it("an edit that removes the landlord while the trust account stays selected is refused; the expense is unchanged", async () => {
-    const e = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "400", ownerId: s.agent, propertyId: s.propA, bankAccountId: trustId });
-    const r: any = await attempt(() => expenses.update(U, user, e.id, { ownerId: null, propertyId: null }));
+    const e = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "400", ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
+    const r: any = await attempt(() => expenses.update(U, user, e.id, { ownerId: null, propertyId: null, chargeTo: "company" }));
     assert.deepEqual([r.status, r.body.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
     const [row] = await env.q(`select e.owner_id, d.revision, d.bank_account_id from expenses e join finance_expense_details d on d.expense_id = e.id where e.id = $1`, [e.id]);
     assert.deepEqual(row, { owner_id: s.agent, revision: 1, bank_account_id: trustId });
     // Clearing the landlord together with a non-trust account is fine.
-    const ok = await expenses.update(U, user, e.id, { ownerId: null, propertyId: null, bankAccountId: null });
+    const ok = await expenses.update(U, user, e.id, { ownerId: null, propertyId: null, chargeTo: "company", bankAccountId: null });
     assert.deepEqual([ok.ownerId, ok.details!.bankAccountId, ok.details!.revision], [null, null, 2]);
     // And an office expense cannot be moved onto trust by an edit.
     const r2: any = await attempt(() => expenses.update(U, user, e.id, { bankAccountId: trustId }));
@@ -126,7 +126,7 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
     const sup = await ap.createSupplier(U, user, { nameAr: "مورد", paymentTermsDays: 30 });
     const office = await ap.approveBill(U, user, (await ap.createBill(U, user, { supplierId: sup.id, billDate: today, lines: [{ description: "قرطاسية", amount: "100" }] })).id);
     const landlord = await ap.approveBill(U, user, (await ap.createBill(U, user, {
-      supplierId: sup.id, billDate: today, ownerId: s.agent, propertyId: s.propA, lines: [{ description: "صيانة", amount: "100" }],
+      supplierId: sup.id, billDate: today, ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord", lines: [{ description: "صيانة", amount: "100" }],
     })).id);
     const refused: any = await attempt(() => ap.createPayment(U, user, {
       supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: office.id, amount: "100" }],

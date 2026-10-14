@@ -187,6 +187,14 @@ export class BankAccountsService {
         const u = await c.query(`select ${USED_SQL} as used from bank_accounts b where b.id = $1`, [id]);
         if (u.rows[0]?.used) throw new ConflictException({ error: "BANK_ACCOUNT_IN_USE", message: "A used account cannot change between trust and own money" });
       }
+      if (isTrust && !cur.is_trust) {
+        // finance-v2: the operating default (or the settings default) never becomes trust: money left on "default" would land on the
+        // same GL, now client money (the chart fallback 1113 is this account's GL when it is the main bank account).
+        const st = await c.query(`select 1 from finance_settings where account_user_id = $1 and $2 in (default_bank_account_id, default_cash_account_id)`, [scope, id]);
+        if (cur.is_default || st.rowCount) {
+          throw new ConflictException({ error: "BANK_ACCOUNT_IS_DEFAULT", message: "اجعل حساباً تشغيلياً آخر افتراضياً أولاً · Make another operating account the default first" });
+        }
+      }
       if (cur.is_trust && cur.is_default && !isTrust) {
         // Accountant round 3: the default trust account is never left unset (Manager mode requires one).
         throw new ConflictException({ error: "BANK_ACCOUNT_IS_DEFAULT", message: "اجعل حساب أمانات آخر افتراضياً أولاً · Make another trust account the default first" });
@@ -209,8 +217,6 @@ export class BankAccountsService {
         throw err;
       }
       if (!cur.is_template) await c.query(`update accounts set name_ar = $2, name_en = $3 where id = $1`, [cur.gl_account_id, nameAr, nameEn ?? nameAr]);
-      // The settings default is the operating (non-trust) account money falls back to; an account that becomes trust stops being it.
-      if (isTrust && !cur.is_trust) await c.query(`update finance_settings set default_bank_account_id = null where account_user_id = $1 and default_bank_account_id = $2`, [scope, id]);
       if (isDefault === true && isActive) await this.makeDefault(c, scope, id, cur.kind, isTrust);
       await auditRow(c, scope, actorId, "finance_bank_account", id, `/finance/v2/bank-accounts/${id}`, "PATCH");
       return this.get(scope, id, c);
