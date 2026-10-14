@@ -17,7 +17,7 @@ import { CurrentUser } from "../../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../../common/permissions.decorator";
 import { PERMISSIONS } from "../../../common/permissions";
 import { scopeId } from "../../../common/scope";
-import { OpsParamError, resolveParams, riyadhToday, type OpsParams, type OpsReport, type OpsReportId, type ResolvedParams } from "./ops-core";
+import { OpsParamError, capRows, resolveParams, riyadhToday, type OpsParams, type OpsReport, type OpsReportId, type ResolvedParams } from "./ops-core";
 import { catalog, defOf } from "./ops-catalog";
 import { loadDataset } from "./ops-data";
 import { BUILDERS, NEEDS } from "./ops-builders";
@@ -50,7 +50,7 @@ export async function runOpsReport(db: Drizzle, uid: number, id: string, raw: Re
     throw e;
   }
   const ds = await loadDataset(db, uid, { ownerId: p.ownerId, propertyId: p.propertyId, today: p.today, need: NEEDS[def.id] ?? {} });
-  const body = BUILDERS[def.id](ds, p);
+  const body = capRows(BUILDERS[def.id](ds, p));
   return { id: def.id, params: echo(def.id, p), generatedAt: new Date().toISOString(), ...body };
 }
 

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  OpsParamError, addDays, agingBucket, collectedOf, completionDate, contractStatusAt, daysBetween, daysOverdue, expiryBucket,
+  OpsParamError, ROW_CAP, addDays, capRows, agingBucket, collectedOf, completionDate, contractStatusAt, daysBetween, daysOverdue, expiryBucket,
   inForceOn, instStatus, isIsoDate, lastOfMonth, monthsIn, occupancyDay, occupiedUnits, pct, remainingOf, resolveParams,
   riyadhDate, riyadhToday, type ContractLike, type Installment,
 } from "./ops-core";
@@ -168,5 +168,24 @@ describe("completion with a refund (negative collection)", () => {
   it("refunded then collected again completes on the later day", () => {
     const i = inst({ amount: 300, dueDate: "2026-06-01", status: "paid", collections: [{ date: "2026-05-30", amount: 300 }, { date: "2026-06-03", amount: -300 }, { date: "2026-06-05", amount: 300 }] });
     assert.equal(completionDate(i), "2026-06-05");
+  });
+});
+
+describe("row cap", () => {
+  const body = (n: number) => ({ rows: Array.from({ length: n }, (_, i) => ({ i })), totals: { i: n }, notes: [{ ar: "ن", en: "n" }] });
+  it("leaves a report at or under the cap untouched", () => {
+    const b = body(5);
+    assert.equal(capRows(b, 5), b);
+    assert.equal(ROW_CAP, 50_000);
+  });
+  it("cuts the rows, keeps totals, records the count and says so first in the notes", () => {
+    const out = capRows(body(12), 10);
+    assert.equal(out.rows.length, 10);
+    assert.deepEqual(out.rows.at(-1), { i: 9 }, "the first rows, in the builder's order");
+    assert.deepEqual(out.truncated, { total: 12, shown: 10 });
+    assert.deepEqual(out.totals, { i: 12 }, "totals still cover every row");
+    assert.equal(out.notes!.length, 2);
+    assert.match(out.notes![0].en, /first 10 of 12 rows/);
+    assert.match(out.notes![0].ar, /10 صف من 12/);
   });
 });

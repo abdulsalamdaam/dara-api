@@ -66,7 +66,38 @@ export type OpsReport = {
   totals?: Record<string, number>;
   notes?: Lbl[];
   statusOptions?: { value: string; label: Lbl }[];
+  /** Set when the rows were cut at `ROW_CAP`: KPIs, charts and totals still cover all `total` rows. */
+  truncated?: { total: number; shown: number };
 };
+
+/**
+ * The most rows one report response carries. A per-installment report over a
+ * wide range on a large account runs into the hundreds of thousands (10,000
+ * units × 12 installments × years); past this the response is megabytes of
+ * JSON the browser has to parse, search and sort. KPIs, charts and totals are
+ * computed before the cut, so they stay exact; the UI says rows were cut and
+ * asks for a narrower period or filter.
+ */
+export const ROW_CAP = 50_000;
+
+/** Cut `rows` at `cap`, recording how many there were. Totals/KPIs are left as computed over every row. */
+export function capRows<T extends { rows: OpsRow[]; notes?: Lbl[] }>(body: T, cap = ROW_CAP): T & { truncated?: { total: number; shown: number } } {
+  if (body.rows.length <= cap) return body;
+  const total = body.rows.length;
+  const n = (x: number) => x.toLocaleString("en-US");
+  return {
+    ...body,
+    rows: body.rows.slice(0, cap),
+    truncated: { total, shown: cap },
+    notes: [
+      {
+        ar: `يعرض الجدول أول ${n(cap)} صف من ${n(total)}؛ المؤشرات والرسوم والإجماليات محسوبة على جميع الصفوف. ضيّق الفترة أو الفلاتر لعرض الباقي وتصديره.`,
+        en: `The table holds the first ${n(cap)} of ${n(total)} rows; KPIs, charts and totals cover every row. Narrow the period or filters to see and export the rest.`,
+      },
+      ...(body.notes ?? []),
+    ],
+  };
+}
 
 /* ── numbers ────────────────────────────────────────────────────────────── */
 
