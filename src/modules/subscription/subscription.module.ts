@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { usersTable, subscriptionPaymentsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -10,7 +10,7 @@ import { scopeId } from "../../common/scope";
 import { resolvePackage, planPrice, isPayablePlan, isPackagePlan, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription, nextEndDate } from "../../common/subscription";
 import { trialView } from "../../common/trial";
-import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
+import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured, type MoyasarInvoice, type MoyasarPayment } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
@@ -21,21 +21,122 @@ const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com")
 type SubscriptionPaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
 
 /**
- * Mark a pending payment row paid and open/renew its owner's subscription.
- * Shared by the webhook (normal path) and the pay endpoint (defensive, when a
- * user re-clicks Pay after an already-paid invoice whose webhook was missed).
- * No-op if the row is already paid.
+ * What Moyasar says happened, reduced to the facts a payment row is checked
+ * against. Built either from an invoice we fetched ourselves
+ * (`evidenceFromInvoice`) or from a webhook payload whose sender the shared
+ * secret proved (`evidenceFromPayment`).
  */
-async function activateFromPaidRow(
+export interface MoyasarPaidEvidence {
+  status: string;
+  /** Halalas. */
+  amount: number;
+  currency: string;
+  invoiceId: string | null;
+  metadata: Record<string, any> | null;
+  paymentId: string | null;
+  /** When the money actually moved, if Moyasar says. */
+  paidAt: Date | null;
+}
+
+function parseDate(v: unknown): Date | null {
+  if (typeof v !== "string" || !v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * An invoice counts as paid only when Moyasar says so AND it carries a settled
+ * payment for the full invoice amount (not authorized-only, not refunded).
+ * The invoice's own `status` is not enough on its own: it is the one field
+ * that has to be true, not the only one.
+ */
+export function evidenceFromInvoice(inv: MoyasarInvoice): MoyasarPaidEvidence {
+  const invAmount = Number(inv.amount);
+  const settled = (inv.payments ?? []).find((p) =>
+    String(p?.status || "").toLowerCase() === "paid" &&
+    Number(p?.amount) === invAmount &&
+    !(Number(p?.refunded) > 0));
+  const invStatus = String(inv.status || "").toLowerCase();
+  return {
+    status: invStatus === "paid" && settled ? "paid" : invStatus === "paid" ? "paid_without_settled_payment" : invStatus,
+    amount: invAmount,
+    currency: String(inv.currency || "").toUpperCase(),
+    invoiceId: inv.id ?? null,
+    metadata: inv.metadata ?? null,
+    paymentId: settled?.id ?? null,
+    paidAt: parseDate(settled?.created_at),
+  };
+}
+
+/** A payment object straight from a webhook body (trusted only after the secret check). */
+export function evidenceFromPayment(p: Partial<MoyasarPayment> & Record<string, any>): MoyasarPaidEvidence {
+  const status = String(p?.status || "").toLowerCase();
+  return {
+    status: status === "paid" && Number(p?.refunded) > 0 ? "refunded" : status,
+    amount: Number(p?.amount),
+    currency: String(p?.currency || "").toUpperCase(),
+    invoiceId: p?.invoice_id ?? null,
+    metadata: p?.metadata ?? null,
+    paymentId: p?.id ?? null,
+    paidAt: parseDate(p?.created_at),
+  };
+}
+
+/**
+ * Is this evidence a successful payment OF THIS ROW? Status alone is not: the
+ * amount and currency must be what the row asked for, and the Moyasar invoice
+ * and metadata must point back at this row and this account. Staging and
+ * production share one Moyasar account, so a paid invoice that belongs to the
+ * other environment's row with the same id is a real, paid, and wrong match.
+ */
+export function verifyMoyasarPaid(
+  row: Pick<SubscriptionPaymentRow, "id" | "userId" | "amount" | "currency" | "moyasarInvoiceId">,
+  ev: MoyasarPaidEvidence,
+): { ok: boolean; reason?: string } {
+  if (ev.status !== "paid") return { ok: false, reason: `not_paid:${ev.status || "unknown"}` };
+  const expected = Math.round(Number(row.amount) * 100);
+  if (!Number.isFinite(ev.amount) || ev.amount !== expected) return { ok: false, reason: "amount_mismatch" };
+  if (ev.currency !== String(row.currency || "SAR").toUpperCase()) return { ok: false, reason: "currency_mismatch" };
+  if (row.moyasarInvoiceId) {
+    if (ev.invoiceId !== row.moyasarInvoiceId) return { ok: false, reason: "invoice_mismatch" };
+  }
+  const meta = ev.metadata ?? {};
+  const metaRow = meta.subscriptionPaymentId != null ? String(meta.subscriptionPaymentId) : null;
+  const metaUser = meta.userId != null ? String(meta.userId) : null;
+  if (metaRow != null && metaRow !== String(row.id)) return { ok: false, reason: "metadata_mismatch" };
+  if (metaUser != null && metaUser !== String(row.userId)) return { ok: false, reason: "metadata_mismatch" };
+  // A row with no Moyasar invoice on file can only be tied to a payment by
+  // metadata naming both the row AND its account.
+  if (!row.moyasarInvoiceId && (metaRow == null || metaUser == null)) return { ok: false, reason: "no_reference" };
+  return { ok: true };
+}
+
+/**
+ * Mark a payment row paid and open/renew its owner's subscription — ONLY for a
+ * row whose payment has already been verified (`verifyMoyasarPaid`). Shared by
+ * the webhook (normal path) and the pay endpoint (self-heal, when a user
+ * re-clicks Pay after an already-paid invoice whose webhook was missed).
+ *
+ * Idempotent across callers: the paid transition is a conditional UPDATE, so
+ * when the webhook and the pay endpoint race on the same row exactly one of
+ * them wins, and only the winner activates and emails the invoice. Returns
+ * whether this call was the one that marked the row paid.
+ */
+export async function activateFromPaidRow(
   db: Drizzle,
   row: SubscriptionPaymentRow,
-  moyasarPaymentId?: string | null,
+  paid: { moyasarPaymentId?: string | null; paidAt?: Date | null } = {},
   invoices?: SubscriptionInvoiceService,
-): Promise<void> {
-  if (row.status === "paid") return;
-  await db.update(subscriptionPaymentsTable)
-    .set({ status: "paid", paidAt: new Date(), moyasarPaymentId: moyasarPaymentId ?? row.moyasarPaymentId ?? null })
-    .where(eq(subscriptionPaymentsTable.id, row.id));
+): Promise<boolean> {
+  if (row.status === "paid") return false;
+  const [claimed] = await db.update(subscriptionPaymentsTable)
+    .set({ status: "paid", paidAt: paid.paidAt ?? new Date(), moyasarPaymentId: paid.moyasarPaymentId ?? row.moyasarPaymentId ?? null })
+    .where(and(eq(subscriptionPaymentsTable.id, row.id), ne(subscriptionPaymentsTable.status, "paid")))
+    .returning({ id: subscriptionPaymentsTable.id });
+  // Somebody else (the webhook, or a second click) already marked it paid,
+  // activated the account and sent the invoice. Doing it again would email a
+  // second "paid" invoice and restart the period.
+  if (!claimed) return false;
   const cycle = (row.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
   const now = new Date();
   await db.update(usersTable).set({
@@ -55,22 +156,24 @@ async function activateFromPaidRow(
 
   // Issue the tax invoice and email it. Deliberately NOT awaited: this spawns
   // headless Chrome, and the caller is either a Moyasar webhook — which retries
-  // the whole delivery if we are slow to answer, and would then re-run this
-  // path — or a user waiting on a redirect. The subscription is already active
-  // by the time this starts, and every failure inside is logged and swallowed.
+  // the whole delivery if we are slow to answer — or a user waiting on a
+  // redirect. The subscription is already active by the time this starts, and
+  // every failure inside is logged and swallowed.
   if (invoices) {
     void invoices.issueAndEmail(db, row.id, { start: now, end: nextEndDate(cycle, now) });
   }
+  return true;
 }
 
 @ApiTags("subscription")
 @ApiBearerAuth("user-jwt")
 @Controller("me/subscription")
 @UseGuards(JwtAuthGuard)
-class SubscriptionController {
+export class SubscriptionController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly invoices: SubscriptionInvoiceService,
+    private readonly appLog?: AppLogService,
   ) {}
 
   /** Subscription status + payment history for the current account. */
@@ -190,13 +293,39 @@ class SubscriptionController {
 
     let reuse: typeof pendings[number] | null = null;
     for (const p of pendings) {
-      const invStatus = p.moyasarInvoiceId
-        ? await fetchMoyasarInvoice(p.moyasarInvoiceId).then((i) => String(i.status || "").toLowerCase()).catch(() => "")
-        : "";
+      const inv = p.moyasarInvoiceId
+        ? await fetchMoyasarInvoice(p.moyasarInvoiceId).catch(() => null)
+        : null;
+      const invStatus = String(inv?.status || "").toLowerCase();
       if (invStatus === "paid") {
-        // Already paid but the webhook hasn't landed — activate now and return.
-        await activateFromPaidRow(this.db, p, null, this.invoices);
-        return { paymentId: p.id, url: p.paymentUrl, invoiceId: p.moyasarInvoiceId, alreadyPaid: true };
+        // Moyasar calls an earlier invoice paid but its webhook never landed.
+        // This runs when the user OPENS a payment, so it must not take the
+        // invoice's word alone: the settled payment, amount, currency and
+        // metadata must all be this row's before anything is marked paid or a
+        // "paid" invoice is emailed.
+        const ev = evidenceFromInvoice(inv!);
+        const check = verifyMoyasarPaid(p, ev);
+        if (!check.ok) {
+          // Paid at Moyasar but not provably THIS payment. Leave the row as it
+          // is (never cancel a paid invoice's row) and flag it for a human.
+          this.appLog?.record({
+            level: "error",
+            event: "moyasar_paid_unverified",
+            message: `subscription payment ${p.id}: Moyasar invoice is paid but does not match the row — not activated`,
+            context: "SubscriptionPay",
+            userId: p.userId,
+            meta: { paymentId: p.id, invoiceId: p.moyasarInvoiceId, reason: check.reason },
+          });
+          continue;
+        }
+        await activateFromPaidRow(this.db, p, { moyasarPaymentId: ev.paymentId, paidAt: ev.paidAt }, this.invoices);
+        // No `url`: that link is a checkout page Moyasar now shows as PAID, and
+        // redirecting a user who asked to pay onto it reads as "you were
+        // charged". The client reports the confirmed earlier payment instead.
+        return {
+          paymentId: p.id, invoiceId: p.moyasarInvoiceId, alreadyPaid: true,
+          plan: p.plan, billingCycle: p.billingCycle, amount: Number(p.amount), paidAt: ev.paidAt,
+        };
       }
       const sameSelection = p.plan === plan && p.billingCycle === cycle && Number(p.amount) === amount;
       if (!reuse && invStatus === "initiated" && sameSelection) {
@@ -247,7 +376,7 @@ class SubscriptionController {
  */
 @ApiTags("subscription")
 @Controller("subscription")
-class SubscriptionWebhookController {
+export class SubscriptionWebhookController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
     private readonly invoices: SubscriptionInvoiceService,
@@ -292,7 +421,8 @@ class SubscriptionWebhookController {
 
     let paid = false;
     let verified = false;
-    let paymentId: string | undefined = eventPaymentId;
+    // What Moyasar says happened; every row match below is checked against it.
+    let evidence: MoyasarPaidEvidence | null = null;
 
     // "Don't trust the payload alone" was the intent; the code only managed it
     // when an invoice id happened to be present. Without one, `paid` came
@@ -302,7 +432,8 @@ class SubscriptionWebhookController {
     if (invoiceId && isMoyasarConfigured()) {
       try {
         const inv = await fetchMoyasarInvoice(invoiceId);
-        paid = String(inv.status).toLowerCase() === "paid";
+        evidence = evidenceFromInvoice(inv);
+        paid = evidence.status === "paid";
         verified = true;
       } catch (err) {
         // A transient Moyasar failure must not become an unverified
@@ -328,7 +459,8 @@ class SubscriptionWebhookController {
     if (!verified) {
       // The shared secret is the only other thing that can prove the sender.
       if (expected && body?.secret_token === expected) {
-        paid = String(data?.status || "").toLowerCase() === "paid";
+        evidence = evidenceFromPayment(data);
+        paid = evidence.status === "paid";
       } else {
         console.error("[moyasar] webhook REFUSED: payload could not be verified", {
           hasInvoiceId: !!invoiceId, moyasarConfigured: isMoyasarConfigured(),
@@ -360,7 +492,12 @@ class SubscriptionWebhookController {
       [row] = await this.db.select().from(subscriptionPaymentsTable)
         .where(eq(subscriptionPaymentsTable.moyasarInvoiceId, invoiceId));
     }
-    if (!row && metaPaymentId != null) {
+    // An invoice we verified with Moyasar identifies its row by that invoice
+    // id and nothing else. Falling back to `metadata.subscriptionPaymentId`
+    // here is how a paid invoice from the OTHER environment (staging and
+    // production share one Moyasar account) would mark an unrelated customer's
+    // row paid and email them a "paid" invoice.
+    if (!row && metaPaymentId != null && !(verified && invoiceId)) {
       // The metadata is attacker-controllable on this unauthenticated route:
       // a non-numeric value used to become NaN and blow up in the driver (500).
       // Anything that isn't a real row id now falls through to the same clean
@@ -391,10 +528,28 @@ class SubscriptionWebhookController {
     }
     if (row.status === "paid") return { ok: true, already: true };
 
-    // Mark paid + activate/renew (start now, end one cycle later, clear pending).
-    await activateFromPaidRow(this.db, row, paymentId ?? null, this.invoices);
+    // Paid, but paid for THIS row? Amount, currency, invoice and metadata.
+    const check = verifyMoyasarPaid(row, evidence!);
+    if (!check.ok) {
+      this.appLog.record({
+        level: "error",
+        event: "moyasar_webhook_mismatch",
+        message: `paid event does not match subscription payment ${row.id} — not activated`,
+        context: "MoyasarWebhook",
+        userId: row.userId,
+        meta: { paymentId: row.id, invoiceId: invoiceId ?? null, eventPaymentId: eventPaymentId ?? null, reason: check.reason },
+      });
+      return { ok: true, ignored: true, reason: check.reason };
+    }
 
-    return { ok: true, activated: true };
+    // Mark paid + activate/renew (start now, end one cycle later, clear pending).
+    // A second delivery, or the pay endpoint's self-heal racing this one, loses
+    // the conditional update and sends nothing.
+    const won = await activateFromPaidRow(
+      this.db, row, { moyasarPaymentId: evidence!.paymentId ?? eventPaymentId ?? null, paidAt: evidence!.paidAt }, this.invoices,
+    );
+
+    return won ? { ok: true, activated: true } : { ok: true, already: true };
   }
 }
 

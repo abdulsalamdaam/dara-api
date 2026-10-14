@@ -34,6 +34,20 @@ export interface MoyasarInvoice {
   url: string; // hosted payment page
   description?: string;
   metadata?: Record<string, any>;
+  /** The payment attempts made against this invoice, as Moyasar returns them on GET. */
+  payments?: MoyasarPayment[];
+}
+
+/** The fields of a Moyasar payment object that verification relies on. */
+export interface MoyasarPayment {
+  id: string;
+  status: string; // initiated | paid | authorized | captured | failed | refunded | voided | ...
+  amount: number; // halalas
+  currency?: string;
+  refunded?: number; // halalas refunded so far
+  invoice_id?: string | null;
+  metadata?: Record<string, any> | null;
+  created_at?: string;
 }
 
 /** Create a hosted invoice. `amountSar` is in SAR; Moyasar charges in halalas. */
