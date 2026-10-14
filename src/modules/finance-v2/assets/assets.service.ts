@@ -621,6 +621,8 @@ export class AssetsService {
     const acquisitionMode = body?.acquisitionMode === "bank" ? "bank" : body?.acquisitionMode == null || body.acquisitionMode === "none" ? "none" : null;
     if (!acquisitionMode) throw bad("BAD_INPUT", "acquisitionMode must be none or bank");
     const acquisitionBankAccountId = acquisitionMode === "bank" ? await this.banks.assertUsable(c, scope, body?.acquisitionBankAccountId, "acquisitionBankAccountId") : null;
+    // A fixed asset is the office's own: its purchase is never paid from client money (trust).
+    await this.banks.assertNotTrustForOffice(c, scope, acquisitionBankAccountId, "acquisitionBankAccountId");
 
     const s = await loadSettings(sqlOf(c as any), scope);
     if (s?.goLive) {

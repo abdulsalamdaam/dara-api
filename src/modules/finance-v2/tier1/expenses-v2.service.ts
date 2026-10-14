@@ -336,6 +336,9 @@ export class ExpensesV2Service {
     }
     const bankIn = body?.bankAccountId;
     const bankAccountId = bankIn === currentBank && currentBank != null ? currentBank : await this.banks.assertUsable(c, scope, bankIn);
+    // A company expense (no landlord, directly or through the property) is the office's own money: never from trust (accountant, 15 Oct 2026).
+    // Checked on every save, so an edit that clears the landlord while the trust account stays selected is refused too.
+    if (ctx.ownerId == null) await this.banks.assertNotTrustForOffice(c, scope, bankAccountId);
     const glAccountId = optId(body?.glAccountId, "glAccountId");
     if (glAccountId != null) {
       const g = (await c.query(`select type, is_group, is_active from accounts where id = $1 and user_id = $2`, [glAccountId, scope])).rows[0];

@@ -98,6 +98,23 @@ export class BankAccountsService {
     return n;
   }
 
+  /**
+   * Accountant note (15 Oct 2026): the trust account holds landlords' and
+   * tenants' money, so an outflow that is the office's own (an expense with no
+   * landlord, a fixed-asset purchase, a supplier bill with no landlord) can
+   * never be paid from it. A 409 when `id` is an active trust account.
+   */
+  async assertNotTrustForOffice(q: Q, scope: number, id: number | null, field = "bankAccountId"): Promise<void> {
+    if (id == null) return;
+    const r = await q.query(`select is_trust from bank_accounts where id = $1 and user_id = $2`, [id, scope]);
+    if (r.rows[0]?.is_trust === true) {
+      throw new ConflictException({
+        error: "TRUST_FOR_OFFICE_EXPENSE", field,
+        message: "لا يمكن صرف مصروفات المكتب من حساب الأمانات (أموال العملاء)؛ اختر حساباً تشغيلياً أو الصندوق · Office expenses cannot be paid from the trust (client money) account; choose an operating account or cash box",
+      });
+    }
+  }
+
   async create(scope: number, actorId: number, body: any): Promise<BankAccountOut> {
     const kind = body?.kind;
     if (kind !== "bank" && kind !== "cash") throw new BadRequestException({ error: "BAD_INPUT", message: "kind must be bank or cash" });
@@ -192,6 +209,8 @@ export class BankAccountsService {
         throw err;
       }
       if (!cur.is_template) await c.query(`update accounts set name_ar = $2, name_en = $3 where id = $1`, [cur.gl_account_id, nameAr, nameEn ?? nameAr]);
+      // The settings default is the operating (non-trust) account money falls back to; an account that becomes trust stops being it.
+      if (isTrust && !cur.is_trust) await c.query(`update finance_settings set default_bank_account_id = null where account_user_id = $1 and default_bank_account_id = $2`, [scope, id]);
       if (isDefault === true && isActive) await this.makeDefault(c, scope, id, cur.kind, isTrust);
       await auditRow(c, scope, actorId, "finance_bank_account", id, `/finance/v2/bank-accounts/${id}`, "PATCH");
       return this.get(scope, id, c);
