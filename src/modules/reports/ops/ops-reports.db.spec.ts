@@ -178,7 +178,7 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     const monthSum = r.rows.reduce((s, x) => s + (x.due as number), 0);
     assert.equal(monthSum, 9300);
     const byProp = Object.fromEntries(r.charts[1].data.map((x) => [x.label, x]));
-    assert.deepEqual([byProp["Tower A"].collected, byProp["Tower A"].outstanding, byProp["—"].collected], [4900, 3600, 800]);
+    assert.deepEqual([byProp["Tower A"].collected, byProp["Tower A"].outstanding, byProp["بلا عقار مرتبط"].collected, byProp["بلا عقار مرتبط"].labelEn], [4900, 3600, 800, "No linked property"]);
   });
 
   it("installments_schedule with live status", async () => {

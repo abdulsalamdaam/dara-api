@@ -674,13 +674,15 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
   const overdue = sum(all.filter((i) => i.dueDate < p.today).map((i) => remainingOf(i)));
   const cById = x.contractById();
   // Keyed by property id (two properties may share a name); "—" = no linked unit.
-  const byProp = new Map<number | null, Money & { label: string }>();
+  // A terminated contract's units are unlinked, so its money has no property: say so instead of a bare "—".
+  const byProp = new Map<number | null, Money & { label: string; labelEn: string }>();
   for (const i of all) {
     const c = cById.get(i.contractId);
     const key = c?.propertyId ?? null;
-    const cur = byProp.get(key) ?? { label: c ? x.propertyName(c) : "—", billed: 0, collected: 0, outstanding: 0 };
+    const name = key != null && c ? x.propertyName(c) : null;
+    const cur = byProp.get(key) ?? { label: name ?? "بلا عقار مرتبط", labelEn: name ?? "No linked property", billed: 0, collected: 0, outstanding: 0 };
     const mm = money([i]);
-    byProp.set(key, { label: cur.label, billed: round2(cur.billed + mm.billed), collected: round2(cur.collected + mm.collected), outstanding: round2(cur.outstanding + mm.outstanding) });
+    byProp.set(key, { ...cur, billed: round2(cur.billed + mm.billed), collected: round2(cur.collected + mm.collected), outstanding: round2(cur.outstanding + mm.outstanding) });
   }
   return {
     kpis: [
@@ -701,7 +703,7 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
         key: "by_property", type: "stacked", unit: "sar",
         title: { ar: "التحصيل حسب العقار", en: "Collection by property" },
         series: [{ key: "collected", label: { ar: "المحصّل", en: "Collected" }, color: C.cobalt }, { key: "outstanding", label: { ar: "المتبقي", en: "Outstanding" }, color: C.sky }],
-        data: [...byProp.values()].sort((a, b) => b.billed - a.billed).map((v) => ({ label: v.label, collected: v.collected, outstanding: v.outstanding })),
+        data: [...byProp.values()].sort((a, b) => b.billed - a.billed).map((v) => ({ label: v.label, labelEn: v.labelEn, collected: v.collected, outstanding: v.outstanding })),
       },
     ],
     columns: [
