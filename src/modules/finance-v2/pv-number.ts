@@ -3,12 +3,12 @@ import { LOCK_KEYS } from "./lock-keys";
 
 /**
  * The account's ONE payment-voucher series, PV-###### (DESIGN §8.2 c, §8.4):
- * tenant credit refunds, v2 deposit refunds and supplier payments share it, so
- * a number is never issued twice across the three. MAX+1 under the account's
+ * tenant credit refunds, v2 deposit refunds, supplier payments and landlord
+ * payouts (0079) share it, so a number is never issued twice across them. MAX+1 under the account's
  * PV advisory lock, inside the caller's transaction. A table that does not
  * exist yet (its migration failed at boot) is simply left out.
  */
-const SOURCES = ["tenant_credit_actions", "finance_deposit_refunds", "supplier_payments"] as const;
+const SOURCES = ["tenant_credit_actions", "finance_deposit_refunds", "supplier_payments", "finance_payout_vouchers"] as const;
 
 export async function nextPvNumber(c: Pick<Fv2Client, "query">, scope: number): Promise<string> {
   await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.PV]);

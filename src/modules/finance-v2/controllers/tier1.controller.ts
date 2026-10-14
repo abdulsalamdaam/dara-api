@@ -6,6 +6,7 @@ import { BankAccountsService } from "../tier1/bank-accounts.service";
 import { AccountTransferService } from "../tier1/account-transfer.service";
 import { ExpensesV2Service } from "../tier1/expenses-v2.service";
 import { TenantCreditsService } from "../tier1/tenant-credits.service";
+import { LandlordPayoutsService } from "../tier1/landlord-payouts.service";
 
 const idOf = (v: string): number => {
   const n = Number(v);
@@ -26,7 +27,17 @@ export class FinanceV2Tier1Controller {
     private readonly expenses: ExpensesV2Service,
     private readonly credits: TenantCreditsService,
     private readonly transfers: AccountTransferService,
+    private readonly payouts: LandlordPayoutsService,
   ) {}
+
+  // ── Landlord payout (تحويل للمؤجر): the payment voucher (سند صرف), accountant 15 Oct 2026 ──
+
+  /** The payout's PV- voucher: landlord, amount, paid from, and its E19 entry (posted, or the preview of it). Another account's id is 404. */
+  @Get("landlord-payouts/:id/voucher")
+  @RequireCapability("view")
+  payoutVoucher(@Req() req: Fv2Request, @Param("id") id: string) {
+    return this.payouts.voucher(scopeId(req.user!), idOf(id));
+  }
 
   // ── Bank accounts and cash boxes (§8.2 a) ──
 

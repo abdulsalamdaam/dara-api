@@ -227,10 +227,10 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     assert.equal(cross.status, 400);
     assert.equal(cross.body.error, "FINANCE_V2_CROSS_LANDLORD");
     assert.equal((await env.q(`select count(*)::int as n from tenant_credit_actions where user_id = $1`, [U]))[0].n, n0);
-    // 700 left: 800 refused, 500 refunded (PV-000001)
+    // 700 left: 800 refused, 500 refunded (PV-000002: the landlord payout above took PV-000001 — one PV series)
     assert.equal(((await attempt(() => credits.refund(U, user, { tenantId: s.tenant, amount: "800" }))) as any).body.available, "700.00");
     const rf = await credits.refund(U, user, { tenantId: s.tenant, amount: "500", bankAccountId: bankB.id, method: "bank_transfer", reference: "TRX-1" });
-    assert.equal(rf.action.number, "PV-000001");
+    assert.equal(rf.action.number, "PV-000002");
     assert.equal(rf.remainingCredit, "200.00");
     await drain(env);
     assert.deepEqual(codes(await linesOf(env, "tenant_credit_action", rf.action.id, "refund")), ["1117 Cr 500", "1122 Dr 500", "2122 Cr 500", "2121 Dr 500"]);
@@ -245,7 +245,7 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
     const refused = [a, b].filter((x: any) => x?.status === 409);
     assert.equal(ok.length, 1);
     assert.equal(refused.length, 1);
-    assert.equal((ok[0] as any).action.number, "PV-000002");
+    assert.equal((ok[0] as any).action.number, "PV-000003");
     await drain(env);
     assert.equal((await credits.list(U)).rows.filter((r) => r.tenantId === s.tenant).length, 0, "no credit left");
   });

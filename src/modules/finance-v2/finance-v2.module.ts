@@ -43,6 +43,7 @@ import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { AccountTransferService } from "./tier1/account-transfer.service";
 import { ExpensesV2Service } from "./tier1/expenses-v2.service";
 import { TenantCreditsService } from "./tier1/tenant-credits.service";
+import { LandlordPayoutsService } from "./tier1/landlord-payouts.service";
 import { BankRecService } from "./tier2/bank-rec.service";
 import { RemindersService } from "./tier2/reminders.service";
 import { DryRunReminderSender, REMINDER_SENDER } from "./tier2/reminder-sender";
@@ -87,6 +88,7 @@ import { InstallmentDocsService } from "./installment-docs.service";
     BackfillService, ManualJournalsService, TrustTransferService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,
     BankAccountsService, AccountTransferService, ExpensesV2Service, TenantCreditsService, BankRecService, RemindersService,
+    LandlordPayoutsService, // the landlord payout's سند صرف (accountant 15 Oct 2026)
     ApService, JournalExportService, FinanceSettingsService,
     ControlChecksService,
     AcctReportsService,

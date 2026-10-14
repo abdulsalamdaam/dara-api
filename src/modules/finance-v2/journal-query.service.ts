@@ -112,8 +112,11 @@ export class JournalQueryService {
       }
       case "expense":
         return (await one(`select 1 from expenses where id = $1 and user_id = $2`)) ? { type, id, number: null, route: `/dashboard/reports/expenses?id=${id}` } : null;
-      case "landlord_payout":
-        return (await one(`select 1 from landlord_payouts where id = $1 and user_id = $2`)) ? { type, id, number: null, route: `/dashboard/reports/payouts?id=${id}` } : null;
+      case "landlord_payout": {
+        const r = await one(`select v.number from landlord_payouts lp left join finance_payout_vouchers v on v.payout_id = lp.id and v.user_id = lp.user_id
+                              where lp.id = $1 and lp.user_id = $2`);
+        return r ? { type, id, number: r.number ?? null, route: `/dashboard/reports/payouts?id=${id}` } : null;
+      }
       case "tenant_credit_action": {
         const r = await one(`select number, tenant_id from tenant_credit_actions where id = $1 and user_id = $2`);
         return r ? { type, id, number: r.number ?? null, route: `/dashboard/accounting/tenant-credits?tenantId=${r.tenant_id}` } : null;

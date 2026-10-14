@@ -20,6 +20,7 @@ import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../
 import { commissionZatcaDocV2 } from "../overrides/commission-approve";
 import { applyDispositions } from "../overrides/terminate";
 import { assertPayoutWithinDue } from "../overrides/landlord-dues";
+import { createPayoutV2, type PayoutV2Result } from "../overrides/landlord-payout";
 import { fromHalalas } from "../money";
 import { trustRefusal, trustRefusalFor, type TrustTarget } from "../overrides/installment-docs";
 
@@ -479,6 +480,15 @@ export class FinanceV2Hooks {
     await assertPayoutWithinDue(this.sqlPool(), scope, ownerId, amount, allowAdvance === true, accounting);
   }
 
+  /**
+   * POST /reports/landlord-payouts under v2 (accountant, 15 Oct 2026): the whole write in one transaction under the
+   * payout lock — request-id replay, net-due check, the row, "paid from", a PV- voucher number and the E19 event.
+   * The legacy handler has already checked the landlord's scope; see overrides/landlord-payout.ts.
+   */
+  async createPayoutV2(scope: number, user: { id: number }, ownerId: number, body: any, accounting: () => Promise<any>): Promise<PayoutV2Result> {
+    return createPayoutV2({ pool: this.pool, emitter: this.emitter }, scope, user, ownerId, body, accounting);
+  }
+
   /** DELETE /reports/landlord-payouts/:id (E19 reversal). */
   async payoutDeleted(ctx: HookCtx, payoutId: number): Promise<void> {
     await this.run(ctx, "payout_delete", async (q) => {
@@ -550,6 +560,7 @@ export class FinanceV2Hooks {
       "finance_auto_invoice_links", "finance_auto_invoice_settings", // 0073
       "fixed_asset_dep_runs", "fixed_assets", "account_external_codes", // 0074
       "finance_property_commission", // 0075
+      "finance_payout_vouchers", // 0079
       "finance_commission_run_items", "finance_commission_runs", "finance_commission_transfers"]) { // 0070 in FK order
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);

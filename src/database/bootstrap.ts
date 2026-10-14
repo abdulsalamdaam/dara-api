@@ -659,6 +659,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 trust accounts failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0079 the landlord payout's payment voucher (PV- number, request id). After 0076, same rules.
+    try { // finance-v2:
+      const fv2PayoutPv = findSqlFile(join("drizzle", "0079_finance_v2_payout_vouchers.sql")); // finance-v2:
+      if (fv2PayoutPv) await client.query(readFileSync(fv2PayoutPv, "utf8")); // finance-v2:
+      else log.warn("0079_finance_v2_payout_vouchers.sql not found — Finance v2 payout vouchers not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 payout vouchers failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Ejar Import v2: saved two-call lookups (and the index the lookup budget
     // counts with). Idempotent and additive. A failure warns and boots anyway:

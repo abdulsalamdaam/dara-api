@@ -441,7 +441,8 @@ export class ExtraChecks {
          select 'payment_voucher', number, count(*)::int from (
            select number from tenant_credit_actions where user_id = $1 and number is not null
            union all select number from finance_deposit_refunds where user_id = $1
-           union all select number from supplier_payments where user_id = $1) pv group by number having count(*) > 1
+           union all select number from supplier_payments where user_id = $1
+           union all select number from finance_payout_vouchers where user_id = $1) pv group by number having count(*) > 1
        ) x order by kind, number`, [scope, since]);
     return countCheck(r.rowCount ?? 0, r.rows.map((x: any) => ({ kind: x.kind, number: x.number, count: x.n })));
   }

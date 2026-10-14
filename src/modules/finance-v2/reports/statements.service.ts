@@ -105,12 +105,16 @@ export class StatementsService {
     const cols = new Map((await q(ids("payment_collection"), `select id, receipt_number, method from payment_collections where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const acts = new Map((await q(ids("tenant_credit_action"), `select id, number from tenant_credit_actions where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
     const refunds = new Map((await q(ids("deposit_refund"), `select id, number from finance_deposit_refunds where user_id = $1 and id = any($2::int[])`)).map((r: any) => [r.id, r]));
+    const payouts = new Map((await q(ids("landlord_payout"),
+      `select lp.id, lp.method, v.number from landlord_payouts lp left join finance_payout_vouchers v on v.payout_id = lp.id and v.user_id = lp.user_id
+        where lp.user_id = $1 and lp.id = any($2::int[])`)).map((r: any) => [r.id, r]));
     return (m: Movement) => {
       switch (m.sourceType) {
         case "simple_invoice": return { number: docs.get(m.sourceId)?.number ?? null, method: null };
         case "payment_collection": return { number: cols.get(m.sourceId)?.receipt_number ?? (m.documentId != null ? docs.get(m.documentId)?.number ?? null : null), method: cols.get(m.sourceId)?.method ?? null };
         case "tenant_credit_action": return { number: acts.get(m.sourceId)?.number ?? null, method: null };
         case "deposit_refund": return { number: refunds.get(m.sourceId)?.number ?? null, method: null };
+        case "landlord_payout": return { number: payouts.get(m.sourceId)?.number ?? null, method: payouts.get(m.sourceId)?.method ?? null };
         default: return { number: m.documentId != null ? docs.get(m.documentId)?.number ?? null : null, method: null };
       }
     };

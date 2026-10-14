@@ -11,7 +11,7 @@
 export const LOCK_KEYS = {
   /** JV- manual journal numbers. */
   JV: -101,
-  /** PV- payment voucher numbers (deposit refunds, tenant refunds). */
+  /** PV- payment voucher numbers (deposit refunds, tenant refunds, supplier payments, landlord payouts). */
   PV: -102,
   /** RR- rent receipt (non-tax document) numbers. */
   RR: -103,
@@ -39,6 +39,8 @@ export const LOCK_KEYS = {
   COMMISSION_TRANSFER: -171,
   /** Transfer between the account's own bank accounts / cash boxes: the source-balance check and the post, serialised per account. */
   ACCOUNT_TRANSFER: -172,
+  /** Landlord payout (v2 path): the request-id replay, the net-due check, the insert and its PV- number, serialised per account. */
+  LANDLORD_PAYOUT: -173,
   /** The installments screen's rent receipt (accountant #3): the coverage check and the RR- insert, serialised per account. */
   INSTALLMENT_RR: -190,
 } as const;
