@@ -293,6 +293,56 @@ describe("the lookup budget", () => {
   });
 });
 
+describe("the plan's Ejar lookup quota", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const period = (plan: string, cycle: string) => ({
+    packagePlan: plan, billingCycle: cycle,
+    subscriptionStartedAt: new Date(Date.now() - DAY), subscriptionEndsAt: new Date(Date.now() + 80 * DAY),
+  });
+
+  it("a quarterly Basic account gets 22 lookups for its period, then 429", async () => {
+    w = dworld();
+    w.store.plans[1] = period("basic", "quarterly");
+    const b = await w.svc.budget(1);
+    assert.equal(b.limit, 22);
+    assert.equal(b.window, "period");
+    assert.equal(b.remaining, 22);
+    assert.equal(b.gateway.limit, 50, "the gateway budget is still reported");
+    assert.ok(b.resetsAt, "renews with the subscription");
+
+    const numbers = Array.from({ length: 23 }, (_, i) => String(10000000100 + i));
+    numbers.forEach((n) => w.known.add(n));
+    for (const n of numbers.slice(0, 22)) await w.svc.lookup(USER, { contract_number: n });
+    const sent = w.calls.length;
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22] }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "budget_exhausted");
+    assert.equal(body.budget.plan.used, 22);
+    assert.equal(w.calls.length, sent, "nothing is sent past the quota");
+  });
+
+  it("counts only the current paid period", async () => {
+    w = dworld();
+    w.store.plans[1] = period("tenant", "quarterly"); // floor(30 × 3/12) = 7
+    w.store.logs.push({
+      id: 999, userId: 1, env: "balady-staging", endpoint: "rentalContractInvoices", attempts: 5,
+      status: 200, createdAt: new Date(Date.now() - 10 * DAY),
+    });
+    const b = await w.svc.budget(1);
+    assert.equal(b.limit, 7);
+    assert.equal(b.plan?.used, 0, "calls before the period started don't count");
+  });
+
+  it("Enterprise has no plan quota", async () => {
+    w = dworld();
+    w.store.plans[1] = period("enterprise", "yearly");
+    const b = await w.svc.budget(1);
+    assert.equal(b.plan, null);
+    assert.equal(b.limit, 50);
+    assert.equal(b.window, "month");
+  });
+});
+
 describe("budget configuration", () => {
   it("defaults: 50 per month, no per-account cap, 24 h cache, 20 wrong numbers a day", () => {
     assert.deepEqual(lookupConfig({}), { limit: 50, window: "month", perAccount: null, cacheHours: 24, secondCall: "contracts", wrongNumbersPerDay: 20 });

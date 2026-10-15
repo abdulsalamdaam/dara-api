@@ -968,9 +968,17 @@ would strand everything filed in between.
   differ by seats — tenant 1, basic 3, pro 6, enterprise unlimited). `mode`
   still shapes *content* (the dashboard widget, who the contract wizard treats
   as the account holder), not access.
-- **Billing cycles:** quarterly (default, 5% off) and yearly (15% off). Monthly
-  is withdrawn for new payments but stays a valid stored value — old rows and
-  accounts carry it; `purchasableCycle()` moves it up to quarterly on renewal.
+- **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
+  yearly list (tenant 1,000 · basic 4,200 · pro 5,400): six months costs the
+  yearly +10% annualised, three months +20% (basic: 4,200 / 2,310 / 1,260 per
+  payment). Monthly is withdrawn for new payments but stays a valid stored
+  value — old rows and accounts carry it; `purchasableCycle()` moves it up to
+  quarterly on renewal.
+- **Ejar lookup quota per plan** (`PLAN_EJAR_LOOKUPS_PER_YEAR`): tenant 30,
+  basic 90, pro 150 a year, enterprise uncapped — prorated to the paid period
+  (quarterly basic = 22) and counted from `subscription_started_at`, on top of
+  the gateway-wide `EJAR_LOOKUP_LIMIT`. Deliberately not shown on the landing
+  or the package pages; only the Ejar import screen shows it.
 - **Admin approval grants the package it displays.** `PATCH
   /admin/registrations/:id/approve` 400s on an unknown plan key rather than
   falling back to `basic` — it used to accept the legacy `broker` a fresh row

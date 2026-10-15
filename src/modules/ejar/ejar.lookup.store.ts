@@ -2,12 +2,12 @@ import { Inject, Injectable, ServiceUnavailableException } from "@nestjs/common"
 import type pg from "pg";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
-  createAuxPool, contractsTable, ejarLookupsTable, lookupsTable, ownersTable, propertiesTable, tenantsTable, unitsTable,
+  createAuxPool, contractsTable, ejarLookupsTable, lookupsTable, ownersTable, propertiesTable, tenantsTable, unitsTable, usersTable,
 } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import { resolveEjarScope, type EjarScope } from "./ejar.scope";
-import type { LookupUsage } from "./ejar.budget";
+import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { LOOKUP_ENDPOINTS } from "./ejar.types";
 
 /**
@@ -71,6 +71,8 @@ export interface EjarLookupStore {
   /** Invoices calls Ejar answered "no such contract" for this account since `since`. */
   wrongNumbers(since: Date, accountId: number): Promise<number>;
   scope(accountId: number): Promise<EjarScope>;
+  /** The account's plan and paid period — what its Ejar lookup quota is cut from. */
+  planPeriod(accountId: number): Promise<PlanPeriod | null>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
   findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null>;
@@ -179,6 +181,18 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   scope(accountId: number): Promise<EjarScope> {
     return resolveEjarScope(this.db, accountId);
+  }
+
+  async planPeriod(accountId: number): Promise<PlanPeriod | null> {
+    const [row] = await this.db
+      .select({
+        packagePlan: usersTable.packagePlan, billingCycle: usersTable.billingCycle,
+        subscriptionStartedAt: usersTable.subscriptionStartedAt, subscriptionEndsAt: usersTable.subscriptionEndsAt,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, accountId))
+      .limit(1);
+    return row ?? null;
   }
 
   async getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null> {

@@ -11,7 +11,7 @@ import { EjarClientService } from "../ejar.client.service";
 import { EjarLookupService } from "../ejar.lookup.service";
 import type { EjarLookupStore, LookupMatches, MatchKeys, PartyMatch, SavedLookup } from "../ejar.lookup.store";
 import type { EjarScope } from "../ejar.scope";
-import type { LookupUsage } from "../ejar.budget";
+import type { LookupUsage, PlanPeriod } from "../ejar.budget";
 
 export const CN = "10000000001";
 export const UUID = "11111111-2222-4333-8444-555555555555";
@@ -105,6 +105,8 @@ export class MemStore implements EjarLookupStore {
   /** user id → account (scope owner) */
   accountOf: Record<number, number> = {};
   scopes: Record<number, EjarScope> = {};
+  /** account → plan/period; unset = Enterprise (no plan quota), so the gateway budget alone applies. */
+  plans: Record<number, PlanPeriod> = {};
   owners: Array<{ id: number; accountId: number; name: string; idNumber: string | null }> = [];
   tenants: Array<{ id: number; accountId: number; name: string; nationalId: string | null }> = [];
   properties: Array<{ id: number; accountId: number; ownerId: number | null; usageLookupId: number | null; ejarId?: string | null; name?: string }> = [];
@@ -162,6 +164,9 @@ export class MemStore implements EjarLookupStore {
   }
 
   async scope(accountId: number): Promise<EjarScope> { return this.scopes[accountId] ?? { locked: false, idNumber: null }; }
+  async planPeriod(accountId: number): Promise<PlanPeriod> {
+    return this.plans[accountId] ?? { packagePlan: "enterprise", billingCycle: "yearly", subscriptionStartedAt: null, subscriptionEndsAt: null };
+  }
   async getLookup(accountId: number, n: string) { return this.lookups.get(`${accountId}:${n}`) ?? null; }
   async saveLookup(row: Omit<SavedLookup, "id" | "createdAt">) {
     const saved = { ...row, id: this.nextId++, createdAt: new Date() };

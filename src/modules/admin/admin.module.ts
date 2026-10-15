@@ -277,11 +277,11 @@ class AdminController {
         ))
         .groupBy(sql`1`),
       // True MRR: every account's latest paid subscription, each normalised to
-      // a month (a yearly plan contributes a twelfth, a quarterly one a third). Summing the raw amounts
+      // a month (a yearly plan contributes a twelfth, a semiannual one a sixth, a quarterly one a third). Summing the raw amounts
       // would let one annual payment read as a month's income.
       this.db.execute(sql`
         select coalesce(sum(
-          case latest.billing_cycle when 'yearly' then latest.amount / 12.0 when 'quarterly' then latest.amount / 3.0 else latest.amount end
+          case latest.billing_cycle when 'yearly' then latest.amount / 12.0 when 'semiannual' then latest.amount / 6.0 when 'quarterly' then latest.amount / 3.0 else latest.amount end
         ), 0) as mrr
         from (
           select distinct on (sp.user_id) sp.user_id, sp.amount, sp.billing_cycle

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable } from "./packages";
+import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable, ejarLookupQuota } from "./packages";
 
 /**
  * The tenant plan is sold to corporate tenants only. The check has to fail
@@ -39,10 +39,13 @@ describe("planAllowedForUserType", () => {
 });
 
 describe("billing cycles", () => {
-  it("prices a quarter at 3 months less 5%, a year at 12 less 15%", () => {
-    assert.equal(listPrice("basic", "monthly"), 250);
-    assert.equal(listPrice("basic", "quarterly"), Math.round(250 * 0.95) * 3);
-    assert.equal(listPrice("basic", "yearly"), Math.round(250 * 0.85) * 12);
+  it("prices from the yearly list: six months +10%, three months +20% (annualised)", () => {
+    const table = { tenant: [1000, 550, 300], basic: [4200, 2310, 1260], professional: [5400, 2970, 1620] } as const;
+    for (const [plan, [y, h, q]] of Object.entries(table)) {
+      assert.equal(listPrice(plan, "yearly"), y, plan);
+      assert.equal(listPrice(plan, "semiannual"), h, plan);
+      assert.equal(listPrice(plan, "quarterly"), q, plan);
+    }
     assert.equal(listPrice("enterprise", "quarterly"), null);
   });
   it("normalises unknown cycles to monthly", () => {
@@ -62,7 +65,17 @@ describe("purchasable cycles and quotas", () => {
     assert.equal(purchasableCycle("monthly"), "quarterly");
     assert.equal(purchasableCycle(undefined), "quarterly");
     assert.equal(purchasableCycle("quarterly"), "quarterly");
+    assert.equal(purchasableCycle("semiannual"), "semiannual");
     assert.equal(purchasableCycle("yearly"), "yearly");
+  });
+  it("prorates the yearly Ejar lookup quota to the paid period", () => {
+    assert.equal(ejarLookupQuota("tenant", "yearly"), 30);
+    assert.equal(ejarLookupQuota("basic", "yearly"), 90);
+    assert.equal(ejarLookupQuota("basic", "quarterly"), 22);
+    assert.equal(ejarLookupQuota("basic", "semiannual"), 45);
+    assert.equal(ejarLookupQuota("professional", "yearly"), 150);
+    assert.equal(ejarLookupQuota("professional", "quarterly"), 37);
+    assert.equal(ejarLookupQuota("enterprise", "quarterly"), null);
   });
   it("gives every plan unlimited units and properties", () => {
     for (const def of Object.values(PACKAGES)) {

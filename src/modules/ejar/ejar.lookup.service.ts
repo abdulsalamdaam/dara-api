@@ -5,7 +5,10 @@ import {
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { EjarAccessError, EjarApiError, EjarClientService, EjarConfigError, ejarAccessDenial } from "./ejar.client.service";
-import { canLookup, computeBudget, hasHeadroom, lookupConfig, windowBounds, type EjarBudget, type LookupConfig } from "./ejar.budget";
+import {
+  canLookup, computeBudget, hasHeadroom, lookupConfig, planQuotaWindow, windowBounds,
+  type EjarBudget, type LookupConfig, type PlanQuota,
+} from "./ejar.budget";
 import {
   allPartyIdentifiers, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyIdentifiers, pickContractsResource,
   type MappedLookup, type RequiredContext, type RequiredEntry,
@@ -139,7 +142,16 @@ export class EjarLookupService {
 
   async budget(accountId: number, cfg = this.config()): Promise<EjarBudget> {
     const { start } = windowBounds(cfg.window);
-    return computeBudget(cfg, await this.store.usage(start, accountId));
+    const [usage, plan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
+    return computeBudget(cfg, usage, new Date(), plan);
+  }
+
+  /** The account's plan quota and what it has used of it this period; null = uncapped. */
+  private async planQuota(accountId: number): Promise<PlanQuota | null> {
+    const win = planQuotaWindow(await this.store.planPeriod(accountId));
+    if (!win) return null;
+    const { account } = await this.store.usage(win.since, accountId);
+    return { ...win, used: account };
   }
 
   async lookup(user: AuthUser, body: { contract_number?: unknown; refresh?: unknown }): Promise<LookupResponse> {
@@ -166,8 +178,8 @@ export class EjarLookupService {
 
     const { start } = windowBounds(cfg.window);
     const outcome = await this.store.withBudgetLock<Outcome>(async () => {
-      const usage = await this.store.usage(start, accountId);
-      if (!canLookup(cfg, usage)) return { kind: "exhausted", budget: computeBudget(cfg, usage) };
+      const [usage, plan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
+      if (!canLookup(cfg, usage, plan)) return { kind: "exhausted", budget: computeBudget(cfg, usage, new Date(), plan) };
       if (cfg.wrongNumbersPerDay != null) {
         const { start: today } = windowBounds("day");
         if ((await this.store.wrongNumbers(today!, accountId)) >= cfg.wrongNumbersPerDay) return { kind: "wrong_number_cap" };
@@ -207,7 +219,8 @@ export class EjarLookupService {
           // Not in the list (a renewed contract's entry carries the older
           // version's id). Fall back to Details — a third call, so it needs
           // its own headroom; without it, stop rather than overspend.
-          if (!hasHeadroom(cfg, await this.store.usage(start, accountId), "details")) return { kind: "details_unavailable", logs };
+          const [now, nowPlan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
+          if (!hasHeadroom(cfg, now, "details", nowPlan)) return { kind: "details_unavailable", logs };
           needDetails = true;
         }
       }

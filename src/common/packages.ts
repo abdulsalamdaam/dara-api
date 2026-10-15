@@ -161,22 +161,25 @@ export function planUserTypeError(plan: string | null | undefined): string {
 }
 
 /* ── Subscription pricing (SAR) ────────────────────────────────────────────
- * Mirrors the landing: a monthly base price, a quarterly (3-month) price with a
- * 5% discount and a yearly price with 15% — each round(monthly × (1 − d)) × n.
+ * Priced from a YEARLY list price. A shorter cycle costs more per year: six
+ * months is the yearly price +10% (annualised), three months +20% — so Basic
+ * is 4,200 a year, 2,310 per six months (4,620/yr) and 1,260 per quarter
+ * (5,040/yr). Each payment = yearly × (1 + uplift) × months / 12.
  * Enterprise is sold on request (no online payment). Used to bill the Moyasar
  * subscription invoice. */
 
-export type BillingCycle = "monthly" | "quarterly" | "yearly";
-export const BILLING_CYCLES: readonly BillingCycle[] = ["monthly", "quarterly", "yearly"];
-export const QUARTERLY_DISCOUNT = 0.05;
-export const YEARLY_DISCOUNT = 0.15;
+export type BillingCycle = "monthly" | "quarterly" | "semiannual" | "yearly";
+export const BILLING_CYCLES: readonly BillingCycle[] = ["monthly", "quarterly", "semiannual", "yearly"];
 
 /** Months one payment on `cycle` buys. */
-export const CYCLE_MONTHS: Record<BillingCycle, number> = { monthly: 1, quarterly: 3, yearly: 12 };
-const CYCLE_DISCOUNT: Record<BillingCycle, number> = { monthly: 0, quarterly: QUARTERLY_DISCOUNT, yearly: YEARLY_DISCOUNT };
+export const CYCLE_MONTHS: Record<BillingCycle, number> = { monthly: 1, quarterly: 3, semiannual: 6, yearly: 12 };
+/** Annualised mark-up over the yearly price. Monthly is withdrawn; priced like quarterly. */
+export const CYCLE_UPLIFT: Record<BillingCycle, number> = { monthly: 0.2, quarterly: 0.2, semiannual: 0.1, yearly: 0 };
 
 /** Arabic label for a cycle, as printed on invoices and emails. */
-export const CYCLE_LABEL_AR: Record<BillingCycle, string> = { monthly: "شهري", quarterly: "ربع سنوي", yearly: "سنوي" };
+export const CYCLE_LABEL_AR: Record<BillingCycle, string> = {
+  monthly: "شهري", quarterly: "ربع سنوي", semiannual: "نصف سنوي", yearly: "سنوي",
+};
 
 export function isBillingCycle(v: unknown): v is BillingCycle {
   return typeof v === "string" && (BILLING_CYCLES as readonly string[]).includes(v);
@@ -193,21 +196,43 @@ export function parseCycle(v: unknown): BillingCycle {
  * but anything that starts a payment or records a choice goes through
  * `purchasableCycle`, which moves monthly up to quarterly.
  */
-export const PURCHASABLE_CYCLES: readonly BillingCycle[] = ["quarterly", "yearly"];
+export const PURCHASABLE_CYCLES: readonly BillingCycle[] = ["quarterly", "semiannual", "yearly"];
 
 export function purchasableCycle(v: unknown): BillingCycle {
   const c = parseCycle(v);
   return PURCHASABLE_CYCLES.includes(c) ? c : "quarterly";
 }
 
-/** Monthly base price per plan, in SAR. `null` = priced on request. */
-export const PLAN_MONTHLY_PRICE: Record<PackagePlan, number | null> = {
-  tenant: 50,
-  basic: 250,
-  advanced: 250,
-  professional: 350,
+/** Yearly list price per plan, in SAR. `null` = priced on request. */
+export const PLAN_YEARLY_PRICE: Record<PackagePlan, number | null> = {
+  tenant: 1000,
+  basic: 4200,
+  advanced: 4200,
+  professional: 5400,
   enterprise: null,
 };
+
+/* ── Ejar lookup quota ─────────────────────────────────────────────────────
+ * Ejar lookups a plan includes per YEAR, prorated to the paid period: a
+ * quarterly Basic account gets floor(90 × 3/12) = 22 for its three months.
+ * Enforced by the Ejar lookup budget (ejar.lookup.service) on top of the
+ * gateway-wide EJAR_LOOKUP_LIMIT. Deliberately NOT advertised on the landing
+ * or in the package pages — the import screen is the only place it shows.
+ * `null` = no plan cap (Enterprise). */
+export const PLAN_EJAR_LOOKUPS_PER_YEAR: Record<PackagePlan, number | null> = {
+  tenant: 30,
+  basic: 90,
+  advanced: 90,
+  professional: 150,
+  enterprise: null,
+};
+
+/** Ejar lookups a plan's period on `cycle` includes, or null when uncapped. */
+export function ejarLookupQuota(plan: string | null | undefined, cycle: BillingCycle): number | null {
+  const yearly = PLAN_EJAR_LOOKUPS_PER_YEAR[resolvePackage(plan).key];
+  if (yearly == null) return null;
+  return Math.floor((yearly * CYCLE_MONTHS[cycle]) / 12);
+}
 
 /**
  * TEST MODE — charge every payable plan (any cycle, initial or renewal) a flat
@@ -218,9 +243,9 @@ export const TEST_FLAT_PRICE_SAR: number | null = 1;
 
 /** Price-list amount (SAR) for a plan on a cycle, before any test override. */
 export function listPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
-  const monthly = PLAN_MONTHLY_PRICE[resolvePackage(plan).key];
-  if (monthly == null) return null;
-  return Math.round(monthly * (1 - CYCLE_DISCOUNT[cycle])) * CYCLE_MONTHS[cycle];
+  const yearly = PLAN_YEARLY_PRICE[resolvePackage(plan).key];
+  if (yearly == null) return null;
+  return Math.round((yearly * (1 + CYCLE_UPLIFT[cycle]) * CYCLE_MONTHS[cycle]) / 12);
 }
 
 /** Amount charged (SAR) for a plan on the given cycle, or null if on-request. */
@@ -244,9 +269,10 @@ export function planPriceTable(): {
   const list: Partial<Record<PackagePlan, Record<BillingCycle, number>>> = {};
   for (const key of ["tenant", "basic", "professional"] as const) {
     list[key] = {
-      // Not purchasable any more; kept as the base the discounts are shown against.
+      // Not purchasable any more; kept so older clients still find the key.
       monthly: listPrice(key, "monthly")!,
       quarterly: listPrice(key, "quarterly")!,
+      semiannual: listPrice(key, "semiannual")!,
       yearly: listPrice(key, "yearly")!,
     };
   }
@@ -255,5 +281,5 @@ export function planPriceTable(): {
 
 /** Whether a plan can be paid for online (Enterprise is contact-sales only). */
 export function isPayablePlan(plan: string | null | undefined): boolean {
-  return PLAN_MONTHLY_PRICE[resolvePackage(plan).key] != null;
+  return PLAN_YEARLY_PRICE[resolvePackage(plan).key] != null;
 }

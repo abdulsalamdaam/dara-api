@@ -10,10 +10,17 @@
  * actually left the server — `ejar_api_logs` rows for those endpoints on a
  * Balady env, summing `attempts` — never from a counter that could drift.
  *
+ * On top of that, each account has its plan's quota (PLAN_EJAR_LOOKUPS_PER_YEAR
+ * prorated to its paid period — see `planQuotaWindow`), counted the same way.
+ *
  * Pure functions only; the counting query lives in the store.
  */
 
+import { CYCLE_MONTHS, ejarLookupQuota, parseCycle } from "../../common/packages";
+
 export type LookupWindow = "day" | "month" | "total";
+/** The window the budget is REPORTED in: the gateway's, or the plan's paid period. */
+export type BudgetWindow = LookupWindow | "period";
 /** What the lookup calls after Invoices. */
 export type SecondCall = "contracts" | "details";
 export type BudgetEndpoint = "invoices" | "contracts" | "details";
@@ -45,9 +52,25 @@ export interface LookupUsage {
   account: { invoices: number; contracts: number; details: number };
 }
 
-export interface EjarBudget {
+/**
+ * The account's plan quota (PLAN_EJAR_LOOKUPS_PER_YEAR prorated to the paid
+ * period), counted per endpoint from the period's start, like the gateway
+ * budget. Absent for an uncapped plan (Enterprise).
+ */
+export interface PlanQuota {
   limit: number;
-  window: LookupWindow;
+  /** Start of the paid period the quota covers. */
+  since: Date;
+  /** When the period — and so the quota — renews; null when unknown. */
+  resetsAt: Date | null;
+  /** The account's calls since `since`, per endpoint. */
+  used: { invoices: number; contracts: number; details: number };
+}
+
+export interface EjarBudget {
+  /** The cap the user is up against: the plan quota when there is one, else the gateway's. */
+  limit: number;
+  window: BudgetWindow;
   used: { invoices: number; contracts: number; details: number };
   /** Lookups left: limit - max(used), min'd with the account's remaining. */
   remaining: number;
@@ -55,6 +78,10 @@ export interface EjarBudget {
   perAccount: { limit: number | null; used: number; remaining: number | null };
   /** The call made after Invoices (EJAR_LOOKUP_SECOND_CALL). */
   secondCall: SecondCall;
+  /** The plan quota, when the plan has one. */
+  plan: { limit: number; used: number; remaining: number; since: string; resetsAt: string | null } | null;
+  /** The gateway-wide budget (EJAR_LOOKUP_LIMIT), reported separately once a plan quota takes `limit`. */
+  gateway: { limit: number; window: LookupWindow; resetsAt: string | null };
 }
 
 /** Riyadh is UTC+3 all year (no DST). */
@@ -119,25 +146,38 @@ export function windowBounds(window: LookupWindow, now = new Date()): { start: D
 
 const maxOf = (u: { invoices: number; contracts: number; details: number }) => Math.max(u.invoices, u.contracts, u.details);
 
-export function computeBudget(cfg: LookupConfig, usage: LookupUsage, now = new Date()): EjarBudget {
+export function computeBudget(cfg: LookupConfig, usage: LookupUsage, now = new Date(), plan: PlanQuota | null = null): EjarBudget {
   const { resetsAt } = windowBounds(cfg.window, now);
   const globalLeft = Math.max(0, cfg.limit - maxOf(usage));
   const accountUsed = maxOf(usage.account);
   const accountLeft = cfg.perAccount == null ? null : Math.max(0, cfg.perAccount - accountUsed);
+  const planUsed = plan ? maxOf(plan.used) : 0;
+  const planLeft = plan ? Math.max(0, plan.limit - planUsed) : null;
+  let remaining = accountLeft == null ? globalLeft : Math.min(globalLeft, accountLeft);
+  if (planLeft != null) remaining = Math.min(remaining, planLeft);
+  const gatewayResets = resetsAt ? resetsAt.toISOString() : null;
   return {
-    limit: cfg.limit,
-    window: cfg.window,
+    limit: plan ? plan.limit : cfg.limit,
+    window: plan ? "period" : cfg.window,
     used: { invoices: usage.invoices, contracts: usage.contracts, details: usage.details },
-    remaining: accountLeft == null ? globalLeft : Math.min(globalLeft, accountLeft),
-    resetsAt: resetsAt ? resetsAt.toISOString() : null,
+    remaining,
+    resetsAt: plan ? (plan.resetsAt ? plan.resetsAt.toISOString() : null) : gatewayResets,
     perAccount: { limit: cfg.perAccount, used: accountUsed, remaining: accountLeft },
     secondCall: cfg.secondCall,
+    plan: plan
+      ? {
+        limit: plan.limit, used: planUsed, remaining: planLeft!,
+        since: plan.since.toISOString(), resetsAt: plan.resetsAt ? plan.resetsAt.toISOString() : null,
+      }
+      : null,
+    gateway: { limit: cfg.limit, window: cfg.window, resetsAt: gatewayResets },
   };
 }
 
-/** One more call to `endpoint` fits, globally and for the account. */
-export function hasHeadroom(cfg: LookupConfig, usage: LookupUsage, endpoint: BudgetEndpoint): boolean {
+/** One more call to `endpoint` fits — globally, for the account, and in its plan quota. */
+export function hasHeadroom(cfg: LookupConfig, usage: LookupUsage, endpoint: BudgetEndpoint, plan: PlanQuota | null = null): boolean {
   if (cfg.limit - usage[endpoint] < 1) return false;
+  if (plan && plan.limit - plan.used[endpoint] < 1) return false;
   return cfg.perAccount == null || cfg.perAccount - usage.account[endpoint] >= 1;
 }
 
@@ -147,6 +187,37 @@ export function hasHeadroom(cfg: LookupConfig, usage: LookupUsage, endpoint: Bud
  * second call would spend a call for nothing). The Details fallback is
  * checked separately, when it is needed.
  */
-export function canLookup(cfg: LookupConfig, usage: LookupUsage): boolean {
-  return hasHeadroom(cfg, usage, "invoices") && hasHeadroom(cfg, usage, cfg.secondCall);
+export function canLookup(cfg: LookupConfig, usage: LookupUsage, plan: PlanQuota | null = null): boolean {
+  return hasHeadroom(cfg, usage, "invoices", plan) && hasHeadroom(cfg, usage, cfg.secondCall, plan);
+}
+
+/** The account's subscription, as far as the plan quota needs it. */
+export interface PlanPeriod {
+  packagePlan: string | null;
+  billingCycle: string | null;
+  subscriptionStartedAt: Date | string | null;
+  subscriptionEndsAt: Date | string | null;
+}
+
+/**
+ * The plan quota's limit and window for an account. The window is the paid
+ * period (`subscription_started_at` → `subscription_ends_at`) — every payment
+ * restarts it, so the quota renews with the subscription. Without a usable
+ * start (legacy rows) it falls back to a rolling window of the cycle's length.
+ * Returns null when the plan is uncapped.
+ */
+export function planQuotaWindow(
+  p: PlanPeriod | null, now = new Date(),
+): { limit: number; since: Date; resetsAt: Date | null } | null {
+  const cycle = parseCycle(p?.billingCycle);
+  const limit = ejarLookupQuota(p?.packagePlan ?? null, cycle);
+  if (limit == null) return null;
+  const start = p?.subscriptionStartedAt ? new Date(p.subscriptionStartedAt) : null;
+  const ends = p?.subscriptionEndsAt ? new Date(p.subscriptionEndsAt) : null;
+  if (start && !Number.isNaN(start.getTime()) && start <= now && (!ends || ends > now)) {
+    return { limit, since: start, resetsAt: ends && !Number.isNaN(ends.getTime()) ? ends : null };
+  }
+  const since = new Date(now);
+  since.setMonth(since.getMonth() - CYCLE_MONTHS[cycle]);
+  return { limit, since, resetsAt: null };
 }
