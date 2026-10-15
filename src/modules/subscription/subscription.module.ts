@@ -7,7 +7,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan, isBillingCycle, parseCycle, CYCLE_LABEL_AR, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
+import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan, isBillingCycle, parseCycle, purchasableCycle, CYCLE_LABEL_AR, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription, nextEndDate } from "../../common/subscription";
 import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured, type MoyasarInvoice, type MoyasarPayment } from "../../common/moyasar";
@@ -193,7 +193,8 @@ export class SubscriptionController {
     return {
       plan: resolvePackage(owner?.packagePlan).key,
       billingCycle: cycle,
-      amountDue: planPrice(owner?.packagePlan, cycle),
+      // What the next payment costs — a monthly account renews quarterly.
+      amountDue: planPrice(owner?.packagePlan, purchasableCycle(cycle)),
       // Every payable plan × cycle, so the checkout shows the amount that
       // will actually be charged rather than a copy of the price list.
       prices: planPriceTable(),
@@ -260,9 +261,10 @@ export class SubscriptionController {
 
     // Optional plan/cycle switch (upgrade or change cycle).
     let plan = owner.packagePlan;
-    let cycle = parseCycle(owner.billingCycle);
+    // Monthly is no longer sold: an account still on it renews quarterly.
+    let cycle = purchasableCycle(owner.billingCycle);
     if (body?.plan && isPackagePlan(body.plan)) plan = body.plan;
-    if (isBillingCycle(body?.cycle)) cycle = body.cycle;
+    if (isBillingCycle(body?.cycle)) cycle = purchasableCycle(body.cycle);
 
     // Some plans are sold to one account type only (e.g. the Tenants plan is
     // for companies). This is the 4th path that ends up writing

@@ -7,7 +7,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, type BillingCycle } from "../../common/packages";
+import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
 import { packageUsage } from "../../common/quota";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
@@ -79,7 +79,7 @@ class PackageController {
     const cycle = parseCycle(owner?.billingCycle);
     const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: endsAt, isTrial: owner?.subscriptionIsTrial });
     const trial = trialView(!!owner?.subscriptionIsTrial, endsAt);
-    const amountDue = planPrice(owner?.packagePlan, cycle);
+    const amountDue = planPrice(owner?.packagePlan, purchasableCycle(cycle));
     return {
       plan,
       mode: plan.mode,

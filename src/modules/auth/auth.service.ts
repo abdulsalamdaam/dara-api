@@ -12,7 +12,7 @@ import { PhoneOtpService, smsBypassEnabled, DEV_BYPASS_CODE } from "../sms/phone
 import { qaBypassEnabled, EMAIL_OTP_BYPASS_CODE } from "../../common/qa-bypass";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
-import { isPackagePlan, isBillingCycle, planAllowedForUserType, planUserTypeError } from "../../common/packages";
+import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 
 const MAX_FAILED = 5;
@@ -440,7 +440,7 @@ export class AuthService {
     if (desiredPackagePlan && !planAllowedForUserType(desiredPackagePlan, userType)) {
       throw new BadRequestException(planUserTypeError(desiredPackagePlan));
     }
-    const desiredBillingCycle = isBillingCycle(input.desiredBillingCycle) ? input.desiredBillingCycle : null;
+    const desiredBillingCycle = isBillingCycle(input.desiredBillingCycle) ? purchasableCycle(input.desiredBillingCycle) : null;
     if (!email || !name) throw new BadRequestException("الاسم والبريد الإلكتروني مطلوبة");
     // A company account is two things: the person signing up and the entity
     // they sign up for. `name` is the person; the company needs its own name

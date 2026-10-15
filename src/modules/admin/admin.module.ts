@@ -14,7 +14,7 @@ import {
   listQuerySchema, parseDateBound, parseEnumList, wantsPagination,
 } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
-import { isPackagePlan, parseCycle, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
+import { isPackagePlan, purchasableCycle, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { EjarModule } from "../ejar/ejar.module";
 import { AdminCustomerOverviewController } from "./customer-overview.controller";
@@ -1128,7 +1128,7 @@ class AdminController {
     if (!planAllowedForUserType(plan, existing.userType)) {
       throw new BadRequestException(planUserTypeError(plan));
     }
-    const cycle = parseCycle(existing.desiredCycle);
+    const cycle = purchasableCycle(existing.desiredCycle);
 
     const askedTrialDays = normalizeTrialDays(body?.trialDays);
     // An explicit instruction from the admin — any of the three — turns the

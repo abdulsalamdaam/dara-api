@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { planAllowedForUserType, planRequiredUserType, PACKAGES, listPrice, parseCycle, planPriceTable } from "./packages";
+import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable } from "./packages";
 
 /**
  * The tenant plan is sold to corporate tenants only. The check has to fail
@@ -54,5 +54,20 @@ describe("billing cycles", () => {
     const { list } = planPriceTable();
     assert.deepEqual(Object.keys(list).sort(), ["basic", "professional", "tenant"]);
     assert.equal(list.professional?.quarterly, listPrice("professional", "quarterly"));
+  });
+});
+
+describe("purchasable cycles and quotas", () => {
+  it("moves a monthly choice up to quarterly, keeps the others", () => {
+    assert.equal(purchasableCycle("monthly"), "quarterly");
+    assert.equal(purchasableCycle(undefined), "quarterly");
+    assert.equal(purchasableCycle("quarterly"), "quarterly");
+    assert.equal(purchasableCycle("yearly"), "yearly");
+  });
+  it("gives every plan unlimited units and properties", () => {
+    for (const def of Object.values(PACKAGES)) {
+      assert.equal(def.maxUnits, UNLIMITED, def.key);
+      assert.equal(def.maxProperties, UNLIMITED, def.key);
+    }
   });
 });

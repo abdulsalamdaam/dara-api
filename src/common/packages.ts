@@ -1,7 +1,6 @@
 /**
- * Subscription packages. Four tiers gate the unit quota (properties scale
- * with units; landlords are unlimited — the Landlords tab is available on
- * every plan). The plan key is stored on the top-level user row
+ * Subscription packages. Units, properties and landlords are unlimited on
+ * every plan; the tiers differ by seats (`maxUsers`) and service. The plan key is stored on the top-level user row
  * (`users.package_plan`); employees inherit their owner's plan.
  *
  * Account *type* (individual vs company) is a separate concept stored on
@@ -45,8 +44,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
   // account holder IS the tenant. It runs the same portal, the same
   // getting-started checklist and the same seat model as the other plans;
   // only the quotas differ.
-  // Landing limits: Tenant 50 units / 1 user, Basic 500 / 3, Pro 1,000 / 6,
-  // Enterprise unlimited. `maxUsers` counts ADDED employees — the account
+  // Units and properties are unlimited on every plan (Oct 2026); plans differ
+  // by seats — Tenant 1 user, Basic 3, Pro 6, Enterprise unlimited. `maxUsers` counts ADDED employees — the account
   // holder is not billed against it (see listEmployees).
   tenant: {
     key: "tenant",
@@ -59,8 +58,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     requiresUserType: "company",
     // A tenant adds the landlord(s) they rent from — don't gate that.
     maxLandlords: UNLIMITED,
-    maxProperties: 50,
-    maxUnits: 50,
+    maxProperties: UNLIMITED,
+    maxUnits: UNLIMITED,
     // One seat: the tenant tracker is a single-user product by design.
     maxUsers: 1,
   },
@@ -70,8 +69,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     labelEn: "Basic",
     mode: "landlord",
     maxLandlords: UNLIMITED,
-    maxProperties: 500,
-    maxUnits: 500,
+    maxProperties: UNLIMITED,
+    maxUnits: UNLIMITED,
     maxUsers: 3,
   },
   // Legacy tier — not offered anymore; mapped to the closest current limits.
@@ -81,8 +80,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     labelEn: "Advanced",
     mode: "landlord",
     maxLandlords: UNLIMITED,
-    maxProperties: 500,
-    maxUnits: 500,
+    maxProperties: UNLIMITED,
+    maxUnits: UNLIMITED,
     maxUsers: 3,
   },
   professional: {
@@ -91,8 +90,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     labelEn: "Pro",
     mode: "landlord",
     maxLandlords: UNLIMITED,
-    maxProperties: 1000,
-    maxUnits: 1000,
+    maxProperties: UNLIMITED,
+    maxUnits: UNLIMITED,
     maxUsers: 6,
   },
   enterprise: {
@@ -188,6 +187,19 @@ export function parseCycle(v: unknown): BillingCycle {
   return isBillingCycle(v) ? v : "monthly";
 }
 
+/**
+ * Cycles a NEW payment may be made on. Monthly was withdrawn (Oct 2026): it
+ * stays a valid stored value — old payment rows and accounts still carry it —
+ * but anything that starts a payment or records a choice goes through
+ * `purchasableCycle`, which moves monthly up to quarterly.
+ */
+export const PURCHASABLE_CYCLES: readonly BillingCycle[] = ["quarterly", "yearly"];
+
+export function purchasableCycle(v: unknown): BillingCycle {
+  const c = parseCycle(v);
+  return PURCHASABLE_CYCLES.includes(c) ? c : "quarterly";
+}
+
 /** Monthly base price per plan, in SAR. `null` = priced on request. */
 export const PLAN_MONTHLY_PRICE: Record<PackagePlan, number | null> = {
   tenant: 50,
@@ -232,6 +244,7 @@ export function planPriceTable(): {
   const list: Partial<Record<PackagePlan, Record<BillingCycle, number>>> = {};
   for (const key of ["tenant", "basic", "professional"] as const) {
     list[key] = {
+      // Not purchasable any more; kept as the base the discounts are shown against.
       monthly: listPrice(key, "monthly")!,
       quarterly: listPrice(key, "quarterly")!,
       yearly: listPrice(key, "yearly")!,
