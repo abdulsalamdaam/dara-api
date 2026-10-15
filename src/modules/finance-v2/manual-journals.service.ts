@@ -7,6 +7,7 @@ import { PeriodsService } from "./periods.service";
 import { capabilities, isAccountHolder } from "./capabilities";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, isoDate, mapLedgerError, requireReason } from "./audit";
+import { manualJournalWarnings, withWarnings } from "./manual-journal-warnings";
 
 export type ManualKind = "manual" | "opening";
 
@@ -96,7 +97,11 @@ export class ManualJournalsService {
          values ($1, $2, 'draft', $3, $4, $5, $6::jsonb, $7) returning id`,
         [scope, kind, v.entryDate, v.memo, v.attachmentKey, JSON.stringify(v.lines), user.id],
       );
-      return this.get(scope, Number(r.rows[0].id), c);
+      const id = Number(r.rows[0].id);
+      // Never refused: a trust account against an office account is a warning, recorded in the audit (manual-journal-warnings.ts).
+      const warnings = await manualJournalWarnings(c, scope, v.lines, kind);
+      if (warnings.length) await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings("/finance/v2/manual-journals", warnings));
+      return { ...(await this.get(scope, id, c)), warnings };
     });
   }
 
@@ -119,7 +124,9 @@ export class ManualJournalsService {
           where id = $1 and user_id = $2`,
         [id, scope, v.entryDate, v.memo, v.attachmentKey, JSON.stringify(v.lines)],
       );
-      return this.get(scope, id, c);
+      const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+      if (warnings.length) await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}`, warnings), "PATCH");
+      return { ...(await this.get(scope, id, c)), warnings };
     });
   }
 
@@ -127,11 +134,12 @@ export class ManualJournalsService {
     return withTx(this.pool, async (c) => {
       const cur = await this.lockRow(c, scope, id);
       if (cur.status !== "draft") throw new ConflictException({ error: "NOT_DRAFT", message: `A ${cur.status} journal cannot be submitted` });
-      await this.validate(c, scope, cur, cur.kind);
+      const v = await this.validate(c, scope, cur, cur.kind);
       await this.assertNotLocked(c, scope, cur.entryDate);
       await c.query(`update manual_journals set status = 'submitted', submitted_at = now(), updated_at = now() where id = $1 and user_id = $2`, [id, scope]);
-      await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, `/finance/v2/manual-journals/${id}/submit`);
-      return this.get(scope, id, c);
+      const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+      await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}/submit`, warnings));
+      return { ...(await this.get(scope, id, c)), warnings };
     });
   }
 
@@ -169,19 +177,20 @@ export class ManualJournalsService {
           ownerId: l.ownerId ?? null, propertyId: l.propertyId ?? null, unitId: l.unitId ?? null, tenantId: l.tenantId ?? null,
           contractId: l.contractId ?? null, paymentId: l.paymentId ?? null,
         }));
+        const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
         const res = await this.journal.post(c, {
           userId: scope, entryDate: v.entryDate, origin: cur.kind === "opening" ? "opening" : "manual",
           sourceType: cur.kind === "opening" ? "opening_balance" : "manual_journal", sourceId: id, event: "posted",
           memo: v.memo, payload: { manualJournalId: id, draftedBy: cur.createdBy, attachmentKey: v.attachmentKey },
-          createdBy: user.id, lines,
+          createdBy: user.id, lines, warnings: warnings.map((w) => w.code),
         });
         await c.query(
           `update manual_journals set status = 'posted', approved_by = $3, approved_at = now(), posted_entry_id = $4, updated_at = now()
             where id = $1 and user_id = $2`,
           [id, scope, user.id, res.id],
         );
-        await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, `/finance/v2/manual-journals/${id}/approve`);
-        return { ...(await this.get(scope, id, c)), entryNo: res.entryNo };
+        await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}/approve`, warnings));
+        return { ...(await this.get(scope, id, c)), entryNo: res.entryNo, warnings };
       });
     } catch (err) {
       mapLedgerError(err);
