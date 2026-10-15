@@ -40,8 +40,8 @@ export const EXTRA_LABELS: Record<string, { ar: string; en: string }> = {
   R15: { ar: "تسوية البنك: الرصيد المعدل للبنك = الرصيد المعدل للدفاتر", en: "Bank reconciliation: adjusted bank = adjusted books" },
   R16: { ar: "أموال العملاء: رصيد حساب الأمانات = مستحقات الملاك والتأمينات والمبالغ المحفوظة", en: "Client money: trust account balance = landlord and tenant money held" },
   R17: { ar: "لا يوجد تكرار في أرقام المستندات", en: "No duplicate document numbers" },
-  R18: { ar: "كل فاتورة إيجار مرتبطة بقسط من جدول الأقساط", en: "Every rent invoice is linked to an installment" },
-  R19: { ar: "لا توجد أقساط مستحقة لم تُفوتر", en: "No installments due but not invoiced" },
+  R18: { ar: "كل فاتورة إيجار مرتبطة بدفعة من جدول الدفعات", en: "Every rent invoice is linked to an installment" },
+  R19: { ar: "لا توجد دفعات مستحقة لم تُفوتر", en: "No installments due but not invoiced" },
   R20: { ar: "لا توجد مستندات بتاريخ داخل فترة مقفلة", en: "No documents dated inside a closed period" },
   R21: { ar: "كل سطور القيود على حسابات تقبل الترحيل", en: "Every journal line is on a postable account" },
 };

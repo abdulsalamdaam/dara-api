@@ -20,7 +20,7 @@ export { AUTO_INVOICE_ERROR_TEXT };
 
 /**
  * Automatic invoicing of due installments (the accountant's requirement
- * "فوترة تلقائية للأقساط المستحقة وتنبيه للمستحق غير المفوتر", and his control
+ * "فوترة تلقائية للدفعات المستحقة وتنبيه للمستحق غير المفوتر", and his control
  * "every due installment is invoiced").
  *
  *  - A per-account setting, OFF by default (a missing row is off), with a lead
@@ -321,7 +321,7 @@ export class AutoInvoiceService implements OnModuleInit, OnModuleDestroy {
     if (!perms.includes("invoices.write")) throw new ForbiddenException("Missing permission: invoices.write");
     const ids: number[] = Array.isArray(body?.paymentIds)
       ? [...new Set<number>(body.paymentIds.map(Number).filter((n: number) => Number.isInteger(n) && n > 0))] : [];
-    if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الأقساط · paymentIds is required" });
+    if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الدفعات · paymentIds is required" });
     if (ids.length > 200) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "200 installments at most per request" });
     const today = riyadhToday();
     const s = await this.getSettings(scope);
@@ -331,7 +331,7 @@ export class AutoInvoiceService implements OnModuleInit, OnModuleDestroy {
     if (missing.length) {
       throw new ConflictException({
         error: "FINANCE_V2_NOT_UNINVOICED",
-        message: "بعض الأقساط ليست مستحقة غير مفوترة · Some installments are not due-and-uninvoiced", paymentIds: missing,
+        message: "بعض الدفعات ليست مستحقة غير مفوترة · Some installments are not due-and-uninvoiced", paymentIds: missing,
       });
     }
     const results = await this.issueGroups(scope, user, rows, "bulk", today);

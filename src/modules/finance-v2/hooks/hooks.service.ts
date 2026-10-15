@@ -41,7 +41,7 @@ export interface HookCtx {
 export const FV2_ERRORS = {
   MARK_PAID_REFUSED: {
     error: "FINANCE_V2_MARK_PAID_REFUSED",
-    message: "لا يمكن اعتبار الأقساط مدفوعة دون تحصيل — سجّل التحصيل أو اشطب المبلغ أو ألغِ الأقساط · "
+    message: "لا يمكن اعتبار الدفعات مدفوعة دون تحصيل — سجّل التحصيل أو اشطب المبلغ أو ألغِ الدفعات · "
       + "Installments cannot be marked paid without money: record the collections, write the balance off, or cancel them",
   },
   FIELD_LOCKED: (fields: string[]) => ({
@@ -52,12 +52,12 @@ export const FV2_ERRORS = {
   }),
   INSTALLMENTS_LINKED: {
     error: "FINANCE_V2_INSTALLMENTS_LINKED",
-    message: "توجد أقساط مفوترة أو مُثبتة في الدفاتر؛ لا يمكن إعادة توليد الجدول · "
+    message: "توجد دفعات مفوترة أو مُثبتة في الدفاتر؛ لا يمكن إعادة توليد الجدول · "
       + "Some installments are invoiced or charged in the ledger; the schedule cannot be regenerated",
   },
   SETTLE_AGAIN: {
     error: "FINANCE_V2_SETTLE_AGAIN_REFUSED",
-    message: "سبق تسوية هذا القسط خارج المنصة ثم التراجع عنها — سجّل تحصيلاً بدلاً من ذلك · "
+    message: "سبق تسوية هذه الدفعة خارج المنصة ثم التراجع عنها — سجّل تحصيلاً بدلاً من ذلك · "
       + "This installment was settled outside Dara and reverted before; record a collection instead",
   },
 } as const;

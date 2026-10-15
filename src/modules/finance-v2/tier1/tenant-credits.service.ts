@@ -309,11 +309,11 @@ export class TenantCreditsService {
             where p.id = $1 and p.user_id = $2 and p.deleted_at is null and ct.deleted_at is null`, [payId, scope])).rows;
         if (!p) throw new NotFoundException({ error: "INSTALLMENT_NOT_FOUND", message: "Installment not found" });
         if (p.tenant_id !== tenantId) throw new BadRequestException({ error: "TARGET_OTHER_TENANT", message: "The installment belongs to another tenant" });
-        if (!["pending", "partially_paid"].includes(p.status)) throw new ConflictException({ error: "FINANCE_V2_TARGET_NOT_OPEN", message: "القسط ليس مفتوحاً · The installment is not open" });
+        if (!["pending", "partially_paid"].includes(p.status)) throw new ConflictException({ error: "FINANCE_V2_TARGET_NOT_OPEN", message: "الدفعة ليست مفتوحة · The installment is not open" });
         const item = aging.items.find((i) => i.type === "installment" && i.id === payId);
         targetContract = p.contract_id;
         targetRemaining = item ? item.remaining : toHalalas(p.amount) - toHalalas(p.collected) - toHalalas(p.applied);
-        if (targetRemaining <= 0) throw new ConflictException({ error: "FINANCE_V2_TARGET_NOT_OPEN", message: "القسط ليس مفتوحاً · The installment has nothing open" });
+        if (targetRemaining <= 0) throw new ConflictException({ error: "FINANCE_V2_TARGET_NOT_OPEN", message: "الدفعة ليست مفتوحة · The installment has nothing open" });
       }
       if (amount > targetRemaining) {
         throw new ConflictException({ error: "FINANCE_V2_EXCEEDS_TARGET", open: fromHalalas(targetRemaining),

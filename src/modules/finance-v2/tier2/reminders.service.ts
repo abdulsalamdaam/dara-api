@@ -9,7 +9,7 @@ import { envGateOn, REMINDER_SENDER, type ReminderChannel, type ReminderSender }
 
 const CHANNELS: readonly ReminderChannel[] = ["sms", "push"];
 const DEFAULT_OFFSETS = [-3, 0, 7];
-const DEFAULT_AR = "عزيزي {tenant}، نذكّركم بقسط الإيجار بمبلغ {amount} ريال المستحق في {dueDate} للعقد {contract}.";
+const DEFAULT_AR = "عزيزي {tenant}، نذكّركم بدفعة الإيجار بمبلغ {amount} ريال المستحق في {dueDate} للعقد {contract}.";
 const DEFAULT_EN = "Dear {tenant}, a reminder that your rent installment of SAR {amount} is due on {dueDate} (contract {contract}).";
 const DAY_MS = 86_400_000;
 

@@ -144,21 +144,21 @@ export async function applyDispositions(
   if (missing.length) {
     throw new BadRequestException({
       error: "FINANCE_V2_DISPOSITION_REQUIRED",
-      message: "حدد لكل قسط مفتوح: تحصيل أو شطب أو إلغاء · Choose collect, write off or cancel for every open installment",
+      message: "حدد لكل دفعة مفتوحة: تحصيل أو شطب أو إلغاء · Choose collect, write off or cancel for every open installment",
       openInstallments: missing,
     });
   }
   const openById = new Map(open.map((o) => [o.paymentId, o]));
   for (const d of list) {
     const o = openById.get(d.paymentId);
-    if (!o) throw new BadRequestException({ error: "FINANCE_V2_BAD_DISPOSITION", message: `القسط ${d.paymentId} ليس مفتوحاً في هذا العقد · Installment ${d.paymentId} is not open on this contract` });
+    if (!o) throw new BadRequestException({ error: "FINANCE_V2_BAD_DISPOSITION", message: `الدفعة ${d.paymentId} ليست مفتوحة في هذا العقد · Installment ${d.paymentId} is not open on this contract` });
     if (!["collect", "write_off", "cancel"].includes(d.action)) {
       throw new BadRequestException({ error: "FINANCE_V2_BAD_DISPOSITION", message: `إجراء غير معروف · Unknown action for installment ${d.paymentId}` });
     }
     if (d.action === "cancel" && o.invoiced) {
       throw new ConflictException({
         error: "FINANCE_V2_CANCEL_INVOICED", paymentId: d.paymentId,
-        message: "القسط مفوتر بمستند معتمد؛ أصدر إشعاراً دائناً أو اشطبه · The installment is on a confirmed invoice: issue a credit note or write it off",
+        message: "الدفعة مفوترة بمستند معتمد؛ أصدر إشعاراً دائناً أو اشطبه · The installment is on a confirmed invoice: issue a credit note or write it off",
       });
     }
     if (d.action === "write_off") {
@@ -166,7 +166,7 @@ export async function applyDispositions(
       if (!o.charged && !o.pastDue) {
         throw new ConflictException({
           error: "FINANCE_V2_WRITE_OFF_UNCHARGED", paymentId: d.paymentId,
-          message: "لا يمكن شطب قسط لم يستحق بعد؛ ألغِه بدلاً من ذلك · An installment not yet due cannot be written off; cancel it instead",
+          message: "لا يمكن شطب دفعة لم تستحق بعد؛ ألغِه بدلاً من ذلك · An installment not yet due cannot be written off; cancel it instead",
         });
       }
     }
@@ -267,7 +267,7 @@ export function writeOffEvent(id: number, amount: string, date: string, ctx: Awa
 export async function writeOffInstallments(q: Sql, scope: number, body: any, actor: { id: number }): Promise<{ writeOffs: Array<{ id: number; paymentId: number; amount: string }>; events: LedgerEvent[] }> {
   const ids: number[] = Array.isArray(body?.paymentIds) ? [...new Set<number>(body.paymentIds.map(Number).filter((n: number) => Number.isInteger(n) && n > 0))] : [];
   const reason = typeof body?.reason === "string" ? body.reason.trim() : "";
-  if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الأقساط · paymentIds is required" });
+  if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الدفعات · paymentIds is required" });
   if (reason.length < 3 || reason.length > 500) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "السبب مطلوب · A reason is required (3–500 characters)" });
   const rows = await q.rows(`select id, contract_id from payments where user_id = $1 and id = any($2::int[]) and deleted_at is null`, [scope, ids]);
   if (rows.length !== ids.length) throw new NotFoundException("Installment not found");
@@ -277,7 +277,7 @@ export async function writeOffInstallments(q: Sql, scope: number, body: any, act
   const today = riyadhTodayV2();
   for (const r of rows) {
     const open = (await openInstallments(q, scope, Number(r.contract_id))).find((o) => o.paymentId === Number(r.id));
-    if (!open) throw new ConflictException({ error: "FINANCE_V2_NOT_OPEN", paymentId: r.id, message: "القسط ليس مفتوحاً · The installment has nothing left to write off" });
+    if (!open) throw new ConflictException({ error: "FINANCE_V2_NOT_OPEN", paymentId: r.id, message: "الدفعة ليست مفتوحة · The installment has nothing left to write off" });
     out.events.push(...(await singleWriteOff(q, scope, s, Number(r.contract_id), open, reason, actor.id, today, out)));
   }
   return out;
@@ -288,7 +288,7 @@ async function singleWriteOff(
   out: { writeOffs: Array<{ id: number; paymentId: number; amount: string }> },
 ): Promise<LedgerEvent[]> {
   if (!o.charged && !o.pastDue) {
-    throw new ConflictException({ error: "FINANCE_V2_WRITE_OFF_UNCHARGED", paymentId: o.paymentId, message: "لا يمكن شطب قسط لم يستحق بعد · An installment not yet due cannot be written off" });
+    throw new ConflictException({ error: "FINANCE_V2_WRITE_OFF_UNCHARGED", paymentId: o.paymentId, message: "لا يمكن شطب دفعة لم تستحق بعد · An installment not yet due cannot be written off" });
   }
   const events: LedgerEvent[] = [];
   const cctx = await contractCtx(q, scope, s.mode, contractId);

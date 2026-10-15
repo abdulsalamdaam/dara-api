@@ -17,7 +17,7 @@ export const ERROR_TEXT: Record<string, { ar: string; en: string }> = {
   BAD_FACTS: { ar: "بيانات الحدث غير صحيحة", en: "The event data is invalid" },
   KEY_COLLISION: { ar: "يوجد قيد آخر بنفس المرجع وبيانات مختلفة", en: "Another entry has this key with different data" },
   KEY_RACE: { ar: "تم الترحيل في نفس اللحظة من مسار آخر", en: "Posted concurrently by another path" },
-  NOT_CHARGED: { ar: "القسط لم يُستحق بعد في الدفاتر", en: "The installment is not charged yet" },
+  NOT_CHARGED: { ar: "الدفعة لم تُستحق بعد في الدفاتر", en: "The installment is not charged yet" },
   CROSS_LANDLORD: { ar: "لا يمكن نقل رصيد المستأجر بين ملاك مختلفين", en: "Tenant credit cannot move between landlords" },
   NO_OPEN_PERIOD: { ar: "لا توجد فترة مفتوحة", en: "No open period" },
   UNKNOWN_RULE: { ar: "نوع حدث غير معروف", en: "Unknown event type" },

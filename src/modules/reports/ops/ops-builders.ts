@@ -87,11 +87,11 @@ const ENTITY_MAP: Record<string, Lbl & { tone?: Tone }> = {
 
 const NOTE = {
   drafts: { ar: "العقود المسودة مستبعدة من جميع التقارير.", en: "Draft contracts are excluded from every report." },
-  deposits: { ar: "مبالغ التأمين (الوديعة) ليست أقساطاً ولا تدخل في المستحق أو المحصّل.", en: "Security deposits are not installments and are not counted as due or collected." },
-  cancelled: { ar: "الأقساط الملغاة مستبعدة من المستحق والمتبقي.", en: "Cancelled installments are excluded from due and outstanding." },
-  overdue: { ar: "المتأخر = المتبقي على أقساط تاريخ استحقاقها قبل اليوم المرجعي (توقيت الرياض)، ويشمل المدفوعة جزئياً.", en: "Overdue = the unpaid remainder of installments due before the reference day (Riyadh time), including partly-paid ones." },
-  paidNoCollections: { ar: "القسط المسجّل مدفوعاً دون سندات تحصيل يُحسب محصّلاً بالكامل في تاريخ سداده.", en: "An installment marked paid without collection records counts as fully collected on its paid date." },
-  dueBasis: { ar: "المحصّل = ما حُصّل حتى الآن مقابل الأقساط المستحقة في الفترة (وليس كل ما قُبض خلال الفترة).", en: "Collected = money received to date against the installments due in the period (not all cash received during it)." },
+  deposits: { ar: "مبالغ التأمين (الوديعة) ليست دفعاتاً ولا تدخل في المستحق أو المحصّل.", en: "Security deposits are not installments and are not counted as due or collected." },
+  cancelled: { ar: "الدفعات الملغاة مستبعدة من المستحق والمتبقي.", en: "Cancelled installments are excluded from due and outstanding." },
+  overdue: { ar: "المتأخر = المتبقي على دفعات تاريخ استحقاقها قبل اليوم المرجعي (توقيت الرياض)، ويشمل المدفوعة جزئياً.", en: "Overdue = the unpaid remainder of installments due before the reference day (Riyadh time), including partly-paid ones." },
+  paidNoCollections: { ar: "الدفعة المسجّلة مدفوعة دون سندات تحصيل يُحسب محصّلاً بالكامل في تاريخ سداده.", en: "An installment marked paid without collection records counts as fully collected on its paid date." },
+  dueBasis: { ar: "المحصّل = ما حُصّل حتى الآن مقابل الدفعات المستحقة في الفترة (وليس كل ما قُبض خلال الفترة).", en: "Collected = money received to date against the installments due in the period (not all cash received during it)." },
   occupancy: { ar: "الوحدة مشغولة إذا غطّاها عقد ساري في ذلك اليوم؛ المقام = جميع الوحدات في النطاق دون استثناء.", en: "A unit is occupied when an in-force contract covers it that day; the denominator is every unit in scope, none excluded." },
   terminatedUnlinked: { ar: "العقد المفسوخ تُفك وحداته عند الفسخ، لذا لا يُنسب إلى عقار ولا يظهر عند التصفية بالعقار أو المؤجر.", en: "A terminated contract has its units unlinked at termination, so it cannot be attributed to a property and drops out under a property or landlord filter." },
   firstUnit: { ar: "العقد متعدد الوحدات يُنسب مالياً إلى عقار أول وحدة فيه (وعند التصفية: أول وحدة له ضمن التصفية).", en: "A multi-unit contract's money is attributed to the property of its first unit (under a filter, its first unit inside the filter)." },
@@ -201,7 +201,7 @@ function tenantBalances(ds: OpsDataset, p: ResolvedParams): Body {
     ],
     rows: out, totals: t,
     notes: [
-      { ar: "المستحق = الأقساط التي حلّ موعدها في التاريخ المرجعي أو قبله، والمحصّل = ما قُبض عليها حتى ذلك التاريخ.", en: "Billed = installments due on or before the as-of date; collected = money received against them by that date." },
+      { ar: "المستحق = الدفعات التي حلّ موعدها في التاريخ المرجعي أو قبله، والمحصّل = ما قُبض عليها حتى ذلك التاريخ.", en: "Billed = installments due on or before the as-of date; collected = money received against them by that date." },
       NOTE.overdue, NOTE.cancelled, NOTE.deposits, NOTE.paidNoCollections, NOTE.drafts,
     ],
   };
@@ -240,7 +240,7 @@ function defaultingTenants(ds: OpsDataset, p: ResolvedParams): Body {
     kpis: [
       kpi("tenants", "مستأجرون متعثرون", "Defaulting tenants", list.length, "count", "bad"),
       kpi("overdueAmount", "إجمالي المتأخر", "Total overdue", t.overdueAmount, "sar", "bad"),
-      kpi("overdueCount", "أقساط متأخرة", "Overdue installments", t.overdueCount, "count", "warn"),
+      kpi("overdueCount", "دفعات متأخرة", "Overdue installments", t.overdueCount, "count", "warn"),
       kpi("d90_plus", "متأخر أكثر من 90 يوم", "Overdue 90+ days", t.d90_plus, "sar", "bad"),
     ],
     charts: [{
@@ -251,13 +251,13 @@ function defaultingTenants(ds: OpsDataset, p: ResolvedParams): Body {
     }],
     columns: [
       col("tenant", "المستأجر", "Tenant", "text"), col("phone", "الجوال", "Phone", "phone"),
-      col("overdueCount", "أقساط متأخرة", "Overdue installments", "number"), col("overdueAmount", "المبلغ المتأخر", "Overdue amount", "sar"),
+      col("overdueCount", "دفعات متأخرة", "Overdue installments", "number"), col("overdueAmount", "المبلغ المتأخر", "Overdue amount", "sar"),
       col("d1_30", "1–30 يوم", "1–30 days", "sar"), col("d31_60", "31–60 يوم", "31–60 days", "sar"),
       col("d61_90", "61–90 يوم", "61–90 days", "sar"), col("d90_plus", "+90 يوم", "90+ days", "sar"),
       col("maxDaysLate", "أقصى تأخير (يوم)", "Max days late", "days"), col("lastPaymentDate", "آخر سداد", "Last payment", "date"),
     ],
     rows: list as unknown as OpsRow[], totals: t,
-    notes: [NOTE.overdue, { ar: "يُصنّف كل قسط في عمره حسب أيام تأخره عن تاريخ استحقاقه.", en: "Each installment is aged by its own days past due." }, NOTE.cancelled, NOTE.deposits, NOTE.drafts],
+    notes: [NOTE.overdue, { ar: "تُصنّف كل دفعة في عمرها حسب أيام تأخره عن تاريخ استحقاقه.", en: "Each installment is aged by its own days past due." }, NOTE.cancelled, NOTE.deposits, NOTE.drafts],
   };
 }
 
@@ -289,7 +289,7 @@ function tenantPaymentBehavior(ds: OpsDataset, p: ResolvedParams): Body {
   ] as const;
   return {
     kpis: [
-      kpi("due", "أقساط مستحقة", "Installments due", t.due, "count", "brand"),
+      kpi("due", "دفعات مستحقة", "Installments due", t.due, "count", "brand"),
       kpi("onTimeRate", "نسبة السداد في الموعد", "On-time rate", pct(t.onTime, t.due), "pct", "good"),
       kpi("late", "مسددة متأخرة", "Paid late", t.late, "count", "warn"),
       kpi("unpaid", "غير مسددة", "Unpaid", t.unpaid, "count", "bad"),
@@ -298,12 +298,12 @@ function tenantPaymentBehavior(ds: OpsDataset, p: ResolvedParams): Body {
     charts: [{
       key: "distribution", type: "donut", unit: "count",
       title: { ar: "توزيع السداد", en: "Payment distribution" },
-      series: [{ key: "value", label: { ar: "الأقساط", en: "Installments" } }],
+      series: [{ key: "value", label: { ar: "الدفعات", en: "Installments" } }],
       data: DIST.map((d) => ({ label: d.ar, labelEn: d.en, value: t[d.k], color: d.color })),
     }],
     columns: [
       col("tenant", "المستأجر", "Tenant", "text"), col("phone", "الجوال", "Phone", "phone"),
-      col("due", "أقساط مستحقة", "Due", "number"), col("onTime", "في الموعد", "On time", "number"),
+      col("due", "دفعات مستحقة", "Due", "number"), col("onTime", "في الموعد", "On time", "number"),
       col("late", "متأخرة", "Paid late", "number"), col("unpaid", "غير مسددة", "Unpaid", "number"),
       col("onTimeRate", "نسبة الالتزام", "On-time rate", "pct"), col("avgDaysLate", "متوسط التأخير (يوم)", "Avg days late", "days"),
     ],
@@ -313,7 +313,7 @@ function tenantPaymentBehavior(ds: OpsDataset, p: ResolvedParams): Body {
     })),
     totals: { due: t.due, onTime: t.onTime, late: t.late, unpaid: t.unpaid },
     notes: [
-      { ar: "تُحتسب الأقساط المستحقة في الفترة حتى اليوم؛ القسط القادم أو المستحق اليوم دون سداد لا يُحتسب بعد.", en: "Counts installments due in the period up to today; one not yet due (or due today and unpaid) is not counted yet." },
+      { ar: "تُحتسب الدفعات المستحقة في الفترة حتى اليوم؛ الدفعة القادمة أو المستحقة اليوم دون سداد لا يُحتسب بعد.", en: "Counts installments due in the period up to today; one not yet due (or due today and unpaid) is not counted yet." },
       { ar: "في الموعد = اكتمل سداده في تاريخ الاستحقاق أو قبله؛ المدفوع جزئياً يُعد غير مسدد.", en: "On time = fully paid on or before the due date; a partly-paid installment counts as unpaid." },
       NOTE.paidNoCollections, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
     ],
@@ -716,7 +716,7 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
     ],
     rows, totals: { due: t.billed, collected: t.collected, outstanding: t.outstanding },
     notes: [
-      { ar: "تُجمع الأقساط حسب شهر استحقاقها؛ هذا تقرير تشغيلي من جدول الأقساط وليس دفتر المحاسبة.", en: "Installments are grouped by due month; this is an operational view of the installment schedule, not the accounting ledger." },
+      { ar: "تُجمع الدفعات حسب شهر استحقاقها؛ هذا تقرير تشغيلي من جدول الدفعات وليس دفتر المحاسبة.", en: "Installments are grouped by due month; this is an operational view of the installment schedule, not the accounting ledger." },
       NOTE.dueBasis, NOTE.overdue, NOTE.paidNoCollections, NOTE.firstUnit, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
     ],
   };
@@ -756,8 +756,8 @@ function installmentsSchedule(ds: OpsDataset, p: ResolvedParams): Body {
     ],
     charts: [{
       key: "by_status", type: "donut", unit: "count",
-      title: { ar: "الأقساط حسب الحالة", en: "Installments by status" },
-      series: [{ key: "value", label: { ar: "الأقساط", en: "Installments" } }],
+      title: { ar: "الدفعات حسب الحالة", en: "Installments by status" },
+      series: [{ key: "value", label: { ar: "الدفعات", en: "Installments" } }],
       data: INST_STATUSES.map((s) => ({ label: INST_STATUS_MAP[s].ar, labelEn: INST_STATUS_MAP[s].en, value: count(s) })),
     }],
     columns: [
@@ -770,9 +770,9 @@ function installmentsSchedule(ds: OpsDataset, p: ResolvedParams): Body {
     totals: { amount: sum(liveRows.map((r) => r.amount)), collected: sum(liveRows.map((r) => r.collected)), remaining: sum(liveRows.map((r) => r.remaining)) },
     statusOptions: opts(INST_STATUS_MAP, INST_STATUSES),
     notes: [
-      { ar: "الحالة مشتقة لحظياً (توقيت الرياض): القسط غير المسدد بعد تاريخ استحقاقه «متأخر».", en: "Status is derived live (Riyadh time): an unsettled installment past its due date is overdue." },
+      { ar: "الحالة مشتقة لحظياً (توقيت الرياض): الدفعة غير المسددة بعد تاريخ استحقاقه «متأخر».", en: "Status is derived live (Riyadh time): an unsettled installment past its due date is overdue." },
       { ar: "فلتر الحالة يطبّق على المؤشرات والرسم والجدول.", en: "The status filter applies to the KPIs, the chart and the table." },
-      { ar: "المجاميع تستبعد الأقساط الملغاة؛ أيام التأخير للمتبقي حتى اليوم أو للسداد المتأخر حتى تاريخ اكتماله.", en: "Totals exclude cancelled rows; days late run to today for an open remainder, or to the completion date for a late payment." },
+      { ar: "المجاميع تستبعد الدفعات الملغاة؛ أيام التأخير للمتبقي حتى اليوم أو للسداد المتأخر حتى تاريخ اكتماله.", en: "Totals exclude cancelled rows; days late run to today for an open remainder, or to the completion date for a late payment." },
       NOTE.paidNoCollections, NOTE.deposits, NOTE.drafts,
     ],
   };

@@ -73,7 +73,7 @@ export async function sellerOf(q: Sql, scope: number, contractId: number): Promi
  */
 export async function createRentReceipt(q: Sql, scope: number, body: any) {
   const ids: number[] = Array.isArray(body?.paymentIds) ? body.paymentIds.map(Number).filter((n: number) => Number.isInteger(n) && n > 0) : [];
-  if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الأقساط · paymentIds is required" });
+  if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الدفعات · paymentIds is required" });
   const uniq = [...new Set(ids)];
   const rows = await q.rows(
     `select p.id, p.contract_id, p.amount::text as amount, to_char(p.due_date,'YYYY-MM-DD') as due, p.status::text as status, p.description
@@ -84,10 +84,10 @@ export async function createRentReceipt(q: Sql, scope: number, body: any) {
   if (rows.length !== uniq.length) throw new NotFoundException("Installment not found");
   const contractId = Number(rows[0].contract_id);
   if (rows.some((r: any) => Number(r.contract_id) !== contractId)) {
-    throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "يجب أن تتبع الأقساط عقداً واحداً · All installments must belong to one contract" });
+    throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "يجب أن تتبع الدفعات عقداً واحداً · All installments must belong to one contract" });
   }
   const bad = rows.filter((r: any) => r.description === DEPOSIT_DESC || ["cancelled", "settled_external"].includes(r.status));
-  if (bad.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "قسط غير قابل للإيصال · An installment cannot be receipted", paymentIds: bad.map((r: any) => r.id) });
+  if (bad.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "دفعة غير قابلة للإيصال · An installment cannot be receipted", paymentIds: bad.map((r: any) => r.id) });
   const covered = await q.rows(
     `select id, number from simple_invoices si where si.user_id = $1 and si.deleted_at is null and si.status <> 'cancelled' and si.type = 'invoice'
         and coalesce(si.kind, 'invoice') in ('invoice','manual','rent_receipt')
@@ -96,7 +96,7 @@ export async function createRentReceipt(q: Sql, scope: number, body: any) {
     [scope, uniq],
   );
   if (covered.length) {
-    throw new ConflictException({ error: "FINANCE_V2_ALREADY_DOCUMENTED", message: "القسط مغطى بمستند قائم · An installment is already on a document", documents: covered.map((d: any) => d.number) });
+    throw new ConflictException({ error: "FINANCE_V2_ALREADY_DOCUMENTED", message: "الدفعة مغطاة بمستند قائم · An installment is already on a document", documents: covered.map((d: any) => d.number) });
   }
   const seller = await sellerOf(q, scope, contractId);
   if (seller.vatRegistered) {
@@ -109,7 +109,7 @@ export async function createRentReceipt(q: Sql, scope: number, body: any) {
   const [c] = await q.rows(`select tenant_id, tenant_name from contracts where id = $1 and user_id = $2`, [contractId, scope]);
   const items = rows.map((r: any) => {
     const amt = Number(fromHalalas(toHalalas(r.amount)));
-    return { description: `إيجار — قسط ${r.due} / Rent — installment due ${r.due}`, quantity: 1, unitPrice: amt, amount: amt, vat: false, vatCategory: "O" };
+    return { description: `إيجار — دفعة ${r.due} / Rent — installment due ${r.due}`, quantity: 1, unitPrice: amt, amount: amt, vat: false, vatCategory: "O" };
   });
   const total = fromHalalas(rows.reduce((s: number, r: any) => s + toHalalas(r.amount), 0));
   const number = await nextDocNumber(q, scope, "RR");

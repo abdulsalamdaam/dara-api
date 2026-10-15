@@ -21,7 +21,7 @@ export const OPS_DEFS: Def[] = [
   {
     id: "defaulting_tenants", category: "people", dates: "none",
     label: { ar: "المستأجرون المتعثرون", en: "Defaulting tenants" },
-    description: { ar: "المستأجرون الذين لديهم أقساط متأخرة مع أعمار الديون", en: "Tenants with overdue installments, with aging" },
+    description: { ar: "المستأجرون الذين لديهم دفعات متأخرة مع أعمار الديون", en: "Tenants with overdue installments, with aging" },
     filters: ["asOf", "ownerId", "propertyId"],
   },
   {
@@ -80,8 +80,8 @@ export const OPS_DEFS: Def[] = [
   },
   {
     id: "installments_schedule", category: "collections", dates: "thisMonth", statuses: INST_STATUSES,
-    label: { ar: "جدول الأقساط", en: "Installments schedule" },
-    description: { ar: "الأقساط المستحقة في الفترة مع حالتها الفعلية", en: "Installments due in the period with their live status" },
+    label: { ar: "جدول الدفعات", en: "Installments schedule" },
+    description: { ar: "الدفعات المستحقة في الفترة مع حالتها الفعلية", en: "Installments due in the period with their live status" },
     filters: ["from", "to", "status", "ownerId", "propertyId"],
   },
   {

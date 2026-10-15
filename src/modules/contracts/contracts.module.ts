@@ -1705,8 +1705,8 @@ class ContractsController {
     await this.fv2h?.contractRemoved({ fv2, userId: scopeId(user) }, id); // finance-v2: ended_on, E05
     return {
       success: true,
-      message: mode === "paid" ? "تم إنهاء العقد واعتبار جميع الأقساط مدفوعة"
-        : mode === "cancelled" ? "تم إنهاء العقد وإلغاء الأقساط غير المدفوعة"
+      message: mode === "paid" ? "تم إنهاء العقد واعتبار جميع الدفعات مدفوعة"
+        : mode === "cancelled" ? "تم إنهاء العقد وإلغاء الدفعات غير المدفوعة"
         : "تم إنهاء العقد",
     };
   }
@@ -1930,8 +1930,8 @@ class ContractsController {
       refunded: round2(refunded),
       message: refundNumber
         ? `تم إنهاء العقد وإصدار سند صرف ${refundNumber} بمبلغ ${round2(refunded)} ر.س`
-        : mode === "paid" ? "تم إنهاء العقد واعتبار جميع الأقساط مدفوعة"
-        : mode === "cancelled" ? "تم إنهاء العقد وإلغاء الأقساط غير المدفوعة"
+        : mode === "paid" ? "تم إنهاء العقد واعتبار جميع الدفعات مدفوعة"
+        : mode === "cancelled" ? "تم إنهاء العقد وإلغاء الدفعات غير المدفوعة"
         : "تم إنهاء العقد",
     };
   }

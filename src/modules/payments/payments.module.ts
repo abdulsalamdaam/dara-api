@@ -289,7 +289,7 @@ class PaymentsController {
     const [p] = await this.db.select().from(paymentsTable)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)));
     if (!p) throw new NotFoundException("Payment not found");
-    if (p.status === "paid" || p.status === "partially_paid") throw new BadRequestException("لا يمكن — تم تحصيل دفعات على هذا القسط");
+    if (p.status === "paid" || p.status === "partially_paid") throw new BadRequestException("لا يمكن — تم تحصيل مبالغ على هذه الدفعة");
     const [row] = await this.db.update(paymentsTable)
       .set({ status: "settled_external", paidDate: p.dueDate } as any)
       .where(eq(paymentsTable.id, id)).returning();
@@ -556,7 +556,7 @@ class PaymentsController {
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
   async addCollection(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string, @Body() body: any) {
     const id = parseInt(paymentId, 10);
-    if (!Number.isInteger(id)) throw new BadRequestException("رقم القسط غير صالح");
+    if (!Number.isInteger(id)) throw new BadRequestException("رقم الدفعة غير صالح");
     const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: resolved before the transaction (§1.2)
     await this.fv2h?.guardCollectionTrust(fv2, scopeId(user), id, body, user?.id); // finance-v2: accountant #6 — Manager-mode landlord rent goes to the trust account (409 unless confirmed)
     // Read-then-insert with nothing holding the row: eight parallel requests
@@ -568,8 +568,8 @@ class PaymentsController {
     const [payment] = await tx.select().from(paymentsTable)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)));
     if (!payment) throw new NotFoundException("Payment not found");
-    if (payment.status === "paid") throw new BadRequestException("هذا القسط محصّل بالكامل");
-    if (payment.status === "cancelled") throw new BadRequestException("هذا القسط ملغى");
+    if (payment.status === "paid") throw new BadRequestException("هذه الدفعة محصّلة بالكامل");
+    if (payment.status === "cancelled") throw new BadRequestException("هذه الدفعة ملغاة");
 
     const amount = round2(Number(body?.amount));
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException("مبلغ التحصيل غير صالح");

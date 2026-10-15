@@ -718,7 +718,7 @@ class SimpleInvoicesController {
     // "Create invoice from installment" only knows the payment — resolve its
     // contract here so the UI can pre-check from that entry point too, instead
     // of discovering the problem when the user hits save.
-    const payId = foreignKeyId(paymentId, "رقم القسط");
+    const payId = foreignKeyId(paymentId, "رقم الدفعة");
     if (id == null && payId != null) {
       const [pay] = await this.db
         .select({ contractId: paymentsTable.contractId })
@@ -863,7 +863,7 @@ class SimpleInvoicesController {
     let tenantId = foreignKeyId(body?.tenantId, "رقم المستأجر");
     let tenantName = body?.tenantName ?? null;
     let client = body?.client ?? null;
-    const bodyPaymentId = foreignKeyId(body?.paymentId, "رقم القسط");
+    const bodyPaymentId = foreignKeyId(body?.paymentId, "رقم الدفعة");
     // An invoice covering several same-day installments arrives as `paymentIds`
     // with no single `paymentId`. Only the singular was read here, so such a
     // document ended up with contractId null — and a null contract makes the
@@ -871,7 +871,7 @@ class SimpleInvoicesController {
     // off for that document. Fall back to the first of the list.
     const snapshotPaymentId = bodyPaymentId
       ?? (Array.isArray(body?.paymentIds)
-        ? (body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط"))
+        ? (body.paymentIds.map((n: any) => foreignKeyId(n, "رقم الدفعة"))
             .find((n: number | null) => n != null) ?? null)
         : null);
     if (snapshotPaymentId != null) {
@@ -921,7 +921,7 @@ class SimpleInvoicesController {
     }
 
     const paymentIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم الدفعة")).filter((n: number | null): n is number => n != null)
       : (bodyPaymentId != null ? [bodyPaymentId] : []);
 
     // Only these sub-kinds are genuinely not tax invoices: a voucher is evidence
@@ -1198,9 +1198,9 @@ class SimpleInvoicesController {
     // Optional installment link(s) — the voucher also records a collection
     // against each, so a deposit/fee/rent collected this way reflects its real
     // collected/remaining figures (no orphaned "paid but collected = 0").
-    const singlePayId = foreignKeyId(body?.paymentId, "رقم القسط");
+    const singlePayId = foreignKeyId(body?.paymentId, "رقم الدفعة");
     const payIds: number[] = Array.isArray(body?.paymentIds)
-      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+      ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم الدفعة")).filter((n: number | null): n is number => n != null)
       : (singlePayId != null ? [singlePayId] : []);
 
     // Optional contract link — snapshot its number/tenant. Fall back to the
@@ -1359,12 +1359,12 @@ class SimpleInvoicesController {
     // The id fields on the same allowlist were copied through untouched — the
     // one place a PATCH could still put an out-of-range value into an int4
     // column. `null` still clears the link.
-    for (const [k, label] of [["contractId", "رقم العقد"], ["tenantId", "رقم المستأجر"], ["paymentId", "رقم القسط"]] as const) {
+    for (const [k, label] of [["contractId", "رقم العقد"], ["tenantId", "رقم المستأجر"], ["paymentId", "رقم الدفعة"]] as const) {
       if (body?.[k] !== undefined) patch[k] = foreignKeyId(body[k], label);
     }
     if (body?.paymentIds !== undefined) {
       patch.paymentIds = Array.isArray(body.paymentIds)
-        ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم القسط")).filter((n: number | null): n is number => n != null)
+        ? body.paymentIds.map((n: any) => foreignKeyId(n, "رقم الدفعة")).filter((n: number | null): n is number => n != null)
         : null;
     }
     const [updated] = await this.db.update(simpleInvoicesTable).set(patch)
@@ -2161,7 +2161,7 @@ class SimpleInvoicesController {
     // or already settled. Carrying on would stamp the invoice paid and burn a
     // receipt-voucher number over money that has no collection row behind it,
     // which the Collections tab then reports as received.
-    if (applied <= 0.01) throw new BadRequestException("لا يوجد قسط مستحق لتحصيل هذا المبلغ عليه");
+    if (applied <= 0.01) throw new BadRequestException("لا توجد دفعة مستحقة لتحصيل هذا المبلغ عليه");
 
     // Only mark the invoice fully collected when prior + this collection cover
     // the net total; a partial collection keeps it confirmed (collectible again).

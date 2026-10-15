@@ -66,7 +66,7 @@ export class InstallmentDocsService {
     const perms: string[] = Array.isArray(user?.permissions) ? user.permissions : [];
     if (!perms.includes("invoices.write")) throw new ForbiddenException("Missing permission: invoices.write");
     const ids = parseIds(body?.paymentIds);
-    if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الأقساط · paymentIds is required" });
+    if (!ids.length) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: "حدد الدفعات · paymentIds is required" });
     const draft = await withTx(this.pool, async (c) => {
       // One issue at a time per account: the "already on a document" check and the insert cannot interleave (double click, two tabs).
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.INSTALLMENT_RR]);

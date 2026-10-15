@@ -82,8 +82,8 @@ export const CONTROL_ROWS: ReadonlyArray<{ no: number; checkId: string; ar: stri
   { no: 15, checkId: "R15", ar: "تسوية البنك: الرصيد المعدل للبنك = الرصيد المعدل للدفاتر", en: "Bank reconciliation: adjusted bank balance = adjusted book balance" },
   { no: 16, checkId: "R16", ar: "أموال العملاء: رصيد الأمانات = مستحق الملاك + التأمينات − تحت التسوية + عمولات لم تُحوّل + مصروفات ملاك غير مسددة", en: "Client money: trust balance = landlord payable + deposits − in transit + commission not transferred + unpaid landlord expenses" },
   { no: 17, checkId: "R17", ar: "لا يوجد تكرار في أرقام المستندات", en: "No duplicate document numbers" },
-  { no: 18, checkId: "R18", ar: "كل فاتورة إيجار مرتبطة بقسط من جدول الأقساط", en: "Every rent invoice is linked to an installment" },
-  { no: 19, checkId: "R19", ar: "لا توجد أقساط مستحقة لم تُفوتر", en: "No installments due but not invoiced" },
+  { no: 18, checkId: "R18", ar: "كل فاتورة إيجار مرتبطة بدفعة من جدول الدفعات", en: "Every rent invoice is linked to an installment" },
+  { no: 19, checkId: "R19", ar: "لا توجد دفعات مستحقة لم تُفوتر", en: "No installments due but not invoiced" },
   { no: 20, checkId: "R20", ar: "لا توجد مستندات بتاريخ داخل الفترة المقفلة", en: "No documents dated inside a closed period" },
   { no: 21, checkId: "R21", ar: "كل سطور القيود على حسابات تقبل الترحيل", en: "Every journal line is on a postable account" },
 ];
