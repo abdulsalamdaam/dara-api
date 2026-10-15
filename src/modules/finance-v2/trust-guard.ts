@@ -118,10 +118,10 @@ interface Snapshot {
  * Posted balance and not-yet-posted outflows of every trust account, read on `c`.
  *
  * Posted: Σ(debit − credit) of the journal. Pending: the outbox rows the worker has not posted yet (pending or
- * failed — the money has moved even if its entry is late), each previewed through the engine. A queued (pending)
+ * failed — the money has moved even if its entry is late), each previewed through the engine. A fresh queued
  * row counts both ways: a collection recorded a second ago is money in the account, and the worker posts it within
- * seconds. A FAILED row may never post, so only its outflow counts. A reversal of a POSTED entry counts both ways
- * (it corrects the posted balance); a reversal whose original is also unposted cancels it. Both are read in ONE statement, so a row the worker posts meanwhile is counted exactly once. `own` rows
+ * seconds. A row that may never post — failed, retrying after an error, or blocked behind such a row — counts only
+ * its outflow; the same holds for a reversal of a POSTED entry. A reversal whose original is also unposted cancels it. Both are read in ONE statement, so a row the worker posts meanwhile is counted exactly once. `own` rows
  * (and the originals that `ownReversals` undo) are left out: the caller counts them itself.
  */
 async function snapshot(c: Fv2Client, scope: number, exclude: Set<Key>): Promise<Snapshot> {
@@ -134,13 +134,17 @@ async function snapshot(c: Fv2Client, scope: number, exclude: Set<Key>): Promise
   const [row] = (await c.query(
     `select (select coalesce(json_agg(json_build_object('gl', x.account_id, 'v', x.v)), '[]'::json)
                from (select account_id, sum(debit - credit)::text as v from journal_lines where user_id = $1 and account_id = any($2::int[]) group by account_id) x) as posted,
-            (select coalesce(json_agg(json_build_object('st', o.source_type, 'sid', o.source_id, 'ev', o.event, 'status', o.status, 'payload', o.payload) order by o.id), '[]'::json)
-               from (select id, source_type, source_id, event, status, payload from ledger_outbox
-                      where user_id = $1 and status in ('pending','failed') order by id limit 2000) o) as pending`,
+            (select coalesce(json_agg(json_build_object('st', o.source_type, 'sid', o.source_id, 'ev', o.event, 'payload', o.payload,
+                                                        'sure', o.status = 'pending' and o.attempts = 0 and not o.stuck_blocker) order by o.id), '[]'::json)
+               from (select x.id, x.source_type, x.source_id, x.event, x.status, x.attempts, x.payload,
+                            exists (select 1 from ledger_outbox b where b.id = x.blocked_on and b.user_id = x.user_id
+                                      and (b.status = 'failed' or b.attempts > 0)) as stuck_blocker
+                       from ledger_outbox x
+                      where x.user_id = $1 and x.status in ('pending','failed') order by x.id limit 2000) o) as pending`,
     [scope, ids])).rows;
   for (const p of row.posted as Array<{ gl: number; v: string }>) posted.set(Number(p.gl), toHalalas(p.v));
 
-  const rows = (row.pending as Array<{ st: string; sid: number; ev: string; status: string; payload: any }>)
+  const rows = (row.pending as Array<{ st: string; sid: number; ev: string; sure: boolean; payload: any }>)
     .filter((o) => !exclude.has(keyOf(o.st, o.sid, o.ev)));
   const keys = new Set(rows.map((o) => keyOf(o.st, o.sid, o.ev)));
   // An unposted reversal of an unposted original: the pair moves nothing.
@@ -153,13 +157,14 @@ async function snapshot(c: Fv2Client, scope: number, exclude: Set<Key>): Promise
   for (const o of rows) {
     const k = keyOf(o.st, o.sid, o.ev);
     if (cancelled.has(k)) continue;
+    // finance-v2: a fresh queued row posts within seconds: it counts both ways. One that may never post — failed, retrying
+    // after an error (attempts > 0), or blocked behind such a row — counts only its outflow: money it would bring in is not there yet.
     if (o.ev.startsWith(REVERSAL)) {
-      // Undoing a POSTED entry: both ways count (the undo of a posted payout gives its money back to the books).
-      for (const [gl, v] of await postedReversalEffect(c, scope, o.st, Number(o.sid), o.ev.slice(REVERSAL.length), set)) add(pending, gl, v);
+      // Undoing a POSTED entry (the undo of a posted payout gives its money back to the books).
+      for (const [gl, v] of await postedReversalEffect(c, scope, o.st, Number(o.sid), o.ev.slice(REVERSAL.length), set)) if (o.sure || v < 0) add(pending, gl, v);
       continue;
     }
-    // A queued row posts within seconds: it counts both ways. A FAILED one may never post: only its outflow counts.
-    for (const [gl, v] of await payloadEffect(c, scope, o.payload, set)) if (o.status === "pending" || v < 0) add(pending, gl, v);
+    for (const [gl, v] of await payloadEffect(c, scope, o.payload, set)) if (o.sure || v < 0) add(pending, gl, v);
   }
   return { trust, posted, pending };
 }
