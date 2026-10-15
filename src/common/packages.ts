@@ -67,8 +67,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
   },
   basic: {
     key: "basic",
-    labelAr: "الأساسية",
-    labelEn: "Basic",
+    labelAr: "عقاري",
+    labelEn: "Aqari",
     mode: "landlord",
     maxLandlords: UNLIMITED,
     maxProperties: UNLIMITED,
@@ -88,8 +88,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
   },
   professional: {
     key: "professional",
-    labelAr: "المطورة",
-    labelEn: "Pro",
+    labelAr: "المكاتب العقارية",
+    labelEn: "Real Estate Offices",
     mode: "landlord",
     maxLandlords: UNLIMITED,
     maxProperties: UNLIMITED,
@@ -98,8 +98,8 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
   },
   enterprise: {
     key: "enterprise",
-    labelAr: "الأعمال",
-    labelEn: "Enterprise",
+    labelAr: "الشركات",
+    labelEn: "Companies",
     mode: "landlord",
     maxLandlords: UNLIMITED,
     maxProperties: UNLIMITED,
