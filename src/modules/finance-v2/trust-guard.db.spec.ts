@@ -445,6 +445,11 @@ describe("fv2 manual journals: trust against an office account needs a reason or
     mj = new ManualJournalsService(env.t.pool, journal, periods);
     transfers = new AccountTransferService(env.t.pool as any, journal, periods);
     for (const u of [M, S]) acc[u] = Object.fromEntries((await env.q(`select code, id from accounts where user_id = $1`, [u])).map((r: any) => [r.code, Number(r.id)]));
+    // Approving a journal that takes money out of trust is held to the trust balance too: 1,000 of the office's money in trust.
+    for (const [u, who] of [[M, holder], [S, solo]] as const) {
+      const trust = Number((await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default`, [u]))[0].id);
+      await transfers.create(u, who, { fromBankAccountId: await bankIdOf(env)(u, "1113"), toBankAccountId: trust, amount: "1000" });
+    }
   });
   after(async () => { await env?.t.drop(); });
 
@@ -557,7 +562,7 @@ describe("fv2 manual journals: trust against an office account needs a reason or
   it("the transfer between accounts writes its manual journal directly (approved, not flagged): governed by the office-money cap instead", async () => {
     const trust = Number((await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default`, [M]))[0].id);
     const office = await bankIdOf(env)(M, "1113");
-    await transfers.create(M, holder, { fromBankAccountId: office, toBankAccountId: trust, amount: "500" }); // the posted journals above took 360 out of trust
+    await transfers.create(M, holder, { fromBankAccountId: office, toBankAccountId: trust, amount: "500" });
     const t = await transfers.create(M, holder, { fromBankAccountId: trust, toBankAccountId: office, amount: "100" });
     assert.deepEqual(t.warnings, []);
     const [e] = await env.q(`select warnings from journal_entries where id = $1`, [t.entryId]);

@@ -4,6 +4,8 @@ import { FV2_POOL, withTx, type Fv2Pool } from "./db";
 import { PostingEngine } from "./posting.engine";
 import { riyadhToday } from "./dates";
 import { auditRow, isoDate, mapLedgerError } from "./audit";
+import { toHalalas } from "./money";
+import { assertTrustCovers } from "./trust-guard";
 
 const ENTRY_COLS = `e.id::int as id, e.entry_no as "entryNo", to_char(e.entry_date,'YYYY-MM-DD') as "entryDate",
   to_char(e.original_date,'YYYY-MM-DD') as "originalDate", e.is_late as "isLate", e.origin, e.source_type as "sourceType",
@@ -167,6 +169,13 @@ export class JournalQueryService {
         }
         if (e.status !== "posted") throw new ConflictException({ error: "ALREADY_REVERSED", message: "The entry is already reversed" });
         if (date < e.d) throw new BadRequestException({ error: "BAD_DATE", message: "A reversal cannot be dated before the entry" });
+        // Reversing an entry that put money INTO trust takes it back out: never more than the trust account holds (trust-guard.ts,
+        // 409 TRUST_INSUFFICIENT — another client's money is not there to cover it). The opening entry is left to its own rules.
+        if (e.origin === "manual") {
+          const ls = (await c.query(`select account_id, debit::text as d, credit::text as c from journal_lines where entry_id = $1 and user_id = $2`, [id, scope])).rows;
+          await assertTrustCovers(c, scope, { lines: ls.map((l: any) => ({ accountId: Number(l.account_id), debit: toHalalas(l.c), credit: toHalalas(l.d) })) },
+            { actorId: user.id, source: `/finance/v2/journal/${id}/reverse` });
+        }
         const res = await this.engine.reverseEntry(c, scope, id, date, { reason: "manual_reversal", createdBy: user.id,
           payload: { reason: typeof body?.reason === "string" ? body.reason.slice(0, 500) : null, reversedBy: user.id } });
         await c.query(`update manual_journals set status = 'void', updated_at = now() where user_id = $1 and posted_entry_id = $2 and status = 'posted'`, [scope, id]);

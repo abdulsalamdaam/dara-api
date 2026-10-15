@@ -7,6 +7,7 @@ import { PeriodsService } from "./periods.service";
 import { capabilities, isAccountHolder } from "./capabilities";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, isoDate, mapLedgerError, requireReason } from "./audit";
+import { assertTrustCovers } from "./trust-guard";
 import { manualJournalWarnings, withWarnings, assertTrustJustified, trustReasonOf, anotherApprover, TRUST_REASON_MIN, type ManualJournalWarning } from "./manual-journal-warnings";
 
 export type ManualKind = "manual" | "opening";
@@ -60,8 +61,8 @@ function withTotal(r: any) {
  *    (TRUST_WITH_OFFICE_ACCOUNT, manual-journal-warnings.ts; accountant, 15 Oct
  *    2026) needs a reason (`trustReason`, 10+ characters) or an attachment to be
  *    saved, submitted or approved (400 TRUST_JOURNAL_REASON_REQUIRED), and is
- *    approved by someone other than the user who created it and the one who
- *    last edited / submitted it (403 SAME_USER_APPROVAL) — the account holder
+ *    approved by someone other than the user who created it and every user who
+ *    edited / submitted it (403 SAME_USER_APPROVAL) — the account holder
  *    included, unless the account has no other active user who can approve:
  *    then the holder may approve his own, with a written reason, and an audit
  *    row `finance_v2_manual_journal_self_approval` records it.
@@ -95,7 +96,8 @@ export class ManualJournalsService {
     const r = await q.query(
       `select ${COLS},
               (select m.trust_reason from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "trustReason",
-              (select m.last_actor_id from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "lastActorId"
+              (select m.last_actor_id from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "lastActorId",
+              (select m.maker_ids from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "makerIds"
          from manual_journals where id = $1 and user_id = $2`, [id, scope]);
     if (!r.rows[0]) throw new NotFoundException("Manual journal not found");
     return withTotal(r.rows[0]);
@@ -104,15 +106,17 @@ export class ManualJournalsService {
   /** The 1:1 meta row (0080): the trust reason and the last user who created / edited / submitted the journal. */
   private async touchMeta(c: Fv2Client, scope: number, id: number, actorId: number, reason?: string | null) {
     await c.query(
-      `insert into finance_manual_journal_meta (manual_journal_id, user_id, trust_reason, last_actor_id) values ($1, $2, $3, $4)
-       on conflict (manual_journal_id) do update set last_actor_id = excluded.last_actor_id, updated_at = now()
+      `insert into finance_manual_journal_meta (manual_journal_id, user_id, trust_reason, last_actor_id, maker_ids) values ($1, $2, $3, $4, array[$4]::int[])
+       on conflict (manual_journal_id) do update set last_actor_id = excluded.last_actor_id, updated_at = now(),
+         maker_ids = case when $4 = any(finance_manual_journal_meta.maker_ids) then finance_manual_journal_meta.maker_ids
+                          else finance_manual_journal_meta.maker_ids || $4::int end
          ${reason === undefined ? "" : ", trust_reason = excluded.trust_reason"}`,
       [id, scope, reason ?? null, actorId]);
   }
 
-  private async meta(c: Fv2Client, scope: number, id: number): Promise<{ trustReason: string | null; lastActorId: number | null }> {
-    const [m] = (await c.query(`select trust_reason, last_actor_id from finance_manual_journal_meta where manual_journal_id = $1 and user_id = $2`, [id, scope])).rows;
-    return { trustReason: m?.trust_reason ?? null, lastActorId: m?.last_actor_id == null ? null : Number(m.last_actor_id) };
+  private async meta(c: Fv2Client, scope: number, id: number): Promise<{ trustReason: string | null; lastActorId: number | null; makerIds: number[] }> {
+    const [m] = (await c.query(`select trust_reason, last_actor_id, maker_ids from finance_manual_journal_meta where manual_journal_id = $1 and user_id = $2`, [id, scope])).rows;
+    return { trustReason: m?.trust_reason ?? null, lastActorId: m?.last_actor_id == null ? null : Number(m.last_actor_id), makerIds: (m?.maker_ids ?? []).map(Number) };
   }
 
   async create(scope: number, user: AuthUser, body: any, kind: ManualKind = "manual") {
@@ -217,6 +221,13 @@ export class ManualJournalsService {
           contractId: l.contractId ?? null, paymentId: l.paymentId ?? null,
         }));
         const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+        // Money out of trust by hand is still money out of trust (accountant, 15 Oct 2026: block): never more than the trust
+        // account holds (409 TRUST_INSUFFICIENT); a transfer by hand from trust to an office money box, never more than the
+        // office's money in trust (409 TRUST_TRANSFER_EXCEEDS_OFFICE_MONEY), as POST /bank-accounts/transfer.
+        if (cur.kind !== "opening") {
+          await assertTrustCovers(c, scope, { lines: lines.map((l) => ({ accountId: l.accountId, debit: l.debit, credit: l.credit })) },
+            { actorId: user.id, source: `/finance/v2/manual-journals/${id}/approve`, cap: (await this.isTrustToOfficeBox(c, scope, lines)) ? { kind: "office" } : undefined });
+        }
         const res = await this.journal.post(c, {
           userId: scope, entryDate: v.entryDate, origin: cur.kind === "opening" ? "opening" : "manual",
           sourceType: cur.kind === "opening" ? "opening_balance" : "manual_journal", sourceId: id, event: "posted",
@@ -273,7 +284,8 @@ export class ManualJournalsService {
   private async assertTrustChecker(c: Fv2Client, scope: number, user: AuthUser, cur: any, warnings: ManualJournalWarning[]): Promise<boolean> {
     const m = await this.meta(c, scope, Number(cur.id));
     assertTrustJustified(warnings, m.trustReason, cur.attachmentKey ?? null);
-    const makers = new Set<number>([Number(cur.createdBy), ...(m.lastActorId != null ? [m.lastActorId] : [])]);
+    // Every user who created, edited or submitted it (an earlier editor stays a maker after another user re-submits).
+    const makers = new Set<number>([Number(cur.createdBy), ...(m.lastActorId != null ? [m.lastActorId] : []), ...m.makerIds]);
     if (!makers.has(Number(user.id))) return false;
     if (isAccountHolder(user) && !(await anotherApprover(c, scope, Number(user.id)))) {
       if ((m.trustReason ?? "").length < TRUST_REASON_MIN) {
@@ -289,6 +301,21 @@ export class ManualJournalsService {
       message: "قيد يستخدم حساب الأمانات مقابل حساب للمكتب يعتمده مستخدم آخر غير من أنشأه أو عدّله أو أرسله (المدير المالي مثلاً)"
         + " · A journal that sets the trust account against an office account must be approved by another user than the one who created, edited or submitted it (e.g. the finance manager)",
     });
+  }
+
+  /** Every line a money box, trust credited and a non-trust box debited: a transfer from trust to the office by hand. */
+  private async isTrustToOfficeBox(c: Fv2Client, scope: number, lines: LineInput[]): Promise<boolean> {
+    const ids = [...new Set(lines.map((l) => Number(l.accountId)))];
+    const rows = (await c.query(
+      `select a.id,
+              exists (select 1 from bank_accounts b where b.user_id = a.user_id and b.gl_account_id = a.id and b.is_trust) or a.system_key = 'trust_bank' as trust,
+              exists (select 1 from bank_accounts b where b.user_id = a.user_id and b.gl_account_id = a.id)
+                or a.system_key in ('cash', 'petty_cash', 'bank_default', 'cash_in_transit', 'cheques_under_collection') as box
+         from accounts a where a.user_id = $1 and a.id = any($2::int[])`, [scope, ids])).rows;
+    const kind = new Map<number, { trust: boolean; box: boolean }>(rows.map((r: any) => [Number(r.id), { trust: r.trust === true, box: r.box === true }]));
+    if (lines.some((l) => !kind.get(Number(l.accountId))?.box)) return false;
+    const trustNet = lines.reduce((t, l) => t + (kind.get(Number(l.accountId))!.trust ? l.debit - l.credit : 0), 0);
+    return trustNet < 0 && lines.some((l) => !kind.get(Number(l.accountId))!.trust && l.debit > 0);
   }
 
   // ── validation ──────────────────────────────────────────────────────────
