@@ -528,8 +528,9 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
         [scope, number, date, fromHalalas(amount), fromId, toId, memo, actor.id]);
       const id = Number(ins.rows[0].id);
       const evs = await transferEvents(q, scope, id);
-      // Commission leaves trust: never more than the trust account holds (another client's money), unless confirmed.
-      await assertTrustCovers(c, scope, { events: evs }, { allow: body?.allowTrustOverdraw, actorId: actor.id, source: "/finance/v2/commission-transfers" });
+      // Commission leaves trust: never more than the trust account holds (another client's money), and never more than the
+      // office's money in trust — commission earned on rent that never reached trust is not there to take (client-money.ts).
+      await assertTrustCovers(c, scope, { events: evs }, { allow: body?.allowTrustOverdraw, actorId: actor.id, source: "/finance/v2/commission-transfers", cap: { kind: "office" } });
       for (const e of evs) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
       await auditRow(c, scope, actor.id, "finance_v2_commission_transfer", id, "/finance/v2/commission-transfers");
       return id;

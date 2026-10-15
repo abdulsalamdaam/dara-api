@@ -7,6 +7,9 @@ import { attempt, enableV2, legacyEnv, seedAccount, userOf, type LegacyEnv, type
 import { riyadhToday } from "../dates";
 import { BankAccountsService } from "./bank-accounts.service";
 import { ExpensesV2Service } from "./expenses-v2.service";
+import { AccountTransferService } from "./account-transfer.service";
+import { PeriodsService } from "../periods.service";
+import { JournalRepository } from "../journal.repository";
 import { ApService } from "../tier3/ap.service";
 import { ReconciliationService } from "../reports/reconciliation.service";
 import { legacyAccountingFor } from "../reports/legacy-accounting";
@@ -46,6 +49,14 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
     expenses = new ExpensesV2Service(env.t.pool as any, env.emitter, banks);
     ap = new ApService(env.t.pool as any, env.emitter, banks);
     trustId = Number((await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default`, [U]))[0].id);
+    // Fund the trust account (office bank → trust, never capped): these specs are about WHICH outflows may use trust;
+    // the balance guard itself (policy block, no confirmation) is covered in trust-guard.db.spec.ts.
+    {
+      const periods = new PeriodsService(env.t.pool);
+      // From the cash box (1111): the operating bank's own test below needs it unused.
+      const office = Number((await env.q(`select b.id from bank_accounts b join accounts a on a.id = b.gl_account_id where b.user_id = $1 and a.code = '1111'`, [U]))[0].id);
+      await new AccountTransferService(env.t.pool as any, new JournalRepository(periods), periods).create(U, user as any, { fromBankAccountId: office, toBankAccountId: trustId, amount: "10000" });
+    }
   });
 
   after(async () => {
@@ -60,7 +71,7 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
   it("an agent landlord's expense charged to the company is office money: refused from trust; charged to the landlord it may be", async () => {
     const r: any = await attempt(() => expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "company", bankAccountId: trustId }));
     assert.deepEqual([r.status, r.body?.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
-    const ok = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId, allowTrustOverdraw: true }); // the trust account is not funded in this fixture; the trust overdraw guard is covered in trust-guard.db.spec.ts
+    const ok = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
     assert.equal(ok.details!.bankAccountId, trustId);
     // An edit that moves it back to the company while trust stays selected is refused.
     const e: any = await attempt(() => expenses.update(U, user, ok.id, { chargeTo: "company" }));
@@ -75,7 +86,7 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
       assert.deepEqual([r.status, r.body?.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
     }
     const lb = await bill({ ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord" });
-    const paid = await ap.createPayment(U, user, { supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: lb.id, amount: "100" }], allowTrustOverdraw: true }); // the trust account is not funded in this fixture; the trust overdraw guard is covered in trust-guard.db.spec.ts
+    const paid = await ap.createPayment(U, user, { supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: lb.id, amount: "100" }] });
     assert.equal(paid.bankAccountId, trustId);
   });
 

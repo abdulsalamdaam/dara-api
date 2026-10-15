@@ -667,6 +667,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) { // finance-v2:
       log.warn(`ensure finance v2 payout vouchers failed: ${err?.message || err}`); // finance-v2:
     } // finance-v2:
+    // finance-v2: 0080 manual journal meta (trust reason, last actor for maker-checker). After 0079, same rules.
+    try { // finance-v2:
+      const fv2MjMeta = findSqlFile(join("drizzle", "0080_finance_v2_manual_journal_meta.sql")); // finance-v2:
+      if (fv2MjMeta) await client.query(readFileSync(fv2MjMeta, "utf8")); // finance-v2:
+      else log.warn("0080_finance_v2_manual_journal_meta.sql not found — Finance v2 manual journal meta not ensured"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.warn(`ensure finance v2 manual journal meta failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Ejar Import v2: saved two-call lookups (and the index the lookup budget
     // counts with). Idempotent and additive. A failure warns and boots anyway:

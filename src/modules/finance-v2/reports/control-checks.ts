@@ -1,12 +1,12 @@
 import type { Fv2Pool } from "../db";
 import { fromHalalas } from "../money";
 import { riyadhToday } from "../dates";
-import { resolveTreatment } from "../rules";
 import { DEPOSIT_DESC, h } from "./common";
 import { fyStartOf } from "./core-math";
 import { CoreReportsService } from "./core-reports.service";
 import { BankRecService } from "../tier2/bank-rec.service";
 import { dueNotInvoicedSql } from "../due-uninvoiced";
+import { clientMoneyPosition } from "../client-money";
 
 /**
  * The accountant's control checks that the reconciliation report (R1–R8) did
@@ -289,137 +289,28 @@ export class ExtraChecks {
    * listed entry by entry (e.g. managed rent collected into the office's own account).
    */
   async r16(scope: number, asOf: string, mode: string | null): Promise<CheckBody> {
-    const st = (await this.pool.query(`select agency_collections_to_trust as trust from finance_settings where account_user_id = $1`, [scope])).rows[0] ?? {};
-    const trustAccts = (await this.pool.query(
-      `select distinct gl_account_id as id from bank_accounts where user_id = $1 and is_trust and gl_account_id is not null`, [scope])).rows.map((x: any) => Number(x.id));
-    if (mode !== "manager" || !trustAccts.length) {
-      return { status: "not_applicable", ledger: null, subLedger: null, difference: null, rows: [], explanations: [], notes: [mode !== "manager" ? "owner_mode" : "no_trust_account"] };
+    // The math lives in ../client-money.ts, shared with the trust guard's per-landlord and office caps (they must not drift).
+    const p = await clientMoneyPosition(this.pool, scope, asOf, mode);
+    if (!p.applicable) {
+      return { status: "not_applicable", ledger: null, subLedger: null, difference: null, rows: [], explanations: [], notes: [p.notApplicable ?? "not_applicable"] };
     }
-    if (!st.trust) {
-      return { status: "not_applicable", ledger: null, subLedger: null, difference: null, rows: [], explanations: [], notes: ["trust_routing_off"] };
-    }
-    const holders = new Set((await this.pool.query(`select id from owners where user_id = $1 and is_account_holder`, [scope])).rows.map((x: any) => x.id));
-    const agent = (ownerId: number | null) => ownerId != null && resolveTreatment("manager", { id: ownerId, isAccountHolder: holders.has(ownerId) }).treatment === "agent";
-    const own = (await this.pool.query(
-      `with recursive g as (select id from accounts where user_id = $1 and code = '1110'
-                             union all select a.id from accounts a join g on a.parent_id = g.id where a.user_id = $1)
-       select a.id from accounts a join g on g.id = a.id where not a.is_group`, [scope])).rows.map((x: any) => Number(x.id)).filter((id: number) => !trustAccts.includes(id));
-    // Per entry: the trust movement, the client-liability movement, the transit movement and the office-cash movement.
-    const lines = (await this.pool.query(
-      `select l.entry_id, e.entry_no, to_char(e.entry_date, 'YYYY-MM-DD') as d, e.origin, coalesce(e.payload->>'rule', o.payload->>'rule') as rule,
-              coalesce(o.origin, e.origin) as root_origin, e.source_type, e.source_id, e.reversal_of is not null as is_reversal,
-              a.system_key as sk, l.account_id, l.owner_id, (l.debit - l.credit)::text as dc
-         from journal_lines l join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
-         join accounts a on a.id = l.account_id and a.user_id = l.user_id
-         left join journal_entries o on o.id = e.reversal_of and o.user_id = e.user_id
-        where l.user_id = $1 and l.entry_date <= $2::date
-          and (l.account_id = any($3::int[]) or l.account_id = any($4::int[]) or a.system_key in ('landlord_payable','deposits_held','cash_in_transit'))`,
-      [scope, asOf, trustAccts, own])).rows;
-    type E = { entryId: number; entryNo: string; date: string; rule: string | null; origin: string; sourceType: string; sourceId: number; reversal: boolean; trust: number; liab: number; transit: number; office: number; landlordLp: number; byOwner: Map<number | null, number> };
-    const ents = new Map<number, E>();
-    const ownerOf = (x: any): number | null => (x.owner_id == null ? null : Number(x.owner_id));
-    const addTo = (m: Map<number | null, number>, k: number | null, v: number) => { if (v) m.set(k, (m.get(k) ?? 0) + v); };
-    // An entry's residual split over the landlords whose 2121 / 2141 / transit lines it moves (in proportion; the
-    // rounding remainder, and an entry with no such line, go to the unattributed bucket `null`).
-    const spread = (e: E, r: number, into: Map<number | null, number>) => {
-      let left = r;
-      const base = e.liab - e.transit;
-      if (base !== 0) for (const [o, v] of e.byOwner) { if (o == null) continue; const part = Math.round((r * v) / base); addTo(into, o, part); left -= part; }
-      addTo(into, null, left);
-    };
-    // Per landlord: the office money taken out of their client money, and their client money collected outside trust.
-    const officeBy = new Map<number | null, number>(), outsideBy = new Map<number | null, number>();
-    let trustBal = 0, lp = 0, dep = 0, transit = 0;
-    for (const x of lines) {
-      const id = Number(x.entry_id);
-      const e = ents.get(id) ?? { entryId: id, entryNo: x.entry_no, date: x.d, rule: x.rule ?? null, origin: x.root_origin, sourceType: x.source_type, sourceId: Number(x.source_id), reversal: x.is_reversal === true, trust: 0, liab: 0, transit: 0, office: 0, landlordLp: 0, byOwner: new Map() };
-      ents.set(id, e);
-      const v = h(x.dc);
-      if (trustAccts.includes(x.account_id)) { e.trust += v; trustBal += v; }
-      else if (x.sk === "landlord_payable") { e.liab -= v; e.landlordLp -= v; lp -= v; addTo(e.byOwner, ownerOf(x), -v); }
-      else if (x.sk === "deposits_held") { e.liab -= v; dep -= v; addTo(e.byOwner, ownerOf(x), -v); }
-      else if (x.sk === "cash_in_transit") { if (agent(x.owner_id)) { e.transit += v; transit += v; addTo(e.byOwner, ownerOf(x), -v); } }
-      else if (own.includes(x.account_id)) e.office += v;
-    }
-    // Landlord-charged supplier bills still open at asOf (their E38 debited 2121; the cash is still in trust until paid).
-    const bills = (await this.pool.query(
-      `select b.id, b.number, b.owner_id, (b.total - coalesce((select sum(a.amount) from supplier_payment_allocations a
-                join supplier_payments p on p.id = a.payment_id and p.user_id = a.user_id
-               where a.bill_id = b.id and a.user_id = b.user_id and p.paid_on <= $2::date and (p.status = 'posted' or p.voided_on > $2::date)), 0))::text as open
-         from supplier_bills b
-        where b.user_id = $1 and b.charge_to = 'landlord' and b.approved_at is not null and b.bill_date <= $2::date and (b.status = 'approved' or b.voided_on > $2::date)`,
-      [scope, asOf])).rows.filter((b: any) => agent(b.owner_id) && h(b.open) !== 0);
-    const unpaidBills = bills.reduce((t: number, b: any) => t + h(b.open), 0);
-
-    // Classify each entry's residual (trust movement − liability movement − transit).
-    const COMMISSION = new Set(["E15", "E16", "E36"]);
-    let commission = 0, officePaid = 0, transfers = 0, billsFlow = 0, opening = 0, depositsToOffice = 0, transfersIn = 0;
-    // A principal deposit forfeited, turned into revenue or applied to the office's own arrears (E11 / E12 / E12B) stops
-    // being client money while the cash stays in trust: it is the office's money, not yet transferred (round 3).
-    const DEPOSIT_TO_OFFICE = new Set(["E11", "E12", "E12B"]);
-    const unexplained: any[] = [];
-    for (const e of ents.values()) {
-      const r = e.trust - e.liab + e.transit;
-      if (r === 0) continue;
-      if (e.rule && COMMISSION.has(e.rule)) { commission += r; spread(e, r, officeBy); continue; }
-      if (e.origin === "opening") { opening += r; continue; }
-      // The commission transfer (E15T, 0070): trust → the office's operating account, the office money moving out.
-      if (e.rule === "E15T") { transfers += r; continue; }
-      // A landlord expense (E18) or bill payment (E39) settled from the office's own account: the office's money is owed back from trust.
-      if ((e.rule === "E18" || e.rule === "E38") && e.trust === 0) { if (e.rule === "E38") billsFlow += r; else officePaid += r; spread(e, r, officeBy); continue; }
-      if (e.rule === "E39") { billsFlow += r; spread(e, r, officeBy); continue; }
-      if (e.rule && DEPOSIT_TO_OFFICE.has(e.rule) && e.trust === 0 && e.landlordLp === 0) { depositsToOffice += r; spread(e, r, officeBy); continue; }
-      // A transfer between the trust account and the office's own cash/bank accounts (a manual journal, both sides cash).
-      // A reversal undoes its original in the original's bucket: reversing a transfer INTO trust takes back money moved in
-      // (not office money moved out of trust), and reversing one OUT of trust gives back office money (not client money moved in).
-      if (e.liab === 0 && e.trust !== 0 && e.trust + e.office === 0) { if (e.reversal ? r < 0 : r > 0) transfersIn += r; else transfers += r; continue; }
-      spread(e, -r, outsideBy);
-      unexplained.push({ entryId: e.entryId, entryNo: e.entryNo, date: e.date, rule: e.rule, sourceType: e.sourceType, sourceId: e.sourceId,
-        trust: money(e.trust), liability: money(e.liab), difference: money(r) });
-    }
-    // Money moved INTO trust from the office's accounts first covers client money that was collected outside trust
-    // (the unexplained entries, e.g. rent and deposits taken into the cash box before trust routing — accountant
-    // round 4); only what is left over is the office's own money sitting in trust.
-    const shortfall = Math.max(0, -unexplained.reduce((t, x) => t + h(x.difference), 0));
-    const movedIntoTrust = Math.min(transfersIn, shortfall);
-    transfers += transfersIn - movedIntoTrust;
-    // Supplier payments from trust to landlord bills reduce the unpaid bills; from the office account they move to office money.
-    // billsFlow carries the E38 (+) and E39 from trust (−) residuals; what is still open is `unpaidBills`, the rest is office-paid.
-    const officeFromBills = billsFlow - unpaidBills;
-    const officeMoney = commission + officePaid + officeFromBills + transfers + depositsToOffice;
-    // Office money only sits in trust when the client money it came out of did. Commission on rent collected into the
-    // cash box, or a landlord expense recovered from such rent, never entered trust: it is the office's share of the
-    // money still outside (accountant round 5: "expected should be 5,215 dues + 3,000 deposit = 8,215 — it does not
-    // deduct the 575 cleaning and the 210 commission"). So the client money still outside trust (net of transfers
-    // in) absorbs the office money first, and only what is left of it is expected in trust.
-    // Only a landlord's own money outside trust can hold the office's share of it: commission earned on rent that did
-    // reach trust is in trust, even while another landlord's rent sits in the cash box.
-    for (const b of bills) addTo(officeBy, Number(b.owner_id), -h(b.open));
-    let attributable = 0;
-    for (const [o, out] of outsideBy) attributable += Math.min(Math.max(0, officeBy.get(o) ?? 0), Math.max(0, out));
-    const stillOutside = shortfall - movedIntoTrust;
-    const officeOutsideTrust = Math.max(0, Math.min(officeMoney, stillOutside, attributable));
-    // The client money held: the net credit balances of 2121 and 2141 (after commission, landlord expenses, payouts
-    // and refunds), less Ejar transit, plus landlord bills still to be paid from it.
-    const clientMoney = lp + dep - transit + unpaidBills;
-    // Office money is never negative in trust: more taken out of trust than the office earned is client money gone.
-    const officeInTrust = Math.max(0, officeMoney - officeOutsideTrust);
-    const v2 = clientMoney + officeInTrust + opening;
-    unexplained.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.entryId - b.entryId));
+    const { trustBal, expected: v2 } = p;
+    const unexplained = p.unexplained.map((x) => ({ entryId: x.entryId, entryNo: x.entryNo, date: x.date, rule: x.rule, sourceType: x.sourceType, sourceId: x.sourceId,
+      trust: money(x.trust), liability: money(x.liability), difference: money(x.difference) }));
     return {
       status: trustBal === v2 ? "ok" : "difference", ledger: money(trustBal), subLedger: money(v2), difference: money(trustBal - v2),
       rows: trustBal === v2 ? [] : unexplained.slice(0, LIST_LIMIT),
       explanations: [
         {
           code: "trust_components", count: 0, amount: null, items: [{
-            landlordPayable: money(lp), depositsHeld: money(dep), cashInTransit: money(0 - transit), commissionDeducted: money(commission),
-            landlordExpensesPaidByOffice: money(officePaid + officeFromBills), depositsKeptByOffice: money(depositsToOffice), transfersToOffice: money(transfers), officeMoneyNotTransferred: money(officeMoney),
-            officeMoneyOutsideTrust: money(-officeOutsideTrust), landlordBillsUnpaid: money(unpaidBills), openingBalanceDifference: money(opening), clientMoneyHeld: money(clientMoney),
+            landlordPayable: money(p.lp), depositsHeld: money(p.dep), cashInTransit: money(0 - p.transit), commissionDeducted: money(p.commission),
+            landlordExpensesPaidByOffice: money(p.officePaid + p.officeFromBills), depositsKeptByOffice: money(p.depositsToOffice), transfersToOffice: money(p.transfers), officeMoneyNotTransferred: money(p.officeMoney),
+            officeMoneyOutsideTrust: money(-p.officeOutsideTrust), landlordBillsUnpaid: money(p.unpaidBills), openingBalanceDifference: money(p.opening), clientMoneyHeld: money(p.clientMoney),
           }],
         },
-        { code: "unexplained_entries", count: unexplained.length, amount: money(unexplained.reduce((t, x) => t + h(x.difference), 0)) },
-        { code: "client_money_moved_into_trust", count: 0, amount: money(movedIntoTrust) },
-        { code: "landlord_bills_unpaid", count: bills.length, amount: money(unpaidBills), items: bills.slice(0, LIST_LIMIT).map((b: any) => ({ billId: b.id, number: b.number, ownerId: b.owner_id, remaining: money(h(b.open)) })) },
+        { code: "unexplained_entries", count: unexplained.length, amount: money(p.unexplained.reduce((t, x) => t + x.difference, 0)) },
+        { code: "client_money_moved_into_trust", count: 0, amount: money(p.movedIntoTrust) },
+        { code: "landlord_bills_unpaid", count: p.bills.length, amount: money(p.unpaidBills), items: p.bills.slice(0, LIST_LIMIT).map((b: any) => ({ billId: b.id, number: b.number, ownerId: b.owner_id, remaining: money(h(b.open)) })) },
       ],
       notes: ["tenant advances on managed rent are part of 2121 in v2 (credited on collection)"],
     };

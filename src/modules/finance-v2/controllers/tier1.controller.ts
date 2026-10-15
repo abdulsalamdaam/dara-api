@@ -60,12 +60,15 @@ export class FinanceV2Tier1Controller {
 
   /**
    * What each trust (client money) account can pay out now — posted balance less the outflows still waiting to post —
-   * and the overdraw policy (`confirm` | `block`), for the money dialogs' trust warning (trust-guard.ts).
+   * and the overdraw policy (`block`), for the money dialogs' trust check (trust-guard.ts); plus the office's money in
+   * trust and, with `?ownerId=`, that landlord's money in trust and what of it is payable to him (client-money.ts).
+   * A foreign or unknown ownerId reads as zero (only this scope's lines are read).
    */
   @Get("bank-accounts/trust-available")
   @RequireCapability("view")
-  trustAvailable(@Req() req: Fv2Request) {
-    return trustAvailability(this.pool, scopeId(req.user!));
+  trustAvailable(@Req() req: Fv2Request, @Query("ownerId") ownerId?: string) {
+    const o = ownerId != null && /^\d{1,9}$/.test(ownerId) ? Number(ownerId) : null;
+    return trustAvailability(this.pool, scopeId(req.user!), o);
   }
 
   /**

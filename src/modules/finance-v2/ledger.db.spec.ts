@@ -97,7 +97,7 @@ describe("finance v2 migration and ledger triggers (real Postgres)", { skip: fv2
       try {
         await bare.apply(MIGRATION_0066);
         const n = (await bare.pool.query(`select count(*)::int n from information_schema.tables where table_schema = current_schema()`)).rows[0].n;
-        assert.equal(n, 22 + 8 + 5 + 4 + 1 + 2 + 3 + 1 + 1, "22 tables from 0066, 8 from 0067, 5 from 0069, 4 from 0070, 1 from 0071, 2 from 0073, 3 from 0074, 1 from 0075 and 1 from 0079 (withDb applies them all; 0068 and 0076 add none)");
+        assert.equal(n, 22 + 8 + 5 + 4 + 1 + 2 + 3 + 1 + 1 + 1, "22 tables from 0066, 8 from 0067, 5 from 0069, 4 from 0070, 1 from 0071, 2 from 0073, 3 from 0074, 1 from 0075, 1 from 0079 and 1 from 0080 (withDb applies them all; 0068 and 0076 add none)");
       } finally { await bare.drop(); }
     });
 

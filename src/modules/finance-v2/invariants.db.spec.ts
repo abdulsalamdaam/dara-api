@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "./__tests__/with-db";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
-import { enableV2, legacyEnv, seedAccount, userOf, type LegacyEnv, type Seed } from "./__tests__/legacy-env";
+import { attempt, enableV2, legacyEnv, seedAccount, userOf, type LegacyEnv, type Seed } from "./__tests__/legacy-env";
 import { BackfillService } from "./backfill/backfill.service";
 import { LedgerStartService } from "./ledger-start.service";
 import { FinanceSetupService } from "./setup.service";
@@ -744,12 +744,14 @@ describe("finance v2 invariants — regressions found by the property run (real 
     assert.equal(v.vat, "0.00", "a cancelled supply carries no VAT");
   });
 
-  it("R3: a payout to a landlord with no contract yet is missing from the dues report; the sub-ledger completes it", async () => {
+  it("R3: a payout to a landlord with no contract yet (an advance) is refused under v2 since 15 Oct 2026; the checks hold", async () => {
     const U = 39005;
     await setupAccount(env, U, "manager");
     const [a] = await env.q(`select id from owners where user_id = $1 and not is_account_holder`, [U]);
-    // An advance (nothing is due yet): finding #2 refuses it without an explicit allowAdvance.
-    await env.reports.createPayout(user(U), { ownerId: a.id, amount: 25, transferDate: LAST, method: "bank_transfer", allowAdvance: true, allowTrustOverdraw: true }); // nothing is in trust yet: a confirmed overdraw
+    // An advance (nothing is due yet) was possible with allowAdvance until the accountant's decision (15 Oct 2026): under v2
+    // a landlord is never paid more than his net due, so this payout is now refused and writes nothing; R3 still holds.
+    const r: any = await attempt(() => env.reports.createPayout(user(U), { ownerId: a.id, amount: 25, transferDate: LAST, method: "bank_transfer", allowAdvance: true }));
+    assert.deepEqual([r.status, r.body?.error], [409, "PAYOUT_EXCEEDS_DUE"]);
     await checkInvariants(env, backfill, rec, U, "manager", () => settle(env, U), fail("R-e"), null);
   });
 

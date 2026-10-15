@@ -1,11 +1,15 @@
+import { BadRequestException } from "@nestjs/common";
 import type { Fv2Client, Fv2Pool } from "./db";
 
 /**
  * Manual journals (القيود اليدوية) touching client money (accountant, 15 Oct 2026). An accountant may post a
- * trust (أمانات) correction by hand, so nothing is refused; but a journal that sets a trust account against an
+ * trust (أمانات) correction by hand, so it is not forbidden; but a journal that sets a trust account against an
  * OFFICE account — an office expense or revenue, VAT, a supplier, equity — is how office costs end up paid with
  * clients' money, so it carries a warning (TRUST_WITH_OFFICE_ACCOUNT) on create / update / submit / approve,
- * in the posted entry's `warnings`, and in the audit row.
+ * in the posted entry's `warnings`, and in the audit row. The accountant then decided (15 Oct 2026, «تنبيه وقت
+ * الحفظ وتعمل سبب او مرفق يكون اجباري … القيد يعتمد من محاسب آخر»): such a journal needs a reason (10+
+ * characters) or an attachment (400 TRUST_JOURNAL_REASON_REQUIRED), and another user approves it
+ * (manual-journals.service.ts, 403 SAME_USER_APPROVAL).
  *
  * Not office: the client-money accounts — every trust account, landlord payable (2121, 2122), deposits held
  * (2141), managed tenant receivables (1122), due from landlords (1123) — and the money boxes (every bank / cash
@@ -58,3 +62,45 @@ export async function manualJournalWarnings(q: Q, scope: number, lines: Array<{ 
 
 /** `?warnings=A,B` appended to an audit row's path (audit_logs has no details column). */
 export const withWarnings = (path: string, w: Array<{ code: string }>) => (w.length ? `${path}?warnings=${w.map((x) => x.code).join(",")}` : path);
+
+/** The shortest reason accepted for a journal that sets trust against an office account. */
+export const TRUST_REASON_MIN = 10;
+
+/** `trustReason` from a request body: trimmed text (at most 1,000 characters), or null. */
+export function trustReasonOf(v: unknown): string | null {
+  if (v == null || v === "") return null;
+  if (typeof v !== "string") throw new BadRequestException({ error: "BAD_INPUT", field: "trustReason", message: "trustReason must be text" });
+  const s = v.trim();
+  if (s.length > 1000) throw new BadRequestException({ error: "BAD_INPUT", field: "trustReason", message: "trustReason is too long (at most 1,000 characters)" });
+  return s || null;
+}
+
+/** A flagged journal (TRUST_WITH_OFFICE_ACCOUNT) needs a reason of TRUST_REASON_MIN+ characters or an attachment. */
+export function assertTrustJustified(warnings: ManualJournalWarning[], reason: string | null, attachmentKey: string | null): void {
+  if (!warnings.some((w) => w.code === TRUST_WITH_OFFICE_ACCOUNT)) return;
+  if ((reason ?? "").trim().length >= TRUST_REASON_MIN || attachmentKey) return;
+  throw new BadRequestException({
+    error: "TRUST_JOURNAL_REASON_REQUIRED",
+    field: "trustReason",
+    message: `القيد يستخدم حساب الأمانات مقابل حساب للمكتب: اكتب السبب (${TRUST_REASON_MIN} أحرف على الأقل) أو أرفق مستنداً`
+      + ` · The entry sets the trust account against an office account: give a reason (at least ${TRUST_REASON_MIN} characters) or attach a document`,
+  });
+}
+
+/**
+ * Whether the account has an active user OTHER than `exceptUserId` who can approve a manual journal: the account
+ * holder, or an active employee whose role grants the `approve` capability (expenses.approve + invoices.write,
+ * capabilities.ts).
+ */
+export async function anotherApprover(q: Q, scope: number, exceptUserId: number): Promise<boolean> {
+  const [r] = (await q.query(
+    `select exists (
+       select 1 from users u
+        where u.id = $1 and u.id <> $2 and u.deleted_at is null and u.is_active
+       union all
+       select 1 from users u join roles r on r.id = u.role_id
+        where u.owner_user_id = $1 and u.id <> $2 and u.deleted_at is null and u.is_active and r.deleted_at is null
+          and r.permissions ? 'expenses.approve' and r.permissions ? 'invoices.write'
+     ) as other`, [scope, exceptUserId])).rows;
+  return r?.other === true;
+}

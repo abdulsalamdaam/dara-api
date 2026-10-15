@@ -30,9 +30,12 @@ import { assertTrustCovers } from "../trust-guard";
  *    400/404. Omitted → the posting engine's default, which for an agent
  *    landlord in Manager mode with trust routing is the default trust account
  *    (1114), so the entry is Dr 2121 / Cr 1114 (E19);
- *  - the net-due check (409 PAYOUT_EXCEEDS_DUE unless `allowAdvance: true`);
- *  - the trust balance (trust-guard.ts): paid from a trust account, never more than it holds
- *    (409 TRUST_INSUFFICIENT unless `allowTrustOverdraw: true` under the `confirm` policy);
+ *  - the net-due check: 409 PAYOUT_EXCEEDS_DUE, with no way round it (accountant, 15 Oct 2026: «اهم حاجه
+ *    مايتعداش رصيد مستحقاته» — `allowAdvance` is ignored on this path; the flag-off legacy route is unchanged);
+ *  - the trust balance (trust-guard.ts): paid from a trust account, never more than it holds (409 TRUST_INSUFFICIENT,
+ *    policy `block`), and never more than THIS landlord's money in trust (409 LANDLORD_TRUST_INSUFFICIENT — another
+ *    landlord's money is not his); the account holder's drawings from trust never exceed the office's money there
+ *    (409 TRUST_TRANSFER_EXCEEDS_OFFICE_MONEY);
  *  - the landlord_payouts row (the same columns the legacy insert writes),
  *    its finance_payout_meta (paid on, paid from), a PV-###### number in the
  *    account's one payment-voucher series, and the E19 outbox event.
@@ -102,13 +105,12 @@ export async function createPayoutV2(
   // The dues report runs on the shared pool, so it is read BEFORE the transaction: run under the payout lock it
   // needs a second connection while every waiter holds one, and pool-size concurrent payouts starve the whole API.
   // Under the lock only the payouts committed since that read are re-counted (the report's `transferred` is their sum).
-  const allowAdvance = body?.allowAdvance === true;
+  // No advance under v2: the net due is a hard cap (`allowAdvance` is ignored).
   let report: any = null;
-  if (!allowAdvance) {
-    const q = sqlOf(deps.pool as any);
-    const [o] = (await loadSettings(q, scope))?.mode === "owner" ? [] : await q.rows(`select is_account_holder from owners where id = $1 and user_id = $2`, [ownerId, scope]);
-    if (o && o.is_account_holder !== true) report = await accounting(); // the same cases assertPayoutWithinDue checks
-  }
+  const q0 = sqlOf(deps.pool as any);
+  const mode0 = (await loadSettings(q0, scope))?.mode ?? null;
+  const [o] = mode0 === "owner" ? [] : await q0.rows(`select is_account_holder from owners where id = $1 and user_id = $2`, [ownerId, scope]);
+  if (o && o.is_account_holder !== true) report = await accounting(); // the same cases assertPayoutWithinDue checks
   const out = await withTx(deps.pool, async (c) => {
     await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.LANDLORD_PAYOUT]);
     if (requestId) {
@@ -131,7 +133,7 @@ export async function createPayoutV2(
       }
     }
     // Under the lock: an earlier payout of this account has committed before this check reads the dues.
-    await assertPayoutWithinDue(sqlOf(c), scope, ownerId, Number(amount), allowAdvance, async () => {
+    await assertPayoutWithinDue(sqlOf(c), scope, ownerId, Number(amount), false, async () => {
       if (!report) report = await accounting(); // only if the mode or the holder flag changed since the read above
       const [p] = (await c.query(
         `select coalesce(sum(amount), 0)::text as amt from landlord_payouts where user_id = $1 and owner_id = $2 and deleted_at is null`, [scope, ownerId])).rows;
@@ -161,7 +163,9 @@ export async function createPayoutV2(
       [payoutId, scope, number, requestId, user.id ?? null]);
     const s = await loadSettings(sqlOf(c), scope);
     const e = s ? await payoutEvent(sqlOf(c), scope, s, payoutId) : null;
-    if (e) await assertTrustCovers(c, scope, { events: [e] }, { allow: body?.allowTrustOverdraw, actorId: user.id ?? null, source: "/reports/landlord-payouts" });
+    // Manager mode: an agent landlord is paid from HIS money in trust only; the account holder's drawings from the office's.
+    const cap = s?.mode === "manager" && o ? (o.is_account_holder === true ? { kind: "office" as const } : { kind: "landlord" as const, ownerId }) : undefined;
+    if (e) await assertTrustCovers(c, scope, { events: [e] }, { allow: body?.allowTrustOverdraw, actorId: user.id ?? null, source: "/reports/landlord-payouts", cap });
     if (e) await deps.emitter.emit({ fv2: true, userId: scope, tx: c }, e);
     return { replay: false, row: shape(row, { bankAccountId, voucherNumber: number, requestId, replayed: false }) };
   });

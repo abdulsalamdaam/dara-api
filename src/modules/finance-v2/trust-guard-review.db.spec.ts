@@ -6,6 +6,7 @@ import { riyadhToday } from "./dates";
 import { PeriodsService } from "./periods.service";
 import { JournalRepository } from "./journal.repository";
 import { AccountTransferService } from "./tier1/account-transfer.service";
+import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { trustAvailability } from "./trust-guard";
 
 /** Review regressions for trust-guard.ts (synthetic data only): see each case. */
@@ -77,7 +78,7 @@ describe("fv2 trust guard: rows that may never post, replay, races, contract end
     await transfers.create(U, user, { fromBankAccountId: officeId, toBankAccountId: trustId, amount: "5000" });
     const ops: Array<Promise<any>> = [];
     for (let i = 0; i < 6; i++) {
-      ops.push(attempt(() => env.reports.createPayout(user, { ownerId: s.agent, amount: "300", transferDate: today, method: "bank_transfer", allowAdvance: true })));
+      ops.push(attempt(() => env.reports.createPayout(user, { ownerId: s.agent, amount: "300", transferDate: today, method: "bank_transfer" })));
       ops.push(attempt(() => transfers.create(U, user, { fromBankAccountId: trustId, toBankAccountId: officeId, amount: "300" })));
       ops.push(env.worker.runAccount(U).catch((e: any) => ({ status: 500, body: String(e) })));
     }
@@ -99,17 +100,21 @@ describe("fv2 trust guard: rows that may never post, replay, races, contract end
     await drain(env, G);
     const bal = async () => (await env.q(`select coalesce(sum(l.debit - l.credit),0)::text as b from journal_lines l join accounts a on a.id = l.account_id where l.user_id = $1 and a.code = '1114'`, [G]))[0].b;
     const before = await bal();
-    { // empty trust
-      const t = Number((await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default`, [G]))[0].id);
-      const o = Number((await env.q(`select b.id from bank_accounts b join accounts a on a.id = b.gl_account_id where b.user_id = $1 and a.code = '1113'`, [G]))[0].id);
-      await transfers.create(G, gu, { fromBankAccountId: t, toBankAccountId: o, amount: before });
-    }
+    // Empty the default trust account into a second trust account (trust → trust: client money stays client money, never capped).
+    const t = Number((await env.q(`select id from bank_accounts where user_id = $1 and is_trust and is_default`, [G]))[0].id);
+    const parked = await new BankAccountsService(env.t.pool as any).create(G, G, { kind: "bank", nameAr: "أمانات مؤقت", isTrust: true, isDefault: false });
+    await transfers.create(G, gu, { fromBankAccountId: t, toBankAccountId: parked.id, amount: before });
     const body = { mode: "cancelled", deposit: "refund", advance: "refund", installments: "refund", refundMethod: "bank_transfer",
       dispositions: inst.slice(1).map((p: any) => ({ paymentId: Number(p.id), action: "cancel" })) };
-    const r: any = await attempt(() => env.contracts.terminate(gu, String(c.id), body));
-    const ok: any = await attempt(() => env.contracts.terminate(gu, String(c.id), { ...body, allowTrustOverdraw: true }));
+    // Refused (policy block: the flag changes nothing), with what the refunds would take out of the default trust account.
+    const r: any = await attempt(() => env.contracts.terminate(gu, String(c.id), { ...body, allowTrustOverdraw: true }));
+    assert.deepEqual([r.status, r.body?.error], [409, "TRUST_INSUFFICIENT"]);
+    // Money back, then the same terminate goes through: the actual outflow equals the refused `required`.
+    await transfers.create(G, gu, { fromBankAccountId: parked.id, toBankAccountId: t, amount: before });
+    const ok: any = await attempt(() => env.contracts.terminate(gu, String(c.id), body));
+    assert.equal(ok.success, true, JSON.stringify(ok));
     await drain(env, G);
     const after = await bal();
-    assert.equal(r.body?.required, (0 - Number(after)).toFixed(2));
+    assert.equal(r.body?.required, (Number(before) - Number(after)).toFixed(2));
   });
 });

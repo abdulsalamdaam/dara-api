@@ -6,6 +6,9 @@ import { riyadhToday } from "./dates";
 import { CommissionRunService, type CommissionIssuer } from "./commission-run.service";
 import { StatementsService } from "./reports/statements.service";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
+import { AccountTransferService } from "./tier1/account-transfer.service";
+import { PeriodsService } from "./periods.service";
+import { JournalRepository } from "./journal.repository";
 import { FinanceSettingsService } from "./settings.service";
 import { BillingModule } from "../billing/billing.module";
 
@@ -291,10 +294,14 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
 
     const over: any = await attempt(() => svc.createTransfer(M, { id: M }, { amount: "999999" }));
     assert.deepEqual([over.status, over.body.error], [409, "OVER_UNSENT_COMMISSION"]);
-    // This fixture's trust account (a second one, 1117) holds nothing: the commission cannot leave it unconfirmed (trust-guard.ts).
-    const short: any = await attempt(() => svc.createTransfer(M, { id: M }, {}));
+    // This fixture's trust account (a second one, 1117) holds nothing: the commission cannot leave it, flag or not (trust-guard.ts, policy block).
+    const short: any = await attempt(() => svc.createTransfer(M, { id: M }, { allowTrustOverdraw: true }));
     assert.deepEqual([short.status, short.body.error, short.body.available, short.body.required], [409, "TRUST_INSUFFICIENT", "0.00", t0.unsent]);
-    const tr: any = await svc.createTransfer(M, { id: M }, { allowTrustOverdraw: true });
+    // Fund it from the office's operating account (into trust: never capped).
+    const periods = new PeriodsService(env.t.pool);
+    const transfers = new AccountTransferService(env.t.pool as any, new JournalRepository(periods), periods);
+    await transfers.create(M, { ...userOf(M), permissions: [] } as any, { fromBankAccountId: t0.defaults.toBankAccountId, toBankAccountId: trust.id, amount: t0.unsent });
+    const tr: any = await svc.createTransfer(M, { id: M }, {});
     assert.equal(tr.amount, t0.unsent);
     await drain(env, M);
     const lines = await env.q(

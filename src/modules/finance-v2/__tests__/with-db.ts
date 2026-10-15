@@ -37,6 +37,7 @@ export const MIGRATION_0074 = join(__dirname, "../../../../db/drizzle/0074_finan
 export const MIGRATION_0075 = join(__dirname, "../../../../db/drizzle/0075_finance_v2_property_commission.sql");
 export const MIGRATION_0076 = join(__dirname, "../../../../db/drizzle/0076_finance_v2_trust_mandatory.sql");
 export const MIGRATION_0079 = join(__dirname, "../../../../db/drizzle/0079_finance_v2_payout_vouchers.sql");
+export const MIGRATION_0080 = join(__dirname, "../../../../db/drizzle/0080_finance_v2_manual_journal_meta.sql");
 export const LEGACY_MIN = join(__dirname, "legacy-min.sql");
 /** The full legacy schema (schema only, generated from db/src/schema), for the hook specs that run real legacy handlers. */
 export const LEGACY_FULL = join(__dirname, "legacy-schema.sql");
@@ -75,6 +76,7 @@ export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolea
     await apply(MIGRATION_0075);
     await apply(MIGRATION_0076);
     await apply(MIGRATION_0079);
+    await apply(MIGRATION_0080);
   }
   return {
     pool,

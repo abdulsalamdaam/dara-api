@@ -473,12 +473,13 @@ export class FinanceV2Hooks {
 
   /**
    * POST /reports/landlord-payouts, before the insert (finding #2): an agent
-   * landlord is never paid more than the dues report's remaining unless the
-   * body says `allowAdvance: true`. 409 PAYOUT_EXCEEDS_DUE, nothing written.
+   * landlord is never paid more than the dues report's remaining: 409 PAYOUT_EXCEEDS_DUE, nothing written. No advance
+   * (accountant, 15 Oct 2026): `allowAdvance` is ignored. (Under v2 the route forks to createPayoutV2 first, so this
+   * runs only if that fork is unavailable; with the flag off it does nothing.)
    */
-  async payoutWithinDue(fv2: boolean, scope: number, ownerId: number, amount: number, allowAdvance: unknown, accounting: () => Promise<any>): Promise<void> {
+  async payoutWithinDue(fv2: boolean, scope: number, ownerId: number, amount: number, _allowAdvance: unknown, accounting: () => Promise<any>): Promise<void> {
     if (!fv2) return;
-    await assertPayoutWithinDue(this.sqlPool(), scope, ownerId, amount, allowAdvance === true, accounting);
+    await assertPayoutWithinDue(this.sqlPool(), scope, ownerId, amount, false, accounting);
   }
 
   /**
@@ -562,6 +563,7 @@ export class FinanceV2Hooks {
       "fixed_asset_dep_runs", "fixed_assets", "account_external_codes", // 0074
       "finance_property_commission", // 0075
       "finance_payout_vouchers", // 0079
+      "finance_manual_journal_meta", // 0080
       "finance_commission_run_items", "finance_commission_runs", "finance_commission_transfers"]) { // 0070 in FK order
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);

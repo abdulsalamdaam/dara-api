@@ -77,7 +77,9 @@ describe("fv2 landlord payout: trust by default, PV- voucher, idempotent (real P
     assert.equal(t.b, "3000.00");
   });
 
-  it("refuses more than the net due (409 PAYOUT_EXCEEDS_DUE) without allowAdvance; nothing written, no number used", async () => {
+  it("refuses more than the net due (409 PAYOUT_EXCEEDS_DUE), allowAdvance or not (no advance since 15 Oct 2026); nothing written, no number used", async () => {
+    const adv: any = await attempt(() => env.reports.createPayout(user, { ownerId: s.agent, amount: "3000.01", method: "bank_transfer", transferDate: today, allowAdvance: true }));
+    assert.deepEqual([adv.status, adv.body.error], [409, "PAYOUT_EXCEEDS_DUE"]);
     const over: any = await attempt(() => env.reports.createPayout(user, { ownerId: s.agent, amount: "3000.01", method: "bank_transfer", transferDate: today }));
     assert.equal(over.status, 409);
     assert.equal(over.body.error, "PAYOUT_EXCEEDS_DUE");

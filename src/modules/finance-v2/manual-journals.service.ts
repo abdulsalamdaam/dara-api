@@ -7,7 +7,7 @@ import { PeriodsService } from "./periods.service";
 import { capabilities, isAccountHolder } from "./capabilities";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, isoDate, mapLedgerError, requireReason } from "./audit";
-import { manualJournalWarnings, withWarnings } from "./manual-journal-warnings";
+import { manualJournalWarnings, withWarnings, assertTrustJustified, trustReasonOf, anotherApprover, TRUST_REASON_MIN, type ManualJournalWarning } from "./manual-journal-warnings";
 
 export type ManualKind = "manual" | "opening";
 
@@ -56,6 +56,15 @@ function withTotal(r: any) {
  *    dimension id belongs to the scope (one query per dimension type).
  *  - The approver needs `approve` and must not be the drafter, unless the
  *    approver is the account holder (an owner-mobile token never is).
+ *  - A journal that sets a trust account against an office account
+ *    (TRUST_WITH_OFFICE_ACCOUNT, manual-journal-warnings.ts; accountant, 15 Oct
+ *    2026) needs a reason (`trustReason`, 10+ characters) or an attachment to be
+ *    saved, submitted or approved (400 TRUST_JOURNAL_REASON_REQUIRED), and is
+ *    approved by someone other than the user who created it and the one who
+ *    last edited / submitted it (403 SAME_USER_APPROVAL) — the account holder
+ *    included, unless the account has no other active user who can approve:
+ *    then the holder may approve his own, with a written reason, and an audit
+ *    row `finance_v2_manual_journal_self_approval` records it.
  *  - An attachment (an `acct/<scope>/…` upload key) is required on approval
  *    above 10,000 SAR.
  *  - Period: open, or closed when the approver holds `settings` (an audit
@@ -83,23 +92,45 @@ export class ManualJournalsService {
   }
 
   async get(scope: number, id: number, q: Q = this.pool) {
-    const r = await q.query(`select ${COLS} from manual_journals where id = $1 and user_id = $2`, [id, scope]);
+    const r = await q.query(
+      `select ${COLS},
+              (select m.trust_reason from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "trustReason",
+              (select m.last_actor_id from finance_manual_journal_meta m where m.manual_journal_id = manual_journals.id and m.user_id = manual_journals.user_id) as "lastActorId"
+         from manual_journals where id = $1 and user_id = $2`, [id, scope]);
     if (!r.rows[0]) throw new NotFoundException("Manual journal not found");
     return withTotal(r.rows[0]);
+  }
+
+  /** The 1:1 meta row (0080): the trust reason and the last user who created / edited / submitted the journal. */
+  private async touchMeta(c: Fv2Client, scope: number, id: number, actorId: number, reason?: string | null) {
+    await c.query(
+      `insert into finance_manual_journal_meta (manual_journal_id, user_id, trust_reason, last_actor_id) values ($1, $2, $3, $4)
+       on conflict (manual_journal_id) do update set last_actor_id = excluded.last_actor_id, updated_at = now()
+         ${reason === undefined ? "" : ", trust_reason = excluded.trust_reason"}`,
+      [id, scope, reason ?? null, actorId]);
+  }
+
+  private async meta(c: Fv2Client, scope: number, id: number): Promise<{ trustReason: string | null; lastActorId: number | null }> {
+    const [m] = (await c.query(`select trust_reason, last_actor_id from finance_manual_journal_meta where manual_journal_id = $1 and user_id = $2`, [id, scope])).rows;
+    return { trustReason: m?.trust_reason ?? null, lastActorId: m?.last_actor_id == null ? null : Number(m.last_actor_id) };
   }
 
   async create(scope: number, user: AuthUser, body: any, kind: ManualKind = "manual") {
     return withTx(this.pool, async (c) => {
       const v = await this.validate(c, scope, body, kind);
       await this.assertNotLocked(c, scope, v.entryDate);
+      const reason = trustReasonOf(body?.trustReason);
+      // A trust account against an office account is saved only with a reason or an attachment (manual-journal-warnings.ts).
+      const warnings = await manualJournalWarnings(c, scope, v.lines, kind);
+      assertTrustJustified(warnings, reason, v.attachmentKey);
       const r = await c.query(
         `insert into manual_journals (user_id, kind, status, entry_date, memo, attachment_key, lines, created_by)
          values ($1, $2, 'draft', $3, $4, $5, $6::jsonb, $7) returning id`,
         [scope, kind, v.entryDate, v.memo, v.attachmentKey, JSON.stringify(v.lines), user.id],
       );
       const id = Number(r.rows[0].id);
-      // Never refused: a trust account against an office account is a warning, recorded in the audit (manual-journal-warnings.ts).
-      const warnings = await manualJournalWarnings(c, scope, v.lines, kind);
+      await this.touchMeta(c, scope, id, user.id, reason);
+      // A trust account against an office account is a warning (with its reason), recorded in the audit (manual-journal-warnings.ts).
       if (warnings.length) await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings("/finance/v2/manual-journals", warnings));
       return { ...(await this.get(scope, id, c)), warnings };
     });
@@ -118,13 +149,16 @@ export class ManualJournalsService {
       };
       const v = await this.validate(c, scope, merged, cur.kind);
       await this.assertNotLocked(c, scope, v.entryDate);
+      const reason = body && "trustReason" in body ? trustReasonOf(body.trustReason) : (await this.meta(c, scope, id)).trustReason;
+      const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+      assertTrustJustified(warnings, reason, v.attachmentKey);
       await c.query(
         `update manual_journals set entry_date = $3, memo = $4, attachment_key = $5, lines = $6::jsonb, status = 'draft',
                 rejected_by = null, rejected_reason = null, updated_at = now()
           where id = $1 and user_id = $2`,
         [id, scope, v.entryDate, v.memo, v.attachmentKey, JSON.stringify(v.lines)],
       );
-      const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+      await this.touchMeta(c, scope, id, user.id, reason);
       if (warnings.length) await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}`, warnings), "PATCH");
       return { ...(await this.get(scope, id, c)), warnings };
     });
@@ -136,8 +170,10 @@ export class ManualJournalsService {
       if (cur.status !== "draft") throw new ConflictException({ error: "NOT_DRAFT", message: `A ${cur.status} journal cannot be submitted` });
       const v = await this.validate(c, scope, cur, cur.kind);
       await this.assertNotLocked(c, scope, cur.entryDate);
-      await c.query(`update manual_journals set status = 'submitted', submitted_at = now(), updated_at = now() where id = $1 and user_id = $2`, [id, scope]);
       const warnings = await manualJournalWarnings(c, scope, v.lines, cur.kind);
+      assertTrustJustified(warnings, (await this.meta(c, scope, id)).trustReason, v.attachmentKey);
+      await c.query(`update manual_journals set status = 'submitted', submitted_at = now(), updated_at = now() where id = $1 and user_id = $2`, [id, scope]);
+      await this.touchMeta(c, scope, id, user.id);
       await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}/submit`, warnings));
       return { ...(await this.get(scope, id, c)), warnings };
     });
@@ -148,6 +184,9 @@ export class ManualJournalsService {
       return await withTx(this.pool, async (c) => {
         const cur = await this.lockRow(c, scope, id);
         if (cur.status !== "submitted") throw new ConflictException({ error: "NOT_SUBMITTED", message: `A ${cur.status} journal cannot be approved` });
+        // Client money against an office account: justified, and approved by another person (maker-checker) — checked first.
+        const flagged = await manualJournalWarnings(c, scope, cur.lines ?? [], cur.kind);
+        const selfApproved = flagged.length ? await this.assertTrustChecker(c, scope, user, cur, flagged) : false;
         if (cur.createdBy === user.id && !isAccountHolder(user)) {
           throw new ForbiddenException({ error: "SAME_APPROVER", message: "The approver must differ from the person who drafted the entry" });
         }
@@ -190,7 +229,10 @@ export class ManualJournalsService {
           [id, scope, user.id, res.id],
         );
         await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}/approve`, warnings));
-        return { ...(await this.get(scope, id, c)), entryNo: res.entryNo, warnings };
+        if (selfApproved) {
+          await auditRow(c, scope, user.id, "finance_v2_manual_journal_self_approval", id, withWarnings(`/finance/v2/manual-journals/${id}/approve`, warnings));
+        }
+        return { ...(await this.get(scope, id, c)), entryNo: res.entryNo, warnings, selfApproved };
       });
     } catch (err) {
       mapLedgerError(err);
@@ -218,6 +260,34 @@ export class ManualJournalsService {
       await c.query(`update manual_journals set status = 'void', updated_at = now() where id = $1 and user_id = $2`, [id, scope]);
       await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, `/finance/v2/manual-journals/${id}/void`);
       return this.get(scope, id, c);
+    });
+  }
+
+  /**
+   * Maker-checker for a journal that sets trust against an office account. The approver may be neither the user who
+   * created it nor the one who last edited or submitted it. One-person office: when the approver is the account holder
+   * and the account has no OTHER active user who can approve, he may approve his own journal — with a written reason
+   * (an attachment alone is not enough then) — and the caller writes the self-approval audit row. Returns whether
+   * this is such a self-approval.
+   */
+  private async assertTrustChecker(c: Fv2Client, scope: number, user: AuthUser, cur: any, warnings: ManualJournalWarning[]): Promise<boolean> {
+    const m = await this.meta(c, scope, Number(cur.id));
+    assertTrustJustified(warnings, m.trustReason, cur.attachmentKey ?? null);
+    const makers = new Set<number>([Number(cur.createdBy), ...(m.lastActorId != null ? [m.lastActorId] : [])]);
+    if (!makers.has(Number(user.id))) return false;
+    if (isAccountHolder(user) && !(await anotherApprover(c, scope, Number(user.id)))) {
+      if ((m.trustReason ?? "").length < TRUST_REASON_MIN) {
+        throw new BadRequestException({
+          error: "TRUST_JOURNAL_REASON_REQUIRED",
+          message: `اعتمادك لقيدك بنفسك يتطلب كتابة السبب (${TRUST_REASON_MIN} أحرف على الأقل) · Approving your own journal needs a written reason (at least ${TRUST_REASON_MIN} characters)`,
+        });
+      }
+      return true;
+    }
+    throw new ForbiddenException({
+      error: "SAME_USER_APPROVAL",
+      message: "قيد يستخدم حساب الأمانات مقابل حساب للمكتب يعتمده مستخدم آخر غير من أنشأه أو عدّله أو أرسله (المدير المالي مثلاً)"
+        + " · A journal that sets the trust account against an office account must be approved by another user than the one who created, edited or submitted it (e.g. the finance manager)",
     });
   }
 

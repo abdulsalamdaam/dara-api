@@ -191,11 +191,15 @@ describe("fv2 finding #2: supplier bills and payments in the landlord dues, cash
     assertAllZero(await recon());
   });
 
-  it("an explicit advance (allowAdvance) is accepted and shows as a negative remaining on both sides", async () => {
-    await env.reports.createPayout(user, { ownerId: owner, amount: 100, method: "cash", transferDate: today, allowAdvance: true });
+  it("no advance under v2 (accountant, 15 Oct 2026): allowAdvance is ignored — 409 PAYOUT_EXCEEDS_DUE, nothing written", async () => {
+    const n = async () => (await env.q(`select count(*)::int as n from landlord_payouts where user_id = $1`, [U]))[0].n;
+    const before = await n();
+    const r: any = await attempt(() => env.reports.createPayout(user, { ownerId: owner, amount: 100, method: "cash", transferDate: today, allowAdvance: true }));
+    assert.deepEqual([r.status, r.body?.error, r.body?.netDue], [409, "PAYOUT_EXCEEDS_DUE", "0.00"]);
+    assert.equal(await n(), before);
     await drain(env);
-    assert.equal(await lp(), "-100.00");
-    assert.equal((await dues()).remaining, -100);
+    assert.equal(await lp(), "0.00");
+    assert.equal((await dues()).remaining, 0);
     assertAllZero(await recon());
   });
 

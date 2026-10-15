@@ -4,11 +4,11 @@
 -- real schema: 0066 references no legacy table, so the ledger itself needs
 -- none of this. A committed schema-only dump of the full legacy schema (DESIGN
 -- §2.2 point 5) is for the backfill/hook specs that read the legacy tables.
-create table if not exists roles (id serial primary key, key text not null);
+create table if not exists roles (id serial primary key, key text not null, permissions jsonb not null default '[]'::jsonb, deleted_at timestamptz);
 create table if not exists users (
   id serial primary key, email text not null, name text not null default '',
   owner_user_id integer, role_id integer, user_type text not null default 'individual',
-  deleted_at timestamptz
+  is_active boolean not null default true, deleted_at timestamptz
 );
 create table if not exists owners (
   id serial primary key, user_id integer not null, name text not null,

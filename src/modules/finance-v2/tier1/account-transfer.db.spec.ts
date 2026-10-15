@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip, withDb, type TestDb } from "../__tests__/with-db";
+import { attempt } from "../__tests__/legacy-env";
 import { withTx } from "../db";
 import { toHalalas } from "../money";
 import { riyadhToday } from "../dates";
@@ -333,9 +334,12 @@ describe("finance v2 transfer between accounts: R16 through transfer and reversa
     assert.equal(cf.internalTransfers.own, "-5115.00");
     await jq.reverse(W, holder(W), out.entryId, { reason: "undo" });
     assert.deepEqual(await r16(), ["ok", "9215.00", "9215.00", "0.00"]);
-    // Taking more than the commission out of trust is client money leaving: flagged.
-    await svc.create(W, holder(W), { fromBankAccountId: box.trust, toBankAccountId: box.bank, amount: "400" });
-    assert.deepEqual(await r16(), ["difference", "8815.00", "9115.00", "-300.00"]);
+    // Taking more than the commission out of trust would be client money leaving: refused since the accountant's decision
+    // (15 Oct 2026) — the office's money in trust is the 100 commission earned on the rent that reached trust (the 210 on
+    // the cash-box rent never entered it). R16 stays balanced.
+    const over: any = await attempt(() => svc.create(W, holder(W), { fromBankAccountId: box.trust, toBankAccountId: box.bank, amount: "400" }));
+    assert.deepEqual([over.status, over.body.error, over.body.available, over.body.required], [409, "TRUST_TRANSFER_EXCEEDS_OFFICE_MONEY", "100.00", "400.00"]);
+    assert.deepEqual(await r16(), ["ok", "9215.00", "9215.00", "0.00"]);
   });
 
   it("A → B and B → A at once both post (one lock per account, no deadlock)", async () => {

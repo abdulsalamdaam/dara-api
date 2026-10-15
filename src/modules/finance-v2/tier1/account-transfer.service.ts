@@ -80,8 +80,14 @@ export function transferAmount(v: unknown): number {
  *  - the ledger must have started (ledger_started_at), otherwise nothing posts anywhere yet;
  *  - the source balance may go negative (as every v2 payment allows; the books may lag the bank): the response
  *    and the entry carry the SOURCE_BALANCE_NEGATIVE warning instead of a refusal — EXCEPT from a trust account:
- *    client money is never overdrawn without the trust guard's consent (trust-guard.ts: 409 TRUST_INSUFFICIENT
- *    unless `allowTrustOverdraw: true` under the `confirm` policy; then the warning is TRUST_OVERDRAW_CONFIRMED).
+ *    client money is never overdrawn (trust-guard.ts: 409 TRUST_INSUFFICIENT, policy `block`);
+ *  - from a trust account to an office (non-trust) account: never more than the OFFICE's money in trust — commission
+ *    and other office money not yet transferred, as R16 computes it (client-money.ts) — 409
+ *    TRUST_TRANSFER_EXCEEDS_OFFICE_MONEY (accountant, 15 Oct 2026: the commission transfer's cap and the per-landlord
+ *    protection cannot be bypassed through this generic transfer). Trust → trust and anything → trust are unaffected;
+ *  - into trust from an office box, `ownerId` (optional) says whose client money it is (rent collected into the cash
+ *    box, now moved in): it is kept in the entry's payload (`transfer.ownerId`) and lets that landlord's money in trust
+ *    count it (client-money.ts); untagged money moved in is shared among the landlords whose money is outside.
  *
  * The cash-flow report classifies an entry whose every line is a cash account as an internal transfer (no inflow
  * or outflow); R16 counts a cash ↔ trust transfer as money moved into / out of trust (control-checks.ts).
@@ -94,7 +100,7 @@ export class AccountTransferService {
     private readonly periods: PeriodsService,
   ) {}
 
-  /** Body: { fromBankAccountId, toBankAccountId, amount, date?, note?, reference? } */
+  /** Body: { fromBankAccountId, toBankAccountId, amount, date?, note?, reference?, requestId?, ownerId? } */
   async create(scope: number, user: AuthUser, body: any): Promise<AccountTransferOut> {
     const fromId = idOf(body?.fromBankAccountId, "fromBankAccountId");
     const toId = idOf(body?.toBankAccountId, "toBankAccountId");
@@ -107,6 +113,12 @@ export class AccountTransferService {
     const reference = optText(body?.reference, "reference", 100);
     // The form's per-open id: a double click or a retry after a timeout sends the same one, and gets the first transfer back.
     const requestId = body?.requestId == null || body.requestId === "" ? null : String(body.requestId);
+    let ownerId: number | null = null;
+    if (body?.ownerId != null && body.ownerId !== "") {
+      const n = Number(body.ownerId);
+      if (!Number.isSafeInteger(n) || n <= 0) throw bad("BAD_INPUT", "ownerId must be an id");
+      ownerId = n;
+    }
     if (requestId != null && !/^[A-Za-z0-9_-]{8,64}$/.test(requestId)) throw bad("BAD_INPUT", "requestId must be 8–64 letters, digits, - or _");
 
     try {
@@ -142,6 +154,11 @@ export class AccountTransferService {
           }
         }
         if (Number(from.gl_account_id) === Number(to.gl_account_id)) throw bad("SAME_ACCOUNT", "اختر حسابين مختلفين · Choose two different accounts");
+        if (ownerId != null) {
+          if (!to.is_trust || from.is_trust) throw bad("OWNER_ONLY_INTO_TRUST", "يُحدد المؤجر فقط عند التحويل إلى حساب الأمانات من حساب آخر · A landlord is given only for a transfer into trust from another account");
+          const [ow] = (await c.query(`select id from owners where id = $1 and user_id = $2 and deleted_at is null`, [ownerId, scope])).rows;
+          if (!ow) throw new NotFoundException({ error: "OWNER_NOT_FOUND", field: "ownerId", message: "Landlord not found" });
+        }
 
         const period = await this.periods.ensurePeriod(c, scope, date);
         if (period.status === "locked") {
@@ -153,8 +170,9 @@ export class AccountTransferService {
 
         const warnings: string[] = [];
         // A trust source: the trust guard (posted balance less unposted outflows, under the trust lock) — refuses or records the confirmed overdraw.
+        // Trust → an office account: also capped at the office's money in trust (trust → trust is client money staying client money).
         const trust = await assertTrustCovers(c, scope, { lines: [{ accountId: Number(from.gl_account_id), debit: 0, credit: amount }] },
-          { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/bank-accounts/transfer" });
+          { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/bank-accounts/transfer", cap: from.is_trust && !to.is_trust ? { kind: "office" } : undefined });
         if (trust.overdrawn) warnings.push("TRUST_OVERDRAW_CONFIRMED");
         // The source's book balance after the transfer, at its date and today (a later outflow may already be booked).
         const [sb] = (await c.query(
@@ -180,7 +198,7 @@ export class AccountTransferService {
         const mjId = Number(ins.rows[0].id);
         const res = await this.journal.post(c, {
           userId: scope, entryDate: date, origin: "manual", sourceType: "manual_journal", sourceId: mjId, event: "posted", memo,
-          payload: { manualJournalId: mjId, draftedBy: user.id, transfer: { fromBankAccountId: fromId, toBankAccountId: toId, reference, note, amount: fromHalalas(amount), requestId } },
+          payload: { manualJournalId: mjId, draftedBy: user.id, transfer: { fromBankAccountId: fromId, toBankAccountId: toId, reference, note, amount: fromHalalas(amount), requestId, ...(ownerId != null ? { ownerId } : {}) } },
           warnings, createdBy: user.id,
           lines: [
             { accountId: Number(to.gl_account_id), debit: amount, credit: 0, memo: to.name_ar, bankAccountId: toId },

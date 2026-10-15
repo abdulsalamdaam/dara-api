@@ -98,8 +98,9 @@ export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promis
 /**
  * Never pay an agent landlord more than he is owed: a payout above the dues
  * report's `remaining` (net − already transferred) is refused with 409
- * PAYOUT_EXCEEDS_DUE unless the caller sends `allowAdvance: true` (an advance
- * on future rent is a real thing; it then shows as a negative remaining).
+ * PAYOUT_EXCEEDS_DUE. Every v2 caller passes `allowAdvance = false` since the
+ * accountant's decision (15 Oct 2026: no advance, «مايتعداش رصيد مستحقاته»);
+ * the parameter stays for the shape of the call.
  * The account holder and Owner mode are drawings, not dues: never refused.
  */
 export async function assertPayoutWithinDue(q: Sql, scope: number, ownerId: number, amount: number, allowAdvance: boolean, accounting: () => Promise<any>): Promise<void> {
