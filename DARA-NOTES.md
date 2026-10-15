@@ -964,8 +964,13 @@ would strand everything filed in between.
 - **A package is a quota, not a different product.** The tenant plan used to get
   a whitelist of tabs (`TENANT_TABS`) and a two-step getting-started list; both
   are gone — every plan opens the same portal, and only the limits differ
-  (tenant is 50 units / 3 seats). `mode` still shapes *content* (the dashboard
-  widget, who the contract wizard treats as the account holder), not access.
+  (since Oct 2026 units and properties are unlimited on every plan; tiers
+  differ by seats — tenant 1, basic 3, pro 6, enterprise unlimited). `mode`
+  still shapes *content* (the dashboard widget, who the contract wizard treats
+  as the account holder), not access.
+- **Billing cycles:** quarterly (default, 5% off) and yearly (15% off). Monthly
+  is withdrawn for new payments but stays a valid stored value — old rows and
+  accounts carry it; `purchasableCycle()` moves it up to quarterly on renewal.
 - **Admin approval grants the package it displays.** `PATCH
   /admin/registrations/:id/approve` 400s on an unknown plan key rather than
   falling back to `basic` — it used to accept the legacy `broker` a fresh row
