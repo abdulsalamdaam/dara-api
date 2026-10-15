@@ -162,12 +162,31 @@ export function planUserTypeError(plan: string | null | undefined): string {
 }
 
 /* ── Subscription pricing (SAR) ────────────────────────────────────────────
- * Mirrors the landing: a monthly base price, and a yearly price that applies a
- * 15% discount (round(monthly × 0.85) × 12). Enterprise is sold on request
- * (no online payment). Used to bill the Moyasar subscription invoice. */
+ * Mirrors the landing: a monthly base price, a quarterly (3-month) price with a
+ * 5% discount and a yearly price with 15% — each round(monthly × (1 − d)) × n.
+ * Enterprise is sold on request (no online payment). Used to bill the Moyasar
+ * subscription invoice. */
 
-export type BillingCycle = "monthly" | "yearly";
+export type BillingCycle = "monthly" | "quarterly" | "yearly";
+export const BILLING_CYCLES: readonly BillingCycle[] = ["monthly", "quarterly", "yearly"];
+export const QUARTERLY_DISCOUNT = 0.05;
 export const YEARLY_DISCOUNT = 0.15;
+
+/** Months one payment on `cycle` buys. */
+export const CYCLE_MONTHS: Record<BillingCycle, number> = { monthly: 1, quarterly: 3, yearly: 12 };
+const CYCLE_DISCOUNT: Record<BillingCycle, number> = { monthly: 0, quarterly: QUARTERLY_DISCOUNT, yearly: YEARLY_DISCOUNT };
+
+/** Arabic label for a cycle, as printed on invoices and emails. */
+export const CYCLE_LABEL_AR: Record<BillingCycle, string> = { monthly: "شهري", quarterly: "ربع سنوي", yearly: "سنوي" };
+
+export function isBillingCycle(v: unknown): v is BillingCycle {
+  return typeof v === "string" && (BILLING_CYCLES as readonly string[]).includes(v);
+}
+
+/** A stored/submitted cycle, normalised — anything unknown reads as monthly. */
+export function parseCycle(v: unknown): BillingCycle {
+  return isBillingCycle(v) ? v : "monthly";
+}
 
 /** Monthly base price per plan, in SAR. `null` = priced on request. */
 export const PLAN_MONTHLY_PRICE: Record<PackagePlan, number | null> = {
@@ -185,13 +204,40 @@ export const PLAN_MONTHLY_PRICE: Record<PackagePlan, number | null> = {
  */
 export const TEST_FLAT_PRICE_SAR: number | null = 1;
 
-/** Amount charged (SAR) for a plan on the given cycle, or null if on-request. */
-export function planPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
+/** Price-list amount (SAR) for a plan on a cycle, before any test override. */
+export function listPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
   const monthly = PLAN_MONTHLY_PRICE[resolvePackage(plan).key];
   if (monthly == null) return null;
+  return Math.round(monthly * (1 - CYCLE_DISCOUNT[cycle])) * CYCLE_MONTHS[cycle];
+}
+
+/** Amount charged (SAR) for a plan on the given cycle, or null if on-request. */
+export function planPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
+  const price = listPrice(plan, cycle);
+  if (price == null) return null;
   // TEST MODE: flat price for any payable plan/cycle (see TEST_FLAT_PRICE_SAR).
   if (TEST_FLAT_PRICE_SAR != null) return TEST_FLAT_PRICE_SAR;
-  return cycle === "yearly" ? Math.round(monthly * (1 - YEARLY_DISCOUNT)) * 12 : monthly;
+  return price;
+}
+
+/**
+ * Every payable plan's list price on every cycle — what the checkout renders —
+ * plus the flat test charge when TEST MODE is on, so the page can say the
+ * amount actually taken differs from the list.
+ */
+export function planPriceTable(): {
+  list: Partial<Record<PackagePlan, Record<BillingCycle, number>>>;
+  testFlatPrice: number | null;
+} {
+  const list: Partial<Record<PackagePlan, Record<BillingCycle, number>>> = {};
+  for (const key of ["tenant", "basic", "professional"] as const) {
+    list[key] = {
+      monthly: listPrice(key, "monthly")!,
+      quarterly: listPrice(key, "quarterly")!,
+      yearly: listPrice(key, "yearly")!,
+    };
+  }
+  return { list, testFlatPrice: TEST_FLAT_PRICE_SAR };
 }
 
 /** Whether a plan can be paid for online (Enterprise is contact-sales only). */

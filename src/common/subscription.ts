@@ -1,3 +1,4 @@
+import { CYCLE_MONTHS, type BillingCycle } from "./packages";
 /**
  * Subscription status derivation. The stored `subscription_status` is the
  * intent (pending_payment vs active); grace/locked are derived from the dates
@@ -82,9 +83,8 @@ export function deriveSubscription(input: {
  * reconstruct the window of a payment that was activated before the invoice
  * columns existed.
  */
-export function nextEndDate(cycle: "monthly" | "yearly", from = new Date()): Date {
+export function nextEndDate(cycle: BillingCycle, from = new Date()): Date {
   const d = new Date(from);
-  if (cycle === "yearly") d.setFullYear(d.getFullYear() + 1);
-  else d.setMonth(d.getMonth() + 1);
+  d.setMonth(d.getMonth() + CYCLE_MONTHS[cycle]);
   return d;
 }

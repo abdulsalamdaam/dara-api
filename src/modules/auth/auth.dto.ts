@@ -77,8 +77,8 @@ export class RegisterDto {
   desiredPackagePlan?: string;
 
   @IsOptional()
-  @IsIn(["monthly", "yearly"])
-  desiredBillingCycle?: "monthly" | "yearly";
+  @IsIn(["monthly", "quarterly", "yearly"])
+  desiredBillingCycle?: "monthly" | "quarterly" | "yearly";
 }
 
 export class ForgotPasswordDto {

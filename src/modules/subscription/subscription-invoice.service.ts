@@ -4,7 +4,7 @@ import { usersTable, companiesTable, subscriptionPaymentsTable } from "@dara/dat
 import type { Drizzle } from "../../database/database.module";
 import { PdfService } from "../invoice/services/pdf.service";
 import { EmailService } from "../email/email.service";
-import { resolvePackage, type BillingCycle } from "../../common/packages";
+import { resolvePackage, parseCycle, CYCLE_LABEL_AR, type BillingCycle } from "../../common/packages";
 import { daraSeller, isTaxInvoice, vatRateMatchesAmounts, SUBSCRIPTION_VAT_RATE } from "../../common/dara-seller";
 import { nextEndDate } from "../../common/subscription";
 import { AppLogService } from "../../common/logging/app-log.service";
@@ -110,8 +110,8 @@ export class SubscriptionInvoiceService {
     const { user: owner, company } = buyer;
     const seller = daraSeller();
     const pkg = resolvePackage(row.plan);
-    const cycle = (row.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
-    const cycleLabel = cycle === "yearly" ? "سنوي" : "شهري";
+    const cycle = parseCycle(row.billingCycle);
+    const cycleLabel = CYCLE_LABEL_AR[cycle];
 
     const total = Number(row.amount) || 0;
 
@@ -261,7 +261,7 @@ export class SubscriptionInvoiceService {
     // carries a number, an issue date or a period keeps them, so re-issuing
     // after a failure reproduces the same document rather than re-dating it
     // under the customer.
-    const cycle = (existing.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
+    const cycle = parseCycle(existing.billingCycle);
     const periodStart = existing.periodStart ?? opts.period?.start ?? existing.paidAt ?? existing.createdAt ?? new Date();
     const periodEnd = existing.periodEnd ?? opts.period?.end ?? nextEndDate(cycle, periodStart);
     const [row] = await db.update(subscriptionPaymentsTable)

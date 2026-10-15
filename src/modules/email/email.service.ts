@@ -3,7 +3,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { rolesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { STAFF_ROLE_KEYS } from "../../common/permissions";
-import { resolvePackage } from "../../common/packages";
+import { resolvePackage, isBillingCycle, parseCycle, CYCLE_LABEL_AR, type BillingCycle } from "../../common/packages";
 
 /**
  * Public URL of the brand logo used in the email layout. Gmail strips
@@ -445,7 +445,7 @@ export class EmailService {
     payload: {
       invoiceNumber: string;
       planLabel: string;
-      cycle: "monthly" | "yearly";
+      cycle: BillingCycle;
       amount: number;
       currencyLabel: string;
       periodEnd: Date;
@@ -456,7 +456,7 @@ export class EmailService {
     const safeName = escapeHtml(name || "");
     const number = escapeHtml(payload.invoiceNumber);
     const plan = escapeHtml(payload.planLabel);
-    const cycleLabel = payload.cycle === "yearly" ? "سنوي" : "شهري";
+    const cycleLabel = CYCLE_LABEL_AR[parseCycle(payload.cycle)];
     const amount = `${payload.amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${escapeHtml(payload.currencyLabel)}`;
     const until = payload.periodEnd.toLocaleDateString("en-GB").replace(/\//g, "/");
     const html = layout(`
@@ -686,8 +686,7 @@ export class EmailService {
     const planLabel = payload.desiredPackagePlan
       ? `${resolvePackage(payload.desiredPackagePlan).labelAr} (${payload.desiredPackagePlan})`
       : "لم يختر باقة";
-    const cycleLabel = payload.desiredBillingCycle === "yearly" ? "سنوي"
-      : payload.desiredBillingCycle === "monthly" ? "شهري" : "—";
+    const cycleLabel = isBillingCycle(payload.desiredBillingCycle) ? CYCLE_LABEL_AR[payload.desiredBillingCycle] : "—";
     const when = riyadhTimestamp(payload.createdAt);
     const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/admin`;
     const html = layout(`

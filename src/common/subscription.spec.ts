@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { deriveSubscription, GRACE_DAYS } from "./subscription";
+import { deriveSubscription, GRACE_DAYS, nextEndDate } from "./subscription";
 
 const DAY = 86_400_000;
 const start = new Date("2026-09-01T00:00:00Z");
@@ -62,5 +62,14 @@ describe("deriveSubscription — a paid window keeps its grace", () => {
   it("treats an omitted isTrial as a paid window", () => {
     const s = deriveSubscription({ storedStatus: "active", subscriptionEndsAt: endsAt, now: at(1) });
     assert.equal(s.status, "grace");
+  });
+});
+
+describe("nextEndDate", () => {
+  it("adds 1, 3 or 12 months by cycle", () => {
+    const from = new Date("2026-01-15T00:00:00Z");
+    assert.equal(nextEndDate("monthly", from).toISOString().slice(0, 10), "2026-02-15");
+    assert.equal(nextEndDate("quarterly", from).toISOString().slice(0, 10), "2026-04-15");
+    assert.equal(nextEndDate("yearly", from).toISOString().slice(0, 10), "2027-01-15");
   });
 });

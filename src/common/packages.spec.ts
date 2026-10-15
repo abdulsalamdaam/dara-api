@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { planAllowedForUserType, planRequiredUserType, PACKAGES } from "./packages";
+import { planAllowedForUserType, planRequiredUserType, PACKAGES, listPrice, parseCycle, planPriceTable } from "./packages";
 
 /**
  * The tenant plan is sold to corporate tenants only. The check has to fail
@@ -35,5 +35,24 @@ describe("planAllowedForUserType", () => {
   it("restricts exactly one plan today — a new one must be a deliberate change", () => {
     const restricted = Object.values(PACKAGES).filter(p => p.requiresUserType).map(p => p.key);
     assert.deepEqual(restricted, ["tenant"]);
+  });
+});
+
+describe("billing cycles", () => {
+  it("prices a quarter at 3 months less 5%, a year at 12 less 15%", () => {
+    assert.equal(listPrice("basic", "monthly"), 250);
+    assert.equal(listPrice("basic", "quarterly"), Math.round(250 * 0.95) * 3);
+    assert.equal(listPrice("basic", "yearly"), Math.round(250 * 0.85) * 12);
+    assert.equal(listPrice("enterprise", "quarterly"), null);
+  });
+  it("normalises unknown cycles to monthly", () => {
+    assert.equal(parseCycle("quarterly"), "quarterly");
+    assert.equal(parseCycle("weekly"), "monthly");
+    assert.equal(parseCycle(null), "monthly");
+  });
+  it("lists every payable plan on all three cycles", () => {
+    const { list } = planPriceTable();
+    assert.deepEqual(Object.keys(list).sort(), ["basic", "professional", "tenant"]);
+    assert.equal(list.professional?.quarterly, listPrice("professional", "quarterly"));
   });
 });

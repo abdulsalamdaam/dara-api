@@ -7,7 +7,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { resolvePackage, packageMode, planPrice, isPayablePlan, type BillingCycle } from "../../common/packages";
+import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, type BillingCycle } from "../../common/packages";
 import { packageUsage } from "../../common/quota";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
@@ -76,7 +76,7 @@ class PackageController {
     const endsAt = owner?.subscriptionEndsAt ?? null;
     const daysRemaining = endsAt ? Math.ceil((new Date(endsAt).getTime() - Date.now()) / 86_400_000) : null;
 
-    const cycle = (owner?.billingCycle === "yearly" ? "yearly" : "monthly") as BillingCycle;
+    const cycle = parseCycle(owner?.billingCycle);
     const sub = deriveSubscription({ storedStatus: owner?.subscriptionStatus, subscriptionEndsAt: endsAt, isTrial: owner?.subscriptionIsTrial });
     const trial = trialView(!!owner?.subscriptionIsTrial, endsAt);
     const amountDue = planPrice(owner?.packagePlan, cycle);
