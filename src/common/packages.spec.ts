@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable, ejarLookupQuota } from "./packages";
+import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable, ejarLookupQuota, chargedVatRate } from "./packages";
 
 /**
  * The tenant plan is sold to corporate tenants only. The check has to fail
@@ -81,6 +81,23 @@ describe("purchasable cycles and quotas", () => {
     for (const def of Object.values(PACKAGES)) {
       assert.equal(def.maxUnits, UNLIMITED, def.key);
       assert.equal(def.maxProperties, UNLIMITED, def.key);
+    }
+  });
+});
+
+describe("VAT on subscriptions", () => {
+  it("adds VAT on top of the list price only once Dara is VAT-registered", () => {
+    const before = process.env.DARA_SELLER_VAT;
+    try {
+      delete process.env.DARA_SELLER_VAT;
+      assert.equal(chargedVatRate(), null, "not registered → no VAT charged");
+      assert.equal(planPriceTable().vatRate, null);
+      process.env.DARA_SELLER_VAT = "300000000000003";
+      assert.equal(chargedVatRate(), 15);
+      assert.equal(planPriceTable().vatRate, 15);
+      assert.equal(planPriceTable().list.basic?.quarterly, 1260, "the list stays VAT-exclusive");
+    } finally {
+      if (before === undefined) delete process.env.DARA_SELLER_VAT; else process.env.DARA_SELLER_VAT = before;
     }
   });
 });

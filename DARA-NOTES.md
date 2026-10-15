@@ -971,7 +971,10 @@ would strand everything filed in between.
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
   yearly list (tenant 1,000 · basic 4,200 · pro 5,400): six months costs the
   yearly +10% annualised, three months +20% (basic: 4,200 / 2,310 / 1,260 per
-  payment). Monthly is withdrawn for new payments but stays a valid stored
+  payment). List prices EXCLUDE VAT: `planPrice()` adds 15% on top only when
+  `DARA_SELLER_VAT` is set (the same `isTaxInvoice` rule as the invoice, which
+  extracts it back out); unregistered, no VAT is charged at all. Monthly is
+  withdrawn for new payments but stays a valid stored
   value — old rows and accounts carry it; `purchasableCycle()` moves it up to
   quarterly on renewal.
 - **Ejar lookup quota per plan** (`PLAN_EJAR_LOOKUPS_PER_YEAR`): tenant 30,

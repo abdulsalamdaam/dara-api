@@ -7,6 +7,8 @@
  * `users.user_type` and only drives Settings visibility — it is NOT a plan.
  */
 
+import { daraSeller, isTaxInvoice, SUBSCRIPTION_VAT_RATE } from "./dara-seller";
+
 export type PackagePlan = "tenant" | "basic" | "advanced" | "professional" | "enterprise";
 
 /** Two product modes: the tenant self-tracker vs the full landlord portal. */
@@ -241,20 +243,36 @@ export function ejarLookupQuota(plan: string | null | undefined, cycle: BillingC
  */
 export const TEST_FLAT_PRICE_SAR: number | null = 1;
 
-/** Price-list amount (SAR) for a plan on a cycle, before any test override. */
+/** Price-list amount (SAR, VAT EXCLUDED) for a plan on a cycle, before any test override. */
 export function listPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
   const yearly = PLAN_YEARLY_PRICE[resolvePackage(plan).key];
   if (yearly == null) return null;
   return Math.round((yearly * (1 + CYCLE_UPLIFT[cycle]) * CYCLE_MONTHS[cycle]) / 12);
 }
 
-/** Amount charged (SAR) for a plan on the given cycle, or null if on-request. */
+/**
+ * VAT added on top of the list price, in percent — or null while Dara is not
+ * VAT-registered (no `DARA_SELLER_VAT`), when no VAT may be charged at all.
+ * Same predicate as the invoice (`isTaxInvoice`), so the amount charged and
+ * the document issued for it always agree.
+ */
+export function chargedVatRate(): number | null {
+  return isTaxInvoice(daraSeller()) ? SUBSCRIPTION_VAT_RATE : null;
+}
+
+/**
+ * Amount charged (SAR) for a plan on the given cycle, or null if on-request.
+ * List prices exclude VAT; the charge adds it (to the halala). The invoice
+ * then extracts the same VAT back out of the charged total, landing on the
+ * list price as its subtotal.
+ */
 export function planPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
   const price = listPrice(plan, cycle);
   if (price == null) return null;
   // TEST MODE: flat price for any payable plan/cycle (see TEST_FLAT_PRICE_SAR).
   if (TEST_FLAT_PRICE_SAR != null) return TEST_FLAT_PRICE_SAR;
-  return price;
+  const vat = chargedVatRate();
+  return vat == null ? price : Math.round(price * (100 + vat)) / 100;
 }
 
 /**
@@ -265,6 +283,8 @@ export function planPrice(plan: string | null | undefined, cycle: BillingCycle):
 export function planPriceTable(): {
   list: Partial<Record<PackagePlan, Record<BillingCycle, number>>>;
   testFlatPrice: number | null;
+  /** VAT % added on top of `list` at payment; null = none charged. */
+  vatRate: number | null;
 } {
   const list: Partial<Record<PackagePlan, Record<BillingCycle, number>>> = {};
   for (const key of ["tenant", "basic", "professional"] as const) {
@@ -276,7 +296,7 @@ export function planPriceTable(): {
       yearly: listPrice(key, "yearly")!,
     };
   }
-  return { list, testFlatPrice: TEST_FLAT_PRICE_SAR };
+  return { list, testFlatPrice: TEST_FLAT_PRICE_SAR, vatRate: chargedVatRate() };
 }
 
 /** Whether a plan can be paid for online (Enterprise is contact-sales only). */
