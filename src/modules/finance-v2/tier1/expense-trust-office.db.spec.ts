@@ -57,6 +57,17 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
       const office = Number((await env.q(`select b.id from bank_accounts b join accounts a on a.id = b.gl_account_id where b.user_id = $1 and a.code = '1111'`, [U]))[0].id);
       await new AccountTransferService(env.t.pool as any, new JournalRepository(periods), periods).create(U, user as any, { fromBankAccountId: office, toBankAccountId: trustId, amount: "10000" });
     }
+    // The agent landlord's own money in trust (his rent, collected into trust): a landlord's expense or bill paid from trust
+    // takes only HIS money there (trust-guard.ts, LANDLORD_TRUST_INSUFFICIENT) — the office's money above is not his.
+    {
+      const setup = { ...userOf(U), permissions: ["contracts.write", "payments.write", "invoices.write"] } as any;
+      const c: any = await env.contracts.create(setup, { unitIds: [s.unitA1], tenantId: s.tenant, tenantName: "Synthetic Tenant",
+        startDate: today, endDate: `${Number(today.slice(0, 4)) + 1}-12-31`, monthlyRent: "5000", paymentFrequency: "monthly", vatEnabled: false });
+      const [p] = await env.q(`select id from payments where contract_id = $1 and deleted_at is null order by due_date limit 1`, [c.id]);
+      await env.payments.addCollection(setup, String(p.id), { amount: "5000", collectedDate: today, method: "bank_transfer" });
+      await env.recognizer.runAccount(U);
+      await drain(env);
+    }
   });
 
   after(async () => {

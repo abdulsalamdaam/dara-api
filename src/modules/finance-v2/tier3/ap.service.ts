@@ -588,8 +588,15 @@ export class ApService {
         await c.query(`insert into supplier_payment_allocations (payment_id, bill_id, user_id, amount) values ($1, $2, $3, $4)`, [id, a.billId, scope, fromHalalas(a.amount)]);
       }
       const evs = await supplierPaymentEvents(sqlOf(c as any), scope, (await loadSettings(sqlOf(c as any), scope))!, id);
-      // A landlord's bill paid from trust: never more than the trust account holds, unless confirmed (trust-guard.ts).
-      await assertTrustCovers(c, scope, { events: evs?.events ?? [] }, { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/supplier-payments" });
+      // A landlord's bill paid from trust: never more than the trust account holds (trust-guard.ts), nor more than that
+      // landlord's own money in trust, what is held for his open bills included (409 LANDLORD_TRUST_INSUFFICIENT).
+      const billsBy = new Map<number, number>();
+      for (const a of allocs) {
+        const b = byId.get(a.billId!);
+        if (b?.charge_to === "landlord" && b.owner_id != null) billsBy.set(Number(b.owner_id), (billsBy.get(Number(b.owner_id)) ?? 0) + a.amount);
+      }
+      await assertTrustCovers(c, scope, { events: evs?.events ?? [] },
+        { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/supplier-payments", cap: { kind: "bills", byOwner: billsBy } });
       await this.emitAll(c, scope, evs);
       await auditRow(c, scope, user.id, "finance_v2_supplier_payment", id, "/finance/v2/supplier-payments");
       return this.getPayment(scope, id, c);

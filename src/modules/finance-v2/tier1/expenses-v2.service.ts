@@ -234,7 +234,8 @@ export class ExpensesV2Service {
 
   /**
    * reversal:rev:<prev> (only when that key was ever queued) then rev:<current>. Before either is queued, the trust guard:
-   * a landlord's expense paid from trust takes no more than the trust account holds (an edit counts only its increase).
+   * a landlord's expense paid from trust takes no more than the trust account holds (an edit counts only its increase),
+   * nor more than that landlord's own money in trust (409 LANDLORD_TRUST_INSUFFICIENT).
    */
   private async enqueue(c: Fv2Client, scope: number, id: number, prevRevision: number | null, guard: { allow?: unknown; actorId: number; source: string }): Promise<void> {
     const q = sqlOf(c as any);
@@ -247,7 +248,8 @@ export class ExpensesV2Service {
     }
     const e = await expenseEvent(q, scope, s, id);
     if (e) events.push(e);
-    await assertTrustCovers(c, scope, { events }, guard);
+    // …and no more than the landlord's own money in trust (another landlord's money is not his; an edit nets its reversal).
+    await assertTrustCovers(c, scope, { events }, { ...guard, cap: { kind: "landlords" } });
     for (const ev of events) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, ev);
   }
 

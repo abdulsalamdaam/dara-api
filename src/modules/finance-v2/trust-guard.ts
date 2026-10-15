@@ -8,6 +8,7 @@ import { fromHalalas, toHalalas } from "./money";
 import { auditRow } from "./audit";
 import { clientMoneyPosition, ownerPosition } from "./client-money";
 import { CLIENT_OR_BOX_KEYS } from "./manual-journal-warnings";
+import { h } from "./reports/common";
 
 /**
  * The trust overdraw guard (حساب الأمانات, accountant 15 Oct 2026): a payment OUT of a trust
@@ -297,15 +298,69 @@ async function pendingCaps(c: Fv2Client, scope: number, rows: PendingRow[], trus
 /** The far end of time: the guard reads every posted entry. */
 const ALL = "9999-12-31";
 
-export type TrustCap = { kind: "landlord"; ownerId: number } | { kind: "office" };
+/**
+ *  - `landlord`: a payout to that landlord — the whole outflow against his payable;
+ *  - `landlords`: every landlord whose 2121 the request's own events take out of trust (a landlord's expense paid from
+ *    trust; an edit nets its reversal) — each against his own payable;
+ *  - `bills`: a supplier payment from trust for landlords' bills — each landlord's part against his money in trust
+ *    including what is held for his open bills (his 2121 was charged when the bill was approved);
+ *  - `office`: trust → an office account.
+ */
+export type TrustCap =
+  | { kind: "landlord"; ownerId: number }
+  | { kind: "landlords" }
+  | { kind: "bills"; byOwner: Map<number, number> }
+  | { kind: "office" };
 
 /** What the cap allows now (halalas, ≥ 0), or null when the client-money position does not apply. */
-async function capAvailable(c: Fv2Client, scope: number, cap: TrustCap, snap: Snapshot, trust: Set<number>): Promise<number | null> {
+async function capAvailable(c: Fv2Client, scope: number, cap: { kind: "landlord"; ownerId: number } | { kind: "office" }, snap: Snapshot, trust: Set<number>): Promise<number | null> {
   const pos = await clientMoneyPosition(c, scope, ALL);
   if (!pos.applicable) return null;
   const pend = await pendingCaps(c, scope, snap.rows, trust);
   const v = cap.kind === "landlord" ? ownerPosition(pos, cap.ownerId).payable + (pend.byOwner.get(cap.ownerId) ?? 0) : pos.officeInTrust + pend.office;
   return Math.max(0, v);
+}
+
+/** Per landlord: what the request takes out of his money in trust (halalas > 0) and what he has there now. */
+async function perOwnerCaps(
+  c: Fv2Client, scope: number, cap: { kind: "landlords" } | { kind: "bills"; byOwner: Map<number, number> },
+  own: { events?: LedgerEvent[] }, snap: Snapshot, trust: Set<number>,
+): Promise<Array<{ ownerId: number; available: number; required: number }> | null> {
+  const pos = await clientMoneyPosition(c, scope, ALL);
+  if (!pos.applicable) return null;
+  const pend = await pendingCaps(c, scope, snap.rows, trust);
+  const out: Array<{ ownerId: number; available: number; required: number }> = [];
+  if (cap.kind === "landlords") {
+    // The request's own events, as the queued rows are read (they post in this same transaction's wake: sure).
+    const rows: PendingRow[] = (own.events ?? []).map((e) => ({ st: e.sourceType, sid: Number(e.sourceId), ev: e.event, sure: true, payload: e.payload }));
+    const mine = (await pendingCaps(c, scope, rows, trust)).byOwner;
+    for (const [o, d] of mine) {
+      if (d >= 0) continue;
+      out.push({ ownerId: o, required: -d, available: Math.max(0, ownerPosition(pos, o).payable + (pend.byOwner.get(o) ?? 0)) });
+    }
+    return out;
+  }
+  // Bills: his 2121 was charged on approval, so his money held for them is his position plus his open bills. The open
+  // amounts are read after the request's allocations were written (they are not open any more): add them back.
+  const open = new Map<number, number>();
+  for (const b of pos.bills) open.set(Number(b.owner_id), (open.get(Number(b.owner_id)) ?? 0) + h(b.open));
+  for (const [o, required] of cap.byOwner) {
+    if (required <= 0) continue;
+    const p = ownerPosition(pos, o);
+    out.push({ ownerId: o, required, available: Math.max(0, p.inTrust - p.dep + (open.get(o) ?? 0) + required + (pend.byOwner.get(o) ?? 0)) });
+  }
+  return out;
+}
+
+function landlordShort(ownerId: number, available: number, required: number): ConflictException {
+  const a = fromHalalas(available);
+  const r = fromHalalas(required);
+  return new ConflictException({
+    error: "LANDLORD_TRUST_INSUFFICIENT",
+    message: `رصيد المؤجر في حساب الأمانات لا يكفي: المتاح ${a} والمطلوب ${r} — حوّل أمواله المحصّلة خارج حساب الأمانات (الصندوق أو حساب المكتب) إلى حساب الأمانات أولاً`
+      + ` · The landlord's balance in the trust account is not enough: available ${a}, required ${r} — transfer his money collected outside trust (cash box or office account) into the trust account first`,
+    available: a, required: r, ownerId,
+  });
 }
 
 export interface TrustCheck {
@@ -364,7 +419,7 @@ export async function assertTrustCovers(
     });
   }
   // The landlord's / the office's own money in trust: no confirmation path, under either policy.
-  if (opts.cap) await assertCap(c, scope, opts.cap, need, snap, trust);
+  if (opts.cap) await assertCap(c, scope, opts.cap, need, snap, trust, own);
   if (!shortfalls.length) return none;
   if (opts.actorId != null) {
     await auditRow(c, scope, opts.actorId, "finance_v2_trust_overdraw", shortfalls.map((s) => `${s.glCode}:${s.available}/${s.required}`).join(","),
@@ -373,20 +428,19 @@ export async function assertTrustCovers(
   return { overdrawn: true, shortfalls };
 }
 
-async function assertCap(c: Fv2Client, scope: number, cap: TrustCap, need: Map<number, number>, snap: Snapshot, trust: Set<number>): Promise<void> {
+async function assertCap(c: Fv2Client, scope: number, cap: TrustCap, need: Map<number, number>, snap: Snapshot, trust: Set<number>, own: { events?: LedgerEvent[] }): Promise<void> {
+  if (cap.kind === "landlords" || cap.kind === "bills") {
+    for (const x of (await perOwnerCaps(c, scope, cap, own, snap, trust)) ?? []) {
+      if (x.required > x.available) throw landlordShort(x.ownerId, x.available, x.required);
+    }
+    return;
+  }
   const required = [...need.values()].reduce((a, v) => a + v, 0);
   const avail = await capAvailable(c, scope, cap, snap, trust);
   if (avail == null || required <= avail) return;
   const a = fromHalalas(avail);
   const r = fromHalalas(required);
-  if (cap.kind === "landlord") {
-    throw new ConflictException({
-      error: "LANDLORD_TRUST_INSUFFICIENT",
-      message: `رصيد المؤجر في حساب الأمانات لا يكفي: المتاح ${a} والمطلوب ${r} — حوّل أمواله المحصّلة خارج حساب الأمانات (الصندوق أو حساب المكتب) إلى حساب الأمانات أولاً`
-        + ` · The landlord's balance in the trust account is not enough: available ${a}, required ${r} — transfer his money collected outside trust (cash box or office account) into the trust account first`,
-      available: a, required: r, ownerId: cap.ownerId,
-    });
-  }
+  if (cap.kind === "landlord") throw landlordShort(cap.ownerId, avail, required);
   throw new ConflictException({
     error: "TRUST_TRANSFER_EXCEEDS_OFFICE_MONEY",
     message: `لا يمكن تحويل أكثر من أموال المكتب في حساب الأمانات (العمولات والمبالغ المستحقة للمكتب غير المحوّلة): المتاح ${a} والمطلوب ${r}`
