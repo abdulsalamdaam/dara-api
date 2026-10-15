@@ -218,7 +218,12 @@ export async function clientMoneyPosition(q: Q, scope: number, asOf: string, mod
     });
   }
   // The money moved into trust covers outside money: first what was tagged with a landlord, then the rest in proportion.
-  let pool = movedIntoTrust;
+  // R16's `movedIntoTrust` is capped at the NET shortfall, where one landlord's money outside is offset by another landlord
+  // paid from the cash box (the office then owes itself that money back from trust — R16 counts the excess moved in as
+  // office money instead). Per landlord no such netting: what was moved in covers each landlord's own money outside, up to
+  // what was moved in.
+  const outsideTotal = [...byOwner.values()].reduce((t, p) => t + p.outsideNet, 0);
+  let pool = Math.max(movedIntoTrust, Math.min(transfersIn, outsideTotal));
   for (const [o, p] of byOwner) {
     const take = Math.max(0, Math.min(taggedIn.get(o) ?? 0, p.outsideNet, pool));
     p.movedIn = take;
@@ -226,8 +231,21 @@ export async function clientMoneyPosition(q: Q, scope: number, asOf: string, mod
   }
   const rest = [...byOwner.values()].reduce((t, p) => t + (p.outsideNet - p.movedIn), 0);
   if (pool > 0 && rest > 0) {
-    const share = Math.min(pool, rest);
-    for (const p of byOwner.values()) p.movedIn += Math.floor((share * (p.outsideNet - p.movedIn)) / rest); // floored: never more than moved in
+    // In proportion, to the halala (largest remainder: Σ shares = what was moved in, no 0.01 lost or created). BigInt: the
+    // products of two halala amounts pass 2^53 from about 95,000 SAR each.
+    const share = BigInt(Math.min(pool, rest));
+    const R = BigInt(rest);
+    const parts = [...byOwner.entries()].map(([o, p]) => {
+      const x = share * BigInt(p.outsideNet - p.movedIn);
+      return { o, p, base: x / R, rem: x % R };
+    });
+    let left = share - parts.reduce((t, x) => t + x.base, 0n);
+    parts.sort((a, b) => (a.rem === b.rem ? a.o - b.o : a.rem > b.rem ? -1 : 1));
+    for (const x of parts) {
+      const extra = left > 0n && x.rem > 0n ? 1n : 0n;
+      left -= extra;
+      x.p.movedIn += Number(x.base + extra);
+    }
   }
   for (const p of byOwner.values()) {
     p.inTrust = p.lp + p.dep - p.transit - p.outsideNet + p.movedIn;
