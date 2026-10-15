@@ -19,6 +19,7 @@ import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrid
 import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { commissionZatcaDocV2 } from "../overrides/commission-approve";
 import { applyDispositions } from "../overrides/terminate";
+import { guardTerminateTrust } from "../overrides/terminate-trust";
 import { assertPayoutWithinDue } from "../overrides/landlord-dues";
 import { createPayoutV2, type PayoutV2Result } from "../overrides/landlord-payout";
 import { fromHalalas } from "../money";
@@ -689,6 +690,8 @@ export class FinanceV2Hooks {
    */
   async terminateDispositions(ctx: HookCtx, contractId: number, body: any, user: any): Promise<void> {
     if (!ctx.fv2) return;
+    // The refunds this terminate will pay out of trust: 409 TRUST_INSUFFICIENT before anything is written (overrides/terminate-trust.ts).
+    await withTx(this.pool, (c) => guardTerminateTrust(c, ctx.userId, contractId, body, Number(user?.id ?? ctx.userId)));
     const events = await withTx(this.pool, async (c) => {
       const q = sqlOf(c as any);
       const res = await applyDispositions(q, ctx.userId, contractId, body, { id: Number(user?.id ?? ctx.userId), canApprove: capabilities(user ?? {}).includes("approve") });

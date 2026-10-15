@@ -8,6 +8,7 @@ import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { auditRow, isoDate, mapLedgerError } from "../audit";
 import { LOCK_KEYS } from "../lock-keys";
+import { assertTrustCovers } from "../trust-guard";
 
 export interface AccountTransferOut {
   manualJournalId: number;
@@ -78,7 +79,9 @@ export function transferAmount(v: unknown): number {
  *  - period: open, or closed only for a `settings` holder (as a manual journal's approval); never locked;
  *  - the ledger must have started (ledger_started_at), otherwise nothing posts anywhere yet;
  *  - the source balance may go negative (as every v2 payment allows; the books may lag the bank): the response
- *    and the entry carry the SOURCE_BALANCE_NEGATIVE warning instead of a refusal.
+ *    and the entry carry the SOURCE_BALANCE_NEGATIVE warning instead of a refusal — EXCEPT from a trust account:
+ *    client money is never overdrawn without the trust guard's consent (trust-guard.ts: 409 TRUST_INSUFFICIENT
+ *    unless `allowTrustOverdraw: true` under the `confirm` policy; then the warning is TRUST_OVERDRAW_CONFIRMED).
  *
  * The cash-flow report classifies an entry whose every line is a cash account as an internal transfer (no inflow
  * or outflow); R16 counts a cash ↔ trust transfer as money moved into / out of trust (control-checks.ts).
@@ -149,6 +152,10 @@ export class AccountTransferService {
         }
 
         const warnings: string[] = [];
+        // A trust source: the trust guard (posted balance less unposted outflows, under the trust lock) — refuses or records the confirmed overdraw.
+        const trust = await assertTrustCovers(c, scope, { lines: [{ accountId: Number(from.gl_account_id), debit: 0, credit: amount }] },
+          { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/bank-accounts/transfer" });
+        if (trust.overdrawn) warnings.push("TRUST_OVERDRAW_CONFIRMED");
         // The source's book balance after the transfer, at its date and today (a later outflow may already be booked).
         const [sb] = (await c.query(
           `select coalesce(sum(debit - credit) filter (where entry_date <= $3::date), 0)::text as at_date, coalesce(sum(debit - credit), 0)::text as at_today

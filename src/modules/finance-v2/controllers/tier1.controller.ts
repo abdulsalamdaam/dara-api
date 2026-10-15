@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, NotFoundException, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { JwtAuthGuard } from "../../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../../common/scope";
 import { FinanceV2Guard, RequireCapability, type Fv2Request } from "../finance-v2.guard";
@@ -7,6 +7,8 @@ import { AccountTransferService } from "../tier1/account-transfer.service";
 import { ExpensesV2Service } from "../tier1/expenses-v2.service";
 import { TenantCreditsService } from "../tier1/tenant-credits.service";
 import { LandlordPayoutsService } from "../tier1/landlord-payouts.service";
+import { FV2_POOL, type Fv2Pool } from "../db";
+import { trustAvailability } from "../trust-guard";
 
 const idOf = (v: string): number => {
   const n = Number(v);
@@ -28,6 +30,7 @@ export class FinanceV2Tier1Controller {
     private readonly credits: TenantCreditsService,
     private readonly transfers: AccountTransferService,
     private readonly payouts: LandlordPayoutsService,
+    @Inject(FV2_POOL) private readonly pool: Fv2Pool,
   ) {}
 
   // ── Landlord payout (تحويل للمؤجر): the payment voucher (سند صرف), accountant 15 Oct 2026 ──
@@ -53,6 +56,16 @@ export class FinanceV2Tier1Controller {
   @RequireCapability("view")
   validateIban(@Query("iban") iban?: string) {
     return this.banks.validateIban(iban);
+  }
+
+  /**
+   * What each trust (client money) account can pay out now — posted balance less the outflows still waiting to post —
+   * and the overdraw policy (`confirm` | `block`), for the money dialogs' trust warning (trust-guard.ts).
+   */
+  @Get("bank-accounts/trust-available")
+  @RequireCapability("view")
+  trustAvailable(@Req() req: Fv2Request) {
+    return trustAvailability(this.pool, scopeId(req.user!));
   }
 
   /**

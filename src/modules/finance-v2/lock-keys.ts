@@ -41,6 +41,8 @@ export const LOCK_KEYS = {
   ACCOUNT_TRANSFER: -172,
   /** Landlord payout (v2 path): the request-id replay, the net-due check, the insert and its PV- number, serialised per account. */
   LANDLORD_PAYOUT: -173,
+  /** Any outflow from a trust (client money) account: the trust-balance check and the write, serialised per account across every outflow kind (trust-guard.ts). Always taken LAST. */
+  TRUST_OUTFLOW: -174,
   /** The installments screen's rent receipt (accountant #3): the coverage check and the RR- insert, serialised per account. */
   INSTALLMENT_RR: -190,
 } as const;

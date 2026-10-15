@@ -6,6 +6,7 @@ import { LedgerEmitter } from "./ledger-emitter.service";
 import { sqlOf, type Sql } from "./hooks/sql";
 import { auditRow, isoDate, requireReason } from "./audit";
 import { LOCK_KEYS } from "./lock-keys";
+import { assertTrustCovers } from "./trust-guard";
 import { fromHalalas, toHalalas } from "./money";
 import { riyadhToday, lastDayOfMonth, parseIsoDate } from "./dates";
 import { nextDocNumber } from "./commission";
@@ -526,7 +527,10 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
          values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
         [scope, number, date, fromHalalas(amount), fromId, toId, memo, actor.id]);
       const id = Number(ins.rows[0].id);
-      for (const e of await transferEvents(q, scope, id)) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
+      const evs = await transferEvents(q, scope, id);
+      // Commission leaves trust: never more than the trust account holds (another client's money), unless confirmed.
+      await assertTrustCovers(c, scope, { events: evs }, { allow: body?.allowTrustOverdraw, actorId: actor.id, source: "/finance/v2/commission-transfers" });
+      for (const e of evs) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
       await auditRow(c, scope, actor.id, "finance_v2_commission_transfer", id, "/finance/v2/commission-transfers");
       return id;
     });

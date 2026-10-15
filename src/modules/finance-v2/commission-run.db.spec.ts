@@ -291,7 +291,10 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
 
     const over: any = await attempt(() => svc.createTransfer(M, { id: M }, { amount: "999999" }));
     assert.deepEqual([over.status, over.body.error], [409, "OVER_UNSENT_COMMISSION"]);
-    const tr: any = await svc.createTransfer(M, { id: M }, {});
+    // This fixture's trust account (a second one, 1117) holds nothing: the commission cannot leave it unconfirmed (trust-guard.ts).
+    const short: any = await attempt(() => svc.createTransfer(M, { id: M }, {}));
+    assert.deepEqual([short.status, short.body.error, short.body.available, short.body.required], [409, "TRUST_INSUFFICIENT", "0.00", t0.unsent]);
+    const tr: any = await svc.createTransfer(M, { id: M }, { allowTrustOverdraw: true });
     assert.equal(tr.amount, t0.unsent);
     await drain(env, M);
     const lines = await env.q(

@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "../db";
-import { LedgerEmitter } from "../ledger-emitter.service";
+import { LedgerEmitter, type LedgerEvent } from "../ledger-emitter.service";
+import { assertTrustCovers } from "../trust-guard";
 import { auditRow, isoDate } from "../audit";
 import { fromHalalas, toHalalas } from "../money";
 import { sqlOf } from "../hooks/sql";
@@ -164,7 +165,7 @@ export class ExpensesV2Service {
         [id, scope, n.expenseOn, fromHalalas(n.gross), fromHalalas(n.net), n.rate, fromHalalas(n.vat), n.vatCategory, n.vatRecoverable,
           n.supplierName, n.supplierVatNumber, n.supplierInvoiceNo, n.supplierInvoiceDate, n.attachmentKey, n.bankAccountId, n.chargeTo, n.glAccountId, user.id],
       );
-      await this.enqueue(c, scope, id, null);
+      await this.enqueue(c, scope, id, null, { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/expenses" });
       await auditRow(c, scope, user.id, "expense", id, "/finance/v2/expenses");
       return this.get(scope, id, c);
     });
@@ -223,7 +224,7 @@ export class ExpensesV2Service {
         [id, scope, rev + 1, n.expenseOn, fromHalalas(n.gross), fromHalalas(n.net), n.rate, fromHalalas(n.vat), n.vatCategory, n.vatRecoverable,
           n.supplierName, n.supplierVatNumber, n.supplierInvoiceNo, n.supplierInvoiceDate, n.attachmentKey, n.bankAccountId, n.chargeTo, n.glAccountId, user.id],
       );
-      await this.enqueue(c, scope, id, rev);
+      await this.enqueue(c, scope, id, rev, { allow: body?.allowTrustOverdraw, actorId: user.id, source: `/finance/v2/expenses/${id}` });
       await auditRow(c, scope, user.id, "expense", id, `/finance/v2/expenses/${id}`, "PATCH");
       return this.get(scope, id, c);
     });
@@ -231,17 +232,23 @@ export class ExpensesV2Service {
     return out;
   }
 
-  /** reversal:rev:<prev> (only when that key was ever queued) then rev:<current>. */
-  private async enqueue(c: Fv2Client, scope: number, id: number, prevRevision: number | null): Promise<void> {
+  /**
+   * reversal:rev:<prev> (only when that key was ever queued) then rev:<current>. Before either is queued, the trust guard:
+   * a landlord's expense paid from trust takes no more than the trust account holds (an edit counts only its increase).
+   */
+  private async enqueue(c: Fv2Client, scope: number, id: number, prevRevision: number | null, guard: { allow?: unknown; actorId: number; source: string }): Promise<void> {
     const q = sqlOf(c as any);
     const s = await loadSettings(q, scope);
     if (!s) return;
+    const events: LedgerEvent[] = [];
     if (prevRevision != null) {
       const [o] = await q.rows(`select 1 from ledger_outbox where user_id = $1 and source_type = 'expense' and source_id = $2 and event = $3`, [scope, id, `rev:${prevRevision}`]);
-      if (o) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, reversalEvent("expense", id, `rev:${prevRevision}`, today(), { reason: "edited" }));
+      if (o) events.push(reversalEvent("expense", id, `rev:${prevRevision}`, today(), { reason: "edited" }));
     }
     const e = await expenseEvent(q, scope, s, id);
-    if (e) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
+    if (e) events.push(e);
+    await assertTrustCovers(c, scope, { events }, guard);
+    for (const ev of events) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, ev);
   }
 
   private async assertPeriodNotLocked(c: Q, scope: number, date: string): Promise<void> {

@@ -5,6 +5,7 @@ import { auditRow, isoDate } from "../audit";
 import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { LOCK_KEYS } from "../lock-keys";
+import { assertTrustCovers } from "../trust-guard";
 import { sqlOf } from "../hooks/sql";
 import { loadSettings } from "../hooks/facts-loader";
 import { usageOf } from "../hooks/classify";
@@ -586,7 +587,10 @@ export class ApService {
       for (const a of allocs) {
         await c.query(`insert into supplier_payment_allocations (payment_id, bill_id, user_id, amount) values ($1, $2, $3, $4)`, [id, a.billId, scope, fromHalalas(a.amount)]);
       }
-      await this.emitAll(c, scope, await supplierPaymentEvents(sqlOf(c as any), scope, (await loadSettings(sqlOf(c as any), scope))!, id));
+      const evs = await supplierPaymentEvents(sqlOf(c as any), scope, (await loadSettings(sqlOf(c as any), scope))!, id);
+      // A landlord's bill paid from trust: never more than the trust account holds, unless confirmed (trust-guard.ts).
+      await assertTrustCovers(c, scope, { events: evs?.events ?? [] }, { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/supplier-payments" });
+      await this.emitAll(c, scope, evs);
       await auditRow(c, scope, user.id, "finance_v2_supplier_payment", id, "/finance/v2/supplier-payments");
       return this.getPayment(scope, id, c);
     });

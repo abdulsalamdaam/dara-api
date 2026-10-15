@@ -39,6 +39,8 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
       where o.user_id = $1 and o.source_type = 'expense' and o.source_id = $2 and o.event = $3 and l.credit > 0`, [U, expenseId, event]))[0];
   const expenseCount = async () => (await env.q(`select count(*)::int as n from expenses where user_id = $1`, [U]))[0].n;
 
+  // Expenses charged to a landlord here are paid from an unfunded trust account: they confirm the overdraw
+  // (allowTrustOverdraw), which trust-guard.db.spec.ts covers; this spec is about WHICH outflows may use trust.
   before(async () => {
     env = await legacyEnv("wired");
     s = await seedAccount(env, U);
@@ -63,8 +65,8 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
   });
 
   it("an expense charged to an agent landlord (directly, or through the landlord's property) may be paid from trust", async () => {
-    const direct = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "200", ownerId: s.agent, chargeTo: "landlord", bankAccountId: trustId });
-    const viaProp = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "300", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
+    const direct = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "200", ownerId: s.agent, chargeTo: "landlord", bankAccountId: trustId, allowTrustOverdraw: true });
+    const viaProp = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "300", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId, allowTrustOverdraw: true });
     assert.equal(direct.details!.bankAccountId, trustId);
     assert.equal(viaProp.ownerId, s.agent, "the landlord comes from the property");
     await drain(env);
@@ -102,7 +104,7 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
   });
 
   it("an edit that removes the landlord while the trust account stays selected is refused; the expense is unchanged", async () => {
-    const e = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "400", ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
+    const e = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "400", ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId, allowTrustOverdraw: true });
     const r: any = await attempt(() => expenses.update(U, user, e.id, { ownerId: null, propertyId: null, chargeTo: "company" }));
     assert.deepEqual([r.status, r.body.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
     const [row] = await env.q(`select e.owner_id, d.revision, d.bank_account_id from expenses e join finance_expense_details d on d.expense_id = e.id where e.id = $1`, [e.id]);
@@ -134,6 +136,7 @@ describe("fv2: office outflows are never paid from the trust account (real Postg
     assert.deepEqual([refused.status, refused.body.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
     const paid = await ap.createPayment(U, user, {
       supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: landlord.id, amount: "100" }],
+      allowTrustOverdraw: true, // the trust account is not funded in this fixture (trust-guard.db.spec.ts covers the guard)
     });
     assert.equal(paid.bankAccountId, trustId);
   });

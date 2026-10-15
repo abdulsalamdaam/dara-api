@@ -11,6 +11,7 @@ import { transferAmount } from "../tier1/account-transfer.service";
 import { sqlOf } from "../hooks/sql";
 import { loadSettings, payoutEvent } from "../hooks/facts-loader";
 import { assertPayoutWithinDue } from "./landlord-dues";
+import { assertTrustCovers } from "../trust-guard";
 
 /**
  * POST /reports/landlord-payouts under Finance v2 (accountant, 15 Oct 2026:
@@ -30,6 +31,8 @@ import { assertPayoutWithinDue } from "./landlord-dues";
  *    landlord in Manager mode with trust routing is the default trust account
  *    (1114), so the entry is Dr 2121 / Cr 1114 (E19);
  *  - the net-due check (409 PAYOUT_EXCEEDS_DUE unless `allowAdvance: true`);
+ *  - the trust balance (trust-guard.ts): paid from a trust account, never more than it holds
+ *    (409 TRUST_INSUFFICIENT unless `allowTrustOverdraw: true` under the `confirm` policy);
  *  - the landlord_payouts row (the same columns the legacy insert writes),
  *    its finance_payout_meta (paid on, paid from), a PV-###### number in the
  *    account's one payment-voucher series, and the E19 outbox event.
@@ -158,6 +161,7 @@ export async function createPayoutV2(
       [payoutId, scope, number, requestId, user.id ?? null]);
     const s = await loadSettings(sqlOf(c), scope);
     const e = s ? await payoutEvent(sqlOf(c), scope, s, payoutId) : null;
+    if (e) await assertTrustCovers(c, scope, { events: [e] }, { allow: body?.allowTrustOverdraw, actorId: user.id ?? null, source: "/reports/landlord-payouts" });
     if (e) await deps.emitter.emit({ fv2: true, userId: scope, tx: c }, e);
     return { replay: false, row: shape(row, { bankAccountId, voucherNumber: number, requestId, replayed: false }) };
   });

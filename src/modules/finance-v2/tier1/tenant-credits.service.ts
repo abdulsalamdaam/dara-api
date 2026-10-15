@@ -1,12 +1,13 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "../db";
-import { LedgerEmitter } from "../ledger-emitter.service";
+import { LedgerEmitter, type LedgerEvent } from "../ledger-emitter.service";
 import { PostingWorker } from "../posting-worker.service";
 import { ArAgingService } from "../reports/aging.service";
 import { auditRow, isoDate } from "../audit";
 import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { LOCK_KEYS } from "../lock-keys";
+import { assertTrustCovers } from "../trust-guard";
 import { sqlOf } from "../hooks/sql";
 import { contractCtx, loadSettings, reversalEvent, today } from "../hooks/facts-loader";
 import { BankAccountsService } from "./bank-accounts.service";
@@ -252,7 +253,9 @@ export class TenantCreditsService {
         [scope, tenantId, bucket.contractId, bucket.ownerId, fromHalalas(amount), date, bankAccountId, method, reference, number, user.id],
       );
       const id = Number(ins.rows[0].id);
-      await this.emitAction(c, scope, id);
+      // Paid out of trust (an agent tenant's credit is client money): never more than the trust account holds, unless confirmed.
+      await this.emitAction(c, scope, id, (events) => assertTrustCovers(c, scope, { events },
+        { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/tenant-credits/refund" }));
       await auditRow(c, scope, user.id, "tenant_credit_action", id, "/finance/v2/tenant-credits/refund");
       const [row] = (await c.query(`${ACTION_SQL} where a.id = $1 and a.user_id = $2`, [id, scope])).rows;
       return { action: shapeAction(row), remainingCredit: fromHalalas(available - amount) };
@@ -401,10 +404,11 @@ export class TenantCreditsService {
 
   // ─── internals ─────────────────────────────────────────────────────────
 
-  private async emitAction(c: Fv2Client, scope: number, id: number): Promise<void> {
+  private async emitAction(c: Fv2Client, scope: number, id: number, guard?: (events: LedgerEvent[]) => Promise<unknown>): Promise<void> {
     const s = await loadSettings(sqlOf(c as any), scope);
     if (!s) return;
     const r = await creditActionEvents(sqlOf(c as any), scope, s, id);
+    if (guard && r?.events?.length) await guard(r.events);
     for (const e of r?.events ?? []) await this.emitter.emit({ fv2: true, userId: scope, tx: c as any }, e);
   }
 

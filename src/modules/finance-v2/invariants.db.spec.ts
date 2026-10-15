@@ -749,7 +749,7 @@ describe("finance v2 invariants — regressions found by the property run (real 
     await setupAccount(env, U, "manager");
     const [a] = await env.q(`select id from owners where user_id = $1 and not is_account_holder`, [U]);
     // An advance (nothing is due yet): finding #2 refuses it without an explicit allowAdvance.
-    await env.reports.createPayout(user(U), { ownerId: a.id, amount: 25, transferDate: LAST, method: "bank_transfer", allowAdvance: true });
+    await env.reports.createPayout(user(U), { ownerId: a.id, amount: 25, transferDate: LAST, method: "bank_transfer", allowAdvance: true, allowTrustOverdraw: true }); // nothing is in trust yet: a confirmed overdraw
     await checkInvariants(env, backfill, rec, U, "manager", () => settle(env, U), fail("R-e"), null);
   });
 

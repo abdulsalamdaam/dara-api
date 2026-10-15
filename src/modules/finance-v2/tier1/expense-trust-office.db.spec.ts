@@ -60,7 +60,7 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
   it("an agent landlord's expense charged to the company is office money: refused from trust; charged to the landlord it may be", async () => {
     const r: any = await attempt(() => expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "company", bankAccountId: trustId }));
     assert.deepEqual([r.status, r.body?.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
-    const ok = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId });
+    const ok = await expenses.create(U, user, { expenseDate: today, category: "صيانة", amount: "100", propertyId: s.propA, chargeTo: "landlord", bankAccountId: trustId, allowTrustOverdraw: true }); // the trust account is not funded in this fixture; the trust overdraw guard is covered in trust-guard.db.spec.ts
     assert.equal(ok.details!.bankAccountId, trustId);
     // An edit that moves it back to the company while trust stays selected is refused.
     const e: any = await attempt(() => expenses.update(U, user, ok.id, { chargeTo: "company" }));
@@ -75,7 +75,7 @@ describe("fv2: the trust guard covers every office outflow (real Postgres)", { s
       assert.deepEqual([r.status, r.body?.error], [409, "TRUST_FOR_OFFICE_EXPENSE"]);
     }
     const lb = await bill({ ownerId: s.agent, propertyId: s.propA, chargeTo: "landlord" });
-    const paid = await ap.createPayment(U, user, { supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: lb.id, amount: "100" }] });
+    const paid = await ap.createPayment(U, user, { supplierId: sup.id, paidOn: today, amount: "100", bankAccountId: trustId, allocations: [{ billId: lb.id, amount: "100" }], allowTrustOverdraw: true }); // the trust account is not funded in this fixture; the trust overdraw guard is covered in trust-guard.db.spec.ts
     assert.equal(paid.bankAccountId, trustId);
   });
 
