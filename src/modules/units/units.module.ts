@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ConflictException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql, notInArray } from "drizzle-orm";
-import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
+import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { unitsTable, propertiesTable, contractsTable, contractUnitsTable , lookupsTable } from "@dara/database";
 import {
   BOUNDS, LIMITS, applyBool, applyBoolNonNull, applyDecimal, applyForeignKey, applyInt,
@@ -222,28 +222,35 @@ class UnitsController {
     ];
     if (q.search) {
       conds.push(or(
-        ilike(unitsTable.unitNumber, `%${q.search}%`),
-        ilike(propertiesTable.name, `%${q.search}%`),
+        ilike(unitsTable.unitNumber, likeContains(q.search)),
+        ilike(propertiesTable.name, likeContains(q.search)),
       ));
     }
-    const statuses = parseEnumList(rawQuery?.status, ["available", "rented", "maintenance", "reserved"] as const);
+    const statuses = parseEnumList(rawQuery?.status, UNIT_STATUSES);
     const propertyIds = parseIdList(rawQuery?.propertyId) ?? parseIdList(rawQuery?.propertyIds);
     if (propertyIds) conds.push(inArray(unitsTable.propertyId, propertyIds));
     // Same two spellings as properties: the portal's chips carry the lookup
     // key, integrations carry the id.
-    const typeIds = parseIdList(rawQuery?.typeLookupId)
-      ?? await (async () => {
-        const raw = rawQuery?.type;
-        if (raw == null || raw === "" || raw === "all") return null;
-        const values = String(raw).split(",").map((v: string) => v.trim()).filter(Boolean);
-        if (values.length === 0) return null;
-        const ids = await Promise.all(values.map((v: string) => resolveLookupId(this.db, "unit_type", v)));
-        return ids.filter((id): id is number => id != null);
-      })();
+    // A value that is not a lookup is a custom "Other" type: the list shows
+    // `type_other` as the type, so the filter matches it there.
+    const typeIds = parseIdList(rawQuery?.typeLookupId);
     if (typeIds) conds.push(inArray(unitsTable.typeLookupId, typeIds));
-    if (typeof rawQuery?.floor === "string" && rawQuery.floor.trim() !== "") {
+    else {
+      const raw = rawQuery?.type;
+      const values: string[] = raw == null || raw === "" || raw === "all" ? []
+        : [...new Set<string>(String(raw).split(",").map((v: string) => v.trim()).filter(Boolean))];
+      if (values.length) {
+        const ors = await Promise.all(values.map(async (v) => {
+          const id = await resolveLookupId(this.db, "unit_type", v);
+          return id != null ? eq(unitsTable.typeLookupId, id) : and(isNull(unitsTable.typeLookupId), eq(unitsTable.typeOther, v));
+        }));
+        conds.push(or(...ors));
+      }
+    }
+    if (typeof rawQuery?.floor === "string" && rawQuery.floor.trim() !== "" && rawQuery.floor.trim() !== "all") {
       const floors = rawQuery.floor.split(",").map((x: string) => parseInt(x.trim(), 10)).filter(Number.isInteger);
-      if (floors.length) conds.push(inArray(unitsTable.floor, floors));
+      // Sent but unusable (`floor=abc`) is a filter that matches nothing, not no filter.
+      conds.push(floors.length ? inArray(unitsTable.floor, floors) : sql`false`);
     }
     if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(unitsTable.isDraft, true));
     else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(unitsTable.isDraft, false));
@@ -251,6 +258,7 @@ class UnitsController {
     // so picking one must not blank the other three.
     const statsWhere = and(...conds);
     if (statuses) conds.push(inArray(unitsTable.status, statuses));
+    else if (enumListSentEmpty(rawQuery?.status, UNIT_STATUSES)) conds.push(sql`false`);
     const where = and(...conds);
 
     /**
@@ -320,6 +328,22 @@ class UnitsController {
         notes: unitsTable.notes,
         createdAt: unitsTable.createdAt,
         tenantName: fromActiveContract(contractsTable.tenantName).as("tenant_name"),
+        // Monthly rent of the contract on this unit — the active one, else the
+        // newest finalised one — through `contract_units`, so a unit that is the
+        // second or third unit of a multi-unit contract gets it too. The Units
+        // tab's rent column used to key a separate contracts fetch on the
+        // contract's FIRST unit only, leaving the others blank.
+        contractMonthlyRent: sql<string | null>`(${this.db
+          .select({ v: contractsTable.monthlyRent })
+          .from(contractUnitsTable)
+          .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+          .where(and(
+            eq(contractUnitsTable.unitId, unitsTable.id),
+            isNull(contractsTable.deletedAt),
+            eq(contractsTable.isDraft, false),
+          ))
+          .orderBy(sql`(${contractsTable.status} = 'active') desc`, desc(contractsTable.id))
+          .limit(1)})`.as("contract_monthly_rent"),
         tenantPhone: fromActiveContract(contractsTable.tenantPhone).as("tenant_phone"),
       })
       .from(unitsTable)
@@ -362,6 +386,40 @@ class UnitsController {
       pageSize: q.pageSize,
       total: Number(totalRow[0]?.total ?? 0),
       stats: { byStatus },
+    };
+  }
+
+  /**
+   * The distinct values the Units tab's filter panel offers: unit types
+   * (lookup key, or the free text of a custom "Other" type — exactly as the
+   * list spells `type`), the properties that have units, and the floors in
+   * numeric order. The panel used to download every unit to build these.
+   */
+  @Get("units/facets")
+  @RequirePermissions(PERMISSIONS.UNITS_VIEW)
+  async facets(@CurrentUser() user: AuthUser) {
+    const scoped = and(
+      eq(propertiesTable.userId, scopeId(user)),
+      isNull(propertiesTable.deletedAt),
+      isNull(unitsTable.deletedAt),
+    );
+    const [typeRows, propRows, floorRows] = await Promise.all([
+      this.db.selectDistinct({ typeLookupId: unitsTable.typeLookupId, typeOther: unitsTable.typeOther })
+        .from(unitsTable).innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id)).where(scoped),
+      this.db.selectDistinct({ id: propertiesTable.id, name: propertiesTable.name })
+        .from(unitsTable).innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id)).where(scoped)
+        .orderBy(asc(propertiesTable.name), asc(propertiesTable.id)),
+      this.db.selectDistinct({ floor: unitsTable.floor })
+        .from(unitsTable).innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
+        .where(and(scoped, sql`${unitsTable.floor} IS NOT NULL`))
+        .orderBy(asc(unitsTable.floor)),
+    ]);
+    await attachLookupLabels(this.db, typeRows as any[], [{ idField: "typeLookupId", out: "type", mode: "key" }]);
+    overlayUnitTypeOther(typeRows as any[]);
+    return {
+      types: [...new Set((typeRows as any[]).map((r) => r.type).filter((x): x is string => typeof x === "string" && x !== ""))],
+      properties: propRows,
+      floors: floorRows.map((r) => r.floor as number),
     };
   }
 

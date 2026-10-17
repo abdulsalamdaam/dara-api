@@ -8,7 +8,7 @@ import { z } from "zod/v4";
 import { deedsTable, propertiesTable } from "@dara/database";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import {
-  listQuerySchema as baseListQuerySchema, parseDateBound, parseIdList,
+  likeContains, listQuerySchema as baseListQuerySchema, parseDateBound, parseIdList,
 } from "../../common/pagination";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -99,11 +99,11 @@ class DeedsController {
     const conds: any[] = [eq(deedsTable.userId, owner), isNull(deedsTable.deletedAt)];
     if (q.search) {
       conds.push(or(
-        ilike(deedsTable.deedNumber, `%${q.search}%`),
-        ilike(deedsTable.registryNumber, `%${q.search}%`),
-        ilike(deedsTable.issuingAuthority, `%${q.search}%`),
-        ilike(deedsTable.ownerNationalId, `%${q.search}%`),
-        ilike(deedsTable.notes, `%${q.search}%`),
+        ilike(deedsTable.deedNumber, likeContains(q.search)),
+        ilike(deedsTable.registryNumber, likeContains(q.search)),
+        ilike(deedsTable.issuingAuthority, likeContains(q.search)),
+        ilike(deedsTable.ownerNationalId, likeContains(q.search)),
+        ilike(deedsTable.notes, likeContains(q.search)),
       ));
     }
     // `deed_type` is free text ("electronic", "paper", or whatever the user
