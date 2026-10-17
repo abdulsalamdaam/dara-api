@@ -6,6 +6,7 @@ import { AppModule } from "./app.module";
 import { ZodExceptionFilter } from "./common/zod-exception.filter";
 import { StructuredLogger } from "./common/logging/logger";
 import { ensureSchema } from "./database/bootstrap";
+import { ensureListIndexes } from "./database/indexes";
 import { fv2StatementBody } from "./modules/finance-v2/tier2/statement-body"; // finance-v2: statement upload body limit
 
 /**
@@ -113,6 +114,10 @@ async function bootstrap() {
   const port = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
   await app.listen(port);
   Logger.log(`API listening on http://localhost:${port}`, "Bootstrap");
+  // List/filter indexes, CONCURRENTLY and in the background: a concurrent
+  // build waits on transactions the outgoing container still holds, so it
+  // must not sit in front of the health check. Never rejects.
+  void ensureListIndexes();
   Logger.log(
     docsEnabled
       ? `Swagger UI    on http://localhost:${port}/api/docs`

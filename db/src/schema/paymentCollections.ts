@@ -32,6 +32,9 @@ export const paymentCollectionsTable = pgTable("payment_collections", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   byPayment: index("payment_collections_payment_idx").on(t.paymentId),
+  // Built on boot by src/database/indexes.ts.
+  byInvoice: index("payment_collections_invoice_idx").on(t.invoiceId),
+  byUserDate: index("payment_collections_user_date_idx").on(t.userId, t.collectedDate),
 }));
 
 export const insertPaymentCollectionSchema = createInsertSchema(paymentCollectionsTable).omit({
