@@ -1,9 +1,9 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, asc, desc, eq, gte, isNull, lte, or, ilike, count, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNull, lte, or, ilike, count, inArray, sql } from "drizzle-orm";
 import { maintenanceRequestsTable, contractsTable, contractUnitsTable, unitsTable, propertiesTable, tenantsTable } from "@dara/database";
 import {
-  likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  idListSentEmpty, likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 import { notifyTenant } from "../../common/notify";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -73,6 +73,8 @@ class MaintenanceController {
     if (tenantIds) conds.push(inArray(maintenanceRequestsTable.tenantId, tenantIds));
     const contractIds = parseIdList(rawQuery?.contractId) ?? parseIdList(rawQuery?.contractIds);
     if (contractIds) conds.push(inArray(maintenanceRequestsTable.contractId, contractIds));
+    // Sent but no usable id (`contractIds=0` — "nothing matches") is no rows, not no filter.
+    else if (idListSentEmpty(rawQuery?.contractId) || idListSentEmpty(rawQuery?.contractIds)) conds.push(sql`false`);
     const from = parseDateBound(rawQuery?.from);
     const to = parseDateBound(rawQuery?.to);
     if (from) conds.push(gte(maintenanceRequestsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));

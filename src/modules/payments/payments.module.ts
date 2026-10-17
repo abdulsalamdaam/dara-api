@@ -6,7 +6,8 @@ import { paymentsTable, paymentCollectionsTable, contractsTable, tenantsTable, s
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 const ADVANCE_NOTE = "إيجار مدفوع مقدماً";
-import { listQuerySchema, parseDateBound, parseIdList } from "../../common/pagination";
+import { listQuerySchema, likeContains, parseDateBound, parseIdList } from "../../common/pagination";
+import { contractFilterSql, parseContractFilter } from "../../common/contract-filter";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -20,6 +21,47 @@ import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/** The invoice already raised for an installment, as the list rows carry it. */
+export type PaymentInvoiceRef = { id: number; number: string; status: string };
+
+/**
+ * For each installment id, the invoice that already covers it — so a screen
+ * can say "invoice created" instead of offering to create a second one.
+ *
+ * Asked of the database per page of installments, on purpose: the screens used
+ * to build this map from a capped page of invoices (≤ 200 for the page's
+ * contracts), and an installment whose invoice fell outside that page looked
+ * un-invoiced and was offered "Create invoice" again — a duplicate.
+ *
+ * A covering document is a type 'invoice' that is not a receipt / deposit
+ * voucher (evidence of money, not a bill) nor a commission (the landlord's,
+ * never the tenant's installment), not deleted and not cancelled — a draft
+ * counts, since raising another beside it is exactly the duplicate. It covers
+ * the installments in its `payment_ids` (or its single `payment_id` when that
+ * is empty). If two ever cover one installment, the newest is reported.
+ */
+export async function invoicesForPayments(db: Drizzle, uid: number, paymentIds: number[]): Promise<Map<number, PaymentInvoiceRef>> {
+  const out = new Map<number, PaymentInvoiceRef>();
+  if (!paymentIds.length) return out;
+  const res: any = await db.execute(sql`
+    select distinct on (x.pid) x.pid as payment_id, d.id, d.number, d.status::text as status
+      from simple_invoices d
+      cross join lateral (
+        select distinct v::int as pid from jsonb_array_elements_text(case
+          when jsonb_typeof(d.payment_ids) = 'array' and jsonb_array_length(d.payment_ids) > 0 then d.payment_ids
+          when d.payment_id is not null then jsonb_build_array(d.payment_id)
+          else '[]'::jsonb end) v
+      ) x
+     where d.user_id = ${uid} and d.deleted_at is null and d.type = 'invoice'
+       and d.status::text <> 'cancelled' and coalesce(d.kind, '') not in ('receipt', 'deposit', 'commission')
+       and x.pid in (${sql.join(paymentIds.map((i) => sql`${i}`), sql`, `)})
+     order by x.pid, d.created_at desc, d.id desc`);
+  for (const r of (Array.isArray(res) ? res : (res?.rows ?? [])) as any[]) {
+    out.set(Number(r.payment_id), { id: Number(r.id), number: String(r.number), status: String(r.status) });
+  }
+  return out;
+}
 
 @ApiTags("payments")
 @ApiBearerAuth("user-jwt")
@@ -44,13 +86,17 @@ class PaymentsController {
       typeof rawQuery?.statusIn === "string"
         ? rawQuery.statusIn.split(",").map((s: string) => s.trim()).filter((s: string) => PAYMENT_STATUSES.includes(s))
         : undefined;
-    // `contractIds` — comma-separated contract ids; the Installments tab's
-    // property / tenant / landlord filters resolve to a set of contracts.
-    const contractIds: number[] | undefined =
-      typeof rawQuery?.contractIds === "string" && rawQuery.contractIds.trim()
-        ? rawQuery.contractIds.split(",").map((s: string) => parseInt(s, 10)).filter((n: number) => Number.isFinite(n))
-        : undefined;
-    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null || status != null || statusIn != null || contractIds != null);
+    // Which contracts: `contractIds`, or the property / unit / landlord /
+    // tenant the finance tabs picked, resolved here in SQL (common/contract-filter).
+    // A filter that was sent but names no usable id — `contractIds=0`, sent on
+    // purpose when nothing matches, or an id past int4 that used to reach the
+    // driver and 500 — matches no rows rather than being dropped.
+    const cf = parseContractFilter(rawQuery);
+    const uid = scopeId(user);
+    const cfOn = (col: unknown) => (cf ? [contractFilterSql(cf, uid, col)] : []);
+    // Only `contractIds` ever switched this endpoint to the envelope; the new
+    // id filters must not flip an array caller (see `wantsPagination`).
+    const usePaginated = rawQuery && (rawQuery.page != null || rawQuery.pageSize != null || rawQuery.search != null || status != null || statusIn != null || rawQuery.contractIds != null);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const baseWhere = and(eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt));
     const conds = [baseWhere];
@@ -67,7 +113,7 @@ class PaymentsController {
     // card above, which already derived correctly, counted them as overdue.
     if (status) conds.push(eq(liveStatusSql, status));
     else if (statusIn && statusIn.length > 0) conds.push(inArray(liveStatusSql, statusIn));
-    if (contractIds && contractIds.length > 0) conds.push(inArray(paymentsTable.contractId, contractIds));
+    conds.push(...cfOn(paymentsTable.contractId));
     // `dueFrom` / `dueTo` — an inclusive YYYY-MM-DD window on the due date, for
     // the installments calendar, which only ever shows one month but used to
     // download every installment in the account. Deliberately NOT a
@@ -89,8 +135,7 @@ class PaymentsController {
     // by-contract finance view asks for one contract's figures with pageSize 1
     // and got the whole account's totals back, so every card there described
     // somebody else's money.
-    const statsConds: any[] = [baseWhere];
-    if (contractIds && contractIds.length > 0) statsConds.push(inArray(paymentsTable.contractId, contractIds));
+    const statsConds: any[] = [baseWhere, ...cfOn(paymentsTable.contractId)];
     statsConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
     const statsWhere = and(...statsConds);
 
@@ -124,10 +169,11 @@ class PaymentsController {
       .orderBy(
         ...(rawQuery?.sort === "createdAt"
           ? [desc(paymentsTable.createdAt), desc(paymentsTable.id)]
+          // The Paid tab: most recently collected first. A paid row with no
+          // paid date sorts last rather than first (Postgres puts NULLs first
+          // on a descending sort).
           : rawQuery?.sort === "paidDate"
-            ? (q.order === "asc"
-              ? [sql`${paymentsTable.paidDate} asc nulls last`, asc(paymentsTable.id)]
-              : [sql`${paymentsTable.paidDate} desc nulls last`, desc(paymentsTable.id)])
+            ? [sql`${paymentsTable.paidDate} ${q.order === "asc" ? sql`asc` : sql`desc`} nulls last`, (q.order === "asc" ? asc : desc)(paymentsTable.id)]
             : [(q.order === "asc" ? asc : desc)(paymentsTable.dueDate), (q.order === "asc" ? asc : desc)(paymentsTable.id)]),
       )
       .$dynamic();
@@ -152,7 +198,7 @@ class PaymentsController {
         this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
           .where(eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id)),
       ),
-      ...(contractIds && contractIds.length > 0 ? [inArray(simpleInvoicesTable.contractId, contractIds)] : []),
+      ...cfOn(simpleInvoicesTable.contractId),
     );
 
     const [rows, totalRow, statsRows, collectedRow, freeCollectedRow] = await Promise.all([
@@ -169,6 +215,14 @@ class PaymentsController {
         status: liveStatusSql,
         cnt: count(),
         amount: sum(paymentsTable.amount),
+        // What is still owed on the part-paid rows — `amount` is their face
+        // value, which overstates the outstanding by what was already
+        // collected. Only those rows pay for the sub-query.
+        // "payments"."id" spelled out: this query has no join, so drizzle
+        // would render the column bare, and inside the sub-query a bare "id"
+        // is payment_collections.id.
+        remaining: sql<string | null>`sum(case when ${paymentsTable.status} = 'partially_paid' then greatest(0, ${paymentsTable.amount}
+          - coalesce((select sum(pc_r.amount) from payment_collections pc_r where pc_r.payment_id = "payments"."id"), 0)) end)`,
       }).from(paymentsTable).where(statsWhere).groupBy(sql`1`) : Promise.resolve([]),
       // Actual money collected across all collections (covers partial ones).
       usePaginated ? this.db.select({ amount: sum(paymentCollectionsTable.amount) })
@@ -183,9 +237,7 @@ class PaymentsController {
           // counted. Collections with no installment at all — a collected
           // commission invoice, say — are real money and stay.
           or(isNull(paymentCollectionsTable.paymentId), isNull(paymentsTable.deletedAt)),
-          ...(contractIds && contractIds.length > 0
-            ? [or(inArray(paymentsTable.contractId, contractIds), inArray(simpleInvoicesTable.contractId, contractIds))]
-            : []),
+          ...(cf ? [or(contractFilterSql(cf, uid, paymentsTable.contractId), contractFilterSql(cf, uid, simpleInvoicesTable.contractId))] : []),
         ))
         : Promise.resolve([{ amount: null }]),
       usePaginated ? this.db.select({ amount: sum(simpleInvoicesTable.total), cnt: count() })
@@ -201,6 +253,7 @@ class PaymentsController {
           .groupBy(paymentCollectionsTable.paymentId)
       : [];
     const collMap = new Map((collAgg as Array<{ paymentId: number; total: string | null }>).map((c) => [c.paymentId, Number(c.total ?? 0)]));
+    const invMap = await invoicesForPayments(this.db, uid, ids);
 
     const data = rows.map((r) => {
       // VAT is per-installment (set at generation): rent rows follow the
@@ -222,6 +275,7 @@ class PaymentsController {
         createdAt: r.createdAt,
         vatEnabled: rowVat,
         contract: r.contractNumber ? { contractNumber: r.contractNumber, tenantName: r.tenantName, tenantShortName: r.tenantShortName, vatEnabled: contractVat } : null,
+        invoice: invMap.get(r.id) ?? null,
       };
     });
     if (!usePaginated) return data;
@@ -232,9 +286,12 @@ class PaymentsController {
       // `collected` is all the money in, whichever way it came in.
       collected: round2(Number((collectedRow as Array<{ amount: string | null }>)[0]?.amount ?? 0) + freeCollected),
       freeCollected, freeCollectedCount,
-      paidCount: 0, pendingCount: 0, overdueCount: 0, cancelledCount: 0, partiallyPaidCount: 0 };
-    for (const s of statsRows as Array<{ status: string; cnt: number; amount: string | null }>) {
+      paidCount: 0, pendingCount: 0, overdueCount: 0, cancelledCount: 0, partiallyPaidCount: 0,
+      /** Σ still owed on the part-paid rows (`partiallyPaid` is their face value). */
+      partiallyPaidRemaining: 0 };
+    for (const s of statsRows as Array<{ status: string; cnt: number; amount: string | null; remaining: string | null }>) {
       const amt = Number(s.amount ?? 0);
+      if (s.status === "partially_paid") stats.partiallyPaidRemaining = round2(Number(s.remaining ?? 0));
       if (s.status === "paid")           { stats.paid = amt;          stats.paidCount = Number(s.cnt); }
       else if (s.status === "pending")   { stats.pending = amt;       stats.pendingCount = Number(s.cnt); }
       else if (s.status === "overdue")   { stats.overdue = amt;       stats.overdueCount = Number(s.cnt); }
@@ -365,27 +422,12 @@ class PaymentsController {
   async listAllCollections(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const q = listQuerySchema.parse(rawQuery ?? {});
     const uid = scopeId(user);
-    const s = q.search ? `%${q.search}%` : null;
-    // Optional landlord/property/unit filter — resolved to contract ids by the
-    // frontend and passed through here.
-    const contractIds = parseIdList(rawQuery?.contractIds);
+    const s = q.search ? likeContains(q.search) : null;
+    // Optional contract / property / unit / landlord / tenant filter, resolved
+    // in SQL. Sent-but-empty (`contractIds=0`) matches nothing.
+    const cf = parseContractFilter(rawQuery);
 
     // ── Source 1: real collections ────────────────────────────────────────
-    const collConds: any[] = [eq(paymentCollectionsTable.userId, uid)];
-    if (s) collConds.push(or(ilike(paymentCollectionsTable.receiptNumber, s), ilike(contractsTable.tenantName, s), ilike(contractsTable.contractNumber, s), ilike(simpleInvoicesTable.number, s), sql`"paid_doc"."number" ilike ${s}`)); // finance-v2: C-1 — also the paid document's number
-    // Match the payment's contract OR the invoice's contract, so invoice-only
-    // collections (e.g. a collected commission invoice, paymentId = null) aren't
-    // dropped when filtering Collections by landlord/property/unit.
-    if (contractIds && contractIds.length > 0) collConds.push(or(inArray(paymentsTable.contractId, contractIds), inArray(simpleInvoicesTable.contractId, contractIds)));
-    // Legacy deposit collections (on a deposit payment row) are not revenue —
-    // exclude them; the deposit shows once, as its receipt voucher (section 2).
-    collConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
-    // Advance/prepaid rent IS real money received — it keeps its own collection
-    // row (it carries its own receipt-voucher number). When the rent invoice is
-    // later collected, the remaining balance produces a second voucher, so an
-    // advance-paid rent shows two receipt vouchers (advance + remainder).
-    // For invoice-only collections the contract/tenant come from the invoice,
-    // not the payment.
     const invContract = alias(contractsTable, "inv_contract");
     // finance-v2: C-1 (accountant, 14 Oct 2026; flag off too) — the document a collection PAID. The
     // finance-v2: collection's own invoice_id is that document when it is a real one (INV-/COM-/RR-
@@ -408,35 +450,68 @@ class PaymentsController {
                or (jsonb_typeof(d.payment_ids) = 'array'
                    and exists (select 1 from jsonb_array_elements_text(d.payment_ids) x where x = ${paymentCollectionsTable.paymentId}::text)))
         order by d.confirmed_at desc nulls last, d.id desc limit 1))`; // finance-v2: C-1
-    const collectionsQ = this.db
-      .select({
-        id: paymentCollectionsTable.id,
-        paymentId: paymentCollectionsTable.paymentId,
-        amount: paymentCollectionsTable.amount,
-        collectedDate: paymentCollectionsTable.collectedDate,
-        method: paymentCollectionsTable.method,
-        receiptNumber: paymentCollectionsTable.receiptNumber,
-        attachmentKey: paymentCollectionsTable.attachmentKey,
-        notes: paymentCollectionsTable.notes,
-        createdAt: paymentCollectionsTable.createdAt,
-        contractId: sql<number | null>`coalesce(${paymentsTable.contractId}, ${simpleInvoicesTable.contractId})`.as("contract_id"),
-        contractNumber: sql<string | null>`coalesce(${contractsTable.contractNumber}, ${invContract.contractNumber})`.as("contract_number"),
-        tenantName: sql<string | null>`coalesce(${contractsTable.tenantName}, ${simpleInvoicesTable.tenantName})`.as("tenant_name"),
-        invoiceId: paymentCollectionsTable.invoiceId,
-        invoiceNumber: simpleInvoicesTable.number,
-        // The key the list is ordered by: creation time, falling back to the
-        // collection date. Mirrors what the JavaScript sort used to do.
-        sortAt: sql<Date | null>`coalesce(${paymentCollectionsTable.createdAt}, ${paymentCollectionsTable.collectedDate}::timestamptz)`.as("sort_at"),
-        docId: sql<number | null>`${paidDoc.id}`.as("doc_id"), // finance-v2: C-1 — the document this collection paid
-        docNumber: sql<string | null>`${paidDoc.number}`.as("doc_number"), // finance-v2: C-1
-      })
-      .from(paymentCollectionsTable)
-      .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
-      .leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
-      .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
-      .leftJoin(invContract, eq(simpleInvoicesTable.contractId, invContract.id))
-      .leftJoin(paidDoc, paidDocOn) // finance-v2: C-1
-      .where(and(...collConds));
+
+    const collConds: any[] = [
+      eq(paymentCollectionsTable.userId, uid),
+      // A collection whose installment, or whose document, was since deleted
+      // stops being listed — the same rule the Installments cards apply to the
+      // money collected, so the two tabs report one figure. Collections with
+      // no installment (a collected commission invoice, say) are real money
+      // and stay.
+      or(isNull(paymentCollectionsTable.paymentId), isNull(paymentsTable.deletedAt)),
+      or(isNull(paymentCollectionsTable.invoiceId), isNull(simpleInvoicesTable.deletedAt)),
+    ];
+    // Match the payment's contract OR the invoice's contract, so invoice-only
+    // collections (e.g. a collected commission invoice, paymentId = null) aren't
+    // dropped when filtering Collections by landlord/property/unit.
+    if (cf) collConds.push(or(contractFilterSql(cf, uid, paymentsTable.contractId), contractFilterSql(cf, uid, simpleInvoicesTable.contractId)));
+    // Legacy deposit collections (on a deposit payment row) are not revenue —
+    // exclude them; the deposit shows once, as its receipt voucher (section 2).
+    collConds.push(or(isNull(paymentsTable.description), ne(paymentsTable.description, DEPOSIT_DESC)));
+    // Advance/prepaid rent IS real money received — it keeps its own collection
+    // row (it carries its own receipt-voucher number). When the rent invoice is
+    // later collected, the remaining balance produces a second voucher, so an
+    // advance-paid rent shows two receipt vouchers (advance + remainder).
+    // For invoice-only collections the contract/tenant come from the invoice,
+    // not the payment.
+    //
+    // The paid-document lookup is a correlated sub-query over every
+    // document's payment_ids, per collection. Only the page of rows needs it
+    // (the column it fills); the count and the sum skip the join unless the
+    // search has to match that document's number.
+    const collections = (withDoc: boolean) => {
+      const conds = [...collConds];
+      if (s) conds.push(or(ilike(paymentCollectionsTable.receiptNumber, s), ilike(contractsTable.tenantName, s), ilike(contractsTable.contractNumber, s), ilike(simpleInvoicesTable.number, s), ...(withDoc ? [sql`"paid_doc"."number" ilike ${s}`] : []))); // finance-v2: C-1 — also the paid document's number
+      const base = this.db
+        .select({
+          id: paymentCollectionsTable.id,
+          paymentId: paymentCollectionsTable.paymentId,
+          amount: paymentCollectionsTable.amount,
+          collectedDate: paymentCollectionsTable.collectedDate,
+          method: paymentCollectionsTable.method,
+          receiptNumber: paymentCollectionsTable.receiptNumber,
+          attachmentKey: paymentCollectionsTable.attachmentKey,
+          notes: paymentCollectionsTable.notes,
+          createdAt: paymentCollectionsTable.createdAt,
+          contractId: sql<number | null>`coalesce(${paymentsTable.contractId}, ${simpleInvoicesTable.contractId})`.as("contract_id"),
+          contractNumber: sql<string | null>`coalesce(${contractsTable.contractNumber}, ${invContract.contractNumber})`.as("contract_number"),
+          tenantName: sql<string | null>`coalesce(${contractsTable.tenantName}, ${simpleInvoicesTable.tenantName})`.as("tenant_name"),
+          invoiceId: paymentCollectionsTable.invoiceId,
+          invoiceNumber: simpleInvoicesTable.number,
+          // The key the list is ordered by: creation time, falling back to the
+          // collection date. Mirrors what the JavaScript sort used to do.
+          sortAt: sql<Date | null>`coalesce(${paymentCollectionsTable.createdAt}, ${paymentCollectionsTable.collectedDate}::timestamptz)`.as("sort_at"),
+          docId: (withDoc ? sql<number | null>`${paidDoc.id}` : sql<number | null>`null::integer`).as("doc_id"), // finance-v2: C-1 — the document this collection paid
+          docNumber: (withDoc ? sql<string | null>`${paidDoc.number}` : sql<string | null>`null::text`).as("doc_number"), // finance-v2: C-1
+        })
+        .from(paymentCollectionsTable)
+        .leftJoin(paymentsTable, eq(paymentCollectionsTable.paymentId, paymentsTable.id))
+        .leftJoin(contractsTable, eq(paymentsTable.contractId, contractsTable.id))
+        .leftJoin(simpleInvoicesTable, eq(paymentCollectionsTable.invoiceId, simpleInvoicesTable.id))
+        .leftJoin(invContract, eq(simpleInvoicesTable.contractId, invContract.id))
+        .$dynamic();
+      return (withDoc ? base.leftJoin(paidDoc, paidDocOn) : base).where(and(...conds)); // finance-v2: C-1
+    };
 
     // ── Source 2: confirmed invoices with no installment ──────────────────
     const invConds: any[] = [
@@ -452,7 +527,7 @@ class PaymentsController {
       isNotNull(simpleInvoicesTable.paidDate),
     ];
     if (s) invConds.push(or(ilike(simpleInvoicesTable.receiptNumber, s), ilike(simpleInvoicesTable.tenantName, s), ilike(simpleInvoicesTable.number, s), ilike(contractsTable.contractNumber, s)));
-    if (contractIds && contractIds.length > 0) invConds.push(inArray(simpleInvoicesTable.contractId, contractIds));
+    if (cf) invConds.push(contractFilterSql(cf, uid, simpleInvoicesTable.contractId));
     // Vouchers (deposit / receipt) are evidence, not collections — keep them out
     // of the Collections tab; they live under Receipt Vouchers.
     invConds.push(or(isNull(simpleInvoicesTable.kind), and(ne(simpleInvoicesTable.kind, "deposit"), ne(simpleInvoicesTable.kind, "receipt"))));
@@ -488,17 +563,20 @@ class PaymentsController {
       .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id))
       .where(and(...invConds));
 
-    const merged = unionAll(collectionsQ, freeInvoicesQ).as("collections_union");
-
     // One row per invoice+voucher pair; anything without both stays on its own.
     // `nullif(..., '')` because an empty receipt number is falsy in JavaScript
     // but not NULL in SQL — without it, every row that has an invoice and a
     // blank voucher number would collapse into a single bogus group.
-    const groupKey = sql`case
-      when ${merged.invoiceId} is not null and nullif(${merged.receiptNumber}, '') is not null
-        then 'inv:' || ${merged.invoiceId} || '|rv:' || ${merged.receiptNumber}
-      else 'row:' || ${merged.id}
+    const keyOf = (m: { invoiceId: unknown; receiptNumber: unknown; id: unknown }) => sql`case
+      when ${m.invoiceId} is not null and nullif(${m.receiptNumber}, '') is not null
+        then 'inv:' || ${m.invoiceId} || '|rv:' || ${m.receiptNumber}
+      else 'row:' || ${m.id}
     end`;
+    const merged = unionAll(collections(true), freeInvoicesQ).as("collections_union");
+    // The count and the sum read the same union without the paid-document
+    // join (it only fills `doc_*`, and filters nothing unless searched).
+    const mergedLite = s ? merged : unionAll(collections(false), freeInvoicesQ).as("collections_union_lite");
+    const groupKey = keyOf(merged);
     const dir = q.order === "asc" ? sql`asc` : sql`desc`;
 
     const [rows, totalRow, sumRow] = await Promise.all([
@@ -535,12 +613,12 @@ class PaymentsController {
       // `total` counts GROUPS, not union rows — a three-installment invoice is
       // one line in this list, so counting rows would overstate it.
       this.db.select({ total: count() }).from(
-        this.db.select({ k: sql`1`.as("k") }).from(merged).groupBy(groupKey).as("groups"),
+        this.db.select({ k: sql`1`.as("k") }).from(mergedLite).groupBy(keyOf(mergedLite)).as("groups"),
       ),
 
       // Grouping only re-partitions the money, so the collected total is the
       // sum over the whole filtered union.
-      this.db.select({ amount: sql<string | null>`sum(${merged.amount})` }).from(merged),
+      this.db.select({ amount: sql<string | null>`sum(${mergedLite.amount})` }).from(mergedLite),
     ]);
 
     const total = Number(totalRow[0]?.total ?? 0);

@@ -8,7 +8,8 @@
  * which the remaining already excludes). `?statusV2=` filters on the v2 status exactly;
  * the legacy `?status=` / `?statusIn=` are mapped onto it.
  */
-import { listQuerySchema, parseDateBound } from "../../../common/pagination";
+import { listQuerySchema, likeContains, parseDateBound } from "../../../common/pagination";
+import { contractFilterText, parseContractFilter } from "../../../common/contract-filter";
 import { liveStatusV2Sql, remainingSqlV2, collectedSqlV2, ejarSettledSqlV2, riyadhTodayV2 } from "../../../common/payment-status-v2";
 import type { Sql } from "../hooks/sql";
 
@@ -32,16 +33,43 @@ export function displayStatus(v2: string): string {
 
 const toNum = (v: unknown) => Math.round(Number(v ?? 0) * 100) / 100;
 
+/**
+ * Per installment, the invoice already covering it — the text-SQL twin of
+ * `invoicesForPayments` in payments.module.ts; keep the two rules identical.
+ */
+async function invoicesForPaymentsV2(q: Sql, scope: number, ids: number[]) {
+  const out = new Map<number, { id: number; number: string; status: string }>();
+  if (!ids.length) return out;
+  const rows = await q.rows(
+    `select distinct on (x.pid) x.pid as payment_id, d.id, d.number, d.status::text as status
+       from simple_invoices d
+       cross join lateral (
+         select distinct v::int as pid from jsonb_array_elements_text(case
+           when jsonb_typeof(d.payment_ids) = 'array' and jsonb_array_length(d.payment_ids) > 0 then d.payment_ids
+           when d.payment_id is not null then jsonb_build_array(d.payment_id)
+           else '[]'::jsonb end) v
+       ) x
+      where d.user_id = $1 and d.deleted_at is null and d.type = 'invoice'
+        and d.status::text <> 'cancelled' and coalesce(d.kind, '') not in ('receipt', 'deposit', 'commission')
+        and x.pid = any($2::int[])
+      order by x.pid, d.created_at desc, d.id desc`,
+    [scope, ids],
+  );
+  for (const r of rows as any[]) out.set(Number(r.payment_id), { id: Number(r.id), number: String(r.number), status: String(r.status) });
+  return out;
+}
+
 export async function paymentsListV2(q: Sql, scope: number, raw: any) {
   const status = typeof raw?.status === "string" && LEGACY.includes(raw.status) ? raw.status : undefined;
   const statusIn = typeof raw?.statusIn === "string"
     ? raw.statusIn.split(",").map((s: string) => s.trim()).filter((s: string) => LEGACY.includes(s)) : undefined;
   const statusV2 = typeof raw?.statusV2 === "string"
     ? raw.statusV2.split(",").map((s: string) => s.trim()).filter((s: string) => V2.includes(s)) : undefined;
-  const contractIds: number[] | undefined = typeof raw?.contractIds === "string" && raw.contractIds.trim()
-    ? raw.contractIds.split(",").map((s: string) => parseInt(s, 10)).filter((n: number) => Number.isFinite(n)) : undefined;
+  // Same contract filter as the legacy list (common/contract-filter): ids
+  // bounded to int4, and a filter sent with no usable id matches no rows.
+  const cf = parseContractFilter(raw);
   const usePaginated = raw && (raw.page != null || raw.pageSize != null || raw.search != null || status != null || statusIn != null
-    || contractIds != null || statusV2 != null);
+    || raw.contractIds != null || statusV2 != null);
   const lq = listQuerySchema.parse(raw ?? {});
   const today = riyadhTodayV2();
 
@@ -49,11 +77,12 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
   const P = (v: unknown) => { params.push(v); return `$${params.length}`; };
   const st = liveStatusV2Sql("p", "$2::date");
   const base = [`p.user_id = $1`, `p.deleted_at is null`, `(p.description is null or p.description <> $3)`];
-  if (contractIds?.length) base.push(`p.contract_id = any(${P(contractIds)}::int[])`);
+  if (cf) base.push(contractFilterText(cf, "$1", "p.contract_id", P));
   const statsWhere = base.join(" and ");
+  const statParamCount = params.length; // the stats read only the base filters' params
   const rowConds = [...base];
   if (lq.search) {
-    const s = P(`%${lq.search}%`);
+    const s = P(likeContains(lq.search));
     rowConds.push(`(p.receipt_number ilike ${s} or c.tenant_name ilike ${s} or c.contract_number ilike ${s})`);
   }
   const wanted = statusV2?.length ? statusV2 : status ? mapLegacy(status) : statusIn?.length ? statusIn.flatMap(mapLegacy) : null;
@@ -65,6 +94,7 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
   const where = rowConds.join(" and ");
   const dir = lq.order === "asc" ? "asc" : "desc";
   const order = raw?.sort === "createdAt" ? `p.created_at desc, p.id desc`
+    // The Paid tab: most recently collected first, undated rows last.
     : raw?.sort === "paidDate" ? `p.paid_date ${dir} nulls last, p.id ${dir}`
     : `p.due_date ${dir}, p.id ${dir}`;
   const limit = usePaginated ? ` limit ${Number(lq.pageSize)} offset ${(Number(lq.page) - 1) * Number(lq.pageSize)}` : "";
@@ -79,6 +109,7 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
       where ${where} order by ${order}${limit}`,
     params,
   );
+  const invMap = await invoicesForPaymentsV2(q, scope, rows.map((r: any) => Number(r.id)));
   const data = rows.map((r: any) => ({
     id: r.id,
     contractId: r.contract_id,
@@ -94,6 +125,8 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
     createdAt: r.created_at,
     vatEnabled: !!r.vat_enabled,
     contract: r.contract_number ? { contractNumber: r.contract_number, tenantName: r.tenant_name, tenantShortName: r.tenant_short_name, vatEnabled: !!r.contract_vat } : null,
+    /** The invoice already covering this installment — the same rule as the legacy list (`invoicesForPayments`). */
+    invoice: invMap.get(Number(r.id)) ?? null,
     // finance-v2 additions (flag on only)
     statusV2: r.status_v2,
     remaining: toNum(r.remaining),
@@ -105,26 +138,31 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
 
   const [totalRow] = await q.rows(
     `select count(*)::int as n from payments p left join contracts c on c.id = p.contract_id where ${where} and $2::date is not null`, params);
-  const statParams = params.slice(0, contractIds?.length ? 4 : 3);
+  const statParams = params.slice(0, statParamCount);
   const statsRows = await q.rows(
     `select s, count(*)::int as cnt, sum(amount)::text as amount, sum(remaining)::text as remaining from (
        select ${st} as s, p.amount, ${remainingSqlV2("p")} as remaining from payments p where ${statsWhere}) x group by s`,
     statParams,
   );
-  const cf = contractIds?.length ? `and (p.contract_id = any($2::int[]) or si.contract_id = any($2::int[]))` : "";
+  const collParams: unknown[] = [scope];
+  const PC = (v: unknown) => { collParams.push(v); return `$${collParams.length}`; };
+  const collCf = cf ? `and (${contractFilterText(cf, "$1", "p.contract_id", PC)} or ${contractFilterText(cf, "$1", "si.contract_id", PC)})` : "";
   const [collectedRow] = await q.rows(
     `select coalesce(sum(pc.amount), 0)::text as amount from payment_collections pc
        left join payments p on p.id = pc.payment_id left join simple_invoices si on si.id = pc.invoice_id
-      where pc.user_id = $1 and (pc.payment_id is null or p.deleted_at is null) ${cf}`,
-    contractIds?.length ? [scope, contractIds] : [scope],
+      where pc.user_id = $1 and (pc.payment_id is null or p.deleted_at is null) ${collCf}`,
+    collParams,
   );
+  const freeParams: unknown[] = [scope];
+  const PF = (v: unknown) => { freeParams.push(v); return `$${freeParams.length}`; };
+  const freeCf = cf ? `and ${contractFilterText(cf, "$1", "si.contract_id", PF)}` : "";
   const [freeRow] = await q.rows(
     `select coalesce(sum(si.total), 0)::text as amount, count(*)::int as cnt from simple_invoices si
       where si.user_id = $1 and si.status = 'confirmed' and si.type = 'invoice' and si.payment_id is null and si.deleted_at is null
         and si.paid_date is not null and (si.kind is null or (si.kind <> 'deposit' and si.kind <> 'receipt'))
         and not exists (select 1 from payment_collections pc where pc.invoice_id = si.id)
-        ${contractIds?.length ? "and si.contract_id = any($2::int[])" : ""}`,
-    contractIds?.length ? [scope, contractIds] : [scope],
+        ${freeCf}`,
+    freeParams,
   );
   const freeCollected = toNum(freeRow?.amount);
   const stats = {
@@ -132,6 +170,8 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
     collected: toNum(Number(collectedRow?.amount ?? 0) + freeCollected),
     freeCollected, freeCollectedCount: Number(freeRow?.cnt ?? 0),
     paidCount: 0, pendingCount: 0, overdueCount: 0, cancelledCount: 0, partiallyPaidCount: 0,
+    // Same key as the legacy list; under v2 `partiallyPaid` is already Σ remaining.
+    partiallyPaidRemaining: 0,
     // finance-v2 additions
     unverified: 0, unverifiedCount: 0, writtenOff: 0, writtenOffCount: 0, settledExternal: 0, settledExternalCount: 0,
   };
@@ -144,7 +184,7 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
       case "paid_unverified": stats.paid = toNum(stats.paid + amt); stats.paidCount += n; stats.unverified = amt; stats.unverifiedCount = n; break;
       case "pending": stats.pending = rem; stats.pendingCount = n; break;
       case "overdue": stats.overdue = rem; stats.overdueCount = n; break;
-      case "partially_paid": stats.partiallyPaid = rem; stats.partiallyPaidCount = n; break;
+      case "partially_paid": stats.partiallyPaid = rem; stats.partiallyPaidRemaining = rem; stats.partiallyPaidCount = n; break;
       case "cancelled": stats.cancelled = toNum(stats.cancelled + amt); stats.cancelledCount += n; break;
       case "written_off": stats.writtenOff = amt; stats.writtenOffCount = n; break;
       case "settled_external": stats.settledExternal = amt; stats.settledExternalCount = n; break;
