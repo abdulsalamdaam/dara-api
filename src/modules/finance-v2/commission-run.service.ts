@@ -237,27 +237,38 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  /** GET /finance/v2/commission-runs?month: the runs, newest month first, with their invoices and ZATCA status. */
-  async list(scope: number, q: any = {}) {
+  /**
+   * GET /finance/v2/commission-runs?month&page&pageSize: the runs, newest month first, with their invoices and ZATCA
+   * status, a page at a time (`total` counts them all). A row carries its per-property `detail` (jsonb) only with
+   * `detail=1`, or when one run is read by id (`opts.id`, the reverse response).
+   */
+  async list(scope: number, q: any = {}, opts: { id?: number } = {}) {
     const span = q?.month ? monthSpan(q.month) : null;
     if (q?.month && !span) throw bad("BAD_MONTH", "month must be YYYY-MM");
+    const page = Math.max(1, Number(q?.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(q?.pageSize) || 50));
+    const withDetail = opts.id != null || q?.detail === "1" || q?.detail === "true" || q?.detail === true;
+    const where = `r.user_id = $1 and ($2::date is null or r.month = $2::date) and ($3::int is null or r.id = $3::int)`;
+    const params = [scope, span?.start ?? null, opts.id ?? null];
+    const [{ n }] = await this.q().rows(`select count(*)::int as n from finance_commission_runs r where ${where}`, params);
     const rows = await this.q().rows(
       `select r.id, r.owner_id, o.name as owner_name, to_char(r.month,'YYYY-MM') as month, r.status, r.origin,
               r.collected::text as collected, r.base::text as base, r.net::text as net, r.vat::text as vat, r.total::text as total,
-              r.vat_registered, r.detail, r.created_at, r.reversed_at, r.reverse_reason,
+              r.vat_registered, ${withDetail ? "r.detail" : "null::jsonb as detail"}, r.created_at, r.reversed_at, r.reverse_reason,
               d.id as document_id, d.number, d.status::text as doc_status, d.zatca_status, d.zatca_error, to_char(d.issue_date,'YYYY-MM-DD') as issue_date,
               cd.id as credit_id, cd.number as credit_number, cd.zatca_status as credit_zatca_status, cd.zatca_error as credit_zatca_error
          from finance_commission_runs r
          left join owners o on o.id = r.owner_id and o.user_id = r.user_id
          left join simple_invoices d on d.id = r.document_id and d.user_id = r.user_id
          left join simple_invoices cd on cd.id = r.credit_document_id and cd.user_id = r.user_id
-        where r.user_id = $1 and ($2::date is null or r.month = $2::date)
-        order by r.month desc, o.name, r.id desc`,
-      [scope, span?.start ?? null],
+        where ${where}
+        order by r.month desc, o.name, r.id desc limit ${pageSize} offset ${(page - 1) * pageSize}`,
+      params,
     );
     const s = await commissionSettings(this.q(), scope);
     return {
       settings: s ? { basis: s.basis, collectedFrom: s.collectedFrom, autoRun: s.autoRun, lastAutoMonth: s.lastAutoMonth, mode: s.mode } : null,
+      total: Number(n), page, pageSize,
       rows: rows.map((r: any) => ({
         id: r.id, ownerId: r.owner_id, ownerName: r.owner_name ?? null, month: r.month, label: monthLabel(r.month), status: r.status, origin: r.origin,
         collected: r.collected, base: r.base, net: r.net, vat: r.vat, total: r.total, vatRegistered: r.vat_registered, detail: r.detail ?? [],
@@ -317,7 +328,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       await c.query(`update finance_commission_run_items set live = false where run_id = $1 and user_id = $2`, [runId, scope]);
       await auditRow(c, scope, actor.id, "finance_v2_commission_run", runId, `/finance/v2/commission-runs/${runId}/reverse`);
     });
-    return (await this.list(scope)).rows.find((r) => r.id === runId) ?? null;
+    return (await this.list(scope, {}, { id: runId })).rows.find((r) => r.id === runId) ?? null;
   }
 
   // ─── Scheduled month-end run ──────────────────────────────────────────────
@@ -453,9 +464,16 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Commission transfer (تحويل عمولات) ──────────────────────────────────
 
-  /** GET /finance/v2/commission-transfers: the transfers, the unsent commission and the default accounts to prefill. */
-  async listTransfers(scope: number) {
+  /**
+   * GET /finance/v2/commission-transfers?page&pageSize: the transfers (newest first, a page at a time; `total` counts
+   * them all), the unsent commission and the default accounts to prefill. `opts.id` reads one transfer.
+   */
+  async listTransfers(scope: number, qs: any = {}, opts: { id?: number } = {}) {
     const q = this.q();
+    const page = Math.max(1, Number(qs?.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(qs?.pageSize) || 50));
+    const params = [scope, opts.id ?? null];
+    const [{ n }] = await q.rows(`select count(*)::int as n from finance_commission_transfers t where t.user_id = $1 and ($2::int is null or t.id = $2::int)`, params);
     const rows = await q.rows(
       `select t.id, t.number, to_char(t.transfer_date,'YYYY-MM-DD') as date, t.amount::text as amount, t.status, t.memo, t.void_reason,
               t.from_bank_account_id, t.to_bank_account_id, f.name_ar as from_ar, f.name_en as from_en, b.name_ar as to_ar, b.name_en as to_en,
@@ -464,14 +482,15 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
          from finance_commission_transfers t
          left join bank_accounts f on f.id = t.from_bank_account_id and f.user_id = t.user_id
          left join bank_accounts b on b.id = t.to_bank_account_id and b.user_id = t.user_id
-        where t.user_id = $1 order by t.transfer_date desc, t.id desc`,
-      [scope],
+        where t.user_id = $1 and ($2::int is null or t.id = $2::int) order by t.transfer_date desc, t.id desc limit ${pageSize} offset ${(page - 1) * pageSize}`,
+      params,
     );
     const u = await unsentCommission(q, scope);
     const defaults = await this.defaultBoxes(q, scope);
     return {
       unsent: fromHalalas(u.unsent), booked: fromHalalas(u.booked), transferred: fromHalalas(u.transferred),
       defaults,
+      total: Number(n), page, pageSize,
       rows: rows.map((r: any) => ({
         id: r.id, number: r.number, date: r.date, amount: r.amount, status: r.status, memo: r.memo ?? null, voidReason: r.void_reason ?? null,
         from: { id: r.from_bank_account_id, nameAr: r.from_ar ?? null, nameEn: r.from_en ?? null },
@@ -536,7 +555,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       return id;
     });
     this.emitter.kick(scope);
-    return (await this.listTransfers(scope)).rows.find((r) => r.id === out) ?? null;
+    return (await this.listTransfers(scope, {}, { id: out })).rows.find((r) => r.id === out) ?? null;
   }
 
   /** POST /finance/v2/commission-transfers/:id/void {reason}: the reversal of its entry. */
@@ -553,7 +572,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       await auditRow(c, scope, actor.id, "finance_v2_commission_transfer", id, `/finance/v2/commission-transfers/${id}/void`);
     });
     this.emitter.kick(scope);
-    return (await this.listTransfers(scope)).rows.find((r) => r.id === id) ?? null;
+    return (await this.listTransfers(scope, {}, { id })).rows.find((r) => r.id === id) ?? null;
   }
 
   private issuerOrThrow(): CommissionIssuer {

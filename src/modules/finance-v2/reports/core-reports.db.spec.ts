@@ -306,6 +306,20 @@ describe("finance v2 core reports (real Postgres)", { skip: fv2DbSkip }, () => {
       assert.deepEqual(s.byMethod, [{ method: "bank_transfer", receipts: "3000.00", payments: "0.00" }, { method: "other", receipts: "0.00", payments: "1300.00" }]);
     });
 
+    it("paged like the general ledger: the running balance holds on every page, by-method covers the whole range; filter by account", async () => {
+      const full = await rep.cashBook(U, { bankAccountId: String(bankBA), from: "2026-02-01", to: "2026-02-28" });
+      const p2 = await rep.cashBook(U, { bankAccountId: String(bankBA), from: "2026-02-01", to: "2026-02-28", page: "2", pageSize: "1" });
+      const a = full.sections[0], b = p2.sections[0];
+      assert.deepEqual([b.pages, b.totalLines, b.lines.length], [3, 3, 1]);
+      assert.deepEqual(b.lines[0], a.lines[1]);
+      assert.deepEqual([b.opening, b.receipts, b.payments, b.closing, b.byMethod], [a.opening, a.receipts, a.payments, a.closing, a.byMethod]);
+      const byAcct = await rep.cashBook(U, { accountId: String(a.account.id), from: "2026-02-01", to: "2026-02-28" });
+      assert.deepEqual(byAcct.sections.map((s: any) => s.account.id), [a.account.id]);
+      const every = await rep.cashBook(U, { from: "2026-02-01", to: "2026-02-28" });
+      assert.deepEqual(byAcct.options, every.options, "the options list every account whatever the filter");
+      assert.ok(every.options.some((o: any) => o.bankAccountId === bankBA && o.accountId === a.account.id));
+    });
+
     it("all accounts: the cash box too; totals across sections; a foreign bank account is 404", async () => {
       const cb = await rep.cashBook(U, { from: "2026-02-01", to: "2026-02-28", lang: "en" });
       const cash = cb.sections.find((s: any) => s.bankAccount?.id === cashBA)!;

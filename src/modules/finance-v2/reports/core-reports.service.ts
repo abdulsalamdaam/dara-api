@@ -44,6 +44,23 @@ export interface DimFilter {
 }
 
 const BS_TYPES = new Set<AcctType>(["asset", "liability", "equity"]);
+
+/** How many accounts' ledger sections are read at once (each is ~14 queries on the shared pool). */
+const SECTION_CONCURRENCY = 6;
+
+/** `fn` over `items` with at most `limit` in flight; results in the input order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 const PL_TYPES = new Set<AcctType>(["revenue", "expense"]);
 const DIM_COLS: Array<[keyof DimFilter, string]> = [
   ["ownerId", "owner_id"], ["propertyId", "property_id"], ["unitId", "unit_id"], ["tenantId", "tenant_id"], ["contractId", "contract_id"],
@@ -474,11 +491,11 @@ export class CoreReportsService {
     const pageSize = Math.min(Math.max(Number(q.pageSize) || 500, 1), 2000);
     const page = Math.max(Number(q.page) || 1, 1);
     const f = await this.filterOf(scope, q, ["ownerId", "propertyId", "unitId", "tenantId", "contractId"]);
-    const sections = [];
-    for (const a of leaves) {
+    // Each section is independent (its own queries, no shared state): read them a few at a time, in account-code order.
+    const sections = await mapLimit(leaves, SECTION_CONCURRENCY, async (a) => {
       const s = await this.ledgerSection(scope, a, from, to, fy, f, pageSize, (page - 1) * pageSize, lang);
-      sections.push({ ...s, lines: s.lines.map(({ method: _m, ...l }: any) => l), page, pageSize, pages: Math.max(1, Math.ceil(s.totalLines / pageSize)) });
-    }
+      return { ...s, lines: s.lines.map(({ method: _m, ...l }: any) => l), page, pageSize, pages: Math.max(1, Math.ceil(s.totalLines / pageSize)) };
+    });
     return {
       report: "general-ledger",
       lang,
@@ -781,6 +798,13 @@ export class CoreReportsService {
 
   // ───────────────────────────── §7.9 cash and bank book ─────────────────────────────
 
+  /**
+   * Per bank account / cash box: opening, the range's lines a page at a time (`page`, `pageSize`, as the general
+   * ledger: the running balance is a window over the whole range, so it is right on every page), the period totals,
+   * the closing balance and the receipts/payments by method (SQL over the whole range, not the page).
+   * `bankAccountId` reads one bank account; `accountId` one cash/bank ledger account (one with no bank_accounts row
+   * included). `options` always lists every account the book can show, whatever the filter.
+   */
   async cashBook(scope: number, q: Record<string, any> = {}) {
     const lang = langOf(q.lang);
     const sm = await this.startMonth(scope);
@@ -788,13 +812,14 @@ export class CoreReportsService {
     const list = await this.accounts(scope);
     const accts = new Map(list.map((a) => [a.id, a]));
     const bankId = optId(q.bankAccountId, "bankAccountId");
+    const acctId = optId(q.accountId, "accountId");
     const banks = (await this.pool.query(
       `select id, kind, name_ar as "nameAr", name_en as "nameEn", bank_name as "bankName", iban, is_trust as "isTrust",
               is_default as "isDefault", is_active as "isActive", gl_account_id as "glAccountId"
-         from bank_accounts where user_id = $1 ${bankId ? "and id = $2" : ""} order by kind desc, id`, bankId ? [scope, bankId] : [scope])).rows;
-    if (bankId && !banks.length) throw new NotFoundException({ error: "BANK_ACCOUNT_NOT_FOUND", message: "Bank account not found" });
-    const targets: Array<{ bank: any | null; acct: Acct }> = banks.filter((b: any) => accts.has(b.glAccountId)).map((b: any) => ({ bank: b, acct: accts.get(b.glAccountId)! }));
-    if (!bankId) {
+         from bank_accounts where user_id = $1 order by kind desc, id`, [scope])).rows;
+    if (bankId && !banks.some((b: any) => b.id === bankId)) throw new NotFoundException({ error: "BANK_ACCOUNT_NOT_FOUND", message: "Bank account not found" });
+    const all: Array<{ bank: any | null; acct: Acct }> = banks.filter((b: any) => accts.has(b.glAccountId)).map((b: any) => ({ bank: b, acct: accts.get(b.glAccountId)! }));
+    {
       // Cash and bank leaves under the 1110 group that no bank_accounts row points at, when they carry postings.
       const grp = list.find((a) => a.code === "1110");
       const linked = new Set(banks.map((b: any) => b.glAccountId));
@@ -804,27 +829,25 @@ export class CoreReportsService {
         const used = await this.pool.query(`select distinct account_id from journal_lines where user_id = $1 and entry_date <= $2::date and account_id = any($3::int[])`,
           [scope, to, cands.map((a) => a.id)]);
         const u = new Set(used.rows.map((x: any) => x.account_id));
-        for (const a of cands) if (u.has(a.id)) targets.push({ bank: null, acct: a });
+        for (const a of cands) if (u.has(a.id)) all.push({ bank: null, acct: a });
       }
     }
+    const targets = all.filter((t) => (bankId ? t.bank?.id === bankId : acctId ? t.acct.id === acctId : true));
+    if (acctId && !bankId && !targets.length) throw new NotFoundException({ error: "ACCOUNT_NOT_FOUND", message: "Cash or bank account not found" });
     const fy = fyStartOf(from, sm);
-    const LIMIT = 10_000;
+    const pageSize = Math.min(Math.max(Number(q.pageSize) || 500, 1), 2000);
+    const page = Math.max(Number(q.page) || 1, 1);
     let gr = 0, gp = 0, go = 0, gc = 0;
-    const sections = [];
-    for (const t of targets) {
-      const s = await this.ledgerSection(scope, t.acct, from, to, fy, {}, LIMIT, 0, lang);
-      const byMethod = new Map<string, { receipts: number; payments: number }>();
+    const sections = await mapLimit(targets, SECTION_CONCURRENCY, async (t) => {
+      const [s, byMethod] = await Promise.all([
+        this.ledgerSection(scope, t.acct, from, to, fy, {}, pageSize, (page - 1) * pageSize, lang),
+        this.cashByMethod(scope, t.acct.id, from, to),
+      ]);
       const lines = s.lines.map((l: any) => {
-        const k = l.method ?? "other";
-        const m = byMethod.get(k) ?? { receipts: 0, payments: 0 };
-        m.receipts += h(l.debit);
-        m.payments += h(l.credit);
-        byMethod.set(k, m);
         const { debit, credit, ...rest } = l;
         return { ...rest, receipt: debit, payment: credit };
       });
-      gr += h(s.periodDebit); gp += h(s.periodCredit); go += h(s.opening); gc += h(s.closing);
-      sections.push({
+      return {
         bankAccount: t.bank ? { ...t.bank, name: nameOf(lang, { nameAr: t.bank.nameAr, nameEn: t.bank.nameEn ?? t.bank.nameAr }) } : null,
         account: s.account,
         opening: s.opening,
@@ -832,19 +855,47 @@ export class CoreReportsService {
         payments: s.periodCredit,
         closing: s.closing,
         lines,
-        truncated: s.totalLines > LIMIT,
-        byMethod: [...byMethod.entries()].sort(([a], [b]) => (a === "other" ? 1 : b === "other" ? -1 : a < b ? -1 : 1))
-          .map(([method, v]) => ({ method, receipts: fromHalalas(v.receipts), payments: fromHalalas(v.payments) })),
-      });
-    }
+        totalLines: s.totalLines,
+        page,
+        pageSize,
+        pages: Math.max(1, Math.ceil(s.totalLines / pageSize)),
+        // Kept for older clients: the lines are paged now, never cut.
+        truncated: false,
+        byMethod,
+      };
+    });
+    for (const s of sections) { gr += h(s.receipts); gp += h(s.payments); go += h(s.opening); gc += h(s.closing); }
+    const options = all.map((t) => ({
+      bankAccountId: t.bank?.id ?? null, accountId: t.acct.id, code: t.acct.code, kind: t.bank?.kind ?? null, isTrust: t.bank?.isTrust ?? false,
+      name: t.bank ? nameOf(lang, { nameAr: t.bank.nameAr, nameEn: t.bank.nameEn ?? t.bank.nameAr }) : nameOf(lang, t.acct),
+    }));
     return {
       report: "cash-book",
       lang,
       mode: await this.mode(scope),
       generatedAt: riyadhNow(),
-      params: { from, to, bankAccountId: bankId ?? null, days: daysBetween(from, to) + 1 },
+      params: { from, to, bankAccountId: bankId ?? null, accountId: bankId ? null : acctId ?? null, page, pageSize, days: daysBetween(from, to) + 1 },
+      options,
       sections,
       totals: { opening: fromHalalas(go), receipts: fromHalalas(gr), payments: fromHalalas(gp), closing: fromHalalas(gc) },
     };
+  }
+
+  /**
+   * Receipts (debits) and payments (credits) by payment method over the whole range of one account. The method is
+   * the collection's (`payment_collection` lines, as `decorate` resolves it); every other line is "other".
+   */
+  private async cashByMethod(scope: number, accountId: number, from: string, to: string) {
+    const r = await this.pool.query(
+      `select coalesce(case when e.source_type = 'payment_collection' then pc.method end, 'other') as method,
+              coalesce(sum(l.debit), 0)::text as dr, coalesce(sum(l.credit), 0)::text as cr
+         from journal_lines l join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+         left join payment_collections pc on e.source_type = 'payment_collection' and pc.id = e.source_id and pc.user_id = l.user_id
+        where l.user_id = $1 and l.account_id = $2 and l.entry_date between $3::date and $4::date
+        group by 1`, [scope, accountId, from, to]);
+    return r.rows
+      .map((x: any) => ({ method: String(x.method), receipts: h(x.dr), payments: h(x.cr) }))
+      .sort((a: any, b: any) => (a.method === "other" ? 1 : b.method === "other" ? -1 : a.method < b.method ? -1 : 1))
+      .map((v: any) => ({ method: v.method, receipts: fromHalalas(v.receipts), payments: fromHalalas(v.payments) }));
   }
 }

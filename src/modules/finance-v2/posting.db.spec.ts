@@ -405,6 +405,9 @@ describe("finance v2 posting engine (real Postgres)", { skip: fv2DbSkip }, () =>
       assert.equal(item.state, "retrying");
       assert.equal(item.message.en, "A linked account is inactive");
       assert.ok(listed.items.some((i: any) => Number(i.id) === Number(rev.id) && i.state === "blocked"));
+      // `total` is the list's WHERE counted once per row (a pending row retrying AND blocked is one row).
+      assert.equal(listed.total, listed.items.length);
+      assert.equal(listed.counts.errors, listed.total);
 
       await q(`update accounts set is_active = true where user_id = $1 and system_key = $2`, [U, SYS.drawings]);
       await errors.retry(U, ACTOR, Number(orig.id));

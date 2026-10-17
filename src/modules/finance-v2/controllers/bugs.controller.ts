@@ -11,7 +11,7 @@ import { LedgerEmitter } from "../ledger-emitter.service";
 import { effectiveFeeForProperty, effectiveManagementFee } from "../commission";
 import { contractSummaryV2 } from "../overrides/reads";
 import { openInstallments, writeOffInstallments } from "../overrides/terminate";
-import { createRentReceipt, ensureAgencyFeeDraft, unbilledAgencyFees } from "../overrides/documents-v2";
+import { createRentReceipt, documentedPayments, ensureAgencyFeeDraft, unbilledAgencyFees } from "../overrides/documents-v2";
 import { fromHalalas, toHalalas } from "../money";
 
 const idOf = (v: string): number => {
@@ -133,6 +133,13 @@ export class FinanceV2BugsController {
     });
     if (!doc) throw new NotFoundException({ error: "FINANCE_V2_NO_AGENCY_FEE", message: "لا توجد أتعاب وساطة على العقد · The contract has no agency fee" });
     return doc;
+  }
+
+  /** E9: the contract's installments already on a live charge document (they cannot be receipted again). */
+  @Get("contracts/:id/documented-payments")
+  @RequireCapability("view")
+  documented(@Req() req: Fv2Request, @Param("id") id: string) {
+    return documentedPayments(this.q(), scopeId(req.user!), idOf(id));
   }
 
   /** E8: contracts with an agency fee and no live AGF document. */

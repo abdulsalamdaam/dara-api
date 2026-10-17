@@ -89,8 +89,8 @@ export class FinanceV2CommissionController {
   /** The transfers, the untransferred commission and the default trust / operating accounts. */
   @Get("commission-transfers")
   @RequireCapability("view")
-  transfers(@Req() req: Fv2Request) {
-    return this.runs.listTransfers(scopeId(req.user!));
+  transfers(@Req() req: Fv2Request, @Query() q: any) {
+    return this.runs.listTransfers(scopeId(req.user!), q);
   }
 
   /** {amount?, date?, fromBankAccountId?, toBankAccountId?, memo?} — Dr operating bank / Cr trust bank. */

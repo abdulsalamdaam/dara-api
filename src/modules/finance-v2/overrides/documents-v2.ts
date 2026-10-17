@@ -67,6 +67,29 @@ export async function sellerOf(q: Sql, scope: number, contractId: number): Promi
 }
 
 /**
+ * GET /finance/v2/contracts/:id/documented-payments → `{ rows: [{ paymentId, number }] }`: the contract's
+ * installments already on a live charge document (the lowest-id one's number), by the same test the rent-receipt
+ * create refuses with FINANCE_V2_ALREADY_DOCUMENTED — in SQL over every document, not a first page of them.
+ */
+export async function documentedPayments(q: Sql, scope: number, contractId: number) {
+  const [c] = await q.rows(`select id from contracts where id = $1 and user_id = $2 and deleted_at is null`, [contractId, scope]);
+  if (!c) throw new NotFoundException({ error: "CONTRACT_NOT_FOUND", message: "Contract not found" });
+  const rows = await q.rows(
+    `select x."paymentId", x.number from (
+       select p.id as "paymentId",
+              (select si.number from simple_invoices si
+                where si.user_id = p.user_id and si.deleted_at is null and si.status <> 'cancelled' and si.type = 'invoice'
+                  and coalesce(si.kind, 'invoice') in ('invoice','manual','rent_receipt')
+                  and (si.payment_id = p.id or exists (select 1 from jsonb_array_elements_text(coalesce(si.payment_ids, '[]'::jsonb)) e where e::int = p.id))
+                order by si.id limit 1) as number
+         from payments p where p.user_id = $1 and p.contract_id = $2 and p.deleted_at is null) x
+      where x.number is not null order by x."paymentId"`,
+    [scope, contractId],
+  );
+  return { rows: rows.map((r: any) => ({ paymentId: Number(r.paymentId), number: String(r.number) })) };
+}
+
+/**
  * POST /finance/v2/rent-receipts {paymentIds, issueDate?, notes?} → a DRAFT
  * rent receipt covering those installments (same contract; not deposits,
  * cancelled or externally settled; not already on a live charge document).
