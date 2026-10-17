@@ -965,7 +965,7 @@ would strand everything filed in between.
   a whitelist of tabs (`TENANT_TABS`) and a two-step getting-started list; both
   are gone — every plan opens the same portal, and only the limits differ
   (since Oct 2026 units and properties are unlimited on every plan; tiers
-  differ by seats — tenant 1, basic 3, pro 6, enterprise unlimited). `mode`
+  differ by seats — tenant 1, basic 2, pro 6, enterprise unlimited). `mode`
   still shapes *content* (the dashboard widget, who the contract wizard treats
   as the account holder), not access.
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
@@ -977,6 +977,10 @@ would strand everything filed in between.
   withdrawn for new payments but stays a valid stored
   value — old rows and accounts carry it; `purchasableCycle()` moves it up to
   quarterly on renewal.
+- **Subscription payments activate on the Moyasar webhook**, with `POST
+  /me/subscription/sync` as the fallback the web calls on return from checkout:
+  it fetches each recent pending invoice and activates only a verified, fully
+  settled one. Staging needs it — Moyasar's webhook is registered against prod.
 - **Ejar lookup quota per plan** (`PLAN_EJAR_LOOKUPS_PER_YEAR`): tenant 30,
   basic 90, pro 150 a year, enterprise uncapped — prorated to the paid period
   (quarterly basic = 22) and counted from `subscription_started_at`, on top of

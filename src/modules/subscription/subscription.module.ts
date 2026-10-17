@@ -248,6 +248,50 @@ export class SubscriptionController {
   }
 
   /**
+   * Confirm the account's open payments with Moyasar directly.
+   *
+   * Activation normally rides on the webhook, but a webhook can miss — on
+   * staging it is registered against production, so a staging payment never
+   * hears back. The web calls this when the user returns from the checkout
+   * (and when the billing page shows a pending row): each recent pending
+   * invoice is fetched from Moyasar and, only when it is provably this row's
+   * full settled payment (`verifyMoyasarPaid`), activated exactly as the
+   * webhook would. Nothing is marked paid on the invoice's word alone.
+   */
+  @Post("sync")
+  async sync(@CurrentUser() user: AuthUser) {
+    const ownerId = scopeId(user);
+    if (!isMoyasarConfigured()) return { activated: 0 };
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const pendings = (await this.db.select().from(subscriptionPaymentsTable)
+      .where(and(eq(subscriptionPaymentsTable.userId, ownerId), eq(subscriptionPaymentsTable.status, "pending")))
+      .orderBy(desc(subscriptionPaymentsTable.createdAt)))
+      .filter((p) => p.moyasarInvoiceId && new Date(p.createdAt) >= since);
+    let activated = 0;
+    for (const p of pendings) {
+      const inv = await fetchMoyasarInvoice(p.moyasarInvoiceId!).catch(() => null);
+      if (String(inv?.status || "").toLowerCase() !== "paid") continue;
+      const ev = evidenceFromInvoice(inv!);
+      const check = verifyMoyasarPaid(p, ev);
+      if (!check.ok) {
+        this.appLog?.record({
+          level: "error",
+          event: "moyasar_paid_unverified",
+          message: `subscription payment ${p.id}: Moyasar invoice is paid but does not match the row — not activated`,
+          context: "SubscriptionSync",
+          userId: p.userId,
+          meta: { paymentId: p.id, invoiceId: p.moyasarInvoiceId, reason: check.reason },
+        });
+        continue;
+      }
+      if (await activateFromPaidRow(this.db, p, { moyasarPaymentId: ev.paymentId, paidAt: ev.paidAt }, this.invoices)) activated++;
+      // One paid invoice is the live subscription; older pending rows stay for the pay path to close.
+      break;
+    }
+    return { activated };
+  }
+
+  /**
    * Start a subscription payment. Optionally switches the plan/cycle first
    * (the "upgrade" path), then creates a Moyasar hosted invoice and returns
    * its payment URL. Only the account owner (not an employee) may pay.

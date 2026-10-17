@@ -73,7 +73,7 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     maxLandlords: UNLIMITED,
     maxProperties: UNLIMITED,
     maxUnits: UNLIMITED,
-    maxUsers: 3,
+    maxUsers: 2,
   },
   // Legacy tier — not offered anymore; mapped to the closest current limits.
   advanced: {
