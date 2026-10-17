@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, or, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, lte, or, sql, sum } from "drizzle-orm";
 import { campaignsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -9,7 +9,20 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { listQuerySchema, parseDateBound, wantsPagination } from "../../common/pagination";
+import { likeContains, listQuerySchema, parseDateBound, wantsPagination } from "../../common/pagination";
+
+/**
+ * Campaigns created before the status keys were English carry the Arabic
+ * label instead (`نشطة` was even the create default). They are read as their
+ * English key wherever status is grouped or filtered - no data migration.
+ */
+const LEGACY_STATUS: Record<string, string> = { "نشطة": "active", "متوقفة": "paused", "منتهية": "ended" };
+// Inlined as literals, not bound parameters: the same expression is used in
+// SELECT and GROUP BY, and Postgres only matches the two when they are
+// textually identical - `$1` in one and `$7` in the other is a GROUP BY error.
+const statusKeySql = sql<string>`case ${campaignsTable.status} ${sql.raw(
+  Object.entries(LEGACY_STATUS).map(([ar, en]) => `when '${ar}' then '${en}'`).join(" "),
+)} else ${campaignsTable.status} end`;
 
 const FIELDS = ["name", "targetUnits", "channel", "budget", "leads", "conversions", "status", "startDate", "endDate", "notes"] as const;
 
@@ -28,8 +41,14 @@ class CampaignsController {
    * slice. Pagination is opt-in — `page`/`pageSize`/`paginated` switch the
    * response to `{ data, page, pageSize, total }`; without them the legacy bare
    * array is preserved. `status` and `channel` are free text on this table
-   * (the UI writes Arabic labels), so they are matched exactly against
-   * whatever the caller sends rather than validated against an enum.
+   * (older rows carry Arabic status labels), so they are matched exactly
+   * against whatever the caller sends rather than validated against an enum -
+   * except that `status=active` also matches a legacy `نشطة` row, and so on.
+   *
+   * `stats` (paged only) aggregates the whole filtered set ignoring status:
+   * the headline totals, `byStatus` (count + leads per English status key) and
+   * `byChannel` (leads / conversions / budget per channel, most leads first) -
+   * everything the channels and analytics panels used to sum in the browser.
    */
   @Get()
   @RequirePermissions(PERMISSIONS.CAMPAIGNS_VIEW)
@@ -39,11 +58,12 @@ class CampaignsController {
 
     const conds: any[] = [eq(campaignsTable.userId, scopeId(user)), isNull(campaignsTable.deletedAt)];
     if (q.search) {
+      const pattern = likeContains(q.search);
       conds.push(or(
-        ilike(campaignsTable.name, `%${q.search}%`),
-        ilike(campaignsTable.channel, `%${q.search}%`),
-        ilike(campaignsTable.targetUnits, `%${q.search}%`),
-        ilike(campaignsTable.notes, `%${q.search}%`),
+        ilike(campaignsTable.name, pattern),
+        ilike(campaignsTable.channel, pattern),
+        ilike(campaignsTable.targetUnits, pattern),
+        ilike(campaignsTable.notes, pattern),
       ));
     }
     const statuses = typeof rawQuery?.status === "string" && rawQuery.status.trim()
@@ -61,7 +81,10 @@ class CampaignsController {
     // programme's leads/conversions/budget alongside a per-status breakdown,
     // so selecting one status must not rewrite the headline figures.
     const statsWhere = and(...conds);
-    if (statuses?.length) conds.push(inArray(campaignsTable.status, statuses));
+    if (statuses?.length) {
+      const legacy = Object.entries(LEGACY_STATUS).filter(([, en]) => statuses.includes(en)).map(([ar]) => ar);
+      conds.push(inArray(campaignsTable.status, [...statuses, ...legacy]));
+    }
     const where = and(...conds);
 
     // Kept ascending by default — this list has always read oldest-first and
@@ -73,7 +96,7 @@ class CampaignsController {
       .orderBy(dir(campaignsTable.createdAt), dir(campaignsTable.id)).$dynamic();
     if (paged) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow, statsRow] = await Promise.all([
+    const [rows, totalRow, statsRow, statusRows, channelRows] = await Promise.all([
       rowsQ,
       paged ? this.db.select({ total: count() }).from(campaignsTable).where(where) : Promise.resolve([{ total: 0 }]),
       // The marketing tab's headline figures - leads, conversions, budget and
@@ -85,11 +108,31 @@ class CampaignsController {
         conversions: sum(campaignsTable.conversions),
         budget: sum(campaignsTable.budget),
       }).from(campaignsTable).where(statsWhere) : Promise.resolve([{ leads: null, conversions: null, budget: null }]),
+      paged ? this.db.select({ status: statusKeySql, cnt: count(), leads: sum(campaignsTable.leads) })
+        .from(campaignsTable).where(statsWhere).groupBy(statusKeySql) : Promise.resolve([]),
+      paged ? this.db.select({
+        channel: campaignsTable.channel,
+        leads: sum(campaignsTable.leads),
+        conversions: sum(campaignsTable.conversions),
+        budget: sum(campaignsTable.budget),
+      }).from(campaignsTable).where(statsWhere).groupBy(campaignsTable.channel) : Promise.resolve([]),
     ]);
     if (!paged) return rows;
     const st = statsRow[0] as { leads: string | null; conversions: string | null; budget: string | null } | undefined;
     const leads = Number(st?.leads ?? 0);
     const conversions = Number(st?.conversions ?? 0);
+    const byStatus: Record<string, { count: number; leads: number }> = {};
+    for (const r of statusRows as Array<{ status: string; cnt: number; leads: string | null }>) {
+      byStatus[r.status] = { count: Number(r.cnt), leads: Number(r.leads ?? 0) };
+    }
+    const byChannel = (channelRows as Array<{ channel: string; leads: string | null; conversions: string | null; budget: string | null }>)
+      .map((r) => ({
+        channel: r.channel,
+        leads: Number(r.leads ?? 0),
+        conversions: Number(r.conversions ?? 0),
+        budget: Math.round((Number(r.budget ?? 0) + Number.EPSILON) * 100) / 100,
+      }))
+      .sort((a, b) => b.leads - a.leads);
     return {
       data: rows,
       page: q.page,
@@ -100,6 +143,8 @@ class CampaignsController {
         conversions,
         budget: Math.round((Number(st?.budget ?? 0) + Number.EPSILON) * 100) / 100,
         conversionRate: leads > 0 ? Math.round((conversions / leads) * 1000) / 10 : 0,
+        byStatus,
+        byChannel,
       },
     };
   }
@@ -116,7 +161,7 @@ class CampaignsController {
       budget: body.budget ? String(body.budget) : "0",
       leads: body.leads ?? 0,
       conversions: body.conversions ?? 0,
-      status: body.status || "نشطة",
+      status: body.status || "active",
       startDate: body.startDate ?? null,
       endDate: body.endDate ?? null,
       notes: body.notes ?? null,
