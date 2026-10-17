@@ -3,6 +3,7 @@ import {
   NotFoundException, Param, ParseIntPipe, Post, Query, Res, UseGuards,
 } from "@nestjs/common";
 import { ParseInt4Pipe } from "../../common/int4.pipe";
+import { listQuerySchema } from "../../common/pagination";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import type { Response } from "express";
 import { eq, and, isNull } from "drizzle-orm";
@@ -87,12 +88,12 @@ export class InvoicesController {
     @Query("search") search?: string,
   ) {
     if (page != null || pageSize != null || search != null) {
-      return this.invoices.listPaged(scopeId(user), {
-        page: Math.max(1, parseInt(page ?? "1", 10) || 1),
-        // 25 to match every other list in the product; cap raised to the shared 200.
-        pageSize: Math.min(200, Math.max(1, parseInt(pageSize ?? "25", 10) || 25)),
-        search: search?.trim() || undefined,
-      });
+      // The shared list schema: page ≥ 1, 1 ≤ pageSize ≤ 200 (default 25), and
+      // an out-of-range value is a 400 like every other list — it used to be
+      // clamped silently, so a caller asking for 500 got 200 and believed it
+      // had everything.
+      const q = listQuerySchema.parse({ page, pageSize, search });
+      return this.invoices.listPaged(scopeId(user), { page: q.page, pageSize: q.pageSize, search: q.search || undefined });
     }
     return this.invoices.list(scopeId(user), {
       limit: limit ? Math.min(500, parseInt(limit, 10) || 100) : 100,

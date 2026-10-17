@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Logger } from "@nestjs/common";
 import { eq, and, isNull, desc, ilike, count } from "drizzle-orm";
+import { likeContains } from "../../../common/pagination";
 import {
   invoicesTable,
   invoiceLinesTable,
@@ -737,17 +738,19 @@ export class InvoiceService {
   async listPaged(
     userId: number,
     opts: { page: number; pageSize: number; search?: string },
-  ): Promise<{ data: Invoice[]; total: number }> {
+  ): Promise<{ data: Invoice[]; page: number; pageSize: number; total: number }> {
     const conds = [eq(invoicesTable.userId, userId), isNull(invoicesTable.deletedAt)];
-    if (opts.search) conds.push(ilike(invoicesTable.invoiceNumber, `%${opts.search}%`));
+    if (opts.search) conds.push(ilike(invoicesTable.invoiceNumber, likeContains(opts.search)));
     const where = and(...conds);
     const [rows, totalRow] = await Promise.all([
       this.db.select().from(invoicesTable).where(where)
-        .orderBy(desc(invoicesTable.createdAt))
+        // id breaks ties: invoices issued in one batch share a created_at to
+        // the microsecond often enough that a row could show on two pages.
+        .orderBy(desc(invoicesTable.createdAt), desc(invoicesTable.id))
         .limit(opts.pageSize).offset((opts.page - 1) * opts.pageSize),
       this.db.select({ total: count() }).from(invoicesTable).where(where),
     ]);
-    return { data: rows, total: Number(totalRow[0]?.total ?? 0) };
+    return { data: rows, page: opts.page, pageSize: opts.pageSize, total: Number(totalRow[0]?.total ?? 0) };
   }
 
   async getOneWithLines(userId: number, id: number): Promise<{ invoice: Invoice; lines: InvoiceLine[] }> {

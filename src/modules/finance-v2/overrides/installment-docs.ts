@@ -41,7 +41,7 @@ export interface DocumentRouteRow {
 /** Contract ids from `?contractIds=1,2,3` (at most 200, positive integers). */
 export function parseIds(raw: unknown, max = 200): number[] {
   const parts = Array.isArray(raw) ? raw : String(raw ?? "").split(",");
-  const ids = [...new Set(parts.map((x) => Number(String(x).trim())).filter((n) => Number.isInteger(n) && n > 0))];
+  const ids = [...new Set(parts.map((x) => Number(String(x).trim())).filter((n) => Number.isInteger(n) && n > 0 && n <= 2147483647))]; // int4 — a larger id 500s in the driver
   if (ids.length > max) throw new BadRequestException({ error: "FINANCE_V2_BAD_INPUT", message: `${max} ids at most per request` });
   return ids;
 }

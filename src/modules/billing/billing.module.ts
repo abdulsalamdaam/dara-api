@@ -15,7 +15,8 @@ import { PdfA3Service } from "../invoice/services/pdfa3.service";
 import { UploadsService } from "../uploads/uploads.service";
 import { classifyKey } from "../uploads/key-scope";
 import { UploadsModule } from "../uploads/uploads.module";
-import { listQuerySchema, wantsPagination, pageBounds, parseIdList} from "../../common/pagination";
+import { listQuerySchema, wantsPagination, pageBounds, parseIdList, likeContains } from "../../common/pagination";
+import { contractFilterSql, parseContractFilter } from "../../common/contract-filter";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -360,20 +361,18 @@ class SimpleInvoicesController {
       : undefined;
     const type = !types && DOC_TYPES.includes(rawQuery?.type) ? rawQuery.type : undefined;
     const status = DOC_STATUSES.includes(rawQuery?.status) ? rawQuery.status : undefined;
-    // Optional landlord/property/unit filter — resolved to contract ids by the
-    // frontend and passed through here.
-    const contractIds: number[] | undefined =
-      typeof rawQuery?.contractIds === "string" && rawQuery.contractIds.trim()
-        // parseIdList bounds each id to int4; the local parse here let a value
-        // past 2^31 reach the driver, which answers a 500 rather than a miss.
-        ? (parseIdList(rawQuery.contractIds) ?? [])
-        : undefined;
+    // Optional contract / property / unit / landlord / tenant filter, resolved
+    // in SQL (common/contract-filter). A filter sent with no usable id —
+    // `contractIds=0`, which the portal sends when nothing matches — returns
+    // no rows; it used to be dropped, and the tab showed every document.
+    const cf = parseContractFilter(rawQuery);
+    const cfCond = cf ? contractFilterSql(cf, scopeId(user), simpleInvoicesTable.contractId) : undefined;
     const base = and(eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt));
     const conds = [base];
     if (types) conds.push(inArray(simpleInvoicesTable.type, types as any) as any);
     else if (type) conds.push(eq(simpleInvoicesTable.type, type as any));
     if (status) conds.push(eq(simpleInvoicesTable.status, status as any));
-    if (contractIds && contractIds.length > 0) conds.push(inArray(simpleInvoicesTable.contractId, contractIds) as any);
+    if (cfCond) conds.push(cfCond as any);
     // Hide vouchers (deposit + receipt) from the Invoices / Collections views —
     // they're evidence documents shown under Receipt Vouchers, never tax
     // invoices and never collectible.
@@ -414,23 +413,32 @@ class SimpleInvoicesController {
     // Carries a receipt voucher number.
     if (flag(rawQuery?.hasReceipt)) conds.push(isNotNull(simpleInvoicesTable.receiptNumber) as any);
     if (q.search) {
+      const pat = likeContains(q.search);
       conds.push(or(
-        ilike(simpleInvoicesTable.number, `%${q.search}%`),
-        ilike(simpleInvoicesTable.tenantName, `%${q.search}%`),
-        ilike(simpleInvoicesTable.receiptNumber, `%${q.search}%`),
-        ilike(contractsTable.contractNumber, `%${q.search}%`),
+        ilike(simpleInvoicesTable.number, pat),
+        ilike(simpleInvoicesTable.tenantName, pat),
+        ilike(simpleInvoicesTable.receiptNumber, pat),
+        ilike(contractsTable.contractNumber, pat),
       ) as any);
     }
     const where = and(...conds);
     const statsConds: any[] = [base];
     if (types) statsConds.push(inArray(simpleInvoicesTable.type, types as any));
     else if (type) statsConds.push(eq(simpleInvoicesTable.type, type as any));
-    if (contractIds && contractIds.length > 0) statsConds.push(inArray(simpleInvoicesTable.contractId, contractIds));
+    if (cfCond) statsConds.push(cfCond);
     if (excludeVouchers) statsConds.push(notVoucherCond as any);
     else if (excludeDeposit) statsConds.push(notDepositCond as any);
     const statsWhere = and(...statsConds);
 
-    const [rows, totalRow, statsRows] = await Promise.all([
+    const listFv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: R4-3
+    // The Receipt Vouchers tab's cards: how many vouchers the list holds and
+    // the money they record, over the SAME filters as the rows. The per-status
+    // figures below ignore the tab's own `hasReceipt` condition, so the card
+    // counted every approved invoice (32) over a list of the 28 that carry a
+    // voucher. The amount is each row's `voucherAmount`, computed in SQL by
+    // `voucherAmountSql` — the figure the row itself shows.
+    const wantVoucherStats = flag(rawQuery?.hasReceipt);
+    const [rows, totalRow, statsRows, voucherStatsRow] = await Promise.all([
       this.db.select({ ...getTableColumns(simpleInvoicesTable), contractNumber: contractsTable.contractNumber })
         .from(simpleInvoicesTable)
         .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id))
@@ -439,15 +447,38 @@ class SimpleInvoicesController {
         .limit(q.pageSize).offset((q.page - 1) * q.pageSize),
       this.db.select({ total: count() }).from(simpleInvoicesTable)
         .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id)).where(where),
-      this.db.select({ status: simpleInvoicesTable.status, cnt: count(), amount: sum(simpleInvoicesTable.total) })
-        .from(simpleInvoicesTable).where(statsWhere).groupBy(simpleInvoicesTable.status),
+      this.db.select({ status: simpleInvoicesTable.status, type: simpleInvoicesTable.type, cnt: count(), amount: sum(simpleInvoicesTable.total) })
+        .from(simpleInvoicesTable).where(statsWhere).groupBy(simpleInvoicesTable.status, simpleInvoicesTable.type),
+      wantVoucherStats
+        ? this.db.select({ amount: sql<string | null>`sum(${SimpleInvoicesController.voucherAmountSql(listFv2)})` })
+            .from(simpleInvoicesTable)
+            .leftJoin(contractsTable, eq(simpleInvoicesTable.contractId, contractsTable.id)).where(where)
+        : Promise.resolve([{ amount: null }]),
     ]);
-    const stats: Record<string, number> = { draftCount: 0, draftAmount: 0, confirmedCount: 0, confirmedAmount: 0 };
+    // `draft*` / `confirmed*` add every type the request covers — right for a
+    // single-type tab. `byType` keeps credit and debit notes apart: on the
+    // combined Settlement tab one LOWERS what was billed and the other RAISES
+    // it, and adding their totals as one positive figure described neither.
+    type TypeStats = { draftCount: number; draftAmount: number; confirmedCount: number; confirmedAmount: number };
+    const stats: Record<string, any> = { draftCount: 0, draftAmount: 0, confirmedCount: 0, confirmedAmount: 0 };
+    const byType: Record<string, TypeStats> = {};
     for (const s of statsRows as any[]) {
-      if (s.status === "draft") { stats.draftCount = Number(s.cnt); stats.draftAmount = round2(Number(s.amount ?? 0)); }
-      else if (s.status === "confirmed") { stats.confirmedCount = Number(s.cnt); stats.confirmedAmount = round2(Number(s.amount ?? 0)); }
+      const n = Number(s.cnt), amt = Number(s.amount ?? 0);
+      const t = (byType[s.type] ??= { draftCount: 0, draftAmount: 0, confirmedCount: 0, confirmedAmount: 0 });
+      if (s.status === "draft") {
+        stats.draftCount += n; stats.draftAmount = round2(stats.draftAmount + amt);
+        t.draftCount = n; t.draftAmount = round2(amt);
+      } else if (s.status === "confirmed") {
+        stats.confirmedCount += n; stats.confirmedAmount = round2(stats.confirmedAmount + amt);
+        t.confirmedCount = n; t.confirmedAmount = round2(amt);
+      }
     }
+    stats.byType = byType;
     const total = Number(totalRow[0]?.total ?? 0);
+    if (wantVoucherStats) {
+      stats.filteredCount = total;
+      stats.voucherAmount = round2(Number((voucherStatsRow as Array<{ amount: string | null }>)[0]?.amount ?? 0));
+    }
     // Per-invoice collected amount (sum of collections recorded against it).
     const ids = (rows as Array<{ id: number }>).map((r) => r.id);
     const collAgg = ids.length
@@ -547,7 +578,6 @@ class SimpleInvoicesController {
       }
     }
 
-    const listFv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: R4-3
     const instCollected = await this.installmentCollectedFor(this.db, scopeId(user), (rows as any[]).filter((r) => r.type === "invoice").map((r) => Number(r.id))); // finance-v2: R4-3
     const data = (rows as any[]).map((r) => {
       const settledByDues = SimpleInvoicesController.settledByDues(listFv2, r); // finance-v2: R4-3
@@ -577,116 +607,154 @@ class SimpleInvoicesController {
    * Grouped by the strongest identifier present (VAT number, then phone, then
    * email, then the normalised name), so the same person entered twice with a
    * typo'd name still lands on one card if they share a VAT number or phone.
+   *
+   * Grouped, searched, counted and paged BY THE DATABASE (`customerGroupsSql`).
+   * It used to read every invoice in the account, fold them in JavaScript and
+   * slice a page — and embed every one of a customer's invoices in the row.
+   * The documents now load when a row is opened (`GET customers/invoices`).
+   *
+   * `totalAmount` is what the customer was BILLED: approved documents only,
+   * credit notes subtracting, and never a receipt / deposit voucher — those
+   * record money received against a bill already counted, so adding them
+   * counted the same rent twice, and a draft has billed nobody yet.
+   * `invoiceCount` still counts every document listed under the customer.
    */
   @Get("customers")
   @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
   async customers(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    const rows = await this.db
-      .select({
-        id: simpleInvoicesTable.id,
-        number: simpleInvoicesTable.number,
-        type: simpleInvoicesTable.type,
-        status: simpleInvoicesTable.status,
-        kind: simpleInvoicesTable.kind,
-        tenantId: simpleInvoicesTable.tenantId,
-        tenantName: simpleInvoicesTable.tenantName,
-        client: simpleInvoicesTable.client,
-        total: simpleInvoicesTable.total,
-        issueDate: simpleInvoicesTable.issueDate,
-      })
-      .from(simpleInvoicesTable)
-      .where(and(eq(simpleInvoicesTable.userId, scopeId(user)), isNull(simpleInvoicesTable.deletedAt)))
-      .orderBy(desc(simpleInvoicesTable.issueDate), desc(simpleInvoicesTable.id));
-
-    type Customer = {
-      key: string; name: string; kind: string;
-      phone: string | null; email: string | null; address: string | null; vatNumber: string | null;
+    const uid = scopeId(user);
+    const search = typeof rawQuery?.search === "string" ? rawQuery.search.trim() : "";
+    const groups = SimpleInvoicesController.customerGroupsSql(uid);
+    const where = search
+      ? sql`where (g.name ilike ${likeContains(search)} or g.vat_number ilike ${likeContains(search)} or g.phone ilike ${likeContains(search)}
+          or g.email ilike ${likeContains(search)} or g.city ilike ${likeContains(search)})`
+      : sql``;
+    const paged = wantsPagination(rawQuery);
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const { limit, offset } = pageBounds(q);
+    const rowsOf = (res: any) => (Array.isArray(res) ? res : (res?.rows ?? [])) as any[];
+    const [res, totalRes] = await Promise.all([
+      this.db.execute(sql`with g as (${groups}) select * from g ${where}
+        order by g.last_issue_date desc nulls last, g.invoice_count desc, g.key
+        ${paged ? sql`limit ${limit} offset ${offset}` : sql``}`),
+      paged ? this.db.execute(sql`with g as (${groups}) select count(*)::int as n from g ${where}`) : Promise.resolve(null),
+    ]);
+    const list = rowsOf(res).map((r) => ({
+      key: String(r.key),
+      name: String(r.name ?? ""),
+      kind: String(r.kind ?? "other"),
+      phone: r.phone ?? null, email: r.email ?? null, address: r.address ?? null, vatNumber: r.vat_number ?? null,
       // Structured national address. Only an external (non-tenant, non-landlord)
       // buyer carries it on the invoice — for everyone else it lives on their
       // own record, and re-serving a stale copy from here would fight it.
-      region: string | null; city: string | null; district: string | null; street: string | null;
-      buildingNumber: string | null; additionalNumber: string | null; postalCode: string | null;
-      tenantId: number | null;
-      invoiceCount: number; totalAmount: number; lastIssueDate: string | null;
-      invoices: Array<{ id: number; number: string; type: string; status: string; total: number; issueDate: string | null }>;
-    };
-    const byKey = new Map<string, Customer>();
-    const blankStr = (v: unknown) => { const x = (v ?? "").toString().trim(); return x || null; };
+      region: r.region ?? null, city: r.city ?? null, district: r.district ?? null, street: r.street ?? null,
+      buildingNumber: r.building_number ?? null, additionalNumber: r.additional_number ?? null, postalCode: r.postal_code ?? null,
+      tenantId: r.tenant_id != null ? Number(r.tenant_id) : null,
+      invoiceCount: Number(r.invoice_count ?? 0),
+      totalAmount: round2(Number(r.total_amount ?? 0)),
+      lastIssueDate: r.last_issue_date ?? null,
+      // The documents load on expand; whether any is approved is what the
+      // invoice form needed from them (an approved buyer's details are locked).
+      hasConfirmed: r.has_confirmed === true,
+    }));
+    if (!paged) return list;
+    return { data: list, page: q.page, pageSize: q.pageSize, total: Number(rowsOf(totalRes)[0]?.n ?? 0) };
+  }
 
-    for (const r of rows) {
-      const c = (r.client ?? {}) as Record<string, any>;
-      const name = String(r.tenantName ?? c.name ?? "").trim();
-      const vat = String(c.vatNumber ?? "").trim();
-      const phone = String(c.phone ?? "").trim();
-      const email = String(c.email ?? "").trim().toLowerCase();
-      // An invoice with nothing identifying the buyer can't be attributed.
-      if (!name && !vat && !phone && !email) continue;
-      const key = vat ? `v:${vat}` : phone ? `p:${phone}` : email ? `e:${email}` : `n:${name.toLowerCase()}`;
-
-      let cur = byKey.get(key);
-      if (!cur) {
-        cur = {
-          key,
-          name: name || vat || phone || email,
-          // `kind` is stamped on new documents; older rows only tell us whether
-          // a tenant was linked, so fall back to that rather than guessing.
-          kind: String(c.kind ?? (r.tenantId ? "tenant" : r.kind === "commission" ? "landlord" : "other")),
-          phone: phone || null, email: email || null,
-          address: (c.address ? String(c.address) : null), vatNumber: vat || null,
-          region: blankStr(c.region), city: blankStr(c.city), district: blankStr(c.district),
-          street: blankStr(c.street), buildingNumber: blankStr(c.buildingNumber),
-          additionalNumber: blankStr(c.additionalNumber), postalCode: blankStr(c.postalCode),
-          tenantId: r.tenantId ?? null,
-          invoiceCount: 0, totalAmount: 0, lastIssueDate: null, invoices: [],
-        };
-        byKey.set(key, cur);
-      }
-      // Rows arrive newest-first, so the first sighting holds the freshest
-      // contact details; only fill what is still missing.
-      cur.phone ??= phone || null;
-      cur.email ??= email || null;
-      cur.address ??= c.address ? String(c.address) : null;
-      cur.vatNumber ??= vat || null;
-      cur.region ??= blankStr(c.region);
-      cur.city ??= blankStr(c.city);
-      cur.district ??= blankStr(c.district);
-      cur.street ??= blankStr(c.street);
-      cur.buildingNumber ??= blankStr(c.buildingNumber);
-      cur.additionalNumber ??= blankStr(c.additionalNumber);
-      cur.postalCode ??= blankStr(c.postalCode);
-      cur.tenantId ??= r.tenantId ?? null;
-      cur.invoiceCount += 1;
-      // Credit notes reduce what the customer was billed.
-      cur.totalAmount += (r.type === "credit" ? -1 : 1) * (Number(r.total) || 0);
-      if (!cur.lastIssueDate && r.issueDate) cur.lastIssueDate = r.issueDate;
-      cur.invoices.push({
-        id: r.id, number: r.number, type: r.type, status: r.status,
-        total: Number(r.total) || 0, issueDate: r.issueDate,
-      });
-    }
-
-    let list = [...byKey.values()]
-      .map((c) => ({ ...c, totalAmount: Math.round((c.totalAmount + Number.EPSILON) * 100) / 100 }))
-      .sort((a, b) => (b.lastIssueDate ?? "").localeCompare(a.lastIssueDate ?? "") || b.invoiceCount - a.invoiceCount);
-
-    // Search and paging happen after the grouping, not before it: a customer is
-    // only a customer once their invoices have been folded together by the
-    // identifier precedence above, so there is nothing to page until then.
-    // The account's invoices are still all read to build that — the same cost
-    // as before this endpoint took any parameters.
-    const search = typeof rawQuery?.search === "string" ? rawQuery.search.trim().toLowerCase() : "";
-    if (search) {
-      list = list.filter((c) =>
-        [c.name, c.vatNumber, c.phone, c.email, c.city]
-          .some((v) => v != null && String(v).toLowerCase().includes(search)));
-    }
-    if (!wantsPagination(rawQuery)) return list;
+  /**
+   * GET /simple-invoices/customers/invoices?key=… — one customer's documents,
+   * newest first, paged. `key` is the `key` a customers row carries; the
+   * grouping is the same SQL, so a row and its documents always agree.
+   */
+  @Get("customers/invoices")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW)
+  async customerInvoices(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const key = typeof rawQuery?.key === "string" ? rawQuery.key : "";
+    if (!/^[vpen]:/.test(key)) throw new BadRequestException("مفتاح العميل غير صالح");
     const q = listQuerySchema.parse(rawQuery ?? {});
     const { limit, offset } = pageBounds(q);
+    const keyed = SimpleInvoicesController.customerKeyedSql(scopeId(user));
+    const rowsOf = (res: any) => (Array.isArray(res) ? res : (res?.rows ?? [])) as any[];
+    const [res, totalRes] = await Promise.all([
+      this.db.execute(sql`with k as (${keyed}) select k.id, k.number, k.type, k.status, k.total, to_char(k.issue_date, 'YYYY-MM-DD') as issue_date from k
+        where k.key = ${key} order by k.issue_date desc, k.id desc limit ${limit} offset ${offset}`),
+      this.db.execute(sql`with k as (${keyed}) select count(*)::int as n from k where k.key = ${key}`),
+    ]);
     return {
-      data: list.slice(offset, offset + limit),
-      page: q.page, pageSize: q.pageSize, total: list.length,
+      data: rowsOf(res).map((r) => ({
+        id: Number(r.id), number: String(r.number), type: String(r.type), status: String(r.status),
+        total: Number(r.total) || 0, issueDate: r.issue_date ?? null,
+      })),
+      page: q.page, pageSize: q.pageSize, total: Number(rowsOf(totalRes)[0]?.n ?? 0),
     };
+  }
+
+  /**
+   * Every live document with its customer key — the grouping rule of the
+   * Customers list, kept to the letter of the JavaScript it replaced:
+   * name = tenant_name, else the client's name; VAT number, phone and email
+   * (lower-cased) from the client snapshot, all trimmed; the key is the first
+   * of those present (`v:` VAT, `p:` phone, `e:` email, `n:` lower-cased
+   * name). A document naming nobody belongs to no customer.
+   */
+  /** JavaScript's `String(x ?? "").trim()`, near enough: NULL → '', leading/trailing whitespace off. */
+  private static trimSql(x: ReturnType<typeof sql>) {
+    return sql`regexp_replace(coalesce(${x}, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')`;
+  }
+
+  private static customerKeyedSql(uid: number) {
+    const trim = SimpleInvoicesController.trimSql;
+    return sql`select x.*, case
+        when x.vat <> '' then 'v:' || x.vat
+        when x.phone <> '' then 'p:' || x.phone
+        when x.email <> '' then 'e:' || x.email
+        else 'n:' || lower(x.name) end as key
+      from (
+        select si.id, si.number, si.type::text as type, si.status::text as status, si.kind, si.total, si.issue_date, si.tenant_id,
+               coalesce(si.client, '{}'::jsonb) as c,
+               ${trim(sql`coalesce(si.tenant_name, si.client->>'name')`)} as name,
+               ${trim(sql`si.client->>'vatNumber'`)} as vat,
+               ${trim(sql`si.client->>'phone'`)} as phone,
+               lower(${trim(sql`si.client->>'email'`)}) as email
+          from simple_invoices si
+         where si.user_id = ${uid} and si.deleted_at is null
+      ) x
+      where not (x.name = '' and x.vat = '' and x.phone = '' and x.email = '')`;
+  }
+
+  /**
+   * One row per customer key. Contact fields come from the NEWEST document
+   * that has them (issue date desc, id desc — the order the JavaScript read
+   * them in), so a later invoice's phone wins over an older one's, and an
+   * older one only fills what the newer ones left blank.
+   */
+  private static customerGroupsSql(uid: number) {
+    const newest = sql`order by k.issue_date desc, k.id desc`;
+    const first = (expr: ReturnType<typeof sql>) =>
+      sql`(array_agg(${expr} ${newest}) filter (where ${expr} is not null))[1]`;
+    const blank = (field: string) => sql`nullif(${SimpleInvoicesController.trimSql(sql`k.c->>${field}`)}, '')`;
+    return sql`select k.key,
+        (array_agg(coalesce(nullif(k.name, ''), nullif(k.vat, ''), nullif(k.phone, ''), k.email) ${newest}))[1] as name,
+        (array_agg(coalesce(k.c->>'kind', case when k.tenant_id is not null then 'tenant' when k.kind = 'commission' then 'landlord' else 'other' end) ${newest}))[1] as kind,
+        ${first(sql`nullif(k.phone, '')`)} as phone,
+        ${first(sql`nullif(k.email, '')`)} as email,
+        ${first(sql`nullif(k.c->>'address', '')`)} as address,
+        ${first(sql`nullif(k.vat, '')`)} as vat_number,
+        ${first(blank("region"))} as region,
+        ${first(blank("city"))} as city,
+        ${first(blank("district"))} as district,
+        ${first(blank("street"))} as street,
+        ${first(blank("buildingNumber"))} as building_number,
+        ${first(blank("additionalNumber"))} as additional_number,
+        ${first(blank("postalCode"))} as postal_code,
+        ${first(sql`k.tenant_id`)} as tenant_id,
+        count(*)::int as invoice_count,
+        bool_or(k.status = 'confirmed') as has_confirmed,
+        coalesce(sum(case when k.status = 'confirmed' and coalesce(k.kind, '') not in ('receipt', 'deposit')
+          then case when k.type = 'credit' then -k.total else k.total end end), 0) as total_amount,
+        max(k.issue_date)::text as last_issue_date
+      from (${SimpleInvoicesController.customerKeyedSql(uid)}) k
+      group by k.key`;
   }
 
   /**
@@ -795,6 +863,53 @@ class SimpleInvoicesController {
    */
   private static settledByDues(fv2: boolean, doc: { kind?: string | null; status?: string | null }): boolean {
     return fv2 && doc.kind === "commission" && doc.status === "confirmed";
+  }
+
+  /**
+   * A list row's `voucherAmount`, as one SQL expression over `simple_invoices`
+   * — so a card can SUM it across every matching row instead of one page.
+   * Mirrors `list()` exactly:
+   *
+   *   - a voucher document (receipt / deposit) is its own total;
+   *   - otherwise the collections booked under the row's own receipt number,
+   *     when there are any;
+   *   - otherwise the row's collected figure (`effectiveCollected`): its own
+   *     collections, or what was collected on the installments behind it
+   *     (`installmentCollectedFor`) capped at its net total (total ± confirmed
+   *     notes referencing it), or — a v2 confirmed commission — the net total.
+   *
+   * Keep it in step with those three; a drift shows as a card that disagrees
+   * with the rows under it.
+   */
+  static voucherAmountSql(fv2: boolean) {
+    // Columns spelled out as "simple_invoices"."…": drizzle renders a column
+    // bare when the query has no join, and inside these sub-queries a bare
+    // "id" / "user_id" would bind to the inner table.
+    const c = (name: string) => sql.raw(`"simple_invoices"."${name}"`);
+    const d = {
+      id: c("id"), userId: c("user_id"), total: c("total"), type: c("type"), kind: c("kind"), status: c("status"),
+      number: c("number"), paymentId: c("payment_id"), paymentIds: c("payment_ids"), receiptNumber: c("receipt_number"),
+    };
+    const notes = sql`coalesce((select sum(case when n.type = 'credit' then -n.total else n.total end) from simple_invoices n
+      where n.user_id = ${d.userId} and n.deleted_at is null and n.type in ('credit', 'debit') and n.status = 'confirmed'
+        and n.billing_reference = ${d.number}), 0)`;
+    const net = sql`(${d.total} + case when ${d.type} = 'invoice' then ${notes} else 0 end)`;
+    const own = sql`coalesce((select sum(pc.amount) from payment_collections pc where pc.invoice_id = ${d.id}), 0)`;
+    const viaInstallments = sql`coalesce((select sum(pc.amount) from payment_collections pc
+        left join simple_invoices o on o.id = pc.invoice_id and o.user_id = ${d.userId}
+       where pc.user_id = ${d.userId} and ${d.type} = 'invoice' and coalesce(${d.kind}, '') not in ('receipt', 'deposit')
+         and pc.payment_id in (select v::int from jsonb_array_elements_text(case
+           when jsonb_typeof(${d.paymentIds}) = 'array' and jsonb_array_length(${d.paymentIds}) > 0 then ${d.paymentIds}
+           when ${d.paymentId} is not null then jsonb_build_array(${d.paymentId})
+           else '[]'::jsonb end) v)
+         and (pc.invoice_id is null or pc.invoice_id = ${d.id} or o.kind in ('receipt', 'deposit'))), 0)`;
+    const collected = fv2
+      ? sql`case when ${d.kind} = 'commission' and ${d.status} = 'confirmed' then ${net} else greatest(${own}, least(${net}, ${viaInstallments})) end`
+      : sql`greatest(${own}, least(${net}, ${viaInstallments}))`;
+    const underReceipt = sql`(select sum(pc.amount) from payment_collections pc
+      where pc.invoice_id = ${d.id} and pc.receipt_number = nullif(${d.receiptNumber}, ''))`;
+    return sql`case when coalesce(${d.kind}, '') in ('receipt', 'deposit') then ${d.total}
+      else coalesce(${underReceipt}, ${collected}) end`;
   }
 
   /** finance-v2: R4-3 — the collected figure every read path reports. */

@@ -24,7 +24,7 @@ import { CurrentTenant } from "../../common/decorators/current-tenant.decorator"
 import { UploadsService } from "../uploads/uploads.service";
 import { feeLineTreatment } from "../contracts/installments";
 import {
-  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  idListSentEmpty, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 
 const METHODS = ["bank_transfer", "cash", "cheque", "other"] as const;
@@ -260,6 +260,8 @@ export class PaymentConfirmationsController {
     }
     const filterContractIds = parseIdList(rawQuery?.contractId) ?? parseIdList(rawQuery?.contractIds);
     if (filterContractIds) conds.push(inArray(paymentConfirmationsTable.contractId, filterContractIds));
+    // Sent but no usable id (`contractIds=0` — "nothing matches") is no rows, not no filter.
+    else if (idListSentEmpty(rawQuery?.contractId) || idListSentEmpty(rawQuery?.contractIds)) conds.push(sql`false`);
     const paymentIds = parseIdList(rawQuery?.paymentId) ?? parseIdList(rawQuery?.paymentIds);
     if (paymentIds) conds.push(inArray(paymentConfirmationsTable.paymentId, paymentIds));
     const methods = parseEnumList(rawQuery?.method, METHODS);
