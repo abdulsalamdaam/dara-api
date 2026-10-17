@@ -18,7 +18,9 @@ export const auditLogsTable = pgTable("audit_logs", {
   path: text("path").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
-  ownerIdx: index("audit_logs_owner_idx").on(t.ownerUserId),
+  // Built on boot by src/database/indexes.ts (CONCURRENTLY), which also drops
+  // the single-column audit_logs_owner_idx this replaces.
+  ownerCreatedIdx: index("audit_logs_owner_created_idx").on(t.ownerUserId, t.createdAt.desc(), t.id.desc()),
 }));
 
 export type AuditLog = typeof auditLogsTable.$inferSelect;

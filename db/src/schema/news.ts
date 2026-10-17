@@ -126,6 +126,8 @@ export const newsItemsTable = pgTable("news_items", {
 }, (t) => ({
   uniqExternal: uniqueIndex("news_items_external_id_uniq").on(t.externalId),
   byFeed: index("news_items_feed_idx").on(t.status, t.pinned, t.postedAt),
+  // The public feed's exact order; built on boot by src/database/indexes.ts.
+  byFeedOrder: index("news_items_feed_v2_idx").on(t.status, t.pinned.desc(), t.postedAt.desc().nullsLast(), t.id.desc()),
   byCategory: index("news_items_category_idx").on(t.aiCategory),
   bySource: index("news_items_source_idx").on(t.sourceId),
   byCreated: index("news_items_created_idx").on(t.createdAt, t.id),
