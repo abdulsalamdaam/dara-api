@@ -415,6 +415,11 @@ describe("news retention (real Postgres)", { skip }, () => {
       await dbm.pool.query(`insert into news_job_runs (trigger, status, started_at) values ('manual', 'success', $1)`, [t]);
       await dbm.pool.query(`insert into news_sources (kind, handle, display_name) values ('x', $1, 'Same')`, [`h${i}`]);
     }
+    // Microsecond-precision ties: a cursor rounded to milliseconds would skip or repeat these.
+    for (let i = 0; i < 3; i++) {
+      await dbm.pool.query(`insert into news_items (external_id, text, status, posted_at, pinned) values ($1, 't', 'published', '2026-01-01 00:00:00.123456+00', false)`, [`us-${i}`]);
+    }
+    await dbm.pool.query(`insert into news_items (external_id, text, status, posted_at, pinned) values ('us-x', 't', 'published', '2026-01-01 00:00:00.123457+00', false)`);
     const admin = new NewsAdminController(db, new Runner(db, appLog), appLog);
     const feed = new NewsController(db);
     const walk = async (fetchPage: (page: number) => Promise<any>) => {
@@ -434,12 +439,43 @@ describe("news retention (real Postgres)", { skip }, () => {
     await walk((page) => admin.items({ page: String(page), pageSize: "7" }));
     await walk((page) => admin.runs({ page: String(page), pageSize: "7" }) as any);
     await walk((page) => admin.sources({ page: String(page), pageSize: "7" }) as any);
-    await walk((page) => feed.list({ page: String(page), pageSize: "7" }));
+    const byOffset = await walk((page) => feed.list({ page: String(page), pageSize: "7" }));
+
+    // Keyset walk: the same rows in the same order as the offset walk.
+    const walkCursor = async (between?: (step: number) => Promise<void>) => {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      for (let step = 0; step < 20; step++) {
+        const r: any = await feed.list({ pageSize: "4", ...(cursor ? { cursor } : {}) });
+        seen.push(...r.data.map((x: any) => x.id));
+        assert.ok(!("cursorAt" in (r.data[0] ?? {})), "the cursor column never leaks into rows");
+        if (!r.nextCursor) break;
+        cursor = r.nextCursor;
+        await between?.(step);
+      }
+      return seen;
+    };
+    assert.deepEqual(await walkCursor(), byOffset, "cursor order = offset order (pinned, undated and tied rows included)");
+
+    // Mid-scroll churn: a backdated story gets published, a shown one gets hidden.
+    // Every row present throughout is seen exactly once.
+    const hidden = byOffset[1];
+    const churn = await walkCursor(async (step) => {
+      if (step !== 0) return;
+      await dbm.pool.query(`update news_items set status = 'hidden' where id = $1`, [hidden]);
+      await dbm.pool.query(`insert into news_items (external_id, text, status, posted_at, pinned) values ('late', 't', 'published', $1, false)`,
+        [new Date(Date.now() - 2 * HOUR).toISOString()]);
+    });
+    assert.equal(new Set(churn).size, churn.length, "no duplicates under churn");
+    for (const id of byOffset) assert.ok(churn.includes(id), `row ${id} not skipped under churn`);
+    await assert.rejects(() => feed.list({ cursor: "junk" }), /invalid cursor/);
+    await dbm.pool.query(`delete from news_items where external_id = 'late'`);
+    await dbm.pool.query(`update news_items set status = 'published' where id = $1`, [hidden]);
     const big: any = await admin.items({ page: "1", pageSize: "150" });
     assert.equal(big.pageSize, 100, "pageSize is clamped to 100");
 
     const counts: any = await admin.itemCounts({ status: "rejected" });
-    assert.deepEqual(counts, { published: 15, rejected: 8, hidden: 0, pinned: 5, total: 23 }, "counts ignore status");
+    assert.deepEqual(counts, { published: 19, rejected: 8, hidden: 0, pinned: 5, total: 27 }, "counts ignore status");
     const bare = await admin.runs({ limit: "5" });
     assert.ok(Array.isArray(bare) && bare.length === 5, "runs without page/pageSize stay a bare array");
   });

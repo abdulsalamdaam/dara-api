@@ -14,7 +14,7 @@ import { OtpThrottlerGuard } from "../../common/throttler";
 import { clientIp, clientUserAgent } from "../../common/client-ip";
 import { EmailService } from "../email/email.service";
 import {
-  listQuerySchema, parseDateBound, wantsPagination,
+  likeContains, listQuerySchema, parseDateBound, wantsPagination,
 } from "../../common/pagination";
 
 class CreateContactDto {
@@ -137,11 +137,12 @@ class AdminContactController {
     const status = typeof rawQuery?.status === "string" ? rawQuery.status : undefined;
     if (status && status !== "all") conds.push(eq(contactSubmissionsTable.status, status as any));
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(contactSubmissionsTable.name, `%${q.search}%`),
-        ilike(contactSubmissionsTable.email, `%${q.search}%`),
-        ilike(contactSubmissionsTable.phone, `%${q.search}%`),
-        ilike(contactSubmissionsTable.description, `%${q.search}%`),
+        ilike(contactSubmissionsTable.name, like),
+        ilike(contactSubmissionsTable.email, like),
+        ilike(contactSubmissionsTable.phone, like),
+        ilike(contactSubmissionsTable.description, like),
       ));
     }
     const from = parseDateBound(rawQuery?.from);

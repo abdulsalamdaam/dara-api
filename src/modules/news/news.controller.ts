@@ -8,6 +8,7 @@ import { DEFAULT_PAGE_SIZE, listQuerySchema, type ListQuery } from "../../common
 import { z } from "zod/v4";
 import { NEWS_CATEGORIES } from "./news.types";
 import { readNewsConfig } from "./news.config";
+import { NEWS_CURSOR_AT, decodeNewsCursor, encodeNewsCursor, newsCursorCondition } from "./news.cursor";
 
 /** What a reader sees of an item — no AI score/reason, no moderation fields. */
 export const PUBLIC_ITEM_COLUMNS = {
@@ -73,12 +74,22 @@ export class NewsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
   /**
-   * GET /news?category=&q=&page=&pageSize=
-   * → `{ data, page, pageSize, total }`, published only, pinned first then newest.
+   * GET /news?category=&q=&page=&pageSize=&cursor=
+   * → `{ data, page, pageSize, total, nextCursor }`, published only, pinned
+   * first then newest.
+   *
+   * Two ways to walk it. The portal's infinite feed sends `cursor` (the
+   * previous response's `nextCursor`; omit it for the first page) and gets
+   * keyset paging that cannot skip or repeat a row when a story is published
+   * or hidden mid-scroll — see news.cursor.ts. `page` is ignored then.
+   * Offset callers (`page`) keep working unchanged; they get `nextCursor` too.
+   * `nextCursor` is null on the last page. `total` is the count for the same
+   * filters, regardless of the cursor.
    */
   @Get()
   async list(@Query() raw: any) {
     const query = newsListQuery(raw);
+    const cursor = decodeNewsCursor(raw?.cursor);
     const conds: SQL[] = [eq(newsItemsTable.status, "published")];
     const category = typeof raw?.category === "string" ? raw.category.trim() : "";
     if (category) {
@@ -88,15 +99,22 @@ export class NewsController {
     const q = (typeof raw?.q === "string" ? raw.q : query.search ?? "").trim().slice(0, 100);
     if (q) conds.push(searchCondition(q)!);
     const where = and(...conds);
+    const pageWhere = cursor ? and(where, newsCursorCondition(cursor)) : where;
 
-    const [rows, total] = await Promise.all([
-      this.db.select(PUBLIC_ITEM_COLUMNS).from(newsItemsTable).where(where)
+    const [found, total] = await Promise.all([
+      this.db.select({ ...PUBLIC_ITEM_COLUMNS, cursorAt: NEWS_CURSOR_AT }).from(newsItemsTable).where(pageWhere)
         // Stable: pinned, newest (undated last), then id — pages never repeat or skip.
         .orderBy(desc(newsItemsTable.pinned), sql`${newsItemsTable.postedAt} desc nulls last`, desc(newsItemsTable.id))
-        .limit(query.pageSize).offset((query.page - 1) * query.pageSize),
+        // One extra row says whether another page exists without a second count.
+        .limit(query.pageSize + 1).offset(cursor ? 0 : (query.page - 1) * query.pageSize),
       this.db.select({ n: count() }).from(newsItemsTable).where(where),
     ]);
-    return { data: rows, page: query.page, pageSize: query.pageSize, total: Number(total[0]?.n ?? 0) };
+    const more = found.length > query.pageSize;
+    const page = more ? found.slice(0, query.pageSize) : found;
+    const last = page[page.length - 1];
+    const nextCursor = more && last ? encodeNewsCursor({ pinned: !!last.pinned, postedAt: last.cursorAt ?? null, id: last.id }) : null;
+    const data = page.map(({ cursorAt: _c, ...row }) => row);
+    return { data, page: query.page, pageSize: query.pageSize, total: Number(total[0]?.n ?? 0), nextCursor };
   }
 
   /**

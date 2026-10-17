@@ -10,7 +10,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { EmailModule } from "../email/email.module";
 import { EmailService } from "../email/email.service";
-import { listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
+import { likeContains, listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
 
 @ApiTags("support")
 @ApiBearerAuth("user-jwt")
@@ -46,31 +46,24 @@ class SupportController {
     const dir = q.order === "asc" ? asc : desc;
 
     /**
-     * The newest message on each ticket, as a correlated sub-query.
-     *
-     * This was a per-ticket round trip inside a Promise.all - one query per row,
-     * so the cost grew with the table rather than with the page. Folding it
-     * into the row query also means the last message can be searched.
+     * The newest message on each ticket, as ONE lateral sub-query (message and
+     * time together) rather than two correlated ones that each walked the
+     * ticket's messages. It was a per-ticket round trip before that.
      */
-    const lastMessage = this.db
-      .select({ v: supportMessagesTable.message })
+    const lastMsg = this.db
+      .select({ message: supportMessagesTable.message, at: supportMessagesTable.createdAt })
       .from(supportMessagesTable)
       .where(eq(supportMessagesTable.ticketId, supportTicketsTable.id))
       .orderBy(desc(supportMessagesTable.createdAt), desc(supportMessagesTable.id))
-      .limit(1);
-    const lastMessageAt = this.db
-      .select({ v: supportMessagesTable.createdAt })
-      .from(supportMessagesTable)
-      .where(eq(supportMessagesTable.ticketId, supportTicketsTable.id))
-      .orderBy(desc(supportMessagesTable.createdAt), desc(supportMessagesTable.id))
-      .limit(1);
+      .limit(1)
+      .as("last_msg");
 
     const conds: any[] = [];
     if (!admin) conds.push(eq(supportTicketsTable.userId, user.id));
     const statuses = parseEnumList(rawQuery?.status, ["open", "closed"] as const);
     if (statuses) conds.push(inArray(supportTicketsTable.status, statuses));
     if (q.search) {
-      const like = `%${q.search}%`;
+      const like = likeContains(q.search);
       conds.push(admin
         ? or(
             ilike(usersTable.name, like),
@@ -92,12 +85,13 @@ class SupportController {
         userName: usersTable.name,
         userEmail: usersTable.email,
         userCompany: companiesTable.name,
-        lastMessage: sql<string | null>`(${lastMessage})`.as("last_message"),
-        lastMessageAt: sql<Date | null>`(${lastMessageAt})`.as("last_message_at"),
+        lastMessage: lastMsg.message,
+        lastMessageAt: lastMsg.at,
       })
       .from(supportTicketsTable)
       .leftJoin(usersTable, eq(supportTicketsTable.userId, usersTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+      .leftJoinLateral(lastMsg, sql`true`)
       .where(where)
       // `id` tiebreak - `updated_at` moves on every reply and two tickets
       // replied to in the same instant would otherwise order arbitrarily.

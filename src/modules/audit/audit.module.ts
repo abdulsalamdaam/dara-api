@@ -13,7 +13,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import {
-  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 
 /**
@@ -68,9 +68,10 @@ class AuditController {
    * email), `entity`, `action` (update|delete), `actorId`, and a `from`/`to`
    * date window - and pagination walks the whole history rather than a cap.
    *
-   * The legacy `limit` parameter still works and still returns a bare array,
-   * so the existing settings screen is untouched; sending `page`/`pageSize`/
-   * `paginated` switches to `{ data, page, pageSize, total }`.
+   * The legacy `limit` parameter still works and still returns a bare array
+   * (newest 200 by default); sending `page`/`pageSize`/`paginated` (or any
+   * filter) switches to `{ data, page, pageSize, total }`, which the portal's
+   * Settings → Activity log now uses.
    */
   @Get()
   async list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
@@ -80,12 +81,13 @@ class AuditController {
 
     const conds: any[] = [eq(auditLogsTable.ownerUserId, user.id)];
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(auditLogsTable.entity, `%${q.search}%`),
-        ilike(auditLogsTable.path, `%${q.search}%`),
-        ilike(auditLogsTable.entityId, `%${q.search}%`),
-        ilike(usersTable.name, `%${q.search}%`),
-        ilike(usersTable.email, `%${q.search}%`),
+        ilike(auditLogsTable.entity, like),
+        ilike(auditLogsTable.path, like),
+        ilike(auditLogsTable.entityId, like),
+        ilike(usersTable.name, like),
+        ilike(usersTable.email, like),
       ));
     }
     const entities = typeof rawQuery?.entity === "string" && rawQuery.entity.trim()

@@ -44,11 +44,20 @@ class ReportsController {
     const uid = scopeId(user);
     const live = isNull as any; // brevity
 
-    const [contracts, cUnits, units, properties, owners, tenants, payments, collections, invoices, maint, expenses, payouts] =
+    const [contracts, cuProps, properties, owners, tenants, payments, collections, invoices, maint, expenses, payouts] =
       await Promise.all([
         this.db.select().from(contractsTable).where(and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt))),
-        this.db.select().from(contractUnitsTable),
-        this.db.select().from(unitsTable),
+        // contract → unit → property for THIS account's contracts only. Both
+        // tables used to be read whole — every account's contract_units and
+        // units, on every request. Unit soft-deletes are not filtered, as
+        // before: a deleted unit still says which property its contract was on.
+        this.db.select({ contractId: contractUnitsTable.contractId, propertyId: unitsTable.propertyId })
+          .from(contractUnitsTable)
+          .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+          .where(inArray(contractUnitsTable.contractId,
+            this.db.select({ id: contractsTable.id }).from(contractsTable)
+              .where(and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt)))))
+          .orderBy(asc(contractUnitsTable.id)),
         this.db.select().from(propertiesTable).where(and(eq(propertiesTable.userId, uid), isNull(propertiesTable.deletedAt))),
         this.db.select().from(ownersTable).where(and(eq(ownersTable.userId, uid), isNull(ownersTable.deletedAt))),
         this.db.select().from(tenantsTable).where(and(eq(tenantsTable.userId, uid), isNull(tenantsTable.deletedAt))),
@@ -73,13 +82,11 @@ class ReportsController {
       if (o.idNumber) ownerByIdNum.set(String(o.idNumber).trim(), o);
       if (o.name) ownerByName.set(String(o.name).trim().toLowerCase(), o);
     }
-    const unitProp = new Map(units.map((u) => [u.id, u.propertyId]));
     // contract → propertyId (first unit's property)
     const contractProp = new Map<number, number>();
-    for (const cu of cUnits) {
+    for (const cu of cuProps) {
       if (contractProp.has(cu.contractId)) continue;
-      const pid = unitProp.get(cu.unitId);
-      if (pid != null) contractProp.set(cu.contractId, pid);
+      if (cu.propertyId != null) contractProp.set(cu.contractId, cu.propertyId);
     }
     for (const [cid, pid] of (await this.fv2h?.contractPropertySnapshots(uid)) ?? []) if (!contractProp.has(cid)) contractProp.set(cid, pid); // finance-v2: N-C — a terminated contract (units unlinked) keeps the property its v2 dims captured; flag off: empty
     const paymentById = new Map(payments.map((p) => [p.id, p]));

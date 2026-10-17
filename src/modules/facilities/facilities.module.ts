@@ -9,7 +9,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { listQuerySchema, parseDateBound, wantsPagination } from "../../common/pagination";
+import { likeContains, listQuerySchema, parseDateBound, wantsPagination } from "../../common/pagination";
 
 const FIELDS = ["name", "propertyName", "type", "status", "lastMaintenance", "nextMaintenance", "monthlyOpex", "notes"] as const;
 
@@ -41,10 +41,11 @@ class FacilitiesController {
 
     const conds: any[] = [eq(facilitiesTable.userId, scopeId(user)), isNull(facilitiesTable.deletedAt)];
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(facilitiesTable.name, `%${q.search}%`),
-        ilike(facilitiesTable.propertyName, `%${q.search}%`),
-        ilike(facilitiesTable.notes, `%${q.search}%`),
+        ilike(facilitiesTable.name, like),
+        ilike(facilitiesTable.propertyName, like),
+        ilike(facilitiesTable.notes, like),
       ));
     }
     const csv = (v: unknown) => typeof v === "string" && v.trim()

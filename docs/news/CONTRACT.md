@@ -86,6 +86,10 @@ All paths under the global `/api` prefix.
    `GET /admin/news/items?status=&category=&sourceId=&runId=&q=&page=&pageSize=`
    → `{ data: T[], page, pageSize, total }` (pageSize max 200, default 25). No `next_cursor`;
    "load more" = `page+1` while `page*pageSize < total`.
+   *Amended Oct 2026:* `GET /news` also takes `cursor` and returns `nextCursor` (opaque; null on
+   the last page). The portal feed walks it — keyset paging on `pinned desc, posted_at desc nulls
+   last, id desc`, so a backdated story published or a story hidden mid-scroll can no longer make
+   the feed skip or repeat a row. With `cursor`, `page` is ignored. `page`/`total` still work.
 3. **Portal item shape** (`GET /news`): `{ id, url, authorHandle, authorName, authorAvatarUrl,
    text, lang, postedAt, media:[{type,url,preview_url}], metrics:{likes,retweets,replies,views},
    category, titleAr, titleEn, summaryAr, summaryEn, tags, pinned }` — the `ai` prefix is dropped
