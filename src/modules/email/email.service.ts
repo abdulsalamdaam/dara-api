@@ -21,7 +21,7 @@ const SITE_DOMAIN = process.env.SITE_DOMAIN || "dara-sa.com";
 const SITE_URL = process.env.SITE_URL || `https://${SITE_DOMAIN}`;
 
 /** Shown to recipients as the contact address in email bodies. */
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || `hello@${SITE_DOMAIN}`;
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || `info@${SITE_DOMAIN}`;
 
 /**
  * Hard ceiling on a single Resend call. Must stay well under the proxy
@@ -127,7 +127,7 @@ export class EmailService {
    * Default Reply-To. Sending `noreply@`-style addresses tanks deliverability;
    * giving every email a real mailbox to reply to keeps spam filters happier.
    */
-  private readonly replyTo = process.env.RESEND_REPLY_TO || `hello@${SITE_DOMAIN}`;
+  private readonly replyTo = process.env.RESEND_REPLY_TO || `info@${SITE_DOMAIN}`;
   /**
    * One-click List-Unsubscribe (RFC 8058). Pleases Gmail's bulk-sender
    * policy and adds ~1 point on mail-tester. The URL must accept a POST

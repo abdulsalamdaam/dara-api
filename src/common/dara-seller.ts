@@ -46,7 +46,7 @@ export function daraSeller(): DaraSellerIdentity {
     vatNumber: process.env.DARA_SELLER_VAT || null,
     crNumber: process.env.DARA_SELLER_CRN || null,
     addressLines: addr.length ? addr : ["الرياض، المملكة العربية السعودية"],
-    email: process.env.DARA_BILLING_EMAIL || process.env.SUPPORT_EMAIL || `hello@${SITE_DOMAIN}`,
+    email: process.env.DARA_BILLING_EMAIL || process.env.SUPPORT_EMAIL || `info@${SITE_DOMAIN}`,
     phone: process.env.DARA_SELLER_PHONE || null,
     website: process.env.SITE_URL?.replace(/^https?:\/\//, "") || SITE_DOMAIN,
   };
