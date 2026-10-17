@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, listQuerySchema,
   pageBounds, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  idListSentEmpty, likeContains,
 } from "./pagination";
 
 describe("listQuerySchema", () => {
@@ -127,5 +128,18 @@ describe("parseDateBound", () => {
     assert.equal(parseDateBound("2026-08"), undefined);
     assert.equal(parseDateBound("yesterday"), undefined);
     assert.equal(parseDateBound(undefined), undefined);
+  });
+});
+
+describe("idListSentEmpty / likeContains", () => {
+  it("treats a sent-but-unusable id list as empty", () => {
+    assert.equal(idListSentEmpty("0"), true);
+    assert.equal(idListSentEmpty("99999999999"), true);
+    assert.equal(idListSentEmpty("1,2"), false);
+    assert.equal(idListSentEmpty(undefined), false);
+    assert.equal(idListSentEmpty(""), false);
+  });
+  it("escapes LIKE wildcards", () => {
+    assert.equal(likeContains("a%b_c\\d"), "%a\\%b\\_c\\\\d%");
   });
 });

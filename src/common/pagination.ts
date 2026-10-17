@@ -107,3 +107,26 @@ export function parseDateBound(raw: unknown): string | undefined {
   const v = raw.trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined;
 }
+
+/**
+ * `?contractIds=` was SENT but nothing in it is a usable id (`0`, `abc`, an id
+ * past int4). The frontend sends `contractIds=0` on purpose when a property /
+ * tenant filter matches no contract, so this must mean "no rows", not "no
+ * filter" — dropping it returns the whole list. Pair with `parseIdList`:
+ *
+ *   const ids = parseIdList(q.contractIds);
+ *   if (ids) conds.push(inArray(t.contractId, ids));
+ *   else if (idListSentEmpty(q.contractIds)) conds.push(sql`false`);
+ */
+export function idListSentEmpty(raw: unknown): boolean {
+  return typeof raw === "string" && raw.trim() !== "" && parseIdList(raw) === undefined;
+}
+
+/**
+ * A user's search text as an ILIKE "contains" pattern. `%`, `_` and `\` are
+ * escaped so they match literally — unescaped, `search=%` matches every row.
+ * Postgres' default ILIKE escape character is `\`, so no ESCAPE clause is needed.
+ */
+export function likeContains(raw: string): string {
+  return `%${raw.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
