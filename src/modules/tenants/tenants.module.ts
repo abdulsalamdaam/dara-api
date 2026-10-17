@@ -12,7 +12,7 @@ import { assertNationalAddress } from "../../common/national-address";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
-import { listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
+import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import {
   LIMITS, applyBoolNonNull, applyEmail, applyFourDigitCode, applyIban, applyMoney,
@@ -158,22 +158,24 @@ class TenantsController {
     const types = parseEnumList(rawQuery?.type, ["individual", "company"] as const);
     const statuses = parseEnumList(rawQuery?.status, ["active", "inactive"] as const);
     if (statuses) conds.push(inArray(tenantsTable.status, statuses));
+    else if (enumListSentEmpty(rawQuery?.status, ["active", "inactive"])) conds.push(sql`false`);
     if (rawQuery?.isDraft === "1" || rawQuery?.isDraft === "true") conds.push(eq(tenantsTable.isDraft, true));
     else if (rawQuery?.isDraft === "0" || rawQuery?.isDraft === "false") conds.push(eq(tenantsTable.isDraft, false));
     if (q.search) {
       conds.push(or(
-        ilike(tenantsTable.name, `%${q.search}%`),
-        ilike(tenantsTable.shortName, `%${q.search}%`),
-        ilike(tenantsTable.nationalId, `%${q.search}%`),
-        ilike(tenantsTable.phone, `%${q.search}%`),
-        ilike(tenantsTable.email, `%${q.search}%`),
-        ilike(tenantsTable.taxNumber, `%${q.search}%`),
+        ilike(tenantsTable.name, likeContains(q.search)),
+        ilike(tenantsTable.shortName, likeContains(q.search)),
+        ilike(tenantsTable.nationalId, likeContains(q.search)),
+        ilike(tenantsTable.phone, likeContains(q.search)),
+        ilike(tenantsTable.email, likeContains(q.search)),
+        ilike(tenantsTable.taxNumber, likeContains(q.search)),
       ));
     }
     // Every filter EXCEPT type - the three cards (total / individuals /
     // companies) must keep their counts while one type is selected.
     const statsWhere = and(...conds);
     if (types) conds.push(inArray(tenantsTable.type, types));
+    else if (enumListSentEmpty(rawQuery?.type, ["individual", "company"])) conds.push(sql`false`);
     const where = and(...conds);
 
     const sortFn = q.order === "asc" ? asc : desc;

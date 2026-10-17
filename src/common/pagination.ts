@@ -101,6 +101,22 @@ export function parseEnumList<T extends string>(raw: unknown, allowed: readonly 
   return vals.length > 0 ? vals : undefined;
 }
 
+/**
+ * `?status=` (or any enum filter) was SENT but none of its values is one the
+ * endpoint knows. Same rule as `idListSentEmpty`: a filter that was asked for
+ * and matches nothing means "no rows", not "no filter" — otherwise
+ * `status=archived` returns the whole list while `type=unknown` returns none.
+ * `all` is the UI's "no filter" spelling and is not a value.
+ *
+ *   const statuses = parseEnumList(q.status, STATUSES);
+ *   if (statuses) conds.push(inArray(t.status, statuses));
+ *   else if (enumListSentEmpty(q.status, STATUSES)) conds.push(sql`false`);
+ */
+export function enumListSentEmpty(raw: unknown, allowed: readonly string[]): boolean {
+  return typeof raw === "string" && raw.trim() !== "" && raw.trim() !== "all"
+    && parseEnumList(raw, allowed) === undefined;
+}
+
 /** A `YYYY-MM-DD` bound for a date-range filter, or undefined if unusable. */
 export function parseDateBound(raw: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;

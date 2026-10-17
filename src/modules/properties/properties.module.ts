@@ -16,7 +16,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
+import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 
@@ -34,6 +34,26 @@ function overlayTypeOther<T extends { type?: unknown; typeOther?: unknown }>(row
     if ((r.type == null || r.type === "") && r.typeOther) (r as { type?: unknown }).type = r.typeOther;
   }
   return rows;
+}
+
+/**
+ * The `type` filter, spelled the way the list shows it: a lookup key / Arabic
+ * label, or — for a property saved under "Other" — the free text itself, which
+ * the list surfaces as `type` (see `overlayTypeOther`). A value that resolves
+ * to a lookup matches that FK; one that does not matches the free-text rows
+ * (`type_lookup_id IS NULL AND type_other = value`). Without the second branch
+ * every custom type offered in the filter returned zero rows. Null when no
+ * filter was asked for.
+ */
+async function typeFilter(db: Drizzle, category: string, lookupCol: any, otherCol: any, raw: unknown) {
+  if (raw == null || raw === "" || raw === "all") return null;
+  const values = [...new Set(String(raw).split(",").map((v) => v.trim()).filter(Boolean))];
+  if (values.length === 0) return null;
+  const ors = await Promise.all(values.map(async (v) => {
+    const id = await resolveLookupId(db, category, v);
+    return id != null ? eq(lookupCol, id) : and(isNull(lookupCol), eq(otherCol, v));
+  }));
+  return or(...ors);
 }
 
 /** When the caller is an employee, list their owner's data. Top-level users see their own. */
@@ -169,23 +189,27 @@ class PropertiesController {
     const conds: any[] = [eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)];
     if (q.search) {
       conds.push(or(
-        ilike(propertiesTable.name, `%${q.search}%`),
-        ilike(propertiesTable.district, `%${q.search}%`),
-        ilike(propertiesTable.street, `%${q.search}%`),
-        ilike(propertiesTable.deedNumber, `%${q.search}%`),
-        ilike(deedsTable.deedNumber, `%${q.search}%`),
+        ilike(propertiesTable.name, likeContains(q.search)),
+        ilike(propertiesTable.district, likeContains(q.search)),
+        ilike(propertiesTable.street, likeContains(q.search)),
+        ilike(propertiesTable.deedNumber, likeContains(q.search)),
+        ilike(deedsTable.deedNumber, likeContains(q.search)),
       ));
     }
-    const statuses = parseEnumList(rawQuery?.status, ["active", "inactive", "maintenance"] as const);
+    const statuses = parseEnumList(rawQuery?.status, PROPERTY_STATUSES);
     if (statuses) conds.push(inArray(propertiesTable.status, statuses));
+    else if (enumListSentEmpty(rawQuery?.status, PROPERTY_STATUSES)) conds.push(sql`false`);
     // Two spellings on purpose. The portal's filter chips carry the lookup KEY
     // ("residential"), because that is what the chip list is built from and a
     // key is stable where a label is editable; integrations tend to hold the
     // id. `resolveLookupId` already accepts a key or an Arabic label, so both
     // land on the same column and neither caller has to translate first.
-    const typeIds = parseIdList(rawQuery?.typeLookupId)
-      ?? await this.lookupIds("property_type", rawQuery?.type);
+    const typeIds = parseIdList(rawQuery?.typeLookupId);
     if (typeIds) conds.push(inArray(propertiesTable.typeLookupId, typeIds));
+    else {
+      const typeCond = await typeFilter(this.db, "property_type", propertiesTable.typeLookupId, propertiesTable.typeOther, rawQuery?.type);
+      if (typeCond) conds.push(typeCond);
+    }
     const regionIds = parseIdList(rawQuery?.regionLookupId)
       ?? await this.lookupIds("region", rawQuery?.region);
     if (regionIds) conds.push(inArray(propertiesTable.regionLookupId, regionIds));
@@ -264,6 +288,78 @@ class PropertiesController {
   }
 
   /**
+   * The distinct values the Properties tab's filter panel offers — type,
+   * region and city (each city with its region, so the city chips can follow
+   * the region pick). Spelled exactly as the list rows spell them, so a chip's
+   * value round-trips through the list's `type` / `region` / `city` filters.
+   *
+   * The panel used to download every property to build these, the moment it
+   * was opened.
+   */
+  @Get("facets")
+  @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
+  async facets(@CurrentUser() user: AuthUser) {
+    const scoped = and(eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt));
+    const [typeRows, placeRows] = await Promise.all([
+      this.db.selectDistinct({ typeLookupId: propertiesTable.typeLookupId, typeOther: propertiesTable.typeOther })
+        .from(propertiesTable).where(scoped),
+      this.db.selectDistinct({ regionLookupId: propertiesTable.regionLookupId, cityLookupId: propertiesTable.cityLookupId })
+        .from(propertiesTable).where(scoped),
+    ]);
+    await Promise.all([
+      attachLookupLabels(this.db, typeRows as any[], [{ idField: "typeLookupId", out: "type", mode: "key" }]),
+      attachLookupLabels(this.db, placeRows as any[], [
+        { idField: "regionLookupId", out: "region", mode: "labelAr" },
+        { idField: "cityLookupId", out: "city", mode: "labelAr" },
+      ]),
+    ]);
+    overlayTypeOther(typeRows as any[]);
+    const uniq = (xs: unknown[]) => [...new Set(xs.filter((x): x is string => typeof x === "string" && x !== ""))];
+    const cities = new Map<string, { city: string; region: string | null }>();
+    for (const r of placeRows as any[]) {
+      if (!r.city) continue;
+      const key = `${r.region ?? ""}\u0000${r.city}`;
+      if (!cities.has(key)) cities.set(key, { city: r.city, region: r.region ?? null });
+    }
+    return {
+      types: uniq((typeRows as any[]).map((r) => r.type)),
+      regions: uniq((placeRows as any[]).map((r) => r.region)),
+      cities: [...cities.values()],
+    };
+  }
+
+  /**
+   * Every property, but only the fields the map reads — id, name, district,
+   * city, status, type, totalUnits and the `mapUrl` the coordinates are parsed
+   * from. The map needs the whole portfolio (it states coverage: "13 of 27
+   * have a location"), not the full rows with their occupancy and deed joins.
+   */
+  @Get("map")
+  @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW)
+  async map(@CurrentUser() user: AuthUser) {
+    const rows = await this.db.select({
+      id: propertiesTable.id,
+      name: propertiesTable.name,
+      district: propertiesTable.district,
+      status: propertiesTable.status,
+      totalUnits: propertiesTable.totalUnits,
+      mapUrl: propertiesTable.mapUrl,
+      typeLookupId: propertiesTable.typeLookupId,
+      typeOther: propertiesTable.typeOther,
+      cityLookupId: propertiesTable.cityLookupId,
+    })
+      .from(propertiesTable)
+      .where(and(eq(propertiesTable.userId, scopeId(user)), isNull(propertiesTable.deletedAt)))
+      .orderBy(desc(propertiesTable.createdAt), desc(propertiesTable.id));
+    await attachLookupLabels(this.db, rows as any[], [
+      { idField: "typeLookupId", out: "type", mode: "key" },
+      { idField: "cityLookupId", out: "city", mode: "labelAr" },
+    ]);
+    overlayTypeOther(rows as any[]);
+    return (rows as any[]).map(({ typeLookupId, typeOther, cityLookupId, ...r }) => r);
+  }
+
+  /**
    * Deeds the user can still attach to a NEW property (i.e. not already
    * linked to one). Powers the dropdown on the property add wizard.
    * If `currentDeedId` is provided, include it in the result so the edit
@@ -295,8 +391,8 @@ class PropertiesController {
       // thousand unlinked deeds should send 25 rows and a search term, not the
       // whole set for the browser to filter.
       ...(q.search ? [or(
-        ilike(deedsTable.deedNumber, `%${q.search}%`),
-        ilike(deedsTable.issuingAuthority, `%${q.search}%`),
+        ilike(deedsTable.deedNumber, likeContains(q.search)),
+        ilike(deedsTable.issuingAuthority, likeContains(q.search)),
       )] : []),
     );
 

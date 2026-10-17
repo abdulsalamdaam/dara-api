@@ -1,6 +1,6 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, inArray } from "drizzle-orm";
+import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, inArray, sql } from "drizzle-orm";
 import { ownersTable, contractsTable, ownerNotificationsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -11,7 +11,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { assertNationalAddress } from "../../common/national-address";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
-import { listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
+import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { EmailService } from "../email/email.service";
 import { sendExpoPush } from "../../common/push";
@@ -153,17 +153,18 @@ class OwnersController {
     const conds: any[] = [eq(ownersTable.userId, owner), isNull(ownersTable.deletedAt)];
     if (q.search) {
       conds.push(or(
-        ilike(ownersTable.name, `%${q.search}%`),
-        ilike(ownersTable.shortName, `%${q.search}%`),
-        ilike(ownersTable.idNumber, `%${q.search}%`),
-        ilike(ownersTable.phone, `%${q.search}%`),
-        ilike(ownersTable.email, `%${q.search}%`),
-        ilike(ownersTable.taxNumber, `%${q.search}%`),
+        ilike(ownersTable.name, likeContains(q.search)),
+        ilike(ownersTable.shortName, likeContains(q.search)),
+        ilike(ownersTable.idNumber, likeContains(q.search)),
+        ilike(ownersTable.phone, likeContains(q.search)),
+        ilike(ownersTable.email, likeContains(q.search)),
+        ilike(ownersTable.taxNumber, likeContains(q.search)),
       ));
     }
     const types = parseEnumList(rawQuery?.type, ["individual", "company"] as const);
     const statuses = parseEnumList(rawQuery?.status, ["active", "inactive"] as const);
     if (statuses) conds.push(inArray(ownersTable.status, statuses));
+    else if (enumListSentEmpty(rawQuery?.status, ["active", "inactive"])) conds.push(sql`false`);
     const bool = (v: unknown) => v === "1" || v === "true" ? true : v === "0" || v === "false" ? false : undefined;
     const draft = bool(rawQuery?.isDraft);
     if (draft !== undefined) conds.push(eq(ownersTable.isDraft, draft));
@@ -182,6 +183,7 @@ class OwnersController {
     // conditions are ANDed either way.
     const statsWhere = and(...conds);
     if (types) conds.push(inArray(ownersTable.type, types));
+    else if (enumListSentEmpty(rawQuery?.type, ["individual", "company"])) conds.push(sql`false`);
     const where = and(...conds);
 
     const sortFn = q.order === "asc" ? asc : desc;
@@ -440,9 +442,9 @@ class OwnerNotificationsController {
     else if (rawQuery?.unread === "0" || rawQuery?.unread === "false") conds.push(isNotNull(ownerNotificationsTable.readAt));
     if (q.search) {
       conds.push(or(
-        ilike(ownerNotificationsTable.title, `%${q.search}%`),
-        ilike(ownerNotificationsTable.body, `%${q.search}%`),
-        ilike(ownersTable.name, `%${q.search}%`),
+        ilike(ownerNotificationsTable.title, likeContains(q.search)),
+        ilike(ownerNotificationsTable.body, likeContains(q.search)),
+        ilike(ownersTable.name, likeContains(q.search)),
       ));
     }
     const where = and(...conds);

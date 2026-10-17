@@ -516,13 +516,26 @@ class ContractsController {
       if (unitIds) linkConds.push(inArray(contractUnitsTable.unitId, unitIds));
       if (propertyIds) linkConds.push(inArray(unitsTable.propertyId, propertyIds));
       if (ownerIds) linkConds.push(inArray(propertiesTable.ownerId, ownerIds));
-      conds.push(exists(
+      const linked = exists(
         this.db.select({ one: sql`1` })
           .from(contractUnitsTable)
           .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
           .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
           .where(and(...linkConds)),
-      ));
+      );
+      // A terminated / cancelled contract can lose its unit link, so a landlord
+      // filter alone also matches the contract's landlord snapshot (ID number,
+      // or name) against those landlords — the landlord profile lists every
+      // contract regardless of status, and used to do this match in the browser
+      // over the whole contracts table.
+      const snapshot = ownerIds && !propertyIds && !unitIds
+        ? sql`exists (select 1 from owners o
+            where o.id in (${sql.join(ownerIds.map((id) => sql`${id}`), sql`, `)})
+              and o.user_id = ${scopeId(user)} and o.deleted_at is null
+              and ((coalesce(o.id_number, '') <> '' and o.id_number = ${contractsTable.landlordIdNumber})
+                   or o.name = ${contractsTable.landlordName}))`
+        : undefined;
+      conds.push(snapshot ? or(linked, snapshot) : linked);
     }
     // `statsWhere` is every filter EXCEPT status: the per-status counts below
     // are the tab badges, so selecting one status must not zero the others.
