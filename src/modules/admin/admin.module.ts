@@ -11,7 +11,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { seedDemoData } from "./demo-seed";
 import { ALL_PERMISSIONS, ROLE_PRESETS, STAFF_ROLE_KEYS } from "../../common/permissions";
 import {
-  listQuerySchema, parseDateBound, parseEnumList, wantsPagination,
+  likeContains, listQuerySchema, parseDateBound, parseEnumList, wantsPagination,
 } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
 import { isPackagePlan, purchasableCycle, planAllowedForUserType, planUserTypeError, type PackagePlan } from "../../common/packages";
@@ -104,6 +104,21 @@ const isCustomerAccountSql = and(
   isNull(usersTable.ownerUserId),
   or(isNull(rolesTable.key), notInArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[])),
 );
+
+/**
+ * A phone search that ignores how the number was typed. The tabs used to
+ * filter in the browser against a normalised copy of the phone; in SQL the
+ * stored value has one spelling and the admin types another (05…, 9665…,
+ * +966 5…). The national core — digits with any 00966/966/0 prefix dropped —
+ * is a substring of every spelling. A search that is not a number matches no
+ * extra rows (the pattern becomes the literal search, already covered).
+ */
+export function phoneCoreLike(raw: string): string {
+  const v = raw.trim();
+  if (!/^[\d\s+()\-]+$/.test(v)) return likeContains(v);
+  const core = v.replace(/\D/g, "").replace(/^(00966|966|0)/, "");
+  return likeContains(core.length >= 3 ? core : v);
+}
 
 @ApiTags("admin")
 @ApiBearerAuth("user-jwt")
@@ -237,19 +252,21 @@ class AdminController {
       userRows, companyRows, propRow, unitRow, contractRows,
       subPaidRows, subPendingRows, monthRows, mrrRes, rentPaidRows, rentDueRows,
     ] = await Promise.all([
+      // Every count here is live rows only (`deleted_at IS NULL`): a removed
+      // employee, property, unit or contract was still in the headline totals.
       this.db.select({ isActive: usersTable.isActive, cnt: count() })
-        .from(usersTable).groupBy(usersTable.isActive),
+        .from(usersTable).where(isNull(usersTable.deletedAt)).groupBy(usersTable.isActive),
       this.db.select({ isActive: usersTable.isActive, cnt: count() })
         .from(usersTable)
         .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-        .where(isCustomerAccountSql)
+        .where(and(isCustomerAccountSql, isNull(usersTable.deletedAt)))
         .groupBy(usersTable.isActive),
-      this.db.select({ c: count() }).from(propertiesTable),
-      this.db.select({ c: count() }).from(unitsTable),
+      this.db.select({ c: count() }).from(propertiesTable).where(isNull(propertiesTable.deletedAt)),
+      this.db.select({ c: count() }).from(unitsTable).where(isNull(unitsTable.deletedAt)),
       // Count and monthly-rent sum per status in one pass, so `activeContracts`
       // and `monthlyRecurring` come from the same scan as `totalContracts`.
       this.db.select({ status: contractsTable.status, cnt: count(), rent: sum(contractsTable.monthlyRent) })
-        .from(contractsTable).groupBy(contractsTable.status),
+        .from(contractsTable).where(isNull(contractsTable.deletedAt)).groupBy(contractsTable.status),
       // Revenue on this dashboard is DARA's revenue — what customers pay us for
       // their subscription — not the rent flowing through the platform. These
       // three used to read `payments`, i.e. tenants' rent installments, which
@@ -294,9 +311,9 @@ class AdminController {
       // Rent moving through the platform. Not our revenue — reported separately
       // so the two can never be mistaken for one another again.
       this.db.select({ amount: sum(paymentsTable.amount) })
-        .from(paymentsTable).where(eq(paymentsTable.status, "paid")),
+        .from(paymentsTable).where(and(eq(paymentsTable.status, "paid"), isNull(paymentsTable.deletedAt))),
       this.db.select({ amount: sum(paymentsTable.amount) })
-        .from(paymentsTable).where(inArray(paymentsTable.status, ["pending", "overdue"])),
+        .from(paymentsTable).where(and(inArray(paymentsTable.status, ["pending", "overdue"]), isNull(paymentsTable.deletedAt))),
     ]);
 
     const tally = (rows: Array<{ isActive: boolean; cnt: number }>) => {
@@ -380,11 +397,13 @@ class AdminController {
 
     const conds: any[] = [isCustomerAccountSql];
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(usersTable.name, `%${q.search}%`),
-        ilike(usersTable.email, `%${q.search}%`),
-        ilike(usersTable.phone, `%${q.search}%`),
-        ilike(companiesTable.name, `%${q.search}%`),
+        ilike(usersTable.name, like),
+        ilike(usersTable.email, like),
+        ilike(usersTable.phone, like),
+        ilike(usersTable.phone, phoneCoreLike(q.search)),
+        ilike(companiesTable.name, like),
       ));
     }
     if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
@@ -443,7 +462,10 @@ class AdminController {
         role: user.roleKey,
         isActive: user.isActive,
         phone: user.phone,
-        plan: user.roleKey === "demo" ? "تجريبي" : "مجاني",
+        // The account's real package. This was a hard-coded "تجريبي"/"مجاني",
+        // so every customer read as free and the Subscriptions tab priced
+        // every row at zero.
+        plan: user.roleKey === "demo" ? "demo" : user.packagePlan,
         propertiesCount: c?.properties ?? 0,
         unitsCount: c?.units ?? 0,
         contractsCount: c?.contracts ?? 0,
@@ -471,13 +493,16 @@ class AdminController {
     for (const id of ids) out.set(id, { properties: 0, units: 0, contracts: 0, employees: 0, landlords: 0, tenants: 0 });
 
     const [props, units, contracts, employees, landlords, tenants] = await Promise.all([
+      // Live rows only - a soft-deleted property, unit or contract is gone
+      // from the customer's own screens and was still counted here.
       this.db.select({ k: propertiesTable.userId, c: count() }).from(propertiesTable)
-        .where(inArray(propertiesTable.userId, ids)).groupBy(propertiesTable.userId),
+        .where(and(inArray(propertiesTable.userId, ids), isNull(propertiesTable.deletedAt))).groupBy(propertiesTable.userId),
       this.db.select({ k: propertiesTable.userId, c: count() }).from(unitsTable)
         .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
-        .where(inArray(propertiesTable.userId, ids)).groupBy(propertiesTable.userId),
+        .where(and(inArray(propertiesTable.userId, ids), isNull(unitsTable.deletedAt), isNull(propertiesTable.deletedAt)))
+        .groupBy(propertiesTable.userId),
       this.db.select({ k: contractsTable.userId, c: count() }).from(contractsTable)
-        .where(inArray(contractsTable.userId, ids)).groupBy(contractsTable.userId),
+        .where(and(inArray(contractsTable.userId, ids), isNull(contractsTable.deletedAt))).groupBy(contractsTable.userId),
       this.db.select({ k: usersTable.ownerUserId, c: count() }).from(usersTable)
         .where(and(inArray(usersTable.ownerUserId, ids), isNull(usersTable.deletedAt)))
         .groupBy(usersTable.ownerUserId),
@@ -566,10 +591,11 @@ class AdminController {
 
     const conds: any[] = [inArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[])];
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(usersTable.name, `%${q.search}%`),
-        ilike(usersTable.email, `%${q.search}%`),
-        ilike(companiesTable.name, `%${q.search}%`),
+        ilike(usersTable.name, like),
+        ilike(usersTable.email, like),
+        ilike(companiesTable.name, like),
       ));
     }
     if (rawQuery?.isActive === "1" || rawQuery?.isActive === "true") conds.push(eq(usersTable.isActive, true));
@@ -664,11 +690,12 @@ class AdminController {
     const statuses = typeof rawQuery?.status === "string" && rawQuery.status.trim() && rawQuery.status !== "all"
       ? rawQuery.status.split(",").map((x: string) => x.trim()).filter(Boolean) : undefined;
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(loginLogsTable.email, `%${q.search}%`),
-        ilike(loginLogsTable.ip, `%${q.search}%`),
-        ilike(loginLogsTable.device, `%${q.search}%`),
-        ilike(usersTable.name, `%${q.search}%`),
+        ilike(loginLogsTable.email, like),
+        ilike(loginLogsTable.ip, like),
+        ilike(loginLogsTable.device, like),
+        ilike(usersTable.name, like),
       ));
     }
     const from = parseDateBound(rawQuery?.from);
@@ -959,11 +986,13 @@ class AdminController {
     const conds: any[] = [isCustomerAccountSql];
     if (status !== "all") conds.push(eq(usersTable.accountStatus, status as any));
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(usersTable.name, `%${q.search}%`),
-        ilike(usersTable.email, `%${q.search}%`),
-        ilike(usersTable.phone, `%${q.search}%`),
-        ilike(companiesTable.name, `%${q.search}%`),
+        ilike(usersTable.name, like),
+        ilike(usersTable.email, like),
+        ilike(usersTable.phone, like),
+        ilike(usersTable.phone, phoneCoreLike(q.search)),
+        ilike(companiesTable.name, like),
       ));
     }
     const userTypes = typeof rawQuery?.userType === "string" && rawQuery.userType.trim()
