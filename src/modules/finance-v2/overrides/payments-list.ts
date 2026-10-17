@@ -64,7 +64,9 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
   if (dueTo) rowConds.push(`p.due_date <= ${P(dueTo)}::date`);
   const where = rowConds.join(" and ");
   const dir = lq.order === "asc" ? "asc" : "desc";
-  const order = raw?.sort === "createdAt" ? `p.created_at desc, p.id desc` : `p.due_date ${dir}, p.id ${dir}`;
+  const order = raw?.sort === "createdAt" ? `p.created_at desc, p.id desc`
+    : raw?.sort === "paidDate" ? `p.paid_date ${dir} nulls last, p.id ${dir}`
+    : `p.due_date ${dir}, p.id ${dir}`;
   const limit = usePaginated ? ` limit ${Number(lq.pageSize)} offset ${(Number(lq.page) - 1) * Number(lq.pageSize)}` : "";
 
   const rows = await q.rows(
