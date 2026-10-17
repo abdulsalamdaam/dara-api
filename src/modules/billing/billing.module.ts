@@ -38,6 +38,7 @@ import { clearedInvoiceQr } from "../../common/zatca-qr";
 import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acceptance";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
 import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
+import { parseEnumList } from "../../common/pagination"; // finance-v2: ?kind= filter on the documents list
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -373,6 +374,9 @@ class SimpleInvoicesController {
     if (types) conds.push(inArray(simpleInvoicesTable.type, types as any) as any);
     else if (type) conds.push(eq(simpleInvoicesTable.type, type as any));
     if (status) conds.push(eq(simpleInvoicesTable.status, status as any));
+    // finance-v2: ?kind=rent_receipt,agency_fee — the documents of those kinds, in SQL ("invoice" also matches a null kind, a plain rent invoice).
+    const kinds = parseEnumList(rawQuery?.kind, [...KNOWN_DOC_KINDS, "rent_receipt", "agency_fee"]); // finance-v2: kind filter (+ V2_DOC_KINDS)
+    if (kinds) conds.push((kinds.includes("invoice") ? or(isNull(simpleInvoicesTable.kind), inArray(simpleInvoicesTable.kind, kinds)) : inArray(simpleInvoicesTable.kind, kinds)) as any); // finance-v2: kind filter
     if (contractIds && contractIds.length > 0) conds.push(inArray(simpleInvoicesTable.contractId, contractIds) as any);
     // Hide vouchers (deposit + receipt) from the Invoices / Collections views —
     // they're evidence documents shown under Receipt Vouchers, never tax

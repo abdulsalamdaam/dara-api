@@ -33,6 +33,17 @@ import { BUCKETS, bucketOf, type Bucket } from "./sub-math";
 
 const CHARGE_KINDS = new Set(["invoice", "manual", "rent_receipt", "agency_fee"]);
 
+const PAY_SQL = `select id, contract_id, amount::text as amount, to_char(due_date, 'YYYY-MM-DD') as due, status::text as status, description,
+                deleted_at is not null as deleted
+           from payments`;
+const COL_SQL = `select id, payment_id, invoice_id, amount::text as amount from payment_collections`;
+const DOC_SQL = `select id, number, type::text as type, coalesce(kind, 'invoice') as kind, status::text as status, contract_id, tenant_id,
+                payment_id, payment_ids, total::text as total, billing_reference,
+                nullif(trim(coalesce(client->>'name', tenant_name, '')), '') as customer,
+                to_char(coalesce(issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as issue,
+                to_char(due_date, 'YYYY-MM-DD') as due, deleted_at is not null as deleted
+           from simple_invoices`;
+
 export interface AgingItem {
   type: "installment" | "document";
   id: number;
@@ -72,24 +83,18 @@ const tkey = (tenantId: number | null, contractId: number | null, by: "tenant" |
 export class ArAgingService {
   constructor(@Inject(FV2_POOL) private readonly pool: Fv2Pool) {}
 
-  /** The open items and unapplied credit as of `asOf` (every tenant; filter afterwards). */
-  async openItems(scope: number, asOf: string, by: "tenant" | "contract" = "tenant", opts: { installmentsDueBefore?: string } = {}): Promise<AgingData> {
+  /**
+   * The open items and unapplied credit as of `asOf` (every tenant; filter afterwards).
+   *
+   * `opts.tenantId` reads only what that tenant's items depend on (see `tenantInputs`) and returns only that
+   * tenant's items, each identical to the full run's; `credit` is then not the account's (only the items are).
+   */
+  async openItems(scope: number, asOf: string, by: "tenant" | "contract" = "tenant", opts: { installmentsDueBefore?: string; tenantId?: number } = {}): Promise<AgingData> {
     const dims = await contractDims(this.pool, scope);
     const [pays, cols, docs, wos, acts, ejar] = await Promise.all([
-      this.pool.query(
-        `select id, contract_id, amount::text as amount, to_char(due_date, 'YYYY-MM-DD') as due, status::text as status, description,
-                deleted_at is not null as deleted
-           from payments where user_id = $1`, [scope]),
-      this.pool.query(
-        `select id, payment_id, invoice_id, amount::text as amount from payment_collections
-          where user_id = $1 and collected_date <= $2::date order by id`, [scope, asOf]),
-      this.pool.query(
-        `select id, number, type::text as type, coalesce(kind, 'invoice') as kind, status::text as status, contract_id, tenant_id,
-                payment_id, payment_ids, total::text as total, billing_reference,
-                nullif(trim(coalesce(client->>'name', tenant_name, '')), '') as customer,
-                to_char(coalesce(issue_date, (confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as issue,
-                to_char(due_date, 'YYYY-MM-DD') as due, deleted_at is not null as deleted
-           from simple_invoices where user_id = $1`, [scope]),
+      opts.tenantId != null ? null : this.pool.query(`${PAY_SQL} where user_id = $1`, [scope]),
+      opts.tenantId != null ? null : this.pool.query(`${COL_SQL} where user_id = $1 and collected_date <= $2::date order by id`, [scope, asOf]),
+      opts.tenantId != null ? null : this.pool.query(`${DOC_SQL} where user_id = $1`, [scope]),
       this.pool.query(
         `select payment_ids, document_ids, amount::text as amount from finance_write_offs where user_id = $1 and written_off_on <= $2::date`, [scope, asOf]),
       this.pool.query(
@@ -99,7 +104,11 @@ export class ArAgingService {
       this.pool.query(
         `select payment_id, reported_amount::text as amount from finance_ejar_settlements
           where user_id = $1 and reported_status = 'partially_paid' and reported_amount > 0`, [scope]),
-    ]);
+    ]).then(async ([p, c, d, ...rest]) => {
+      if (opts.tenantId == null) return [p!, c!, d!, ...rest] as const;
+      const t = await this.tenantInputs(scope, asOf, opts.tenantId, dims);
+      return [t.pays, t.cols, t.docs, ...rest] as const;
+    });
 
     const payById = new Map<number, any>(pays.rows.map((p: any) => [p.id, p]));
     const docById = new Map<number, any>(docs.rows.map((d: any) => [d.id, d]));
@@ -256,7 +265,60 @@ export class ArAgingService {
       out.push(it);
     }
     out.sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.id - b.id));
-    return { items: out, credit, dims };
+    return { items: opts.tenantId != null ? out.filter((i) => i.tenantId === opts.tenantId) : out, credit, dims };
+  }
+
+  /**
+   * The rows one tenant's open items depend on — a superset, so each of the tenant's items comes out exactly as in the
+   * full run (the specs compare the two on every invariant sequence):
+   *  - the tenant's documents D (tenant_id = T, or no tenant and a contract of T: `docTenant`) and the installments
+   *    of T's contracts P0; Pcov = P0 plus every installment a document of D names;
+   *  - every document naming an installment of Pcov (so "which document covers it" — the lowest id — is the full
+   *    run's), the non-credit documents sharing a number with D and the credit notes referencing one (credit notes
+   *    reach their target by number);
+   *  - the collections on a document of D or an installment of Pcov, with the document and installment each names
+   *    (a collection is routed by them, so a row it names is never missing).
+   * Anything else reaches only another tenant's item or the unapplied credit, which the caller does not use.
+   */
+  private async tenantInputs(scope: number, asOf: string, tenantId: number, dims: Map<number, ContractDims>) {
+    const contracts = [...dims.values()].filter((c) => c.tenantId === tenantId).map((c) => c.id);
+    const [p0, d0] = await Promise.all([
+      this.pool.query(`${PAY_SQL} where user_id = $1 and contract_id = any($2::int[])`, [scope, contracts]),
+      this.pool.query(`${DOC_SQL} where user_id = $1 and (tenant_id = $2 or (tenant_id is null and contract_id = any($3::int[])))`, [scope, tenantId, contracts]),
+    ]);
+    const named = (d: any): number[] => [
+      ...(Array.isArray(d.payment_ids) ? d.payment_ids : []), ...(d.payment_id != null ? [d.payment_id] : []),
+    ].map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    const pcov = [...new Set<number>([...p0.rows.map((p: any) => Number(p.id)), ...d0.rows.flatMap(named)])];
+    const dIds = d0.rows.map((d: any) => Number(d.id));
+    const numbers = [...new Set<string>(d0.rows.map((d: any) => d.number).filter((n: unknown) => typeof n === "string"))];
+    const [d1, cols] = await Promise.all([
+      this.pool.query(
+        `${DOC_SQL} where user_id = $1 and not (id = any($2::int[])) and (
+            payment_id = any($3::int[])
+            or exists (select 1 from jsonb_array_elements_text(case when jsonb_typeof(payment_ids) = 'array' then payment_ids else '[]'::jsonb end) e
+                        where e ~ '^[0-9]{1,9}$' and e::int = any($3::int[]))
+            or number = any($4::text[]) or (type = 'credit' and billing_reference = any($4::text[])))`,
+        [scope, dIds, pcov, numbers]),
+      this.pool.query(
+        `${COL_SQL} where user_id = $1 and collected_date <= $2::date and (invoice_id = any($3::int[]) or payment_id = any($4::int[])) order by id`,
+        [scope, asOf, dIds, pcov]),
+    ]);
+    const haveDoc = new Set<number>([...dIds, ...d1.rows.map((d: any) => Number(d.id))]);
+    const havePay = new Set<number>(p0.rows.map((p: any) => Number(p.id)));
+    const needDocs = [...new Set<number>(cols.rows.map((c: any) => c.invoice_id).filter((x: any) => x != null && !haveDoc.has(Number(x))).map(Number))];
+    const needPays = [...new Set<number>([...pcov, ...cols.rows.map((c: any) => c.payment_id).filter((x: any) => x != null).map(Number)])].filter((x) => !havePay.has(x));
+    const [d2, p1] = await Promise.all([
+      needDocs.length ? this.pool.query(`${DOC_SQL} where user_id = $1 and id = any($2::int[])`, [scope, needDocs]) : { rows: [] as any[] },
+      needPays.length ? this.pool.query(`${PAY_SQL} where user_id = $1 and id = any($2::int[])`, [scope, needPays]) : { rows: [] as any[] },
+    ]);
+    // In id order, as the full run's rows come back in table order (byNumber keeps the first of a number).
+    const byId = (a: any, b: any) => a.id - b.id;
+    return {
+      pays: { rows: [...p0.rows, ...p1.rows].sort(byId) },
+      cols,
+      docs: { rows: [...d0.rows, ...d1.rows, ...d2.rows].sort(byId) },
+    };
   }
 
   /** Σ advance VAT (E34) booked ≤ asOf on installments not charged by then, per contract. */

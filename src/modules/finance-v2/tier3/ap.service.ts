@@ -284,8 +284,8 @@ export class ApService {
     const to = q?.to ? isoDate(q.to, "to") : today;
     const from = q?.from ? isoDate(q.from, "from") : `${to.slice(0, 4)}-01-01`;
     if (from > to) throw bad("BAD_RANGE", "from must not be after to");
-    const moves = (await this.pool.query(
-      `select x.*, to_char(x.d, 'YYYY-MM-DD') as d_s from (
+    // Every movement of the supplier (a void adds the opposite line at its void date).
+    const MOVES = `
          select b.bill_date as d, 'bill' as type, b.id, b.number, b.supplier_invoice_no as ref, b.total as credit, 0::numeric as debit, b.created_at as ts
            from supplier_bills b where b.user_id = $1 and b.supplier_id = $2 and b.approved_at is not null
          union all
@@ -296,24 +296,24 @@ export class ApService {
            from supplier_payments p where p.user_id = $1 and p.supplier_id = $2
          union all
          select p.voided_on, 'payment_void', p.id, p.number, p.reference, p.amount, 0, p.voided_at
-           from supplier_payments p where p.user_id = $1 and p.supplier_id = $2 and p.status = 'void'
-       ) x where x.d <= $3::date order by x.d, x.ts, x.id`,
-      [scope, id, to])).rows;
-    let opening = 0;
-    let bal = 0;
+           from supplier_payments p where p.user_id = $1 and p.supplier_id = $2 and p.status = 'void'`;
+    // The opening is one SQL sum of everything before `from`; only the range's lines are read.
+    const [op, mv] = await Promise.all([
+      this.pool.query(`select coalesce(sum(x.credit - x.debit), 0)::text as net from (${MOVES}) x where x.d < $3::date`, [scope, id, from]),
+      this.pool.query(
+        `select x.*, to_char(x.d, 'YYYY-MM-DD') as d_s from (${MOVES}) x where x.d between $3::date and $4::date order by x.d, x.ts, x.id`,
+        [scope, id, from, to]),
+    ]);
+    const opening = toHalalas(String(op.rows[0].net));
+    let bal = opening;
     const lines: any[] = [];
     let credits = 0;
     let debits = 0;
-    for (const r of moves) {
+    for (const r of mv.rows) {
       // to_char in SQL: a pg `date` parsed into a JS Date is local midnight, so toISOString() shifts it a day back east of UTC.
       const d: string = r.d_s;
       const cr = toHalalas(String(r.credit));
       const dr = toHalalas(String(r.debit));
-      if (d < from) {
-        opening += cr - dr;
-        bal = opening;
-        continue;
-      }
       bal += cr - dr;
       credits += cr;
       debits += dr;
@@ -349,15 +349,22 @@ export class ApService {
     if (q?.to) add("b.bill_date <= ?::date", isoDate(q.to, "to"));
     const unpaid = q?.unpaid === "true" || q?.unpaid === true || q?.unpaid === "1";
     const sql = `select * from (${BILL_SQL} where ${where.join(" and ")}) z ${unpaid ? "where z.status = 'approved' and z.total > z.paid::numeric" : ""}`;
-    const all = (await this.pool.query(`${sql} order by z.bill_date desc, z.id desc`, p)).rows;
-    const rows = all.slice((page - 1) * pageSize, page * pageSize).map((r: any) => this.shapeBill(r));
-    const live = all.filter((r: any) => r.status === "approved");
+    // The page and the totals are both SQL over the same WHERE: the totals cover every matching approved bill, not the page.
+    const [list, agg] = await Promise.all([
+      this.pool.query(`${sql} order by z.bill_date desc, z.id desc limit ${pageSize} offset ${(page - 1) * pageSize}`, p),
+      this.pool.query(
+        `select count(*)::int as n,
+                coalesce(sum(z.total) filter (where z.status = 'approved'), 0)::text as total,
+                coalesce(sum(z.paid::numeric) filter (where z.status = 'approved'), 0)::text as paid
+           from (${sql}) z`, p),
+    ]);
+    const a = agg.rows[0];
     return {
-      rows, total: all.length, page, pageSize,
+      rows: list.rows.map((r: any) => this.shapeBill(r)), total: Number(a.n), page, pageSize,
       totals: {
-        total: fromHalalas(live.reduce((a: number, r: any) => a + toHalalas(r.total), 0)),
-        paid: fromHalalas(live.reduce((a: number, r: any) => a + toHalalas(r.paid), 0)),
-        remaining: fromHalalas(live.reduce((a: number, r: any) => a + toHalalas(r.total) - toHalalas(r.paid), 0)),
+        total: fromHalalas(toHalalas(a.total)),
+        paid: fromHalalas(toHalalas(a.paid)),
+        remaining: fromHalalas(toHalalas(a.total) - toHalalas(a.paid)),
       },
     };
   }
@@ -526,9 +533,16 @@ export class ApService {
       p.push(isoDate(q.to, "to"));
       where.push(`p.paid_on <= $${p.length}::date`);
     }
-    const rows = (await this.pool.query(`${PAYMENT_SQL} where ${where.join(" and ")} order by p.paid_on desc, p.id desc limit 1000`, p)).rows;
+    const page = Math.max(1, Number(q?.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(q?.pageSize) || 50));
+    const w = where.join(" and ");
+    const [list, cnt] = await Promise.all([
+      this.pool.query(`${PAYMENT_SQL} where ${w} order by p.paid_on desc, p.id desc limit ${pageSize} offset ${(page - 1) * pageSize}`, p),
+      this.pool.query(`select count(*)::int as n from (${PAYMENT_SQL} where ${w}) x`, p),
+    ]);
+    const rows = list.rows;
     const allocs = await this.allocationsOf(this.pool, scope, rows.map((r: any) => Number(r.id)));
-    return { rows: rows.map((r: any) => this.shapePayment(r, allocs.get(Number(r.id)) ?? [])) };
+    return { rows: rows.map((r: any) => this.shapePayment(r, allocs.get(Number(r.id)) ?? [])), total: Number(cnt.rows[0].n), page, pageSize };
   }
 
   async getPayment(scope: number, id: number, q: Q = this.pool): Promise<SupplierPaymentOut> {

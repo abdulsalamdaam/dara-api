@@ -13,6 +13,8 @@ import type { AuthUser } from "../../../common/guards/jwt-auth.guard";
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 
 const m = (v: any) => (v == null ? null : fromHalalas(toHalalas(v)));
+/** How many unmatched ledger lines one statement view carries (newest first); `unmatchedLedgerTruncated` says when there are more. */
+const UNMATCHED_LIMIT = 2000;
 
 const PROFILE_COLS = `id, bank_account_id as "bankAccountId", name, delimiter, encoding, skip_rows as "skipRows", date_col as "dateCol", date_format as "dateFormat",
   desc_col as "descCol", ref_col as "refCol", amount_col as "amountCol", debit_col as "debitCol", credit_col as "creditCol", balance_col as "balanceCol"`;
@@ -194,10 +196,15 @@ export class BankRecService {
                 where j.user_id = l.user_id and j.group_id = bm.group_id and j.journal_line_id is not null) as journal
          from bank_statement_lines l left join bank_matches bm on bm.statement_line_id = l.id and bm.user_id = l.user_id
         where l.user_id = $1 and l.statement_id = $2 order by l.txn_date, l.line_no, l.id`, [scope, id]);
-    const unmatched = await this.pool.query(
-      `${JL_SQL} where l.user_id = $1 and l.account_id = $2 and l.entry_date <= $3::date
-          and not exists (select 1 from bank_matches b where b.journal_line_id = l.id)
-        order by l.entry_date, l.id limit 2000`, [scope, gl, st.period_to]);
+    // The newest UNMATCHED_LIMIT unmatched ledger lines up to the period end (an old outstanding line still shows until the
+    // list is that long), shown oldest first; the count is complete, so a truncated list says so.
+    const unmatchedWhere = `l.user_id = $1 and l.account_id = $2 and l.entry_date <= $3::date
+          and not exists (select 1 from bank_matches b where b.journal_line_id = l.id)`;
+    const [unmatched, unmatchedCount] = await Promise.all([
+      this.pool.query(`${JL_SQL} where ${unmatchedWhere} order by l.entry_date desc, l.id desc limit ${UNMATCHED_LIMIT}`, [scope, gl, st.period_to]),
+      this.pool.query(`select count(*)::int as n from journal_lines l where ${unmatchedWhere}`, [scope, gl, st.period_to]),
+    ]);
+    const unmatchedTotal = Number(unmatchedCount.rows[0].n);
     return {
       statement: this.shapeStatement(st),
       lines: lines.rows.map((l: any) => ({
@@ -205,7 +212,9 @@ export class BankRecService {
         runningBalance: m(l.running_balance), matchStatus: l.match_status, groupId: l.group_id == null ? null : Number(l.group_id),
         journal: (l.journal ?? []).map((j: any) => ({ ...j, amount: m(j.amount), journalLineId: Number(j.journalLineId), entryId: Number(j.entryId) })),
       })),
-      unmatchedLedger: unmatched.rows.map((j: any) => this.shapeJl(j)),
+      unmatchedLedger: [...unmatched.rows].reverse().map((j: any) => this.shapeJl(j)),
+      unmatchedLedgerTotal: unmatchedTotal,
+      unmatchedLedgerTruncated: unmatchedTotal > unmatched.rows.length,
       reconciliation: await this.reconciliation(this.pool, scope, st, gl),
     };
   }

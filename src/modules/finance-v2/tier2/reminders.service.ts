@@ -157,7 +157,7 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
 
   async log(scope: number, limit = 200) {
     const r = await this.pool.query(
-      `select id, payment_id, offset_days, channel, status, created_at from reminder_log where user_id = $1 order by id desc limit $2`,
+      `select id, payment_id, offset_days, channel, status, created_at from reminder_log where user_id = $1 order by created_at desc, id desc limit $2`,
       [scope, Math.min(1000, Math.max(1, limit))],
     );
     return { rows: r.rows.map((x: any) => ({ id: Number(x.id), paymentId: x.payment_id, offsetDays: x.offset_days, channel: x.channel, status: x.status,

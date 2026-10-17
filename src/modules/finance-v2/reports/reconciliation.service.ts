@@ -157,11 +157,15 @@ export class ReconciliationService {
     for (const [k, v] of [...sub]) if (v === 0 && !ledger.has(k)) sub.delete(k);
     const names = await namesOf(this.pool, scope, "tenants", [...new Set([...ledger.keys(), ...sub.keys()])].filter((x) => x != null));
     const cmp = compare(ledger, sub, (k) => ({ tenantId: k, tenantName: k != null ? names.get(k) ?? null : null }));
-    const unverified = await this.pool.query(
-      `select p.id, p.amount::text as amount, coalesce(sum(c.amount), 0)::text as collected
+    // The count and the amount are over every row; only the listed items stop at LIST_LIMIT (in SQL).
+    const unverifiedSql = `select p.id, p.amount::text as amount, coalesce(sum(c.amount), 0)::text as collected
          from payments p left join payment_collections c on c.payment_id = p.id and c.user_id = p.user_id
         where p.user_id = $1 and p.status = 'paid' and p.deleted_at is null and coalesce(p.description, '') <> $2
-        group by p.id having coalesce(sum(c.amount), 0) < p.amount order by p.id`, [scope, DEPOSIT_DESC]);
+        group by p.id having coalesce(sum(c.amount), 0) < p.amount order by p.id`;
+    const [unverified, unverifiedAgg] = await Promise.all([
+      this.pool.query(`${unverifiedSql} limit ${LIST_LIMIT}`, [scope, DEPOSIT_DESC]),
+      this.pool.query(`select count(*)::int as n, coalesce(sum(x.amount::numeric - x.collected::numeric), 0)::text as open from (${unverifiedSql}) x`, [scope, DEPOSIT_DESC]),
+    ]);
     const uncharged = data.items.filter((it) => it.type === "installment" && it.remaining > 0);
     const charged = uncharged.length
       ? new Set((await this.pool.query(
@@ -176,9 +180,9 @@ export class ReconciliationService {
       explanations: [
         { code: "outbox_pending_or_failed", count: pending, amount: null },
         {
-          code: "paid_unverified", count: unverified.rowCount ?? 0,
-          amount: money(unverified.rows.reduce((t: number, x: any) => t + h(x.amount) - h(x.collected), 0)),
-          items: unverified.rows.slice(0, LIST_LIMIT).map((x: any) => ({ paymentId: x.id, amount: x.amount, collected: x.collected })),
+          code: "paid_unverified", count: unverifiedAgg.rows[0].n as number,
+          amount: money(h(unverifiedAgg.rows[0].open)),
+          items: unverified.rows.map((x: any) => ({ paymentId: x.id, amount: x.amount, collected: x.collected })),
         },
         {
           code: "due_not_yet_charged", count: notCharged.length, amount: money(notCharged.reduce((t, x) => t + x.remaining, 0)),
@@ -515,7 +519,7 @@ export class ReconciliationService {
     const byStatus = Object.fromEntries(counts.rows.map((x: any) => [x.status, x.n]));
     const has = (st: string, ev: string) => `(exists (select 1 from ledger_outbox o where o.user_id = x.user_id and o.source_type = '${st}' and o.source_id = x.id and o.event like '${ev}')
       or exists (select 1 from journal_entries e where e.user_id = x.user_id and e.source_type = '${st}' and e.source_id = x.id and e.event like '${ev}'))`;
-    const missing = await this.pool.query(
+    const missingSql =
       `select 'simple_invoice' as "sourceType", x.id as "sourceId", x.number as ref, x.d as date from (
          select si.*, to_char(coalesce(si.issue_date, (si.confirmed_at at time zone 'Asia/Riyadh')::date), 'YYYY-MM-DD') as d from simple_invoices si
           where si.user_id = $1 and si.status = 'confirmed' and si.deleted_at is null and coalesce(si.kind, 'invoice') <> 'receipt') x
@@ -538,13 +542,19 @@ export class ReconciliationService {
         where x.user_id = $1 and x.deleted_at is null and x.status::text not in ('cancelled') and coalesce(x.description, '') <> $4
           and x.due_date >= $3::date and x.due_date < least($2::date, (now() at time zone 'Asia/Riyadh')::date) and not ${has("payment", "charge%")}
           and not exists (select 1 from finance_installment_charges ch where ch.user_id = x.user_id and ch.payment_id = x.id and ch.reversed_at is null)
-       order by 1, 4, 2`, [scope, asOf, since, DEPOSIT_DESC]);
+       order by 1, 4, 2`;
+    // The count is over every missing source; only the listed rows stop at LIST_LIMIT (in SQL).
+    const [missing, missingCount] = await Promise.all([
+      this.pool.query(`${missingSql} limit ${LIST_LIMIT}`, [scope, asOf, since, DEPOSIT_DESC]),
+      this.pool.query(`select count(*)::int as n from (${missingSql}) x`, [scope, asOf, since, DEPOSIT_DESC]),
+    ]);
+    const missingN = missingCount.rows[0].n as number;
     const entries = await this.pool.query(`select count(*)::int as n from journal_entries where user_id = $1 and entry_date <= $2::date`, [scope, asOf]);
     const failed = (byStatus.failed ?? 0) + (byStatus.pending ?? 0);
     return mk("R6", "posting_completeness", {
-      status: missing.rowCount || failed ? "attention" : "ok",
-      ledger: String(entries.rows[0].n), subLedger: null, difference: String(missing.rowCount ?? 0),
-      rows: missing.rows.slice(0, LIST_LIMIT),
+      status: missingN || failed ? "attention" : "ok",
+      ledger: String(entries.rows[0].n), subLedger: null, difference: String(missingN),
+      rows: missing.rows,
       explanations: ["pending", "failed", "dismissed", "skipped"].map((k) => ({ code: `outbox_${k}`, count: byStatus[k] ?? 0, amount: null })),
       notes: goLive ? [`cutover: sources before ${goLive} are in the opening balance`] : [],
     });
@@ -552,9 +562,13 @@ export class ReconciliationService {
 
   // ─── R7 ───
   private async r7(scope: number, asOf: string, mk: any): Promise<Check> {
+    // Each list ends in its ORDER BY: the items are its first LIST_LIMIT rows (in SQL), the count is over every row.
     const list = async (code: string, sql: string, params: unknown[]) => {
-      const r = await this.pool.query(sql, params);
-      return { code, count: r.rowCount ?? 0, amount: null, items: r.rows.slice(0, LIST_LIMIT) };
+      const [r, n] = await Promise.all([
+        this.pool.query(`${sql} limit ${LIST_LIMIT}`, params),
+        this.pool.query(`select count(*)::int as n from (${sql}) x`, params),
+      ]);
+      return { code, count: n.rows[0].n as number, amount: null, items: r.rows };
     };
     const ex = [
       await list("paid_without_full_collections",

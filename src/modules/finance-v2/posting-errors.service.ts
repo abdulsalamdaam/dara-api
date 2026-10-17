@@ -24,6 +24,9 @@ export const ERROR_TEXT: Record<string, { ar: string; en: string }> = {
   POST_ERROR: { ar: "تعذّر الترحيل", en: "Posting failed" },
 };
 
+/** The automatic-invoicing failures shown beside the list (newest first); the count is always complete. */
+const AUTO_INVOICE_LIMIT = 500;
+
 const COLS = `id, source_type as "sourceType", source_id::int as "sourceId", event, to_char(occurred_on,'YYYY-MM-DD') as "occurredOn",
   origin, status, attempts, last_error as "lastError", last_error_code as "lastErrorCode", skip_reason as "skipReason",
   next_attempt_at as "nextAttemptAt", blocked_on::int as "blockedOn", entry_id::int as "entryId", created_at as "createdAt",
@@ -50,8 +53,11 @@ export class PostingErrorsService {
       `select ${COLS} from ledger_outbox where user_id = $1 and ${where} order by id desc limit $2 offset $3`,
       [userId, limit, offset],
     );
+    // `total` is the list's own WHERE counted: a pending row both retrying and blocked is one row, not two.
+    const total = await this.pool.query(`select count(*)::int as n from ledger_outbox where user_id = $1 and ${where}`, [userId]);
     const counts = await this.pool.query(
-      `select count(*) filter (where status = 'failed')::int as failed,
+      `select count(*) filter (where status = 'failed' or (status = 'pending' and (attempts > 0 or blocked_on is not null)))::int as errors,
+              count(*) filter (where status = 'failed')::int as failed,
               count(*) filter (where status = 'pending' and attempts > 0)::int as retrying,
               count(*) filter (where status = 'pending' and blocked_on is not null)::int as blocked,
               count(*) filter (where status = 'skipped')::int as skipped,
@@ -62,8 +68,11 @@ export class PostingErrorsService {
     const autoInvoice = await this.autoInvoiceFailures(userId);
     return {
       tab,
-      counts: { ...counts.rows[0], autoInvoiceFailed: autoInvoice.length },
-      autoInvoice,
+      total: total.rows[0].n as number,
+      counts: { ...counts.rows[0], autoInvoiceFailed: autoInvoice.total },
+      autoInvoice: autoInvoice.rows,
+      // The failures list is the newest AUTO_INVOICE_LIMIT; `autoInvoiceTruncated` says more exist (the count is complete).
+      autoInvoiceTruncated: autoInvoice.total > autoInvoice.rows.length,
       items: rows.rows.map((r: any) => ({
         ...r,
         state: r.status === "failed" ? "failed" : r.status === "skipped" ? "skipped" : r.blockedOn ? "blocked" : "retrying",
@@ -77,8 +86,9 @@ export class PostingErrorsService {
    * events, so they are listed beside the outbox rows rather than in them. Their
    * Retry is "issue now" and their Dismiss is /finance/v2/auto-invoice/:paymentId/dismiss.
    */
-  private async autoInvoiceFailures(userId: number): Promise<any[]> {
+  private async autoInvoiceFailures(userId: number): Promise<{ rows: any[]; total: number }> {
     try {
+      const n = await this.pool.query(`select count(*)::int as n from finance_auto_invoice_links where user_id = $1 and status = 'failed'`, [userId]);
       const r = await this.pool.query(
         `select l.payment_id::int as "paymentId", l.document_id::int as "documentId", l.origin, l.attempts, l.last_error_code as "errorCode",
                 l.last_error as "error", l.updated_at as "updatedAt", to_char(p.due_date,'YYYY-MM-DD') as "dueDate", p.amount::text as amount,
@@ -86,12 +96,15 @@ export class PostingErrorsService {
            from finance_auto_invoice_links l
            join payments p on p.id = l.payment_id and p.user_id = l.user_id
            left join contracts c on c.id = p.contract_id and c.user_id = p.user_id
-          where l.user_id = $1 and l.status = 'failed' order by l.updated_at desc limit 500`,
+          where l.user_id = $1 and l.status = 'failed' order by l.updated_at desc, l.payment_id desc limit ${AUTO_INVOICE_LIMIT}`,
         [userId],
       );
-      return r.rows.map((x: any) => ({ ...x, message: AUTO_INVOICE_ERROR_TEXT[x.errorCode] ?? AUTO_INVOICE_ERROR_TEXT.ISSUE_FAILED }));
+      return {
+        rows: r.rows.map((x: any) => ({ ...x, message: AUTO_INVOICE_ERROR_TEXT[x.errorCode] ?? AUTO_INVOICE_ERROR_TEXT.ISSUE_FAILED })),
+        total: Number(n.rows[0].n),
+      };
     } catch (err: any) {
-      if (err?.code === "42P01") return []; // 0073 not applied
+      if (err?.code === "42P01") return { rows: [], total: 0 }; // 0073 not applied
       throw err;
     }
   }

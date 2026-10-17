@@ -199,6 +199,28 @@ describe("fv2 tier 3: suppliers, bills and AP, journal export (real Postgres)", 
     assert.deepEqual([sep.opening, sep.lines.length, sep.closing], ["630.00", 0, "630.00"]);
   });
 
+  it("bills and payments page in SQL: every page together is the whole list, totals cover every page; the statement opening sums what precedes `from`", async () => {
+    const all: any = await ap.listBills(U, { pageSize: 500 });
+    const seen: number[] = [];
+    for (let page = 1; page <= all.total; page++) {
+      const one: any = await ap.listBills(U, { page, pageSize: 1 });
+      assert.equal(one.total, all.total);
+      assert.deepEqual(one.totals, all.totals, "the totals are the list's, not the page's");
+      seen.push(...one.rows.map((b: any) => b.id));
+    }
+    assert.deepEqual(seen, all.rows.map((b: any) => b.id));
+    const live = all.rows.filter((b: any) => b.status === "approved");
+    const sum = (k: string) => live.reduce((t: number, b: any) => t + Math.round(Number(b[k]) * 100), 0);
+    assert.deepEqual([Math.round(Number(all.totals.total) * 100), Math.round(Number(all.totals.paid) * 100)], [sum("total"), sum("paid")]);
+    const unpaid: any = await ap.listBills(U, { unpaid: "true", pageSize: 1 });
+    assert.equal(unpaid.total, live.filter((b: any) => Number(b.remaining) > 0).length);
+    const pays: any = await ap.listPayments(U, { pageSize: 1 });
+    assert.equal(pays.rows.length, Math.min(1, pays.total));
+    assert.ok(pays.total >= 1);
+    const mid: any = await ap.supplierStatement(U, s1.id, { from: "2026-08-15", to: "2026-08-31" });
+    assert.deepEqual([mid.opening, mid.lines.map((l: any) => [l.number, l.balance]), mid.closing], ["1630.00", [["PV-000001", "630.00"]], "630.00"]);
+  });
+
   it("the supplier statement prints the stored dates whatever the server's time zone (Asia/Riyadh is UTC+3)", async () => {
     const tz = process.env.TZ;
     process.env.TZ = "Asia/Riyadh";

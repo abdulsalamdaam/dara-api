@@ -9,6 +9,7 @@ import { FinanceSetupService } from "./setup.service";
 import { ChartService } from "./chart.service";
 import { PeriodsService } from "./periods.service";
 import { ReconciliationService } from "./reports/reconciliation.service";
+import { ArAgingService } from "./reports/aging.service";
 import { legacyAccountingFor } from "./reports/legacy-accounting";
 import { openInstallments } from "./overrides/terminate";
 import { sqlOf } from "./hooks/sql";
@@ -575,6 +576,14 @@ function explainedR3(c: any): number {
 
 async function assertReconciled(rec: ReconciliationService, U: number, mode: string, phase: string, fail: (m: string) => never) {
   const r: any = await rec.reconciliation(U, { asOf: TODAY, lang: "en" });
+  // I7 the one-tenant aging (tenant-credit drawer) reads a subset of rows; each tenant's items must equal the full run's.
+  const aging = new ArAgingService((rec as any).pool);
+  const full = await aging.openItems(U, TODAY, "contract");
+  for (const t of [...new Set(full.items.map((i) => i.tenantId).filter((x): x is number => x != null))]) {
+    const one = await aging.openItems(U, TODAY, "contract", { tenantId: t });
+    const want = full.items.filter((i) => i.tenantId === t);
+    if (JSON.stringify(one.items) !== JSON.stringify(want)) fail(`I7 (${phase}) tenant ${t} aging differs: ${JSON.stringify({ one: one.items, want })}`);
+  }
   // R7 only lists sub-ledger findings (e.g. VAT charged with no tax invoice yet): no figure to be zero.
   // R3 compares 2121 with the LEGACY dues report, which by design (DESIGN §7.10) differs by the listed, quantified
   // explanations; what must be zero is the part they do not explain.

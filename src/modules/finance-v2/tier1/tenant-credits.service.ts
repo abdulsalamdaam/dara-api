@@ -66,6 +66,9 @@ const shapeAction = (r: any): CreditActionOut => ({
   createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
 });
 
+/** How many of a tenant's credit actions the tenant view carries (newest first). */
+const TENANT_HISTORY_LIMIT = 100;
+
 const idOf = (v: unknown, field: string, required = true): number | null => {
   if (v === undefined || v === null || v === "") {
     if (required) throw new BadRequestException({ error: "BAD_INPUT", message: `${field} is required` });
@@ -180,10 +183,12 @@ export class TenantCreditsService {
     const [t] = (await this.pool.query(`select id, name from tenants where id = $1 and user_id = $2`, [tenantId, scope])).rows;
     if (!t) throw new NotFoundException({ error: "TENANT_NOT_FOUND", message: "Tenant not found" });
     const asOf = riyadhToday();
-    const [buckets, aging, actions, future] = await Promise.all([
+    const [buckets, aging, actions, actionCount, future] = await Promise.all([
       this.buckets(this.pool, scope, asOf, tenantId),
-      this.aging.openItems(scope, asOf, "contract"),
-      this.pool.query(`${ACTION_SQL} where a.user_id = $1 and a.tenant_id = $2 order by a.id desc`, [scope, tenantId]),
+      this.aging.openItems(scope, asOf, "contract", { tenantId }),
+      // The newest TENANT_HISTORY_LIMIT actions; `actionsTotal` is the full count (GET /tenant-credits/actions?tenantId= pages the rest).
+      this.pool.query(`${ACTION_SQL} where a.user_id = $1 and a.tenant_id = $2 order by a.id desc limit ${TENANT_HISTORY_LIMIT}`, [scope, tenantId]),
+      this.pool.query(`select count(*)::int as n from tenant_credit_actions a left join tenant_credit_targets t on t.action_id = a.id and t.user_id = a.user_id where a.user_id = $1 and a.tenant_id = $2`, [scope, tenantId]),
       this.pool.query(
         `select p.id, p.contract_id, to_char(p.due_date,'YYYY-MM-DD') as due, p.amount::text as amount,
                 (select coalesce(sum(pc.amount), 0)::text from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as collected,
@@ -206,7 +211,7 @@ export class TenantCreditsService {
     return {
       tenant: { id: Number(t.id), name: t.name }, asOf, buckets,
       total: fromHalalas(buckets.reduce((s, b) => s + toHalalas(b.credit), 0)),
-      openItems, upcoming, actions: actions.rows.map(shapeAction),
+      openItems, upcoming, actions: actions.rows.map(shapeAction), actionsTotal: Number(actionCount.rows[0].n),
     };
   }
 
@@ -221,8 +226,13 @@ export class TenantCreditsService {
       p.push(idOf(q.contractId, "contractId"));
       w += ` and a.contract_id = $${p.length}`;
     }
-    const r = await this.pool.query(`${ACTION_SQL} where ${w} order by a.id desc limit 500`, p);
-    return { rows: r.rows.map(shapeAction) };
+    const page = Math.max(1, Number(q?.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, Number(q?.pageSize) || 50));
+    const [r, n] = await Promise.all([
+      this.pool.query(`${ACTION_SQL} where ${w} order by a.id desc limit ${pageSize} offset ${(page - 1) * pageSize}`, p),
+      this.pool.query(`select count(*)::int as n from tenant_credit_actions a left join tenant_credit_targets t on t.action_id = a.id and t.user_id = a.user_id where ${w}`, p),
+    ]);
+    return { rows: r.rows.map(shapeAction), total: Number(n.rows[0].n), page, pageSize };
   }
 
   /**
