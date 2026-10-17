@@ -3,7 +3,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, desc, eq, gte, isNull, lte, or, ilike, count, inArray } from "drizzle-orm";
 import { maintenanceRequestsTable, contractsTable, contractUnitsTable, unitsTable, propertiesTable, tenantsTable } from "@dara/database";
 import {
-  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 import { notifyTenant } from "../../common/notify";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -43,10 +43,10 @@ class MaintenanceController {
    * `priority`, `tenantId`, `contractId`, and a `from`/`to` window on when the
    * ticket was raised.
    *
-   * The board renders one column per status and used to build them with
-   * `requests.filter(...)` over the whole table. `stats.byStatus` returns those
-   * counts from the database, so a column badge stays right once this list is
-   * paged - and a `status=` request now fetches only that column.
+   * The board renders one column per status and requests each column with its
+   * own `status=` - the column badge is that request's `total`. (A per-status
+   * `stats.byStatus` used to ride along on every request; nothing read it, and
+   * the board's three column requests paid for three group-bys.)
    */
   @Get()
   @RequirePermissions(PERMISSIONS.MAINTENANCE_VIEW)
@@ -58,11 +58,12 @@ class MaintenanceController {
       isNull(maintenanceRequestsTable.deletedAt),
     ];
     if (q.search) {
+      const like = likeContains(q.search);
       conds.push(or(
-        ilike(maintenanceRequestsTable.unitLabel, `%${q.search}%`),
-        ilike(maintenanceRequestsTable.description, `%${q.search}%`),
-        ilike(maintenanceRequestsTable.supplier, `%${q.search}%`),
-        ilike(tenantsTable.name, `%${q.search}%`),
+        ilike(maintenanceRequestsTable.unitLabel, like),
+        ilike(maintenanceRequestsTable.description, like),
+        ilike(maintenanceRequestsTable.supplier, like),
+        ilike(tenantsTable.name, like),
       ));
     }
     const statuses = parseEnumList(rawQuery?.status, ["open", "in_progress", "pending_approval", "completed"] as const);
@@ -77,9 +78,6 @@ class MaintenanceController {
     if (from) conds.push(gte(maintenanceRequestsTable.createdAt, new Date(`${from}T00:00:00.000Z`)));
     // `to` is inclusive of the whole day, so a same-day window returns that day.
     if (to) conds.push(lte(maintenanceRequestsTable.createdAt, new Date(`${to}T23:59:59.999Z`)));
-    // Every filter EXCEPT status - the board's column badges are the per-status
-    // counts, and fetching one column must not blank the other columns' badges.
-    const statsWhere = and(...conds);
     if (statuses) conds.push(inArray(maintenanceRequestsTable.status, statuses));
     const where = and(...conds);
 
@@ -116,9 +114,9 @@ class MaintenanceController {
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);
 
-    const [rows, totalRow, statusRows] = await Promise.all([
+    const [rows, totalRow] = await Promise.all([
       rowsQ,
-      // Both aggregates repeat the tenants join, because `search` reaches the
+      // The count repeats the tenants join, because `search` reaches the
       // tenant name through it - counting the bare table would report a total
       // the filter never returns.
       usePaginated
@@ -126,23 +124,13 @@ class MaintenanceController {
             .leftJoin(tenantsTable, eq(maintenanceRequestsTable.tenantId, tenantsTable.id))
             .where(where)
         : Promise.resolve([{ total: 0 }]),
-      usePaginated
-        ? this.db.select({ status: maintenanceRequestsTable.status, cnt: count() })
-            .from(maintenanceRequestsTable)
-            .leftJoin(tenantsTable, eq(maintenanceRequestsTable.tenantId, tenantsTable.id))
-            .where(statsWhere)
-            .groupBy(maintenanceRequestsTable.status)
-        : Promise.resolve([]),
     ]);
     if (!usePaginated) return rows;
-    const byStatus: Record<string, number> = {};
-    for (const r of statusRows as Array<{ status: string; cnt: number }>) byStatus[r.status] = Number(r.cnt);
     return {
       data: rows,
       page: q.page,
       pageSize: q.pageSize,
       total: Number(totalRow[0]?.total ?? 0),
-      stats: { byStatus },
     };
   }
 
