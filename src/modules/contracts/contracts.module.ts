@@ -167,7 +167,7 @@ function parseRentTerms(raw: any): { year: number; amount: number }[] {
     .filter((t) => Number.isFinite(t.year) && t.year > 0 && Number.isFinite(t.amount) && t.amount > 0);
 }
 import {
-  listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
+  likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 import { rentVatFromUsage } from "../../common/usage-vat";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
@@ -391,6 +391,65 @@ class ContractsController {
     });
   }
 
+  /** The columns a contract row carries on the list and on `GET /contracts/:id`. */
+  private listColumns() {
+    return {
+      id: contractsTable.id,
+      contractNumber: contractsTable.contractNumber,
+      tenantId: contractsTable.tenantId,
+      tenantType: contractsTable.tenantType,
+      tenantName: contractsTable.tenantName,
+      tenantShortName: tenantsTable.shortName,
+      tenantIdNumber: contractsTable.tenantIdNumber,
+      tenantPhone: contractsTable.tenantPhone,
+      tenantEmail: contractsTable.tenantEmail,
+      tenantTaxNumber: contractsTable.tenantTaxNumber,
+      tenantAddress: contractsTable.tenantAddress,
+      tenantPostalCode: contractsTable.tenantPostalCode,
+      tenantAdditionalNumber: contractsTable.tenantAdditionalNumber,
+      tenantBuildingNumber: contractsTable.tenantBuildingNumber,
+      repName: contractsTable.repName,
+      repIdNumber: contractsTable.repIdNumber,
+      companyUnified: contractsTable.companyUnified,
+      companyOrgType: contractsTable.companyOrgType,
+      signingDate: contractsTable.signingDate,
+      signingPlace: contractsTable.signingPlace,
+      ejarContractNumber: contractsTable.ejarContractNumber,
+      startDate: contractsTable.startDate,
+      endDate: contractsTable.endDate,
+      monthlyRent: contractsTable.monthlyRent,
+      paymentFrequency: contractsTable.paymentFrequency,
+      depositAmount: contractsTable.depositAmount,
+      depositStatus: contractsTable.depositStatus,
+      depositDueDate: contractsTable.depositDueDate,
+      depositMethod: contractsTable.depositMethod,
+      prepaidRent: contractsTable.prepaidRent,
+      prepaidMethod: contractsTable.prepaidMethod,
+      vatEnabled: contractsTable.vatEnabled,
+      escalationRate: contractsTable.escalationRate,
+      escalationType: contractsTable.escalationType,
+      agencyFee: contractsTable.agencyFee,
+      firstPaymentAmount: contractsTable.firstPaymentAmount,
+      additionalFees: contractsTable.additionalFees,
+      customSchedule: contractsTable.customSchedule,
+      landlordName: contractsTable.landlordName,
+      landlordIdNumber: contractsTable.landlordIdNumber,
+      landlordPhone: contractsTable.landlordPhone,
+      landlordEmail: contractsTable.landlordEmail,
+      landlordTaxNumber: contractsTable.landlordTaxNumber,
+      landlordAddress: contractsTable.landlordAddress,
+      landlordPostalCode: contractsTable.landlordPostalCode,
+      landlordAdditionalNumber: contractsTable.landlordAdditionalNumber,
+      landlordBuildingNumber: contractsTable.landlordBuildingNumber,
+      status: contractsTable.status,
+      notes: contractsTable.notes,
+      attachmentKey: contractsTable.attachmentKey,
+      settledExternalUntil: contractsTable.settledExternalUntil,
+      isDraft: contractsTable.isDraft,
+      createdAt: contractsTable.createdAt,
+    };
+  }
+
   /**
    * Contracts, paginated and filtered by the database.
    *
@@ -426,12 +485,13 @@ class ContractsController {
 
     const conds: any[] = [scopeWhere];
     if (q.search) {
+      const pattern = likeContains(q.search);
       conds.push(or(
-        ilike(contractsTable.contractNumber, `%${q.search}%`),
-        ilike(contractsTable.tenantName, `%${q.search}%`),
-        ilike(contractsTable.tenantIdNumber, `%${q.search}%`),
-        ilike(contractsTable.tenantPhone, `%${q.search}%`),
-        ilike(contractsTable.ejarContractNumber, `%${q.search}%`),
+        ilike(contractsTable.contractNumber, pattern),
+        ilike(contractsTable.tenantName, pattern),
+        ilike(contractsTable.tenantIdNumber, pattern),
+        ilike(contractsTable.tenantPhone, pattern),
+        ilike(contractsTable.ejarContractNumber, pattern),
       ));
     }
     const statuses = parseEnumList(rawQuery?.status, CONTRACT_STATUSES);
@@ -467,65 +527,14 @@ class ContractsController {
     // `statsWhere` is every filter EXCEPT status: the per-status counts below
     // are the tab badges, so selecting one status must not zero the others.
     const statsWhere = and(...conds);
+    // A status was asked for but none of it is a real status (`status=foo`):
+    // no rows, not the unfiltered list.
     if (statuses) conds.push(inArray(contractsTable.status, statuses));
+    else if (typeof rawQuery?.status === "string" && rawQuery.status.trim()) conds.push(sql`false`);
     const where = and(...conds);
 
     let rowsQ = this.db
-      .select({
-        id: contractsTable.id,
-        contractNumber: contractsTable.contractNumber,
-        tenantId: contractsTable.tenantId,
-        tenantType: contractsTable.tenantType,
-        tenantName: contractsTable.tenantName,
-        tenantShortName: tenantsTable.shortName,
-        tenantIdNumber: contractsTable.tenantIdNumber,
-        tenantPhone: contractsTable.tenantPhone,
-        tenantEmail: contractsTable.tenantEmail,
-        tenantTaxNumber: contractsTable.tenantTaxNumber,
-        tenantAddress: contractsTable.tenantAddress,
-        tenantPostalCode: contractsTable.tenantPostalCode,
-        tenantAdditionalNumber: contractsTable.tenantAdditionalNumber,
-        tenantBuildingNumber: contractsTable.tenantBuildingNumber,
-        repName: contractsTable.repName,
-        repIdNumber: contractsTable.repIdNumber,
-        companyUnified: contractsTable.companyUnified,
-        companyOrgType: contractsTable.companyOrgType,
-        signingDate: contractsTable.signingDate,
-        signingPlace: contractsTable.signingPlace,
-        ejarContractNumber: contractsTable.ejarContractNumber,
-        startDate: contractsTable.startDate,
-        endDate: contractsTable.endDate,
-        monthlyRent: contractsTable.monthlyRent,
-        paymentFrequency: contractsTable.paymentFrequency,
-        depositAmount: contractsTable.depositAmount,
-        depositStatus: contractsTable.depositStatus,
-        depositDueDate: contractsTable.depositDueDate,
-        depositMethod: contractsTable.depositMethod,
-        prepaidRent: contractsTable.prepaidRent,
-        prepaidMethod: contractsTable.prepaidMethod,
-        vatEnabled: contractsTable.vatEnabled,
-        escalationRate: contractsTable.escalationRate,
-        escalationType: contractsTable.escalationType,
-        agencyFee: contractsTable.agencyFee,
-        firstPaymentAmount: contractsTable.firstPaymentAmount,
-        additionalFees: contractsTable.additionalFees,
-        customSchedule: contractsTable.customSchedule,
-        landlordName: contractsTable.landlordName,
-        landlordIdNumber: contractsTable.landlordIdNumber,
-        landlordPhone: contractsTable.landlordPhone,
-        landlordEmail: contractsTable.landlordEmail,
-        landlordTaxNumber: contractsTable.landlordTaxNumber,
-        landlordAddress: contractsTable.landlordAddress,
-        landlordPostalCode: contractsTable.landlordPostalCode,
-        landlordAdditionalNumber: contractsTable.landlordAdditionalNumber,
-        landlordBuildingNumber: contractsTable.landlordBuildingNumber,
-        status: contractsTable.status,
-        notes: contractsTable.notes,
-        attachmentKey: contractsTable.attachmentKey,
-        settledExternalUntil: contractsTable.settledExternalUntil,
-        isDraft: contractsTable.isDraft,
-        createdAt: contractsTable.createdAt,
-      })
+      .select(this.listColumns())
       .from(contractsTable)
       .leftJoin(tenantsTable, eq(contractsTable.tenantId, tenantsTable.id))
       .where(where)
@@ -567,6 +576,30 @@ class ContractsController {
       total: Number(totalRow[0]?.total ?? 0),
       stats: { byStatus },
     };
+  }
+
+  /**
+   * One contract, in the same shape as a list row (units, primary property,
+   * rent terms). The Contracts tab's deep link used to download every
+   * contract in the account to find this one.
+   */
+  @Get(":contractId")
+  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
+  async getOne(@CurrentUser() user: AuthUser, @Param("contractId") contractId: string) {
+    const id = requiredForeignKeyId(contractId, "رقم العقد");
+    const [row] = await this.db
+      .select(this.listColumns())
+      .from(contractsTable)
+      .leftJoin(tenantsTable, eq(contractsTable.tenantId, tenantsTable.id))
+      .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, scopeId(user)), isNull(contractsTable.deletedAt)))
+      .limit(1);
+    if (!row) throw new NotFoundException("Contract not found");
+    const [unitsMap, termsMap] = await Promise.all([
+      this.unitsByContract([id]),
+      this.rentTermsByContract([id]),
+    ]);
+    const [data] = this.withUnits([row], unitsMap);
+    return { ...data, rentTerms: termsMap.get(id) ?? [] };
   }
 
 

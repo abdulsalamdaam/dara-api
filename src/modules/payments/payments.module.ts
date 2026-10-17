@@ -118,11 +118,17 @@ class PaymentsController {
       .leftJoin(tenantsTable, eq(contractsTable.tenantId, tenantsTable.id))
       .where(where)
       // Default: due date (soonest upcoming / oldest overdue first). The
-      // Payments tab passes sort=createdAt to show the most recent first.
+      // Payments tab passes sort=createdAt to show the most recent first;
+      // the dashboard's "recent payments" passes sort=paidDate (latest
+      // collection first, rows with no paid date last).
       .orderBy(
         ...(rawQuery?.sort === "createdAt"
           ? [desc(paymentsTable.createdAt), desc(paymentsTable.id)]
-          : [(q.order === "asc" ? asc : desc)(paymentsTable.dueDate), (q.order === "asc" ? asc : desc)(paymentsTable.id)]),
+          : rawQuery?.sort === "paidDate"
+            ? (q.order === "asc"
+              ? [sql`${paymentsTable.paidDate} asc nulls last`, asc(paymentsTable.id)]
+              : [sql`${paymentsTable.paidDate} desc nulls last`, desc(paymentsTable.id)])
+            : [(q.order === "asc" ? asc : desc)(paymentsTable.dueDate), (q.order === "asc" ? asc : desc)(paymentsTable.id)]),
       )
       .$dynamic();
     if (usePaginated) rowsQ = rowsQ.limit(q.pageSize).offset((q.page - 1) * q.pageSize);

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Inject, Module, Post, Query, UseGuards,
+  BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq } from "drizzle-orm";
@@ -141,17 +141,22 @@ export class EjarController {
    * cap. `total` is the database's real count for the filter now, and
    * `page`/`pageSize` walk the whole log instead of only its head.
    *
-   * The legacy `{ count, logs }` shape is preserved for the existing admin
-   * screen; sending `page`/`pageSize`/`paginated` returns the standard
+   * The legacy `{ count, logs }` shape is preserved for any older caller;
+   * sending `page`/`pageSize`/`paginated` returns the standard
    * `{ data, page, pageSize, total }` envelope like every other list.
+   *
+   * Scoped to the caller's account - every caller, staff included. It used to
+   * return every account's calls, response bodies and all. Rows come back
+   * without `responseBody`; `GET /ejar/logs/:id` returns one row with it.
    */
   @Get("logs")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
-  async listLogs(@Query() rawQuery: any) {
+  async listLogs(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const paged = wantsPagination(rawQuery);
     const q = listQuerySchema.parse(rawQuery ?? {});
     const status = typeof rawQuery?.status === "string" ? rawQuery.status : undefined;
     const filter: EjarLogFilter = {
+      accountId: scopeId(user),
       endpoint: typeof rawQuery?.endpoint === "string" && rawQuery.endpoint ? rawQuery.endpoint : undefined,
     };
     if (status === "ok" || status === "error") filter.status = status;
@@ -163,9 +168,23 @@ export class EjarController {
       const { rows, total } = await this.logs.list(filter);
       return { data: rows, page: q.page, pageSize: q.pageSize, total };
     }
-    filter.limit = rawQuery?.limit ? Number(rawQuery.limit) : undefined;
+    // Clamped to 1-1000; an unusable `limit` (`abc`, `-5`) falls back to the
+    // default 300 rather than reaching LIMIT as NaN.
+    const limit = Number.parseInt(String(rawQuery?.limit ?? ""), 10);
+    filter.limit = Number.isFinite(limit) && limit >= 1 ? Math.min(limit, 1000) : 300;
     const { rows, total } = await this.logs.list(filter);
     return { count: rows.length, total, logs: rows };
+  }
+
+  /** One log row with its response body - the list leaves bodies out. */
+  @Get("logs/:id")
+  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
+  async getLog(@CurrentUser() user: AuthUser, @Param("id") rawId: string) {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0 || id > 2147483647) throw new NotFoundException("Log not found");
+    const row = await this.logs.get(id, scopeId(user));
+    if (!row) throw new NotFoundException("Log not found");
+    return row;
   }
 
   /**
