@@ -964,17 +964,35 @@ would strand everything filed in between.
   `users.package_plan` column default (an unassigned account) and resolves to
   `professional` via `LEGACY_ALIASES`. The old `advanced` tier and the
   `individual_owner` alias were dropped (Oct 2026; no rows used them).
-- **Quotas plus three feature gates** (`src/common/plan-features.ts`, Oct 2026).
+- **Quotas plus two feature gates** (`src/common/plan-features.ts`, Oct 2026).
   Every plan opens the same portal (no tab whitelist; `mode` shapes content,
   not access) and units/properties are unlimited; tiers differ by seats
-  (tenant 1, basic 2, pro 6, enterprise unlimited) and by three features,
-  exactly as the pricing table promises:
+  (tenant 1, basic 2, pro 4, enterprise unlimited — the account holder counts),
+  by landlords (basic «مؤجر واحد», every other plan unlimited) and by two
+  features, exactly as the pricing table promises:
 
-  | plan | `accounting` | `advanced_reports` | `custom_reports` |
-  |---|---|---|---|
-  | tenant, basic (عقاري) | ✗ | ✗ | ✗ |
-  | professional, enterprise | ✓ | ✓ | ✓ |
-  | broker / null / unknown (→ professional) | ✓ | ✓ | ✓ |
+  | plan | `accounting` | `advanced_reports` |
+  |---|---|---|
+  | tenant, basic (عقاري) | ✗ | ✗ |
+  | professional, enterprise | ✓ | ✓ |
+  | broker / null / unknown (→ professional) | ✓ | ✓ |
+
+  Accounts already above a new cap (pro went 6 → 4, basic 3 → 2, basic
+  landlords unlimited → 1) keep what they have and cannot add more.
+  - **Landlord cap (عقاري = 1).** Counts every live `owners` row of the account
+    (`landlordCount`: account holder, drafts, inactive, Ejar-imported; not
+    soft-deleted), owner-scoped so employees add against it. Every path that
+    inserts an owners row is gated: `POST /owners` and bulk import
+    (`assertWithinQuota(…, "landlords")`; a bulk row is refused whole, reported
+    with `code`), and the Ejar import writer (`ejar.landlord-cap.ts`): after its
+    own ID/name match finds nothing, an account at the cap gets one looser match
+    against its own rows (any Ejar ID/CR/700 number = row ID or tax number, or
+    the same name on a row with no ID — which then gains it); no match is
+    refused before the import's first write. Onboarding (and the dead admin
+    `ensureSoleLandlord`) only insert the account's first row, so need no gate;
+    there is no admin landlord-create endpoint. Refusal is **403**
+    `{statusCode, code: "PLAN_LIMIT_LANDLORDS", requiredPlan: "professional", limit: 1, message}`.
+    `/me/package` adds `limits: {landlords|users: {used, limit (null = unlimited), canAdd}}`.
 
   Always the ACCOUNT OWNER's plan (`users.package_plan` of `scopeId(user)`),
   like the seat quota. `requiredPlan` is always `professional`. Clients get
@@ -1002,8 +1020,8 @@ would strand everything filed in between.
     switched on per account by an admin (toggle + backfill), and the web's
     accounting upsell says so. Admin backfill / ledger-start still read the
     stored flag, so an admin can start a ledger on a plan-locked account.
-  - `custom_reports` = the web's custom report builder (client-side over list
-    data, so the API only advertises it).
+  - The custom report builder (`custom_reports`) was withdrawn on every plan
+    (Oct 2026) and is no longer a key in `planFeatures` / `features`.
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
   yearly list (tenant 1,000 · basic 4,200 · pro 5,400): six months costs the
   yearly +10% annualised, three months +20% (basic: 4,200 / 2,310 / 1,260 per
@@ -1047,8 +1065,8 @@ would strand everything filed in between.
   Changing a user's permissions means changing their role.
 - `listEmployees` includes the account holder, flagged `isOwner`. Owner-first
   ordering is done in JS: the owner's `ownerUserId` is NULL and Postgres sorts
-  NULLs last. The employee quota counts `ownerUserId = owner` separately, so the
-  owner is not billed against `maxUsers`.
+  NULLs last. The seat quota (`employeeCount`) counts the owner too
+  (`id = owner OR ownerUserId = owner`), so `maxUsers` is the whole team.
 
 ---
 

@@ -218,7 +218,7 @@ class OwnersController {
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
     assertNationalAddress(body);
-    // Enforce the subscription package's landlord quota.
+    // Enforce the subscription package's landlord quota (عقاري = 1; 403 PLAN_LIMIT_LANDLORDS).
     await assertWithinQuota(this.db, scopeId(user), "landlords");
     const wantsDefault = Boolean(body.isDefault ?? false);
     // Only one default landlord per account: clear any existing flag before

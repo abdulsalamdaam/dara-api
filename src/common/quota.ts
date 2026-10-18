@@ -7,7 +7,8 @@ import { ForbiddenException } from "@nestjs/common";
 import { and, count, eq, isNull, or } from "drizzle-orm";
 import { usersTable, propertiesTable, unitsTable, ownersTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
-import { resolvePackage } from "./packages";
+import { resolvePackage, UNLIMITED, type PackagePlan } from "./packages";
+import { FEATURE_REQUIRED_PLAN } from "./plan-features";
 
 export type QuotaResource = "properties" | "units" | "landlords" | "users";
 
@@ -35,6 +36,76 @@ export async function employeeCount(db: Drizzle, ownerId: number): Promise<numbe
   return Number(r?.c ?? 0);
 }
 
+/**
+ * Landlord records counted against `maxLandlords`: every live (not
+ * soft-deleted) owners row of the account — the account-holder row, drafts,
+ * inactive rows and Ejar-imported parties alike. Scope is the ACCOUNT OWNER
+ * (`scopeId(user)`), so an employee adds against the owner's allowance.
+ */
+export async function landlordCount(db: Drizzle, ownerId: number): Promise<number> {
+  const [r] = await db
+    .select({ c: count() }).from(ownersTable)
+    .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
+  return Number(r?.c ?? 0);
+}
+
+/** The 403 body every landlord-creating path answers with at the cap. The web keys off `code`. */
+export interface PlanLimitLandlordsBody {
+  statusCode: 403;
+  code: "PLAN_LIMIT_LANDLORDS";
+  requiredPlan: PackagePlan;
+  limit: number;
+  message: string;
+}
+
+/** Arabic first; the plan label comes from packages.ts so a rename follows. */
+export function landlordLimitMessage(limit: number, planLabelAr: string, context: "create" | "ejar_import" = "create"): string {
+  const allowance = limit === 1 ? "مؤجرًا واحدًا فقط" : `${limit} مؤجرين فقط`;
+  const lead = context === "ejar_import"
+    ? `مؤجر هذا العقد ليس المؤجر المسجّل في حسابك، وباقة «${planLabelAr}» تتيح ${allowance}.`
+    : `باقة «${planLabelAr}» تتيح ${allowance}.`;
+  return `${lead} لإضافة مؤجرين آخرين قم بالترقية إلى باقة «المكاتب العقارية».`;
+}
+
+export function planLimitLandlordsBody(limit: number, planLabelAr: string, context: "create" | "ejar_import" = "create"): PlanLimitLandlordsBody {
+  return {
+    statusCode: 403,
+    code: "PLAN_LIMIT_LANDLORDS",
+    requiredPlan: FEATURE_REQUIRED_PLAN,
+    limit,
+    message: landlordLimitMessage(limit, planLabelAr, context),
+  };
+}
+
+export class PlanLimitLandlordsException extends ForbiddenException {
+  constructor(limit: number, planLabelAr: string, context: "create" | "ejar_import" = "create") {
+    super(planLimitLandlordsBody(limit, planLabelAr, context));
+  }
+}
+
+/** Used / limit for one capped resource, as the client reads it. `limit` null = unlimited. */
+export interface QuotaView { used: number; limit: number | null; canAdd: boolean }
+
+function quotaView(used: number, limit: number): QuotaView {
+  return { used, limit: limit >= UNLIMITED ? null : limit, canAdd: used < limit };
+}
+
+/**
+ * Landlord + seat allowance for an account, resolved from the OWNER's plan.
+ * `/me/package` returns it as `limits`, so the portal can say «مؤجر واحد» and
+ * disable "add landlord" / "add user" before the API has to refuse.
+ */
+export async function planLimits(db: Drizzle, ownerId: number, packagePlan?: string | null): Promise<{ landlords: QuotaView; users: QuotaView }> {
+  let plan = packagePlan;
+  if (plan === undefined) {
+    const [owner] = await db.select({ packagePlan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, ownerId));
+    plan = owner?.packagePlan ?? null;
+  }
+  const pkg = resolvePackage(plan);
+  const [landlords, users] = await Promise.all([landlordCount(db, ownerId), employeeCount(db, ownerId)]);
+  return { landlords: quotaView(landlords, pkg.maxLandlords), users: quotaView(users, pkg.maxUsers) };
+}
+
 /** Current record counts for an owner account — drives the package usage UI. */
 export async function packageUsage(db: Drizzle, ownerId: number) {
   const [props] = await db
@@ -44,14 +115,12 @@ export async function packageUsage(db: Drizzle, ownerId: number) {
     .select({ c: count() }).from(unitsTable)
     .innerJoin(propertiesTable, eq(unitsTable.propertyId, propertiesTable.id))
     .where(and(eq(propertiesTable.userId, ownerId), isNull(unitsTable.deletedAt), isNull(propertiesTable.deletedAt)));
-  const [owners] = await db
-    .select({ c: count() }).from(ownersTable)
-    .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
+  const landlords = await landlordCount(db, ownerId);
   const employees = await employeeCount(db, ownerId);
   return {
     properties: Number(props?.c ?? 0),
     units: Number(units?.c ?? 0),
-    landlords: Number(owners?.c ?? 0),
+    landlords,
     employees,
   };
 }
@@ -60,6 +129,10 @@ export async function packageUsage(db: Drizzle, ownerId: number) {
  * Throw `ForbiddenException` if creating one more `resource` would exceed
  * the owner account's package limit. `ownerId` must be the scope id
  * (the top-level account — `scopeId(user)`).
+ *
+ * `landlords` throws `PlanLimitLandlordsException` (403 `PLAN_LIMIT_LANDLORDS`,
+ * see PlanLimitLandlordsBody). An account already above its cap keeps every
+ * row it has; it only cannot add one. `db` may be a transaction.
  */
 export async function assertWithinQuota(db: Drizzle, ownerId: number, resource: QuotaResource): Promise<void> {
   const [owner] = await db
@@ -100,12 +173,10 @@ export async function assertWithinQuota(db: Drizzle, ownerId: number, resource: 
     used = await employeeCount(db, ownerId);
   } else {
     limit = pkg.maxLandlords;
-    labelAr = "مالك"; labelEn = "landlords";
-    const [r] = await db
-      .select({ c: count() })
-      .from(ownersTable)
-      .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
-    used = Number(r?.c ?? 0);
+    if (limit >= UNLIMITED) return;
+    used = await landlordCount(db, ownerId);
+    if (used >= limit) throw new PlanLimitLandlordsException(limit, pkg.labelAr);
+    return;
   }
 
   if (used >= limit) {

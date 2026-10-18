@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, listPrice, parseCycle, purchasableCycle, planPriceTable, ejarLookupQuota, chargedVatRate } from "./packages";
+import { planAllowedForUserType, planRequiredUserType, PACKAGES, UNLIMITED, resolvePackage, listPrice, parseCycle, purchasableCycle, planPriceTable, ejarLookupQuota, chargedVatRate } from "./packages";
 
 /**
  * The tenant plan is sold to corporate tenants only. The check has to fail
@@ -76,6 +76,18 @@ describe("purchasable cycles and quotas", () => {
     assert.equal(ejarLookupQuota("professional", "yearly"), 150);
     assert.equal(ejarLookupQuota("professional", "quarterly"), 37);
     assert.equal(ejarLookupQuota("enterprise", "quarterly"), null);
+  });
+  it("seats: tenant 1, basic (عقاري) 2, professional 4, enterprise unlimited", () => {
+    assert.equal(PACKAGES.tenant.maxUsers, 1);
+    assert.equal(PACKAGES.basic.maxUsers, 2);
+    assert.equal(PACKAGES.professional.maxUsers, 4);
+    assert.equal(PACKAGES.enterprise.maxUsers, UNLIMITED);
+    assert.equal(resolvePackage("broker").maxUsers, 4, "the unassigned default follows professional");
+  });
+  it("landlords: only basic (عقاري) is capped, at exactly one", () => {
+    assert.equal(PACKAGES.basic.maxLandlords, 1);
+    for (const p of ["tenant", "professional", "enterprise"] as const) assert.equal(PACKAGES[p].maxLandlords, UNLIMITED, p);
+    assert.equal(resolvePackage(null).maxLandlords, UNLIMITED);
   });
   it("gives every plan unlimited units and properties", () => {
     for (const def of Object.values(PACKAGES)) {

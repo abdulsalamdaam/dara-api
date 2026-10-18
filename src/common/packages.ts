@@ -1,7 +1,9 @@
 /**
- * Subscription packages. Units, properties and landlords are unlimited on
- * every plan; the tiers differ by seats (`maxUsers`) and service. The plan key is stored on the top-level user row
- * (`users.package_plan`); employees inherit their owner's plan.
+ * Subscription packages. Units and properties are unlimited on every plan;
+ * the tiers differ by seats (`maxUsers`), by landlord records (`maxLandlords`
+ * — عقاري holds exactly one, Oct 2026) and by the features in plan-features.ts.
+ * The plan key is stored on the top-level user row (`users.package_plan`);
+ * employees inherit their owner's plan.
  *
  * Account *type* (individual vs company) is a separate concept stored on
  * `users.user_type` and only drives Settings visibility — it is NOT a plan.
@@ -33,11 +35,16 @@ export interface PackageDef {
    * convenience, not a control.
    */
   requiresUserType?: UserAccountType;
-  /** Landlord (owner) records — unlimited on every plan. */
+  /**
+   * Landlord (owner) records, counting every live row of the account
+   * (the account-holder row and Ejar-imported parties alike). Only عقاري
+   * (`basic`) is capped — at 1, its own landlord. An account already above
+   * the cap keeps its rows; it just cannot add another.
+   */
   maxLandlords: number;
   maxProperties: number;
   maxUnits: number;
-  /** Team members (employees) the owner may add — excludes the owner itself. */
+  /** Seats — the account holder PLUS its employees (see quota.employeeCount). */
   maxUsers: number;
 }
 
@@ -47,8 +54,9 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
   // getting-started checklist and the same seat model as the other plans;
   // only the quotas differ.
   // Units and properties are unlimited on every plan (Oct 2026); plans differ
-  // by seats — Tenant 1 user, Basic 3, Pro 6, Enterprise unlimited. `maxUsers` counts ADDED employees — the account
-  // holder is not billed against it (see listEmployees).
+  // by seats — Tenant 1 user, Basic 2, Pro 4, Enterprise unlimited (Oct 2026;
+  // accounts already above a cap keep their users but cannot add more).
+  // `maxUsers` counts the account holder too (see quota.employeeCount).
   tenant: {
     key: "tenant",
     labelAr: "المستأجرين",
@@ -70,7 +78,9 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     labelAr: "عقاري",
     labelEn: "Aqari",
     mode: "landlord",
-    maxLandlords: UNLIMITED,
+    // Exactly one landlord: the account's own. Managing other people's
+    // property is what المكاتب العقارية is for.
+    maxLandlords: 1,
     maxProperties: UNLIMITED,
     maxUnits: UNLIMITED,
     maxUsers: 2,
@@ -83,7 +93,7 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     maxLandlords: UNLIMITED,
     maxProperties: UNLIMITED,
     maxUnits: UNLIMITED,
-    maxUsers: 6,
+    maxUsers: 4,
   },
   enterprise: {
     key: "enterprise",

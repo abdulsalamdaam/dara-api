@@ -14,6 +14,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import { buildInstallments } from "../contracts/installments";
+import { assertWithinQuota } from "../../common/quota"; // finance-v2: n/a — plan landlord cap
 
 /**
  * Bulk import — one spreadsheet row carries an owner + deed + property +
@@ -34,6 +35,7 @@ type RowResult = {
   created: string[];
   linked: string[];
   messages: string[];
+  code?: string; // finance-v2: n/a — machine code of a refused row (PLAN_LIMIT_LANDLORDS)
 };
 
 const str = (v: unknown): string => (v == null ? "" : String(v).trim());
@@ -73,6 +75,7 @@ class ImportController {
         }
       } catch (e: any) {
         res.status = "error";
+        if (e?.getResponse?.()?.code) res.code = e.getResponse().code; // finance-v2: n/a — e.g. PLAN_LIMIT_LANDLORDS, so the client can offer the upgrade
         res.messages.push(e?.message || "Unknown error");
       }
       results.push(res);
@@ -104,6 +107,7 @@ class ImportController {
         ownerId = found.id; ownerName = found.name; ownerPhone = found.phone; ownerEmail = found.email;
         res.linked.push("owner");
       } else {
+        await assertWithinQuota(this.db, scope, "landlords"); // finance-v2: n/a (plan gate) — عقاري holds one landlord; refuses this row before any write (CONTRACT2 §5)
         const [created] = await this.db.insert(ownersTable).values({
           userId: scope, name: oName || oId,
           type: str(row.owner_type) === "company" ? "company" : "individual",

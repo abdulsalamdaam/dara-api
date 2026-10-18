@@ -10,7 +10,7 @@ import { scopeId } from "../../common/scope";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
-import { packageUsage } from "../../common/quota";
+import { packageUsage, planLimits } from "../../common/quota";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
 
@@ -37,6 +37,10 @@ class PackageController {
       .where(eq(usersTable.id, ownerId));
     const plan = resolvePackage(owner?.packagePlan);
     const usage = await packageUsage(this.db, ownerId);
+    // The capped resources in one place: `limit` null = unlimited, `canAdd`
+    // false once at (or, for an account grandfathered above it, over) the cap.
+    // Same numbers as plan.maxLandlords/maxUsers + usage.landlords/employees.
+    const limits = await planLimits(this.db, ownerId, owner?.packagePlan ?? null);
 
     // Settings completeness — drives the post-payment "complete your settings"
     // lock. Complete when EITHER the account company OR the account's own party
@@ -86,6 +90,7 @@ class PackageController {
       plan,
       mode: plan.mode,
       usage,
+      limits,
       userType: owner?.userType ?? "individual",
       onboarded: owner?.onboardedAt != null,
       // First-run getting-started checklist completed (persisted, not local).
@@ -208,6 +213,8 @@ class PackageController {
         const [existing] = await this.db.select({ id: ownersTable.id }).from(ownersTable)
           .where(and(eq(ownersTable.userId, ownerId), isNull(ownersTable.deletedAt)));
         if (!existing) {
+          // Only ever the account's FIRST landlord row, so it is always within
+          // the landlord cap (عقاري = 1) — no quota check needed here.
           await this.db.insert(ownersTable).values({
             userId: ownerId,
             // A company account's own landlord IS the company, so it carries

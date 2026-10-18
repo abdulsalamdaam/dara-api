@@ -8,6 +8,7 @@ import { resolveLookupId } from "../../common/lookups-resolve";
 import type { Drizzle } from "../../database/database.module";
 import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "../finance-v2/hooks/classify"; // finance-v2: 11a/11b/11i — one reading of Ejar invoices for both paths
 import { ejarRentVatVerdict } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
+import { ejarLandlordCapGate } from "./ejar.landlord-cap"; // finance-v2: n/a — plan landlord cap (CONTRACT2 §5)
 import type { EjarPartyInfo, EjarInvoiceRow } from "./ejar.map";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
@@ -171,6 +172,9 @@ export class EjarImportWriter {
       linked.push("landlord");
       return found.id;
     }
+    // finance-v2: n/a (plan gate, not ledger) — عقاري holds one landlord (CONTRACT2 §5): at the cap reuse the account's own row or refuse with 403 PLAN_LIMIT_LANDLORDS before the first write of the import
+    const capped = await ejarLandlordCapGate(this.db, scope, lessor, name, idNumber); // finance-v2: n/a — landlord cap gate
+    if (capped != null) { linked.push("landlord"); return capped; } // finance-v2: n/a — landlord cap reuse
     const [row] = await this.db
       .insert(ownersTable)
       .values({
