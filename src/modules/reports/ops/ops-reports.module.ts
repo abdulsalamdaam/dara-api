@@ -8,7 +8,7 @@
  * account holder's data for a team member — exactly as the list endpoints do
  * (see ops-data.ts). Contract: OPS-REPORTS-CONTRACT.md.
  */
-import { BadRequestException, Controller, Get, Inject, Module, NotFoundException, Param, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Controller, Get, Inject, Module, NotFoundException, Param, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { DRIZZLE, type Drizzle } from "../../../database/database.module";
 import { JwtAuthGuard } from "../../../common/guards/jwt-auth.guard";
@@ -18,7 +18,7 @@ import { PermissionsGuard, RequirePermissions } from "../../../common/permission
 import { PERMISSIONS } from "../../../common/permissions";
 import { scopeId } from "../../../common/scope";
 import { OpsParamError, capRows, resolveParams, riyadhToday, type OpsParams, type OpsReport, type OpsReportId, type ResolvedParams } from "./ops-core";
-import { catalog, defOf } from "./ops-catalog";
+import { catalog, defOf, missingReportPerms } from "./ops-catalog";
 import { loadDataset } from "./ops-data";
 import { BUILDERS, NEEDS } from "./ops-builders";
 import { UseInterceptors } from "@nestjs/common"; // finance-v2: (additive-diff marker) package feature gate, common/plan-features.ts
@@ -66,13 +66,18 @@ export class OpsReportsController {
 
   @Get()
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
-  list() {
-    return catalog(riyadhToday());
+  list(@CurrentUser() user: AuthUser) {
+    // Only the reports this caller's role may run (OPS_REPORT_PERMS).
+    return catalog(riyadhToday(), user?.permissions ?? []);
   }
 
   @Get(":id")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
   one(@CurrentUser() user: AuthUser, @Param("id") id: string, @Query() rawQuery: any) {
+    if (defOf(id)) {
+      const missing = missingReportPerms(id, user?.permissions ?? []);
+      if (missing.length) throw new ForbiddenException(`Missing permissions: ${missing.join(", ")}`);
+    }
     return runOpsReport(this.db, scopeId(user), id, rawQuery ?? {});
   }
 }

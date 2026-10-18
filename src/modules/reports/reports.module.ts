@@ -12,7 +12,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
-import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PermissionsGuard, RequireAnyPermission, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import {
@@ -39,6 +39,9 @@ class ReportsController {
    */
   @Get("accounting")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
+  // Money: reports.view alone (a maintenance manager) read every landlord's
+  // collected rent, commission and payouts here.
+  @RequireAnyPermission(PERMISSIONS.PAYMENTS_VIEW, PERMISSIONS.INVOICES_VIEW)
   async accounting(@CurrentUser() user: AuthUser) {
     if (!isLegacyCall(user) && (await this.fv2h?.resolve(scopeId(user))) === true) return this.fv2h!.accounting(scopeId(user), await this.accounting(asLegacyCall(user))); // finance-v2: E3/E4/E1 values over the legacy result
     const uid = scopeId(user);
@@ -414,6 +417,9 @@ class ReportsController {
    */
   @Get("landlord-payouts")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW)
+  // Money: reports.view alone (a maintenance manager) read every landlord's
+  // collected rent, commission and payouts here.
+  @RequireAnyPermission(PERMISSIONS.PAYMENTS_VIEW, PERMISSIONS.INVOICES_VIEW)
   async listPayouts(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
     const paged = wantsPagination(rawQuery);
     const q = listQuerySchema.parse(rawQuery ?? {});

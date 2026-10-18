@@ -9,7 +9,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { AllowOwnerToken, PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator"; // rbac (outside finance-v2: additive)
+import { AllowOwnerToken, PermissionsGuard, RequireAnyPermission, RequirePermissions } from "../../common/permissions.decorator"; // rbac (outside finance-v2: additive)
 import { PERMISSIONS } from "../../common/permissions"; // rbac (outside finance-v2: additive)
 import { riyadhToday } from "../../common/payment-status";
 import { attachLookupLabels } from "../../common/lookups-resolve";
@@ -930,6 +930,8 @@ class LandlordMobileController {
    *  per-property performance (collected revenue + occupancy). */
   @Get("reports")
   @RequirePermissions(PERMISSIONS.REPORTS_VIEW) // rbac (outside finance-v2: additive)
+  // Collection figures: a portal login also needs payments/invoices view (owner tokens are narrowed by data instead).
+  @RequireAnyPermission(PERMISSIONS.PAYMENTS_VIEW, PERMISSIONS.INVOICES_VIEW)
   async reports(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);

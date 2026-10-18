@@ -99,11 +99,46 @@ export const OPS_DEFS: Def[] = [
 ];
 
 export const OPS_IDS = new Set<OpsReportId>(OPS_DEFS.map((d) => d.id));
+
+/**
+ * The module permissions each report reads, on top of `reports.view`.
+ *
+ * `reports.view` alone used to open every report, so a Maintenance Manager
+ * (whose preset carries it for maintenance reports) could read tenant
+ * balances, collections and landlord income — data every list endpoint
+ * refuses that role. A report now needs the view key of each module it
+ * reports on; money is `payments.view`.
+ */
+export const OPS_REPORT_PERMS: Record<OpsReportId, readonly string[]> = {
+  tenant_balances: ["tenants.view", "payments.view"],
+  defaulting_tenants: ["tenants.view", "payments.view"],
+  tenant_payment_behavior: ["tenants.view", "payments.view"],
+  landlord_portfolio: ["owners.view", "payments.view"],
+  vacant_units: ["units.view"],
+  property_performance: ["properties.view", "payments.view"],
+  occupancy_trend: ["units.view"],
+  contracts_report: ["contracts.view"],
+  expiring_contracts: ["contracts.view"],
+  contract_movement: ["contracts.view"],
+  collections_summary: ["payments.view"],
+  installments_schedule: ["payments.view"],
+  maintenance_requests: ["maintenance.view"],
+  data_quality: ["properties.view"],
+};
+
+/** The keys `perms` lacks for report `id` (empty = may run it). */
+export function missingReportPerms(id: string, perms: readonly string[] | null | undefined): string[] {
+  const need = OPS_REPORT_PERMS[id as OpsReportId] ?? [];
+  const held = new Set(perms ?? []);
+  return need.filter((p) => !held.has(p));
+}
 export const defOf = (id: string) => OPS_DEFS.find((d) => d.id === id);
 
-export function catalog(today: string): { reports: OpsReportMeta[] } {
+/** The catalog; with `perms`, only the reports those permissions may run. */
+export function catalog(today: string, perms?: readonly string[] | null): { reports: OpsReportMeta[] } {
+  const defs = perms === undefined ? OPS_DEFS : OPS_DEFS.filter((d) => missingReportPerms(d.id, perms).length === 0);
   return {
-    reports: OPS_DEFS.map(({ dates, statuses, days, ...meta }) => {
+    reports: defs.map(({ dates, statuses, days, ...meta }) => {
       const defaults: Partial<OpsParams> = {};
       if (meta.filters.includes("asOf")) defaults.asOf = today;
       if (dates === "last12") { defaults.from = addMonthsFirst(today, -11); defaults.to = today; }
