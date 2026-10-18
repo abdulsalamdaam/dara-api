@@ -216,6 +216,9 @@ class OwnersController {
   @Post()
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
+    // The plan's landlord cap first: an account at its cap learns that before
+    // it is asked to fix the form.
+    await assertWithinQuota(this.db, scopeId(user), "landlords");
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
     assertNationalAddress(body);
     // Enforce the subscription package's landlord quota (عقاري = 1; 403 PLAN_LIMIT_LANDLORDS).
