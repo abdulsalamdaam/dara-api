@@ -330,7 +330,9 @@ class PaymentsController {
     await this.fv2h?.guardPaymentPatch((await this.fv2h.resolve(scopeId(user))) === true, scopeId(user), id, body); // finance-v2: E7 money fields locked
     const fields = ["amount", "dueDate", "paidDate", "status", "receiptNumber", "attachmentKey", "notes"];
     const updateData: Record<string, unknown> = {};
-    for (const f of fields) if (body[f] !== undefined) updateData[f] = body[f];
+    for (const f of fields) if (body?.[f] !== undefined) updateData[f] = body[f];
+    // Nothing to write was a Drizzle "No values to set" — a 500.
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد بيانات للتحديث · Nothing to update");
     const [payment] = await this.db.update(paymentsTable).set(updateData)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)))
       .returning();

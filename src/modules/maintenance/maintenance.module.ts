@@ -152,6 +152,11 @@ class MaintenanceController {
     let contractId: number | null = body.contractId ? Number(body.contractId) : null;
     const ownerId = scopeId(user);
 
+    // A tenant id from the body must be one of THIS account's tenants: the
+    // row is linked to it, its name/phone are shown on the account's list, and
+    // the create/status-change emails and pushes go to it.
+    if (tenantId) await this.assertOwnTenant(ownerId, tenantId);
+
     if (contractId) {
       const [contract] = await this.db
         .select({
@@ -182,7 +187,10 @@ class MaintenanceController {
       }
 
       if (!tenantId && contract.tenantPhone) {
-        const [t] = await this.db.select({ id: tenantsTable.id }).from(tenantsTable).where(eq(tenantsTable.phone, contract.tenantPhone));
+        // Scoped: a phone number is not unique across accounts, and the
+        // unscoped lookup could link (and email) another account's tenant.
+        const [t] = await this.db.select({ id: tenantsTable.id }).from(tenantsTable)
+          .where(and(eq(tenantsTable.phone, contract.tenantPhone), eq(tenantsTable.userId, ownerId), isNull(tenantsTable.deletedAt)));
         if (t) tenantId = t.id;
       }
     }
@@ -271,7 +279,12 @@ class MaintenanceController {
       .where(and(eq(maintenanceRequestsTable.id, rid), eq(maintenanceRequestsTable.userId, scopeId(user)), isNull(maintenanceRequestsTable.deletedAt)));
 
     const updateData: Record<string, unknown> = {};
-    for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    for (const f of FIELDS) if (body?.[f] !== undefined) updateData[f] = body[f];
+    // Nothing to write was a Drizzle "No values to set" — a 500.
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد بيانات للتحديث · Nothing to update");
+    // Re-linking must stay inside the account, exactly as on create.
+    if (updateData.tenantId != null) await this.assertOwnTenant(scopeId(user), Number(updateData.tenantId));
+    if (updateData.contractId != null) await this.assertOwnContract(scopeId(user), Number(updateData.contractId));
     const [row] = await this.db.update(maintenanceRequestsTable).set(updateData)
       .where(and(eq(maintenanceRequestsTable.id, rid), eq(maintenanceRequestsTable.userId, scopeId(user)), isNull(maintenanceRequestsTable.deletedAt)))
       .returning();
@@ -281,6 +294,20 @@ class MaintenanceController {
       void this.notifyTenantOfStatusChange(row, previous.status ?? null);
     }
     return row;
+  }
+
+  private async assertOwnTenant(ownerId: number, tenantId: number): Promise<void> {
+    if (!Number.isInteger(tenantId) || tenantId <= 0) throw new BadRequestException("tenantId غير صالح");
+    const [t] = await this.db.select({ id: tenantsTable.id }).from(tenantsTable)
+      .where(and(eq(tenantsTable.id, tenantId), eq(tenantsTable.userId, ownerId), isNull(tenantsTable.deletedAt)));
+    if (!t) throw new NotFoundException("المستأجر غير موجود");
+  }
+
+  private async assertOwnContract(ownerId: number, contractId: number): Promise<void> {
+    if (!Number.isInteger(contractId) || contractId <= 0) throw new BadRequestException("contractId غير صالح");
+    const [c] = await this.db.select({ id: contractsTable.id }).from(contractsTable)
+      .where(and(eq(contractsTable.id, contractId), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
+    if (!c) throw new NotFoundException("العقد غير موجود");
   }
 
   private async notifyTenantOfStatusChange(row: typeof maintenanceRequestsTable.$inferSelect, previousStatus: string | null) {

@@ -123,7 +123,9 @@ class FacilitiesController {
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const fid = parseInt(id, 10);
     const updateData: Record<string, unknown> = {};
-    for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
+    for (const f of FIELDS) if (body?.[f] !== undefined) updateData[f] = body[f];
+    // Nothing to write was a Drizzle "No values to set" — a 500.
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد بيانات للتحديث · Nothing to update");
     const [row] = await this.db.update(facilitiesTable).set(updateData)
       .where(and(eq(facilitiesTable.id, fid), eq(facilitiesTable.userId, scopeId(user)), isNull(facilitiesTable.deletedAt))).returning();
     if (!row) throw new NotFoundException("المرفق غير موجود");
