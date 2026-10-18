@@ -4,12 +4,16 @@ import { JwtService } from "@nestjs/jwt";
 import { eq } from "drizzle-orm";
 import { tenantsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { sessionIsCurrent, staleSessionException } from "../session";
 
 export type TenantPayload = {
   id: number;
   phone: string;
   kind: "tenant";
   tv: number;
+  /** ms epoch of the login that minted the token — see common/session.ts. */
+  loginAt?: number;
+  iat?: number;
 };
 
 @Injectable()
@@ -33,15 +37,15 @@ export class TenantAuthGuard implements CanActivate {
     if (decoded.kind !== "tenant") throw new UnauthorizedException("Invalid token kind");
 
     const [tenant] = await this.db
-      .select({ id: tenantsTable.id, tokenVersion: tenantsTable.tokenVersion, status: tenantsTable.status, deletedAt: tenantsTable.deletedAt })
+      .select({ id: tenantsTable.id, tokenVersion: tenantsTable.tokenVersion, lastLoginAt: tenantsTable.lastLoginAt, status: tenantsTable.status, deletedAt: tenantsTable.deletedAt })
       .from(tenantsTable)
       .where(eq(tenantsTable.id, decoded.id));
     if (!tenant) throw new UnauthorizedException("Tenant not found");
     if (tenant.deletedAt) throw new UnauthorizedException("الحساب محذوف");
     if (tenant.status !== "active") throw new UnauthorizedException("Tenant inactive");
-    if ((decoded.tv ?? 0) !== (tenant.tokenVersion ?? 0)) {
-      throw new UnauthorizedException("Session revoked. Please log in again.");
-    }
+    // Single session per tenant, same rule as JwtAuthGuard: each tenant login
+    // bumps tokenVersion, so the previous device's token goes stale.
+    if (!sessionIsCurrent(decoded, tenant)) throw staleSessionException(decoded, tenant);
     req.tenant = decoded;
     return true;
   }

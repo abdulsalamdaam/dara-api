@@ -7,6 +7,7 @@ import { ownersTable, rolesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { routeAllowsOwnerToken } from "../permissions.decorator";
 import { STAFF_ROLE_KEYS } from "../permissions";
+import { sessionIsCurrent, staleSessionException } from "../session";
 
 /**
  * `role` is the role *key* string (e.g. "super_admin", "admin", "user",
@@ -25,6 +26,8 @@ export type AuthUser = {
   role: string;
   kind?: "user";
   tv?: number;
+  /** ms epoch of the login that minted the token — see common/session.ts. */
+  loginAt?: number;
   permissions?: string[] | null;
   ownerUserId?: number | null;
   companyId?: number | null;
@@ -50,7 +53,7 @@ export class JwtAuthGuard implements CanActivate {
     const header = req.headers.authorization;
     if (!header?.startsWith("Bearer ")) throw new UnauthorizedException("Unauthorized");
     const token = header.slice(7);
-    type DecodedToken = Omit<AuthUser, "kind"> & { kind?: string; ownerId?: number };
+    type DecodedToken = Omit<AuthUser, "kind"> & { kind?: string; ownerId?: number; iat?: number };
     let decoded: DecodedToken;
     try {
       decoded = this.jwt.verify<DecodedToken>(token);
@@ -96,6 +99,7 @@ export class JwtAuthGuard implements CanActivate {
       .select({
         id: usersTable.id,
         tokenVersion: usersTable.tokenVersion,
+        lastLoginAt: usersTable.lastLoginAt,
         isActive: usersTable.isActive,
         ownerUserId: usersTable.ownerUserId,
         companyId: usersTable.companyId,
@@ -109,9 +113,10 @@ export class JwtAuthGuard implements CanActivate {
       .where(and(eq(usersTable.id, decoded.id), isNull(usersTable.deletedAt)));
     if (!row) throw new UnauthorizedException("User not found");
     if (!row.isActive) throw new UnauthorizedException("Account disabled");
-    if ((decoded.tv ?? 0) !== (row.tokenVersion ?? 0)) {
-      throw new UnauthorizedException("Session revoked. Please log in again.");
-    }
+    // Single session per account: every login bumps tokenVersion, so a stale
+    // tv is either a later login elsewhere (SESSION_REPLACED) or a deliberate
+    // revoke — logout, force-logout, password reset (SESSION_REVOKED).
+    if (!sessionIsCurrent(decoded, row)) throw staleSessionException(decoded, row);
     // A platform-staff role key is only real on the SYSTEM role row held by a
     // top-level account. A company-scoped role may carry any key string, and
     // the team endpoints used to link an employee to any system role by key —

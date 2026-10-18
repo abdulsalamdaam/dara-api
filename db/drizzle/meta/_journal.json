@@ -498,6 +498,13 @@
       "when": 1792281600000,
       "tag": "0081_rbac_team_company_manage",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792368000000,
+      "tag": "0082_users_email_lower_unique",
+      "breakpoints": true
     }
   ]
 }

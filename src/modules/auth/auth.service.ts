@@ -2,7 +2,7 @@ import { Injectable, Inject, BadRequestException, NotFoundException, Unauthorize
 import { JwtService } from "@nestjs/jwt";
 import bcrypt from "bcryptjs";
 import { randomInt } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { companiesTable, emailOtpTokensTable, loginLogsTable, ownersTable, rolesTable, tenantsTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -14,6 +14,7 @@ import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
 import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType, planUserTypeError } from "../../common/packages";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
+import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 
 const MAX_FAILED = 5;
 
@@ -92,10 +93,41 @@ export class AuthService {
   }
 
   /* ── User token ── */
-  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number }): string {
+  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number; loginAt?: number }): string {
     return this.jwt.sign(
-      { id: payload.id, email: payload.email, role: payload.role, kind: "user", tv: payload.tokenVersion },
+      {
+        id: payload.id, email: payload.email, role: payload.role, kind: "user", tv: payload.tokenVersion,
+        ...(payload.loginAt != null ? { loginAt: payload.loginAt } : {}),
+      },
     );
+  }
+
+  /**
+   * Start THE session for a users row — single active session per account
+   * (see common/session.ts).
+   *
+   * One UPDATE bumps `token_version`, stamps `last_login_at` and returns the
+   * new version, which the caller signs into the token. Every token minted
+   * before this login carries an older `tv` and the guard now refuses it with
+   * SESSION_REPLACED, so a second device signing in signs the first one out
+   * — web and the landlord mobile app included, since both log in as the same
+   * row. Two simultaneous logins each get a distinct version; the later one
+   * wins. Only for an interactive login that has already passed its OTP check:
+   * there is no refresh token and no impersonation path, and registration
+   * does not sign anyone in.
+   */
+  private async beginUserSession(userId: number, now: Date, extra: { loginCount?: SQL } = {}): Promise<number> {
+    const [row] = await this.db.update(usersTable)
+      .set({
+        ...extra,
+        tokenVersion: sql`${usersTable.tokenVersion} + 1`,
+        lastLoginAt: now,
+        failedLoginAttempts: 0,
+      })
+      .where(eq(usersTable.id, userId))
+      .returning({ tokenVersion: usersTable.tokenVersion });
+    if (!row) throw new UnauthorizedException("الحساب غير موجود");
+    return row.tokenVersion;
   }
 
   /* ── Owner token ──
@@ -111,8 +143,11 @@ export class AuthService {
   }
 
   /* ── Tenant token ── */
-  signTenantToken(payload: { id: number; phone: string; tokenVersion: number }): string {
-    const claims: TenantPayload = { id: payload.id, phone: payload.phone, kind: "tenant", tv: payload.tokenVersion };
+  signTenantToken(payload: { id: number; phone: string; tokenVersion: number; loginAt?: number }): string {
+    const claims: TenantPayload = {
+      id: payload.id, phone: payload.phone, kind: "tenant", tv: payload.tokenVersion,
+      ...(payload.loginAt != null ? { loginAt: payload.loginAt } : {}),
+    };
     return this.jwt.sign(claims);
   }
 
@@ -138,7 +173,7 @@ export class AuthService {
 
     let user;
     try {
-      [user] = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email.toLowerCase()), isNull(usersTable.deletedAt)));
+      [user] = await this.db.select().from(usersTable).where(and(emailMatches(normalizeEmail(email)), isNull(usersTable.deletedAt)));
     } catch (err: any) {
       console.error("[auth.login] DB query failed:", err);
       throw err;
@@ -180,17 +215,12 @@ export class AuthService {
       throw new HttpException({ error: "Account locked.", code: "LOCKED" }, 423 as HttpStatus);
     }
 
-    await this.db.update(usersTable)
-      .set({
-        loginCount: sql`${usersTable.loginCount} + 1`,
-        lastLoginAt: new Date(),
-        failedLoginAttempts: 0,
-      })
-      .where(eq(usersTable.id, user.id));
+    const now = new Date();
+    const tokenVersion = await this.beginUserSession(user.id, now, { loginCount: sql`${usersTable.loginCount} + 1` });
 
     await this.recordLogin(user.id, user.email, "success", ctx.ip, ctx.ua);
 
-    const token = this.signUserToken({ id: user.id, email: user.email, role: user.role, tokenVersion: user.tokenVersion ?? 0 });
+    const token = this.signUserToken({ id: user.id, email: user.email, role: user.role, tokenVersion, loginAt: now.getTime() });
     return { token, user: { id: user.id, email: user.email, name: user.name, role: user.role, isActive: user.isActive, accountStatus: user.accountStatus, phone: user.phone, company: user.company, loginCount: (user.loginCount ?? 0) + 1, lastLoginAt: new Date(), createdAt: user.createdAt } };
     */
   }
@@ -203,7 +233,7 @@ export class AuthService {
    * Throttling is enforced at the controller layer (OtpThrottlerGuard).
    */
   async requestEmailOtp(input: { email: string }, ctx: { ip: string; ua?: string }): Promise<{ success: true; message: string; expiresInMinutes: number }> {
-    const email = (input.email || "").trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     if (!email) throw new BadRequestException("البريد الإلكتروني مطلوب");
 
     // Join the role row so we know whether the user is an admin without
@@ -220,7 +250,7 @@ export class AuthService {
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      .where(and(eq(usersTable.email, email), isNull(usersTable.deletedAt)));
+      .where(and(emailMatches(email), isNull(usersTable.deletedAt)));
 
     // Product decision: surface a clear "not registered" error instead of
     // silently no-oping. This trades a small enumeration risk (an attacker
@@ -299,7 +329,7 @@ export class AuthService {
   }
 
   async verifyEmailOtp(input: { email: string; code: string }, ctx: { ip: string; ua?: string }) {
-    const email = (input.email || "").trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     const code = (input.code || "").trim();
     if (!email || !code) throw new BadRequestException("البريد الإلكتروني والرمز مطلوبان");
 
@@ -372,7 +402,6 @@ export class AuthService {
         accountStatus: usersTable.accountStatus,
         phone: usersTable.phone,
         loginCount: usersTable.loginCount,
-        tokenVersion: usersTable.tokenVersion,
         createdAt: usersTable.createdAt,
         companyId: usersTable.companyId,
         roleId: usersTable.roleId,
@@ -382,23 +411,18 @@ export class AuthService {
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
-      .where(and(eq(usersTable.email, email), isNull(usersTable.deletedAt)));
+      .where(and(emailMatches(email), isNull(usersTable.deletedAt)));
     if (!user) {
       await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("الحساب غير موجود");
     }
 
-    await this.db.update(usersTable)
-      .set({
-        loginCount: sql`${usersTable.loginCount} + 1`,
-        lastLoginAt: now,
-        failedLoginAttempts: 0,
-      })
-      .where(eq(usersTable.id, user.id));
+    // Single session: this login revokes every earlier token for the account.
+    const tokenVersion = await this.beginUserSession(user.id, now, { loginCount: sql`${usersTable.loginCount} + 1` });
     await this.recordLogin(user.id, user.email, "success", ctx.ip, ctx.ua);
 
     const roleKey = user.roleKey ?? "user";
-    const tokenStr = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion: user.tokenVersion ?? 0 });
+    const tokenStr = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion, loginAt: now.getTime() });
     return {
       token: tokenStr,
       user: {
@@ -428,7 +452,8 @@ export class AuthService {
    * set a real password via a future "set password" flow.
    */
   async register(input: { email: string; password?: string; name: string; phone?: string; company?: string; companyName?: string; commercialReg?: string; userType?: "individual" | "company"; desiredPackagePlan?: string; desiredBillingCycle?: string }) {
-    const { email, password, name, phone } = input;
+    const { password, name, phone } = input;
+    const email = normalizeEmail(input.email);
     const userType = input.userType === "company" ? "company" : "individual";
     // The plan/cycle the user picked on the landing page — shown to the admin
     // before approval so they assign the package the user actually wants.
@@ -469,15 +494,11 @@ export class AuthService {
       });
     }
 
-    const existing = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email.toLowerCase()), isNull(usersTable.deletedAt)));
-    // Carries a machine code alongside the message so the client can attach the
-    // error to the email field itself instead of string-matching Arabic.
-    if (existing.length > 0) {
-      throw new BadRequestException({
-        error: "EMAIL_TAKEN",
-        message: "البريد الإلكتروني مسجّل مسبقاً",
-      });
-    }
+    // One email, one account (common/user-email.ts): case-insensitive, and a
+    // soft-deleted row still owns its address. 409 with `error: "EMAIL_TAKEN"`
+    // so the client can attach it to the email field instead of string-matching
+    // Arabic.
+    await assertEmailAvailable(this.db, email);
 
     // Role for the account holder. An individual gets the plain "user" role;
     // the person registering a company IS its General Manager, so they get
@@ -515,7 +536,7 @@ export class AuthService {
     // admin approves. Only the bcrypt hash is stored, with a short expiry.
     const otp = await newEmailVerifyOtp();
     const [user] = await this.db.insert(usersTable).values({
-      email: email.toLowerCase(),
+      email,
       passwordHash,
       name,
       isActive: false,
@@ -533,7 +554,12 @@ export class AuthService {
       emailVerified: false,
       emailVerifyTokenHash: otp.codeHash,
       emailVerifyExpiresAt: otp.expiresAt,
-    }).returning();
+    }).returning().catch((err: unknown) => {
+      // Lost a race with a simultaneous registration of the same address: the
+      // unique index caught what the check above could not.
+      if (isEmailUniqueViolation(err)) throw emailTakenException();
+      throw err;
+    });
 
     void this.email.sendVerifyOtp(user!.email, user!.name, otp.code, EMAIL_VERIFY_OTP_TTL_MIN, false);
 
@@ -567,11 +593,11 @@ export class AuthService {
 
   /** Verify an email-verification OTP code (email + 6-digit code). */
   async verifyEmailWithOtp(email: string, code: string) {
-    const e = (email || "").trim().toLowerCase();
+    const e = normalizeEmail(email);
     const c = (code || "").trim();
     if (!e || !c) throw new BadRequestException("البريد الإلكتروني والرمز مطلوبان");
     const [user] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.email, e), isNull(usersTable.deletedAt)));
+      .where(and(emailMatches(e), isNull(usersTable.deletedAt)));
     if (!user) throw new BadRequestException({ error: "الرمز غير صحيح أو منتهي الصلاحية", code: "INVALID_CODE" });
     if (user.emailVerified) {
       return { success: true, alreadyVerified: true, message: "تم تأكيد بريدك الإلكتروني مسبقاً" };
@@ -610,10 +636,10 @@ export class AuthService {
 
   /** Re-issue + resend a verification link to an email (public). */
   async resendVerification(email: string) {
-    const e = (email || "").trim().toLowerCase();
+    const e = normalizeEmail(email);
     if (!e) throw new BadRequestException("البريد الإلكتروني مطلوب");
     const [user] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.email, e), isNull(usersTable.deletedAt)));
+      .where(and(emailMatches(e), isNull(usersTable.deletedAt)));
     // Don't reveal whether the email exists.
     if (!user) return { success: true };
     if (user.emailVerified) return { success: true, alreadyVerified: true };
@@ -742,7 +768,7 @@ export class AuthService {
     const channel = input.channel || (isEmail ? "email" : "sms");
 
     const [user] = isEmail
-      ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, id.toLowerCase()), isNull(usersTable.deletedAt)))
+      ? await this.db.select().from(usersTable).where(and(emailMatches(normalizeEmail(id)), isNull(usersTable.deletedAt)))
       // Phone lookup goes through the variant set, not an equality test: the
       // stored form is now the bare 9 digits and the user types 05…/+966….
       : await this.db.select().from(usersTable)
@@ -773,7 +799,7 @@ export class AuthService {
     const channel = input.channel || (isEmail ? "email" : "sms");
 
     const [user] = isEmail
-      ? await this.db.select().from(usersTable).where(and(eq(usersTable.email, identifier.toLowerCase()), isNull(usersTable.deletedAt)))
+      ? await this.db.select().from(usersTable).where(and(emailMatches(normalizeEmail(identifier)), isNull(usersTable.deletedAt)))
       // Same variant lookup as forgotPassword, with the same deterministic
       // ordering — duplicate phone numbers exist, so request and verify must
       // agree on which identity they picked.
@@ -883,13 +909,18 @@ export class AuthService {
       throw new UnauthorizedException("رمز التحقق غير صحيح");
     }
 
-    await this.db.update(tenantsTable)
-      .set({ lastLoginAt: new Date() })
-      .where(eq(tenantsTable.id, tenant.id));
+    // Single session per tenant too: bump the version with the login stamp so
+    // the tenant's previous device is signed out (SESSION_REPLACED).
+    const now = new Date();
+    const [bumped] = await this.db.update(tenantsTable)
+      .set({ lastLoginAt: now, tokenVersion: sql`${tenantsTable.tokenVersion} + 1` })
+      .where(eq(tenantsTable.id, tenant.id))
+      .returning({ tokenVersion: tenantsTable.tokenVersion });
+    if (!bumped) throw new UnauthorizedException("بيانات غير صحيحة");
 
     await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua);
 
-    const token = this.signTenantToken({ id: tenant.id, phone: tenant.phone || phone, tokenVersion: tenant.tokenVersion ?? 0 });
+    const token = this.signTenantToken({ id: tenant.id, phone: tenant.phone || phone, tokenVersion: bumped.tokenVersion, loginAt: now.getTime() });
     return {
       token,
       tenant: {
@@ -983,7 +1014,7 @@ export class AuthService {
       .select({
         id: usersTable.id, email: usersTable.email, name: usersTable.name, phone: usersTable.phone,
         isActive: usersTable.isActive, accountStatus: usersTable.accountStatus,
-        tokenVersion: usersTable.tokenVersion, roleId: usersTable.roleId, ownerUserId: usersTable.ownerUserId,
+        roleId: usersTable.roleId, ownerUserId: usersTable.ownerUserId,
         roleKey: rolesTable.key,
       })
       .from(usersTable).leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
@@ -1016,10 +1047,13 @@ export class AuthService {
       await this.recordLogin(user.id, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("رمز التحقق غير صحيح");
     }
-    await this.db.update(usersTable).set({ lastLoginAt: new Date(), failedLoginAttempts: 0 }).where(eq(usersTable.id, user.id));
+    // Single session: this login revokes every earlier token for the account,
+    // including a web session of the same users row.
+    const now = new Date();
+    const tokenVersion = await this.beginUserSession(user.id, now);
     await this.recordLogin(user.id, user.email, "success", ctx.ip, ctx.ua);
     const roleKey = user.roleKey ?? "user";
-    const token = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion: user.tokenVersion ?? 0 });
+    const token = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion, loginAt: now.getTime() });
     return { token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: roleKey } };
   }
 
