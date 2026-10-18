@@ -18,6 +18,7 @@ import { InvoiceModule } from "../invoice/invoice.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
+import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
@@ -165,6 +166,10 @@ export async function activateFromPaidRow(
   if (invoices) {
     void invoices.issueAndEmail(db, row.id, { start: now, end: nextEndDate(cycle, now) });
   }
+  // Finance v2 is on by default for plans that include accounting: queue the
+  // automatic provisioning (webhook, pay self-heal and /sync all land here).
+  // Fire-and-forget; it never throws and never delays this response.
+  signalFv2Entitlement(row.userId, "subscription_paid");
   return true;
 }
 

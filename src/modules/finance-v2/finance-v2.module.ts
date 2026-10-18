@@ -62,6 +62,7 @@ import { commissionIssuerProvider } from "./commission-issuer";
 import { FinanceV2CommissionController } from "./controllers/commission.controller";
 import { FinanceV2InstallmentsController } from "./controllers/installments.controller";
 import { InstallmentDocsService } from "./installment-docs.service";
+import { FinanceV2AutoProvisionService } from "./auto-provision.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -96,6 +97,7 @@ import { InstallmentDocsService } from "./installment-docs.service";
     AssetsService, DepreciationJobService, // fixed assets (§8.5)
     CommissionRunService, commissionIssuerProvider,
     InstallmentDocsService, // accountant #3: rent receipt from the installments screen
+    FinanceV2AutoProvisionService, // on by default for plan-entitled accounts (auto-provision.service.ts)
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
