@@ -22,6 +22,28 @@ const emptyPaymentFigures = () => ({
   revenueByMonth: { year: Number(riyadhToday().slice(0, 4)), months: Array(12).fill(0) as number[] },
 });
 
+/** Does this caller hold the permission the dashboard's money figures need? */
+export function canSeePaymentFigures(user: Pick<AuthUser, "permissions">): boolean {
+  return (user.permissions ?? []).includes("payments.view");
+}
+
+/**
+ * The payment-derived keys, nulled. Kept in the response (rather than dropped)
+ * so a client reads "not available" instead of mistaking a missing key for an
+ * old API build; `paymentFiguresHidden` says why.
+ */
+export function hiddenPaymentFigures() {
+  return {
+    monthlyRevenue: null, collectedTotal: null, pendingDue: null, overduePaymentsCount: null, overdueAmount: null,
+    revenueByMonth: null, paymentFiguresHidden: true as const,
+  };
+}
+
+/** Active rent commitment is contract data: shown with `contracts.view`. */
+function hiddenRecurring(user: Pick<AuthUser, "permissions">) {
+  return (user.permissions ?? []).includes("contracts.view") ? {} : { monthlyRecurring: null };
+}
+
 @ApiTags("dashboard")
 @ApiBearerAuth("user-jwt")
 @Controller("dashboard")
@@ -50,6 +72,15 @@ class DashboardController {
     // scopeId so employees see their owner's data — same scope the rest
     // of the app uses; user.id alone would show empty stats for employees.
     const userId = scopeId(user);
+    // The route is open to every login (the dashboard is everyone's landing
+    // page), but the money on it is `payments.view` data: a maintenance or
+    // customer-service employee was reading the account's collected, pending
+    // and overdue totals and the monthly revenue chart here, while every
+    // payments endpoint refused them. Without the permission the payment
+    // figures are not computed at all and come back null.
+    if (!canSeePaymentFigures(user)) {
+      return { ...(await this.portfolio(userId)), ...hiddenPaymentFigures(), ...hiddenRecurring(user) };
+    }
     if (!isLegacyCall(user) && (await this.fv2h?.resolve(userId)) === true) {
       // finance-v2: E2/E4 values over the legacy result — the payment figures
       // below are all overridden, so they are left at zero rather than computed.

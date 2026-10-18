@@ -16,6 +16,19 @@ import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
 import { UploadsService } from "../uploads/uploads.service";
 
+/**
+ * May this caller see data of a given kind on the two un-gated home routes
+ * (summary, recent-activity)? An owner-mobile token is narrowed by data, not
+ * by role, so it always may; a portal login (account holder or employee) needs
+ * the permission the matching list route requires. Without this the landlord
+ * app's home screen showed a customer-service employee the account's
+ * collected/pending totals and payment amounts.
+ */
+export function homeMay(user: { ownerScopeId?: number | null; permissions?: string[] | null }, perm: string): boolean {
+  if (user.ownerScopeId != null) return true;
+  return (user.permissions ?? []).includes(perm);
+}
+
 class FcmTokenDto {
   @IsString()
   token!: string;
@@ -375,10 +388,16 @@ class LandlordMobileController {
         .where(and(eq(tenantsTable.userId, uid), isNull(tenantsTable.deletedAt)))).length;
     }
 
+    const mayMoney = homeMay(user, "payments.view");
     return {
       propertiesCount: propIds.length, unitsCount, totalUnits, rentedUnits, availableUnits, maintenanceUnits,
-      activeContractsCount, tenantsCount,
-      monthlyRecurring, collectedTotal, monthlyRevenue, pendingDue, overduePaymentsCount,
+      activeContractsCount,
+      tenantsCount: homeMay(user, "tenants.view") ? tenantsCount : null,
+      monthlyRecurring: homeMay(user, "contracts.view") || mayMoney ? monthlyRecurring : null,
+      collectedTotal: mayMoney ? collectedTotal : null,
+      monthlyRevenue: mayMoney ? monthlyRevenue : null,
+      pendingDue: mayMoney ? pendingDue : null,
+      overduePaymentsCount: mayMoney ? overduePaymentsCount : null,
       occupancyRate: this.occupancyRate(rentedUnits, totalUnits),
     };
   }
@@ -424,7 +443,9 @@ class LandlordMobileController {
       date: m.createdAt ? new Date(m.createdAt).toISOString() : null,
     });
 
-    return items.sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
+    const allowed = { contract: homeMay(user, "contracts.view"), payment: homeMay(user, "payments.view"), maintenance: homeMay(user, "maintenance.view") };
+    return items.filter((i) => allowed[i.type])
+      .sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
   }
 
   /** Properties with occupancy. */
