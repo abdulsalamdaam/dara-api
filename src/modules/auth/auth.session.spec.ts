@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import bcrypt from "bcryptjs";
-import { ConflictException, UnauthorizedException } from "@nestjs/common";
+import { ConflictException, ForbiddenException, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import { getTableName, is, SQL } from "drizzle-orm";
 import { AuthService } from "./auth.service";
@@ -110,6 +110,25 @@ describe("login bumps tokenVersion — single active session", () => {
     assert.ok(isIncrement(set.tokenVersion));
     assert.ok(isIncrement(set.loginCount));
     assert.equal(jwt.verify<any>(res.token).tv, 12);
+  });
+
+  it("email OTP: a disabled account is refused and its session is not bumped", async () => {
+    const codeHash = await bcrypt.hash("482913", 4);
+    const { db, ops } = fakeDb({
+      "select:email_otp_tokens": [[{ id: 1, codeHash, attempts: 0 }]],
+      "select:users": [[{ ...USER, isActive: false, emailVerified: true }]],
+    });
+    await assert.rejects(service(db).verifyEmailOtp({ email: "owner@example.com", code: "482913" }, ctx), UnauthorizedException);
+    assert.equal(ops.filter((o) => o.kind === "update" && o.table === "users").length, 0, "no token_version bump");
+  });
+
+  it("email OTP: an unverified employee and a pending account are refused", async () => {
+    for (const row of [{ ...USER, ownerUserId: 3, emailVerified: false }, { ...USER, accountStatus: "pending", emailVerified: true }]) {
+      const codeHash = await bcrypt.hash("482913", 4);
+      const { db, ops } = fakeDb({ "select:email_otp_tokens": [[{ id: 1, codeHash, attempts: 0 }]], "select:users": [[row]] });
+      await assert.rejects(service(db).verifyEmailOtp({ email: "owner@example.com", code: "482913" }, ctx), ForbiddenException);
+      assert.equal(ops.filter((o) => o.kind === "update" && o.table === "users").length, 0);
+    }
   });
 
   it("a failed code bumps nothing", async () => {

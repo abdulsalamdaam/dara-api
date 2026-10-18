@@ -427,6 +427,8 @@ export class AuthService {
         name: usersTable.name,
         isActive: usersTable.isActive,
         accountStatus: usersTable.accountStatus,
+        emailVerified: usersTable.emailVerified,
+        ownerUserId: usersTable.ownerUserId,
         phone: usersTable.phone,
         loginCount: usersTable.loginCount,
         createdAt: usersTable.createdAt,
@@ -442,6 +444,29 @@ export class AuthService {
     if (!user) {
       await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("الحساب غير موجود");
+    }
+
+    // The same account-state checks as requestEmailOtp. They lived only on the
+    // request step, so a code issued before an employee was deactivated (or
+    // the QA bypass on staging) still minted a session for a disabled,
+    // pending or rejected account — and bumped its token version doing so.
+    // The guard refused that token on the next request, but a login must not
+    // succeed at all for an account that cannot use it.
+    const isAdminRole = user.roleKey === "super_admin" || user.roleKey === "admin";
+    if (!isAdminRole) {
+      if (user.accountStatus === "pending") {
+        throw new ForbiddenException({ error: "حسابك قيد المراجعة، يرجى انتظار موافقة المشرف", code: "PENDING" });
+      }
+      if (user.accountStatus === "rejected") {
+        throw new ForbiddenException({ error: "تم رفض طلب تسجيلك. تواصل مع الدعم للمزيد من المعلومات", code: "REJECTED" });
+      }
+      if (user.ownerUserId != null && !user.emailVerified) {
+        throw new ForbiddenException({ error: "يرجى تأكيد بريدك الإلكتروني أولاً عبر الرابط المُرسَل إليك", code: "EMAIL_NOT_VERIFIED" });
+      }
+    }
+    if (!user.isActive) {
+      await this.recordLogin(user.id, user.email, "failed", ctx.ip, ctx.ua);
+      throw new UnauthorizedException("الحساب غير مفعّل. تواصل مع الدعم");
     }
 
     // Single session: this login revokes every earlier token for the account.
