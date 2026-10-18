@@ -2,7 +2,6 @@ import {
   Inject,
   Injectable,
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   NotFoundException,
 } from "@nestjs/common";
@@ -14,6 +13,7 @@ import { EmailService } from "../email/email.service";
 import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage, UNLIMITED } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
+import { assertEmailAvailable, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
 
 /**
@@ -207,7 +207,7 @@ export class TeamService {
     if (!actor) throw new NotFoundException("Actor not found");
     this.assertCanManageTeam(actor);
 
-    const email = input.email.trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     if (!email) throw new BadRequestException("Email is required");
 
     // Team-member cap driven by the owner account's subscription package.
@@ -230,8 +230,10 @@ export class TeamService {
       );
     }
 
-    const existing = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email), isNull(usersTable.deletedAt)));
-    if (existing.length) throw new ConflictException("A user with this email already exists");
+    // One email, one account (common/user-email.ts) — across every account,
+    // case-insensitive, and a soft-deleted user still owns its address (the
+    // old live-only check let that through to a raw unique-violation 500).
+    await assertEmailAvailable(this.db, email);
 
     const roleId = await this.resolveRoleId(input.preset);
     if (!roleId) throw new BadRequestException(`Unknown role preset: ${input.preset}`);
@@ -262,7 +264,11 @@ export class TeamService {
         emailVerifyTokenHash: verify.tokenHash,
         emailVerifyExpiresAt: verify.expiresAt,
       })
-      .returning();
+      .returning()
+      .catch((err: unknown) => {
+        if (isEmailUniqueViolation(err)) throw emailTakenException();
+        throw err;
+      });
     void this.email.sendVerifyEmail(created!.email, created!.name, verify.token, true);
     return strip(created!);
   }
