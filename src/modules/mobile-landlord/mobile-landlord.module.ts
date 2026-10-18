@@ -9,6 +9,8 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { AllowOwnerToken, PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator"; // rbac (outside finance-v2: additive)
+import { PERMISSIONS } from "../../common/permissions"; // rbac (outside finance-v2: additive)
 import { riyadhToday } from "../../common/payment-status";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
@@ -32,6 +34,11 @@ class FcmTokenDto {
 @ApiTags("landlord-mobile")
 @ApiBearerAuth("user-jwt")
 @Controller("landlord/me")
+// rbac (outside finance-v2: additive). Owner-mobile tokens are this API's
+// audience and are narrowed by ownerScopeId in every handler, so they pass;
+// a user/employee login needs the same view permission as the portal screen.
+@UseGuards(PermissionsGuard)
+@AllowOwnerToken()
 @UseGuards(JwtAuthGuard)
 class LandlordMobileController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle, private readonly uploads: UploadsService) {}
@@ -422,6 +429,7 @@ class LandlordMobileController {
 
   /** Properties with occupancy. */
   @Get("properties")
+  @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW) // rbac (outside finance-v2: additive)
   async properties(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -467,6 +475,7 @@ class LandlordMobileController {
 
   /** Units across the portfolio (with full specs + the current tenant). */
   @Get("units")
+  @RequirePermissions(PERMISSIONS.UNITS_VIEW) // rbac (outside finance-v2: additive)
   async units(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -512,6 +521,7 @@ class LandlordMobileController {
 
   /** Active + past contracts, each with its property + units + tenant. */
   @Get("contracts")
+  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW) // rbac (outside finance-v2: additive)
   async contracts(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -549,6 +559,7 @@ class LandlordMobileController {
   /** Tenants in the portfolio — with contract count and the
    *  linked property/unit from their active (or latest) contract. */
   @Get("tenants")
+  @RequirePermissions(PERMISSIONS.TENANTS_VIEW) // rbac (outside finance-v2: additive)
   async tenants(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -602,6 +613,7 @@ class LandlordMobileController {
   /** The landlords (owners) held by this account — with each one's property +
    *  unit counts and collected revenue. */
   @Get("owners")
+  @RequirePermissions(PERMISSIONS.OWNERS_VIEW) // rbac (outside finance-v2: additive)
   async owners(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const owners = await this.db.select({ id: ownersTable.id, name: ownersTable.name, phone: ownersTable.phone, email: ownersTable.email, type: ownersTable.type, status: ownersTable.status, taxNumber: ownersTable.taxNumber, iban: ownersTable.iban, isDefault: ownersTable.isDefault })
@@ -630,6 +642,7 @@ class LandlordMobileController {
 
   /** One landlord's FULL detail + their properties + contracts (read-only). */
   @Get("owners/:id")
+  @RequirePermissions(PERMISSIONS.OWNERS_VIEW) // rbac (outside finance-v2: additive)
   async owner(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const oid = id;
@@ -667,6 +680,7 @@ class LandlordMobileController {
 
   /** Payment schedule across the portfolio + a small summary. */
   @Get("payments")
+  @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW) // rbac (outside finance-v2: additive)
   async payments(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -747,6 +761,7 @@ class LandlordMobileController {
    *  remain come back in the X-Total-Count / X-Has-More headers, so a
    *  truncated list is visible instead of silently short. */
   @Get("invoices")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW) // rbac (outside finance-v2: additive)
   async invoices(
     @CurrentUser() user: AuthUser,
     @Res({ passthrough: true }) res: Response,
@@ -878,6 +893,7 @@ class LandlordMobileController {
    *  uploads it when the document is approved / the voucher is created; until
    *  then `url` is null and the app shows "not generated yet". */
   @Get("invoices/:id/pdf")
+  @RequirePermissions(PERMISSIONS.INVOICES_VIEW) // rbac (outside finance-v2: additive)
   async invoicePdf(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -892,6 +908,7 @@ class LandlordMobileController {
   /** Reports: headline stats, a 6-month collected-vs-expected series, and
    *  per-property performance (collected revenue + occupancy). */
   @Get("reports")
+  @RequirePermissions(PERMISSIONS.REPORTS_VIEW) // rbac (outside finance-v2: additive)
   async reports(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -1033,6 +1050,7 @@ class LandlordMobileController {
 
   /** Maintenance requests across the portfolio (view-only). */
   @Get("maintenance")
+  @RequirePermissions(PERMISSIONS.MAINTENANCE_VIEW) // rbac (outside finance-v2: additive)
   async maintenance(@CurrentUser() user: AuthUser) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -1054,6 +1072,7 @@ class LandlordMobileController {
   /** Collections (money actually received). Paged with `?limit=&offset=`
    *  (default 200); X-Total-Count / X-Has-More say whether the list was cut. */
   @Get("collections")
+  @RequirePermissions(PERMISSIONS.PAYMENTS_VIEW) // rbac (outside finance-v2: additive)
   async collections(
     @CurrentUser() user: AuthUser,
     @Res({ passthrough: true }) res: Response,
@@ -1088,6 +1107,7 @@ class LandlordMobileController {
 
   /** One property's FULL detail + its units + active contracts. */
   @Get("properties/:id")
+  @RequirePermissions(PERMISSIONS.PROPERTIES_VIEW) // rbac (outside finance-v2: additive)
   async property(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const pid = id;
@@ -1158,6 +1178,7 @@ class LandlordMobileController {
 
   /** One unit's FULL detail + its current active contract/tenant. */
   @Get("units/:id")
+  @RequirePermissions(PERMISSIONS.UNITS_VIEW) // rbac (outside finance-v2: additive)
   async unit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const unitId = id;
@@ -1236,6 +1257,7 @@ class LandlordMobileController {
 
   /** One tenant's full detail + their contracts (read-only). */
   @Get("tenants/:id")
+  @RequirePermissions(PERMISSIONS.TENANTS_VIEW) // rbac (outside finance-v2: additive)
   async tenant(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const scope = await this.ownerScope(user);
@@ -1286,6 +1308,7 @@ class LandlordMobileController {
 
   /** One contract's full detail (read-only). */
   @Get("contracts/:id")
+  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW) // rbac (outside finance-v2: additive)
   async contract(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
     const uid = scopeId(user);
     const cid = id;

@@ -7,6 +7,8 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
 import { packageUsage } from "../../common/quota";
 import { deriveSubscription } from "../../common/subscription";
@@ -16,7 +18,7 @@ import { trialView } from "../../common/trial";
 @ApiTags("package")
 @ApiBearerAuth("user-jwt")
 @Controller("me")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 class PackageController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
@@ -133,6 +135,8 @@ class PackageController {
    * stamps `onboardedAt` so the wizard doesn't show again.
    */
   @Post("onboarding")
+  // Writes the account holder's name/phone and the company identity once.
+  @RequirePermissions(PERMISSIONS.COMPANY_MANAGE)
   async completeOnboarding(@CurrentUser() user: AuthUser, @Body() body: any) {
     const ownerId = scopeId(user);
     const [owner] = await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));

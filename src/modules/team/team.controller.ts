@@ -4,6 +4,8 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { TeamService } from "./team.service";
+import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PERMISSIONS } from "../../common/permissions";
 import { IsArray, IsBoolean, IsEmail, IsOptional, IsString } from "class-validator";
 
 class CreateEmployeeDto {
@@ -28,7 +30,11 @@ class UpdateEmployeeDto {
 @ApiTags("team")
 @ApiBearerAuth("user-jwt")
 @Controller("team")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
+// Every team route — listing included — is team management. It used to be
+// "any top-level login", which also meant any owner-mobile token (those carry
+// the managing account's id) and never a General Manager employee.
+@RequirePermissions(PERMISSIONS.TEAM_MANAGE)
 export class TeamController {
   constructor(private readonly team: TeamService) {}
 
@@ -39,12 +45,12 @@ export class TeamController {
    */
   @Get("employees")
   list(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
-    return this.team.listEmployees(user.id, rawQuery);
+    return this.team.listEmployees(user, rawQuery);
   }
 
   @Post("employees")
   create(@CurrentUser() user: AuthUser, @Body() body: CreateEmployeeDto) {
-    return this.team.createEmployee(user.id, body);
+    return this.team.createEmployee(user, body);
   }
 
   @Patch("employees/:id")
@@ -53,7 +59,7 @@ export class TeamController {
     @Param("id", ParseIntPipe) id: number,
     @Body() body: UpdateEmployeeDto,
   ) {
-    return this.team.updateEmployee(user.id, id, body);
+    return this.team.updateEmployee(user, id, body);
   }
 
   @Patch("employees/:id/permissions")
@@ -62,12 +68,12 @@ export class TeamController {
     @Param("id", ParseIntPipe) id: number,
     @Body() body: { permissions: string[] },
   ) {
-    return this.team.updateEmployeePermissions(user.id, id, body?.permissions ?? []);
+    return this.team.updateEmployeePermissions(user, id, body?.permissions ?? []);
   }
 
   @Delete("employees/:id")
   remove(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
-    return this.team.deleteEmployee(user.id, id);
+    return this.team.deleteEmployee(user, id);
   }
 
   @Post("employees/:id/reset-password")
@@ -76,16 +82,16 @@ export class TeamController {
     @Param("id", ParseIntPipe) id: number,
     @Body() body: { password: string },
   ) {
-    return this.team.resetEmployeePassword(user.id, id, body.password);
+    return this.team.resetEmployeePassword(user, id, body?.password);
   }
 
   @Post("employees/:id/resend-verification")
   resendVerification(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
-    return this.team.resendEmployeeVerification(user.id, id);
+    return this.team.resendEmployeeVerification(user, id);
   }
 
   @Get("role-presets")
-  presets() {
-    return this.team.rolePresets();
+  presets(@CurrentUser() user: AuthUser) {
+    return this.team.rolePresets(user);
   }
 }

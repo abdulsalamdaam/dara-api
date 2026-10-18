@@ -1,9 +1,12 @@
-import { Injectable, CanActivate, ExecutionContext, Inject, UnauthorizedException } from "@nestjs/common";
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException, Inject, Optional, UnauthorizedException } from "@nestjs/common";
+import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
 import { JwtService } from "@nestjs/jwt";
 import { and, eq, isNull } from "drizzle-orm";
 import { ownersTable, rolesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { routeAllowsOwnerToken } from "../permissions.decorator";
+import { STAFF_ROLE_KEYS } from "../permissions";
 
 /**
  * `role` is the role *key* string (e.g. "super_admin", "admin", "user",
@@ -39,6 +42,7 @@ export class JwtAuthGuard implements CanActivate {
   constructor(
     private readonly jwt: JwtService,
     @Inject(DRIZZLE) private readonly db: Drizzle,
+    @Optional() private readonly reflector: Reflector = new Reflector(),
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -60,6 +64,10 @@ export class JwtAuthGuard implements CanActivate {
     if (decoded.kind === "owner") {
       const ownerId = decoded.ownerId;
       if (ownerId == null) throw new UnauthorizedException("Invalid token");
+      // An owner token resolves to the MANAGING account's id. Only routes that
+      // narrow by `ownerScopeId` themselves may see it; everywhere else it
+      // would act as the account holder (team, audit, company, uploads...).
+      if (!routeAllowsOwnerToken(this.reflector, ctx)) throw new ForbiddenException("Forbidden");
       const [owner] = await this.db
         .select({ id: ownersTable.id, userId: ownersTable.userId })
         .from(ownersTable)
@@ -93,6 +101,7 @@ export class JwtAuthGuard implements CanActivate {
         companyId: usersTable.companyId,
         roleId: usersTable.roleId,
         roleKey: rolesTable.key,
+        roleCompanyId: rolesTable.companyId,
         rolePermissions: rolesTable.permissions,
       })
       .from(usersTable)
@@ -102,6 +111,15 @@ export class JwtAuthGuard implements CanActivate {
     if (!row.isActive) throw new UnauthorizedException("Account disabled");
     if ((decoded.tv ?? 0) !== (row.tokenVersion ?? 0)) {
       throw new UnauthorizedException("Session revoked. Please log in again.");
+    }
+    // A platform-staff role key is only real on the SYSTEM role row held by a
+    // top-level account. A company-scoped role may carry any key string, and
+    // the team endpoints used to link an employee to any system role by key —
+    // `super_admin` included. Every staff check downstream (SuperAdminGuard,
+    // support's isAdmin, login) trusts the key alone, so it is pinned here.
+    if ((STAFF_ROLE_KEYS as readonly string[]).includes(row.roleKey ?? "")
+        && (row.roleCompanyId != null || row.ownerUserId != null)) {
+      throw new ForbiddenException("Invalid role assignment");
     }
     req.user = {
       ...decoded,

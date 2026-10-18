@@ -4,6 +4,7 @@ import { Throttle } from "@nestjs/throttler";
 import type { Request } from "express";
 import { AuthService } from "./auth.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { AllowOwnerToken } from "../../common/permissions.decorator";
 import { TenantAuthGuard } from "../../common/guards/tenant-auth.guard";
 import { OtpThrottlerGuard } from "../../common/throttler";
 import { clientIp, clientUserAgent } from "../../common/client-ip";
@@ -126,7 +127,12 @@ export class AuthController {
   @Post("logout")
   @HttpCode(200)
   @UseGuards(JwtAuthGuard)
+  @AllowOwnerToken()
   logout(@CurrentUser() user: AuthUser) {
+    // An owner-mobile token carries the MANAGING account's id: bumping that
+    // row's tokenVersion logged the whole office out whenever a landlord
+    // signed out of the app. Owner tokens are stateless; nothing to revoke.
+    if (user.ownerScopeId != null) return { success: true };
     return this.auth.logoutUser(user.id);
   }
 

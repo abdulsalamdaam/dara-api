@@ -57,7 +57,7 @@ export class EjarController {
    * EJAR_LOOKUP_CACHE_HOURS unless `refresh: true`.
    */
   @Post("lookup")
-  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
+  @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE) // rbac (outside finance-v2: spends the account's paid Ejar quota — the first step of an import)
   async lookup(@CurrentUser() user: AuthUser, @Body() body: any) {
     return this.lookups.lookup(user, body ?? {});
   }

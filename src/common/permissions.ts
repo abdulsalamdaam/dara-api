@@ -65,6 +65,13 @@ export const PERMISSIONS = {
 
   // Subscription/billing management (General Manager).
   SUBSCRIPTION_MANAGE: "subscription.manage",
+
+  // RBAC (outside finance-v2: additive keys, no ledger effect).
+  // Team: add / edit / deactivate / remove employees and assign their roles.
+  TEAM_MANAGE: "team.manage",
+  // The account's own company profile (name, CR, VAT number, logo) and the
+  // one-time onboarding that writes it — the seller identity on invoices.
+  COMPANY_MANAGE: "company.manage",
 } as const;
 
 export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -97,6 +104,7 @@ const FULL_TENANT_ADMIN: Permission[] = [
   PERMISSIONS.ZATCA_ONBOARD, PERMISSIONS.ZATCA_PROMOTE_PRODUCTION,
   PERMISSIONS.EXPENSES_VIEW, PERMISSIONS.EXPENSES_WRITE, PERMISSIONS.EXPENSES_APPROVE,
   PERMISSIONS.SUBSCRIPTION_MANAGE,
+  PERMISSIONS.TEAM_MANAGE, PERMISSIONS.COMPANY_MANAGE, // rbac (outside finance-v2: additive)
 ];
 
 /**

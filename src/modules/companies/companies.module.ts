@@ -8,6 +8,8 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PERMISSIONS } from "../../common/permissions";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 
 class CompanyDto {
@@ -46,7 +48,7 @@ const COMPANY_FIELDS = [
 @ApiTags("companies")
 @ApiBearerAuth("user-jwt")
 @Controller("companies")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 class CompaniesController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
@@ -71,6 +73,7 @@ class CompaniesController {
    * Idempotent for the "already linked" case — returns the existing company.
    */
   @Post("me")
+  @RequirePermissions(PERMISSIONS.COMPANY_MANAGE)
   async createMyCompany(@CurrentUser() user: AuthUser, @Body() body: CompanyDto) {
     const ownerId = scopeId(user);
     const [owner] = await this.db.select().from(usersTable).where(and(eq(usersTable.id, ownerId), isNull(usersTable.deletedAt)));
@@ -96,6 +99,7 @@ class CompaniesController {
 
   /** Update fields of the company that the current user is linked to. */
   @Patch("me")
+  @RequirePermissions(PERMISSIONS.COMPANY_MANAGE)
   async updateMyCompany(@CurrentUser() user: AuthUser, @Body() body: Partial<CompanyDto>) {
     const ownerId = scopeId(user);
     const [owner] = await this.db.select({ companyId: usersTable.companyId }).from(usersTable).where(eq(usersTable.id, ownerId));

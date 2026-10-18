@@ -7,6 +7,20 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
+import { PermissionsGuard, RequireAnyPermission } from "../../common/permissions.decorator";
+import { PERMISSIONS } from "../../common/permissions";
+
+/**
+ * A company's own dropdown option is added inline from the unit form, the
+ * property/deed forms or the contract wizard, so it takes any one of the
+ * write permissions behind those screens (or the company-settings one).
+ * Reading the options stays open to every portal login: they are reference
+ * data every form needs.
+ */
+const LOOKUP_WRITERS = [
+  PERMISSIONS.COMPANY_MANAGE, PERMISSIONS.UNITS_WRITE, PERMISSIONS.PROPERTIES_WRITE,
+  PERMISSIONS.DEEDS_WRITE, PERMISSIONS.CONTRACTS_WRITE,
+] as const;
 
 /**
  * Central lookup endpoint. Returns the system options plus any options the
@@ -17,7 +31,7 @@ import { listQuerySchema, wantsPagination } from "../../common/pagination";
 @ApiTags("lookups")
 @ApiBearerAuth("user-jwt")
 @Controller("lookups")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 class LookupsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 
@@ -97,6 +111,7 @@ class LookupsController {
 
   /** Add a company-specific option (e.g. a custom unit type). */
   @Post()
+  @RequireAnyPermission(...LOOKUP_WRITERS)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const category = String(body?.category || "").trim();
     const labelAr = String(body?.labelAr || "").trim();
@@ -112,6 +127,7 @@ class LookupsController {
   }
 
   @Patch(":id")
+  @RequireAnyPermission(...LOOKUP_WRITERS)
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const lid = parseInt(id, 10);
     const [existing] = await this.db.select().from(lookupsTable).where(eq(lookupsTable.id, lid));
@@ -129,6 +145,7 @@ class LookupsController {
   }
 
   @Delete(":id")
+  @RequireAnyPermission(...LOOKUP_WRITERS)
   async remove(@CurrentUser() user: AuthUser, @Param("id") id: string) {
     const lid = parseInt(id, 10);
     const [existing] = await this.db.select().from(lookupsTable).where(eq(lookupsTable.id, lid));

@@ -733,6 +733,17 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`role refresh skipped: ${err?.message || err}`);
     }
 
+    // RBAC (0081): `team.manage` / `company.manage` for a company-scoped role
+    // that an account holder is linked to — the system roles above already got
+    // them from ROLE_PRESETS. Idempotent; runs after the refresh on purpose.
+    try {
+      const rbacTeam = findSqlFile(join("drizzle", "0081_rbac_team_company_manage.sql"));
+      if (rbacTeam) await client.query(readFileSync(rbacTeam, "utf8"));
+      else log.warn("0081_rbac_team_company_manage.sql not found — account-holder company roles not granted team/company.manage");
+    } catch (err: any) {
+      log.warn(`ensure 0081 rbac grants failed: ${err?.message || err}`);
+    }
+
     // Phase 2: seed data (only if users-table is empty and data.sql exists)
     const userCount = await client.query<{ count: string }>(
       `select count(*)::text as count from public.users`,

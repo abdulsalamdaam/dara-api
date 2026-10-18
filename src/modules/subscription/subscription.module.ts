@@ -7,6 +7,8 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
+import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan, isBillingCycle, parseCycle, purchasableCycle, CYCLE_LABEL_AR, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription, nextEndDate } from "../../common/subscription";
 import { trialView } from "../../common/trial";
@@ -168,7 +170,7 @@ export async function activateFromPaidRow(
 @ApiTags("subscription")
 @ApiBearerAuth("user-jwt")
 @Controller("me/subscription")
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 export class SubscriptionController {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
@@ -228,6 +230,7 @@ export class SubscriptionController {
    * somebody else's invoice.
    */
   @Get("payments/:id/invoice.pdf")
+  @RequirePermissions(PERMISSIONS.SUBSCRIPTION_MANAGE)
   async paymentInvoicePdf(@CurrentUser() user: AuthUser, @Param("id") id: string, @Res() res: Response) {
     const ownerId = scopeId(user);
     const rowId = Number(id);
@@ -259,6 +262,7 @@ export class SubscriptionController {
    * webhook would. Nothing is marked paid on the invoice's word alone.
    */
   @Post("sync")
+  @RequirePermissions(PERMISSIONS.SUBSCRIPTION_MANAGE)
   async sync(@CurrentUser() user: AuthUser) {
     const ownerId = scopeId(user);
     if (!isMoyasarConfigured()) return { activated: 0 };
@@ -297,6 +301,7 @@ export class SubscriptionController {
    * its payment URL. Only the account owner (not an employee) may pay.
    */
   @Post("pay")
+  @RequirePermissions(PERMISSIONS.SUBSCRIPTION_MANAGE)
   async pay(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
     const ownerId = user.id;

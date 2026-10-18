@@ -15,6 +15,11 @@ import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage, UNLIMITED } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
+import type { AuthUser } from "../../common/guards/jwt-auth.guard";
+import { EMPLOYEE_PRESET_KEYS, exceeding, knownPermissions, teamCeiling } from "../../common/rbac";
+
+/** Who is acting, whose team it is, and the most they may grant. */
+type TeamCtx = { actor: AuthUser; scope: number; holder: User; ceiling: Set<string>; isHolder: boolean };
 
 /**
  * What a team endpoint may hand back about a user row. Beyond the password
@@ -61,11 +66,53 @@ export class TeamService {
     private readonly email: EmailService,
   ) {}
 
-  /** Block employees from inviting other employees. Only landlords/admins can. */
-  private assertCanManageTeam(actor: User) {
-    if (actor.ownerUserId) {
-      throw new ForbiddenException("Employees cannot manage team members");
+  /**
+   * Resolve the acting manager and the team they manage.
+   *
+   * Access is by permission (`team.manage`, checked by the controller's
+   * PermissionsGuard), and the TEAM is the account's: `scopeId`, not the
+   * caller's own id. An employee holding `team.manage` (a General Manager)
+   * therefore manages the account's team, never a team of their own — and
+   * whatever they grant is clamped to what they hold (`teamCeiling`).
+   *
+   * Owner-mobile tokens never reach here (JwtAuthGuard refuses them), and are
+   * refused again explicitly: one resolves to the managing account's id, and
+   * used to be able to run every endpoint below as the account holder.
+   */
+  private async ctx(actor: AuthUser): Promise<TeamCtx> {
+    if (!actor || actor.ownerScopeId != null || actor.role === "owner") {
+      throw new ForbiddenException("Forbidden");
     }
+    const scope = actor.ownerUserId ?? actor.id;
+    const [holder] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, scope), isNull(usersTable.deletedAt)));
+    if (!holder) throw new NotFoundException("Actor not found");
+    return { actor, scope, holder, ceiling: teamCeiling(actor), isHolder: actor.ownerUserId == null };
+  }
+
+  /**
+   * The employee being acted on: a live member of THIS account's team, not the
+   * caller themselves, and — when the caller is an employee — no stronger
+   * than the caller. The account holder is never a target: their
+   * `ownerUserId` is NULL, so it can never equal the scope.
+   */
+  private async target(c: TeamCtx, employeeId: number): Promise<User> {
+    const [emp] = await this.db.select().from(usersTable)
+      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
+    if (!emp || emp.ownerUserId == null || emp.ownerUserId !== c.scope) throw new NotFoundException("Employee not found");
+    if (emp.id === c.actor.id) throw new ForbiddenException("You cannot change your own team membership or role");
+    if (!c.isHolder) {
+      const perms = await this.rolePermissions(emp.roleId);
+      const over = exceeding(perms, c.ceiling);
+      if (over.length) throw new ForbiddenException(`This member holds permissions you do not: ${over.join(", ")}`);
+    }
+    return emp;
+  }
+
+  private async rolePermissions(roleId: number | null | undefined): Promise<string[]> {
+    if (roleId == null) return [];
+    const [r] = await this.db.select({ permissions: rolesTable.permissions }).from(rolesTable).where(eq(rolesTable.id, roleId));
+    return (r?.permissions as string[] | undefined) ?? [];
   }
 
   /**
@@ -73,17 +120,25 @@ export class TeamService {
    * "user" — the account-owner role, 40 permissions including deletes and
    * subscription management — so an omitted or misspelled `preset` field was
    * silently whitelisted away and handed the new employee owner-level rights.
-   * Callers that legitimately have no preset now get null and refuse.
+   *
+   * And it must be an EMPLOYEE preset. The lookup used to accept any system
+   * role key, so `preset: "super_admin"` linked a customer's new employee to
+   * the platform super-admin role — SuperAdminGuard trusts the key — and the
+   * customer chose that employee's password. The preset's permissions must
+   * also fit inside the caller's ceiling.
    */
-  private async resolveRoleId(presetKey: string | undefined | null, fallbackKey?: string): Promise<number | null> {
-    const key = presetKey?.trim() || fallbackKey;
-    if (!key) return null;
+  private async resolvePresetRoleId(c: TeamCtx, presetKey: string | undefined | null): Promise<number> {
+    const key = presetKey?.trim();
+    if (!key || !EMPLOYEE_PRESET_KEYS.includes(key)) throw new BadRequestException(`Unknown role preset: ${presetKey}`);
     const [r] = await this.db
-      .select({ id: rolesTable.id })
+      .select({ id: rolesTable.id, permissions: rolesTable.permissions })
       .from(rolesTable)
-      .where(and(eq(rolesTable.key, key), isNull(rolesTable.companyId)))
+      .where(and(eq(rolesTable.key, key), isNull(rolesTable.companyId), isNull(rolesTable.deletedAt)))
       .limit(1);
-    return r?.id ?? null;
+    if (!r) throw new BadRequestException(`Unknown role preset: ${presetKey}`);
+    const over = exceeding((r.permissions as string[]) ?? [], c.ceiling);
+    if (over.length) throw new ForbiddenException(`You cannot grant permissions you do not hold: ${over.join(", ")}`);
+    return r.id;
   }
 
   /**
@@ -98,10 +153,8 @@ export class TeamService {
    * Pagination is opt-in via `page`/`pageSize`/`paginated`; without them the
    * bare array the settings screen already reads is returned unchanged.
    */
-  async listEmployees(actorId: number, rawQuery?: any) {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
+  async listEmployees(user: AuthUser, rawQuery?: any) {
+    const { scope } = await this.ctx(user);
 
     const paged = wantsPagination(rawQuery);
     const q = listQuerySchema.parse(rawQuery ?? {});
@@ -113,7 +166,7 @@ export class TeamService {
       // so the UI can render them without the remove/downgrade actions - the
       // service refuses those anyway, since an owner has no ownerUserId to
       // match.
-      or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+      or(eq(usersTable.ownerUserId, scope), eq(usersTable.id, scope)),
       isNull(usersTable.deletedAt),
     ];
     if (q.search) {
@@ -177,7 +230,7 @@ export class TeamService {
       // narrowed to one state.
       paged ? this.db.select({ isActive: usersTable.isActive, cnt: count() }).from(usersTable)
         .where(and(
-          or(eq(usersTable.ownerUserId, actorId), eq(usersTable.id, actorId)),
+          or(eq(usersTable.ownerUserId, scope), eq(usersTable.id, scope)),
           isNull(usersTable.deletedAt),
         ))
         .groupBy(usersTable.isActive) : Promise.resolve([]),
@@ -200,12 +253,10 @@ export class TeamService {
   }
 
   async createEmployee(
-    actorId: number,
+    user: AuthUser,
     input: { name: string; email: string; phone?: string; password?: string; preset?: string },
   ): Promise<Public> {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
+    const c = await this.ctx(user);
 
     const email = input.email.trim().toLowerCase();
     if (!email) throw new BadRequestException("Email is required");
@@ -216,11 +267,8 @@ export class TeamService {
     // resolvePackage(actor.packagePlan) fell back to the default plan and
     // enforced the wrong seat limit — too few or too many depending on what the
     // account actually pays for. The seat count was already owner-scoped.
-    const ownerId = actor.ownerUserId ?? actor.id;
-    const [ownerRow] = ownerId === actor.id
-      ? [actor]
-      : await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
-    const pkg = resolvePackage((ownerRow ?? actor).packagePlan);
+    const ownerId = c.scope;
+    const pkg = resolvePackage(c.holder.packagePlan);
     const used = await employeeCount(this.db, ownerId);
     if (used >= pkg.maxUsers) {
       const limit = pkg.maxUsers >= UNLIMITED ? "∞" : String(pkg.maxUsers);
@@ -233,8 +281,7 @@ export class TeamService {
     const existing = await this.db.select().from(usersTable).where(and(eq(usersTable.email, email), isNull(usersTable.deletedAt)));
     if (existing.length) throw new ConflictException("A user with this email already exists");
 
-    const roleId = await this.resolveRoleId(input.preset);
-    if (!roleId) throw new BadRequestException(`Unknown role preset: ${input.preset}`);
+    const roleId = await this.resolvePresetRoleId(c, input.preset);
 
     // Password is optional — the app logs in via email-OTP. When none is
     // given, store an unguessable random hash.
@@ -254,9 +301,11 @@ export class TeamService {
         isActive: true,
         accountStatus: "active",
         phone: input.phone?.trim() || null,
-        ownerUserId: actorId,
+        // The ACCOUNT's employee, whoever created them: an employee under an
+        // employee would sit outside every scope check.
+        ownerUserId: c.scope,
         // Inherit the owning user's company so employees see the same data scope.
-        companyId: actor.companyId ?? null,
+        companyId: c.holder.companyId ?? null,
         roleId,
         emailVerified: false,
         emailVerifyTokenHash: verify.tokenHash,
@@ -268,13 +317,9 @@ export class TeamService {
   }
 
   /** Re-send the email-verification link to an employee. */
-  async resendEmployeeVerification(actorId: number, employeeId: number): Promise<{ success: boolean; alreadyVerified?: boolean }> {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
-    const [emp] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
-    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
+  async resendEmployeeVerification(user: AuthUser, employeeId: number): Promise<{ success: boolean; alreadyVerified?: boolean }> {
+    const c = await this.ctx(user);
+    const emp = await this.target(c, employeeId);
     if (emp.emailVerified) return { success: true, alreadyVerified: true };
     const verify = newEmailVerifyToken();
     await this.db.update(usersTable)
@@ -285,29 +330,28 @@ export class TeamService {
   }
 
   async updateEmployee(
-    actorId: number,
+    user: AuthUser,
     employeeId: number,
     patch: { name?: string; phone?: string; preset?: string; isActive?: boolean },
   ): Promise<Public> {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
-
+    const c = await this.ctx(user);
     // Soft-deleted rows are gone as far as the API is concerned — matching
     // deleteEmployee, which already 404s on them instead of touching them.
-    const [emp] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
-    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
+    const emp = await this.target(c, employeeId);
 
     const updates: Partial<typeof usersTable.$inferInsert> = {};
     if (patch.name !== undefined) updates.name = patch.name;
     if (patch.phone !== undefined) updates.phone = patch.phone || null;
-    if (patch.isActive !== undefined) updates.isActive = patch.isActive;
-    if (patch.preset !== undefined) {
-      const roleId = await this.resolveRoleId(patch.preset);
-      if (!roleId) throw new BadRequestException(`Unknown role preset: ${patch.preset}`);
-      updates.roleId = roleId;
+    if (patch.isActive !== undefined) {
+      updates.isActive = patch.isActive;
+      // Deactivation ends live sessions now, not at the next request's
+      // isActive check alone — so a re-activation cannot revive an old token.
+      if (patch.isActive === false && emp.isActive) updates.tokenVersion = (emp.tokenVersion ?? 0) + 1;
     }
+    if (patch.preset !== undefined) {
+      updates.roleId = await this.resolvePresetRoleId(c, patch.preset);
+    }
+    if (Object.keys(updates).length === 0) throw new BadRequestException("Nothing to update");
 
     const [updated] = await this.db
       .update(usersTable)
@@ -324,18 +368,18 @@ export class TeamService {
    * grant or remove individual permissions without touching the shared
    * preset roles.
    */
-  async updateEmployeePermissions(actorId: number, employeeId: number, permissions: string[]): Promise<Public> {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
+  async updateEmployeePermissions(user: AuthUser, employeeId: number, permissions: string[]): Promise<Public> {
+    const c = await this.ctx(user);
+    await this.target(c, employeeId);
 
-    const [emp] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
-    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
-
-    const clean = Array.from(new Set((permissions || []).filter((p) => typeof p === "string" && p.trim())));
+    // Catalog keys only, and only what the caller may grant. This stored the
+    // request's strings verbatim — `admin.users`, `admin.roles`, anything —
+    // and the guard reads permissions straight off this row.
+    const clean: string[] = knownPermissions(Array.isArray(permissions) ? permissions : []);
+    const over = exceeding(clean, c.ceiling);
+    if (over.length) throw new ForbiddenException(`You cannot grant permissions you do not hold: ${over.join(", ")}`);
     const key = `emp_custom_${employeeId}`;
-    const companyId = actor.companyId ?? null;
+    const companyId = c.holder.companyId ?? null;
 
     const [existingRole] = await this.db
       .select()
@@ -362,17 +406,12 @@ export class TeamService {
     return strip(updated!);
   }
 
-  async resetEmployeePassword(actorId: number, employeeId: number, newPassword: string): Promise<{ ok: true }> {
+  async resetEmployeePassword(user: AuthUser, employeeId: number, newPassword: string): Promise<{ ok: true }> {
     if (!newPassword || newPassword.length < 6) {
       throw new BadRequestException("Password must be at least 6 characters");
     }
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
-
-    const [emp] = await this.db.select().from(usersTable)
-      .where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
-    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
+    const c = await this.ctx(user);
+    const emp = await this.target(c, employeeId);
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
     // Bumping tokenVersion invalidates any active session — the employee will
@@ -384,13 +423,9 @@ export class TeamService {
     return { ok: true };
   }
 
-  async deleteEmployee(actorId: number, employeeId: number): Promise<{ ok: true }> {
-    const [actor] = await this.db.select().from(usersTable).where(eq(usersTable.id, actorId));
-    if (!actor) throw new NotFoundException("Actor not found");
-    this.assertCanManageTeam(actor);
-
-    const [emp] = await this.db.select().from(usersTable).where(and(eq(usersTable.id, employeeId), isNull(usersTable.deletedAt)));
-    if (!emp || emp.ownerUserId !== actorId) throw new NotFoundException("Employee not found");
+  async deleteEmployee(user: AuthUser, employeeId: number): Promise<{ ok: true }> {
+    const c = await this.ctx(user);
+    const emp = await this.target(c, employeeId);
 
     // Soft delete and bump tokenVersion to invalidate any active session.
     await this.db.update(usersTable)
@@ -400,8 +435,9 @@ export class TeamService {
   }
 
   /** Returns the seeded employee-preset roles for the team UI dropdown. */
-  async rolePresets() {
-    const employeePresetKeys = ["general", "propertyManager", "leasingOfficer", "collectionOfficer", "accountant", "maintenanceManager", "customerService"];
+  async rolePresets(user?: AuthUser) {
+    const employeePresetKeys = EMPLOYEE_PRESET_KEYS;
+    const ceiling = user ? teamCeiling(user) : null;
     const rows = await this.db
       .select({
         id: rolesTable.key,
@@ -412,6 +448,10 @@ export class TeamService {
       .from(rolesTable)
       .where(and(isNull(rolesTable.companyId)))
       .orderBy(asc(rolesTable.id));
-    return rows.filter((r) => employeePresetKeys.includes(r.id));
+    // `assignable`: whether THIS caller may hand the preset out (an employee
+    // manager cannot grant more than they hold). Additive field.
+    return rows
+      .filter((r) => employeePresetKeys.includes(r.id))
+      .map((r) => ({ ...r, assignable: ceiling ? exceeding((r.permissions as string[]) ?? [], ceiling).length === 0 : true }));
   }
 }
