@@ -21,6 +21,8 @@ import { OpsParamError, capRows, resolveParams, riyadhToday, type OpsParams, typ
 import { catalog, defOf } from "./ops-catalog";
 import { loadDataset } from "./ops-data";
 import { BUILDERS, NEEDS } from "./ops-builders";
+import { UseInterceptors } from "@nestjs/common"; // finance-v2: (additive-diff marker) package feature gate, common/plan-features.ts
+import { OpsPlanGateInterceptor } from "./ops-plan-gate"; // finance-v2: (additive-diff marker) catalog `locked`/`requiredPlan`, 403 PLAN_UPGRADE_REQUIRED + teaser
 
 /** The params echoed back: only the filters the report declares, after defaults. */
 function echo(id: OpsReportId, p: ResolvedParams): OpsParams {
@@ -58,6 +60,7 @@ export async function runOpsReport(db: Drizzle, uid: number, id: string, raw: Re
 @ApiBearerAuth("user-jwt")
 @Controller("reports/ops")
 @UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseInterceptors(OpsPlanGateInterceptor) // finance-v2: (additive-diff marker) advanced_reports gate by the account owner's plan
 export class OpsReportsController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 

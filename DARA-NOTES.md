@@ -961,13 +961,42 @@ would strand everything filed in between.
 
 - Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,
   `enterprise`. Two modes: `tenant` (self-tracker) and `landlord` (full portal).
-- **A package is a quota, not a different product.** The tenant plan used to get
-  a whitelist of tabs (`TENANT_TABS`) and a two-step getting-started list; both
-  are gone — every plan opens the same portal, and only the limits differ
-  (since Oct 2026 units and properties are unlimited on every plan; tiers
-  differ by seats — tenant 1, basic 2, pro 6, enterprise unlimited). `mode`
-  still shapes *content* (the dashboard widget, who the contract wizard treats
-  as the account holder), not access.
+- **Quotas plus three feature gates** (`src/common/plan-features.ts`, Oct 2026).
+  Every plan opens the same portal (no tab whitelist; `mode` shapes content,
+  not access) and units/properties are unlimited; tiers differ by seats
+  (tenant 1, basic 2, pro 6, enterprise unlimited) and by three features,
+  exactly as the pricing table promises:
+
+  | plan | `accounting` | `advanced_reports` | `custom_reports` |
+  |---|---|---|---|
+  | tenant, basic (عقاري) | ✗ | ✗ | ✗ |
+  | advanced (legacy), professional, enterprise | ✓ | ✓ | ✓ |
+  | null / unknown (→ DEFAULT_PACKAGE) | ✓ | ✓ | ✓ |
+
+  Always the ACCOUNT OWNER's plan (`users.package_plan` of `scopeId(user)`),
+  like the seat quota. `requiredPlan` is always `professional`. Clients get
+  `planFeatures` on `GET /auth/me` and `features` on `GET /me/subscription`.
+  - `advanced_reports` = six ops reports (`LOCKED_OPS_REPORTS`:
+    defaulting_tenants, tenant_payment_behavior, landlord_portfolio,
+    property_performance, occupancy_trend, contract_movement). Enforced by
+    `OpsPlanGateInterceptor` (`reports/ops/ops-plan-gate.ts`): the catalog gains
+    `locked` / `requiredPlan`; running a locked one is **403**
+    `{code: "PLAN_UPGRADE_REQUIRED", feature, requiredPlan, message, teaser: {kpis: ≤2 of its own KPIs} | null}`
+    — never rows. The other eight ops reports, the legacy accounting page and
+    all exports stay open.
+  - `accounting` = Finance v2 entirely. **Effective = stored flag && plan.**
+    `FinanceFlagService` folds the plan into `on` (it also reports `flagOn` and
+    `planLocked`), so the guard (404), the legacy forks (via
+    `FinanceV2Hooks.resolve`) and reminders agree; jobs that list accounts in SQL
+    (worker, recognizer, repair sweep, control checks, commission run,
+    auto-invoice, depreciation) add `fv2PlanEntitledSql(col)`. The stored
+    `finance_v2_enabled` is never written by a plan change: downgrade → off,
+    upgrade → back on (≤15 s cache), and "ledger behind" + the nightly catch-up
+    close the gap. `/finance/v2/status` adds `planLocked` / `requiredPlan`;
+    the admin finance-v2 list shows `planLocked` / `effective` next to the
+    stored `enabled`.
+  - `custom_reports` = the web's custom report builder (client-side over list
+    data, so the API only advertises it).
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
   yearly list (tenant 1,000 · basic 4,200 · pro 5,400): six months costs the
   yearly +10% annualised, three months +20% (basic: 4,200 / 2,310 / 1,260 per

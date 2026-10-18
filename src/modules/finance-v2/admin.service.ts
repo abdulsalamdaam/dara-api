@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { FinanceFlagService, type AccountingMode } from "./flag.service";
+import { FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-features";
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
@@ -100,13 +101,21 @@ export class FinanceV2AdminService {
     });
 
     this.flag.invalidate(accountUserId);
-    return { ...result, account: { id: target.id, userType: target.userType }, backfill: { suggested: body.enabled && !result.settings.ledgerStartedAt } };
+    // Read-only: the stored flag is what was just set; the plan may still keep it effectively off.
+    const st = await this.flag.state(accountUserId);
+    const plan = { planLocked: st.planLocked === true, requiredPlan: st.planLocked ? FEATURE_REQUIRED_PLAN : null, effective: st.on };
+    return { ...result, account: { id: target.id, userType: target.userType }, plan, backfill: { suggested: body.enabled && !result.settings.ledgerStartedAt } };
   }
 
-  /** Flag state per customer account, with the suggested mode for the enable dialog. */
+  /**
+   * Flag state per customer account, with the suggested mode for the enable dialog.
+   * `enabled` is the STORED flag; `planLocked` (read-only info) says the plan
+   * keeps it effectively off (common/plan-features.ts), `effective` is what
+   * the account actually gets.
+   */
   async listAccounts() {
     const r = await this.pool.query(
-      `select u.id, u.name, u.email, u.user_type as "userType",
+      `select u.id, u.name, u.email, u.user_type as "userType", u.package_plan as "packagePlan",
               coalesce(fs.finance_v2_enabled, false) as enabled, fs.accounting_mode as mode,
               fs.enabled_at as "enabledAt", fs.ledger_started_at as "ledgerStartedAt"
          from users u
@@ -116,7 +125,10 @@ export class FinanceV2AdminService {
           and coalesce(r.key, '') not in ('super_admin', 'admin')
         order by u.id`,
     );
-    return r.rows;
+    return r.rows.map((row: any) => {
+      const planLocked = !planHasFeature(row.packagePlan, "accounting");
+      return { ...row, planLocked, requiredPlan: planLocked ? FEATURE_REQUIRED_PLAN : null, effective: row.enabled === true && !planLocked };
+    });
   }
 
   async events(accountUserId: number) {

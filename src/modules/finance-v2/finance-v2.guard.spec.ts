@@ -22,6 +22,10 @@ function flagWith(state: any) {
 
 describe("FinanceV2Guard (DESIGN §1.2, §10.2)", () => {
   const on = { on: true, mode: "manager", ledgerStartedAt: null };
+  it("404 when the plan locks it (effective off), however the stored flag reads", async () => {
+    const g = new FinanceV2Guard(flagWith({ on: false, mode: "manager", ledgerStartedAt: null, flagOn: true, planLocked: true }), new Reflector());
+    await assert.rejects(g.canActivate(ctxFor(holder).ctx), NotFoundException);
+  });
   it("404 when the flag is off", async () => {
     const g = new FinanceV2Guard(flagWith({ on: false, mode: null, ledgerStartedAt: null }), new Reflector());
     await assert.rejects(g.canActivate(ctxFor(holder).ctx), NotFoundException);
@@ -47,9 +51,13 @@ describe("FinanceV2Guard (DESIGN §1.2, §10.2)", () => {
 });
 
 describe("GET /finance/v2/status", () => {
-  it("off → exactly { enabled: false }", async () => {
-    const c = new FinanceV2StatusController(flagWith({ on: false, mode: null, ledgerStartedAt: null }));
-    assert.deepEqual(await c.status({ user: holder } as any), { enabled: false });
+  it("off → exactly { enabled: false, planLocked: false, requiredPlan: null }", async () => {
+    const c = new FinanceV2StatusController(flagWith({ on: false, mode: null, ledgerStartedAt: null, flagOn: false, planLocked: false }));
+    assert.deepEqual(await c.status({ user: holder } as any), { enabled: false, planLocked: false, requiredPlan: null });
+  });
+  it("plan-locked (stored flag on, plan without accounting) → off, with the plan lock and the plan to upgrade to", async () => {
+    const c = new FinanceV2StatusController(flagWith({ on: false, mode: "manager", ledgerStartedAt: null, flagOn: true, planLocked: true }));
+    assert.deepEqual(await c.status({ user: holder } as any), { enabled: false, planLocked: true, requiredPlan: "professional" });
   });
   it("on → mode, capabilities and the beta label", async () => {
     const c = new FinanceV2StatusController(flagWith({ on: true, mode: "manager", ledgerStartedAt: null }));
@@ -62,5 +70,7 @@ describe("GET /finance/v2/status", () => {
     assert.equal(s.betaLabel, "المالية v2 (تجريبي) · Finance v2 (Beta)");
     assert.deepEqual(s.betaLabels, { ar: "المالية v2 (تجريبي)", en: "Finance v2 (Beta)" });
     assert.equal(s.ledgerStarted, false);
+    assert.equal(s.planLocked, false);
+    assert.equal(s.requiredPlan, null);
   });
 });

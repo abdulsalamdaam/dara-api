@@ -6,6 +6,7 @@ import { sqlOf, type Sql } from "./hooks/sql";
 import { contractCtx, ejarPartialRows, ejarPartialSettled, installmentFacts, INSTALLMENT_COLS, loadSettings, type ContractCtx, type FinanceSettingsRow, type InstallmentRow } from "./hooks/facts-loader";
 import { DEPOSIT_DESC, installmentNature, installmentVat } from "./hooks/classify";
 import { SYS, type ReleaseFacts } from "./rules";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 const CHECK_MS = 60_000;
 /** Minutes after Riyadh midnight when the daily run is due (§5.6: 00:10). */
@@ -62,7 +63,7 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
     this.running = true;
     try {
       const r = await this.pool.query(
-        `select account_user_id from finance_settings where finance_v2_enabled and ledger_started_at is not null order by account_user_id`,
+        `select account_user_id from finance_settings where finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")} and ledger_started_at is not null order by account_user_id`,
       );
       for (const x of r.rows) {
         try {

@@ -38,6 +38,7 @@ import { lastDayOfMonth, parseIsoDate, riyadhToday } from "./dates";
 import { reversalEvent } from "./hooks/facts-loader";
 import type { LedgerEvent } from "./ledger-emitter.service";
 import { accountBasis, anyCollectedProperty, collectedBasisSql, hasPropertyBasisTable } from "./commission-basis";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
@@ -100,7 +101,7 @@ export interface CommissionSettings {
 
 export async function commissionSettings(q: Sql, scope: number): Promise<CommissionSettings | null> {
   const [r] = await q.rows(
-    `select fs.finance_v2_enabled as enabled, fs.ledger_started_at is not null as started, fs.accounting_mode as mode, fs.commission_basis as basis,
+    `select fs.finance_v2_enabled and ${fv2PlanEntitledSql("fs.account_user_id")} as enabled, fs.ledger_started_at is not null as started, fs.accounting_mode as mode, fs.commission_basis as basis,
             to_char(coalesce(cs.collected_from, date_trunc('month', (coalesce(fs.enabled_at, now()) at time zone 'Asia/Riyadh'))::date),'YYYY-MM-DD') as from_date,
             coalesce(cs.auto_run, true) as auto_run, to_char(cs.last_auto_month,'YYYY-MM') as last_auto
        from finance_settings fs left join finance_commission_settings cs on cs.account_user_id = fs.account_user_id

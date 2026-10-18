@@ -15,6 +15,7 @@ import { createRentReceipt, sellerOf } from "../overrides/documents-v2";
 import { fromHalalas, toHalalas } from "../money";
 import { AUTO_INVOICE_ERROR_TEXT } from "./errors";
 import { dueNotInvoicedSql } from "../due-uninvoiced";
+import { fv2PlanEntitledSql } from "../flag.service";
 
 export { AUTO_INVOICE_ERROR_TEXT };
 
@@ -167,7 +168,7 @@ export class AutoInvoiceService implements OnModuleInit, OnModuleDestroy {
     try {
       const r = await this.pool.query(
         `select a.user_id from finance_auto_invoice_settings a
-           join finance_settings s on s.account_user_id = a.user_id and s.finance_v2_enabled
+           join finance_settings s on s.account_user_id = a.user_id and s.finance_v2_enabled and ${fv2PlanEntitledSql("s.account_user_id")}
           where a.enabled order by a.user_id`,
       );
       for (const x of r.rows) {
@@ -305,7 +306,7 @@ export class AutoInvoiceService implements OnModuleInit, OnModuleDestroy {
   async runAccount(scope: number, today = riyadhToday()): Promise<IssueResult[]> {
     const s = await this.getSettings(scope);
     if (!s.enabled) return [];
-    const flag = await this.pool.query(`select 1 from finance_settings where account_user_id = $1 and finance_v2_enabled`, [scope]);
+    const flag = await this.pool.query(`select 1 from finance_settings where account_user_id = $1 and finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")}`, [scope]);
     if (!flag.rowCount) return [];
     const horizon = addDays(today, s.leadDays);
     const rows = await this.candidates(scope, horizon,

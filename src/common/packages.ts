@@ -112,7 +112,7 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
 export const DEFAULT_PACKAGE: PackagePlan = "professional";
 
 /** Pre-tier plan keys map onto the closest new tier (kept for old rows). */
-const LEGACY_ALIASES: Record<string, PackagePlan> = {
+export const LEGACY_ALIASES: Readonly<Record<string, PackagePlan>> = {
   individual_owner: "basic",
   broker: "professional",
 };

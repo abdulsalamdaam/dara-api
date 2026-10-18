@@ -2,16 +2,38 @@ import { Inject, Injectable, Logger } from "@nestjs/common";
 import { FV2_POOL, type Fv2Pool } from "./db";
 import { appLog } from "../../common/logging/app-log.service";
 import { currentRequestContext, type RequestContext } from "../../common/request-context";
+import { planHasFeature, planKeysWithout } from "../../common/plan-features";
 
 export type AccountingMode = "owner" | "manager";
 
 export interface FlagState {
+  /** EFFECTIVE: the stored flag AND the account plan includes `accounting`. What every consumer acts on. */
   on: boolean;
   mode: AccountingMode | null;
   ledgerStartedAt: Date | null;
+  /** The stored `finance_settings.finance_v2_enabled`, untouched by plan changes (admin views only). */
+  flagOn: boolean;
+  /** The account owner's plan does not include `accounting` (common/plan-features.ts). */
+  planLocked: boolean;
 }
 
-const OFF: FlagState = Object.freeze({ on: false, mode: null, ledgerStartedAt: null }) as FlagState;
+const OFF: FlagState = Object.freeze({ on: false, mode: null, ledgerStartedAt: null, flagOn: false, planLocked: false }) as FlagState;
+
+/** Locked plan keys as a SQL literal list — fixed constants from packages.ts, never user input. */
+const LOCKED_PLAN_SQL = planKeysWithout("accounting").map((k) => `'${k.replace(/'/g, "''")}'`).join(", ");
+
+/**
+ * SQL predicate: the account in column `accountCol` is ENTITLED to Finance v2
+ * by its plan (`users.package_plan` of the account holder). For the
+ * background jobs that pick accounts straight from `finance_settings`: add
+ * `and ${fv2PlanEntitledSql("s.account_user_id")}` next to
+ * `finance_v2_enabled`, so they skip exactly the accounts `FinanceFlagService`
+ * reads as off. A null/unknown plan stays entitled (DEFAULT_PACKAGE).
+ */
+export function fv2PlanEntitledSql(accountCol: string): string {
+  if (!LOCKED_PLAN_SQL) return "true";
+  return `coalesce((select pu.package_plan from users pu where pu.id = ${accountCol}), '') not in (${LOCKED_PLAN_SQL})`;
+}
 const TTL_MS = 15_000;
 const LOG_EVERY_MS = 60_000;
 
@@ -23,7 +45,13 @@ export class FlagUnavailableError extends Error {
 }
 
 /**
- * Reads the per-account `finance_v2` flag (DESIGN §1.2).
+ * Reads the per-account `finance_v2` flag (DESIGN §1.2) — the single choke
+ * point every consumer asks (the `/finance/v2/*` guard, `/status`, the legacy
+ * forks via FinanceV2Hooks.resolve, reminders). `on` is EFFECTIVE:
+ * `finance_v2_enabled && planHasFeature(ownerPlan, "accounting")`. The stored
+ * flag is never written by a plan change; a downgrade reads off, an upgrade
+ * reads the stored value again (the nightly catch-up fills the gap).
+ * Background jobs that list accounts in SQL use `fv2PlanEntitledSql`.
  *
  *  - Reads through the POOL, never a caller's transaction: a failing read
  *    (say the table is missing) inside a transaction would abort it, and a
@@ -108,21 +136,31 @@ export class FinanceFlagService {
     }
   }
 
-  /** One primary-key lookup. A missing table means Finance v2 is not installed: off. */
+  /**
+   * Primary-key lookups: the settings row and the account holder's plan. A
+   * missing settings row or table means off (the plan is still read, so
+   * `/status` can say whether the plan is what keeps it off).
+   */
   protected async read(scopeUserId: number): Promise<FlagState> {
+    let row: any;
     try {
       const r = await this.pool.query(
-        `select finance_v2_enabled as on, accounting_mode as mode, ledger_started_at as started
-           from finance_settings where account_user_id = $1`,
+        `select fs.finance_v2_enabled as on, fs.accounting_mode as mode, fs.ledger_started_at as started, u.package_plan as plan
+           from (select $1::int as id) k
+           left join finance_settings fs on fs.account_user_id = k.id
+           left join users u on u.id = k.id`,
         [scopeUserId],
       );
-      const row = r.rows[0];
-      if (!row) return OFF;
-      return { on: row.on === true, mode: row.mode ?? null, ledgerStartedAt: row.started ?? null };
+      row = r.rows[0] ?? {};
     } catch (err: any) {
-      if (err?.code === "42P01") return OFF; // undefined_table
-      throw err;
+      if (err?.code !== "42P01") throw err; // undefined_table: Finance v2 not installed
+      // Off either way; the plan only feeds `planLocked`, so its read failing is not an error.
+      const plan = await this.pool.query(`select package_plan as plan from users where id = $1`, [scopeUserId]).then((r) => r.rows[0]?.plan ?? null, () => null);
+      row = { plan };
     }
+    const flagOn = row.on === true;
+    const planLocked = !planHasFeature(row.plan ?? null, "accounting");
+    return { on: flagOn && !planLocked, mode: row.mode ?? null, ledgerStartedAt: row.started ?? null, flagOn, planLocked };
   }
 
   private logError(scopeUserId: number, err: unknown): void {

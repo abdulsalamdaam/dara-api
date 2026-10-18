@@ -11,6 +11,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan, isBillingCycle, parseCycle, purchasableCycle, CYCLE_LABEL_AR, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
 import { deriveSubscription, nextEndDate } from "../../common/subscription";
+import { planFeatures } from "../../common/plan-features";
 import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured, type MoyasarInvoice, type MoyasarPayment } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
@@ -194,6 +195,8 @@ export class SubscriptionController {
     const open = payments.find((p) => p.status === "pending" && !!p.paymentUrl);
     return {
       plan: resolvePackage(owner?.packagePlan).key,
+      // What the plan unlocks (common/plan-features.ts) — the same list /auth/me carries as `planFeatures`.
+      features: planFeatures(owner?.packagePlan),
       billingCycle: cycle,
       // What the next payment costs — a monthly account renews quarterly.
       amountDue: planPrice(owner?.packagePlan, purchasableCycle(cycle)),

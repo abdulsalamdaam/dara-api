@@ -14,6 +14,7 @@ import { riyadhNow } from "../reports/core-math";
 import { langOf } from "../reports/common";
 import { ASSET_COLS, ASSET_SOURCE, assetCols, assetEvents, lastDueMonth, scheduleInput, type AssetRow } from "./asset-events";
 import { addMonths, depreciableBase, disposalFigures, lastChargeMonth, monthOf, schedule } from "./asset-math";
+import { fv2PlanEntitledSql } from "../flag.service";
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 
@@ -479,7 +480,7 @@ export class AssetsService {
   async jobAccounts(): Promise<number[]> {
     const r = await this.pool.query(
       `select s.account_user_id as id from finance_settings s
-        where s.finance_v2_enabled and s.ledger_started_at is not null
+        where s.finance_v2_enabled and ${fv2PlanEntitledSql("s.account_user_id")} and s.ledger_started_at is not null
           and exists (select 1 from fixed_assets a where a.user_id = s.account_user_id and a.status <> 'void')
         order by 1`);
     return r.rows.map((x: any) => Number(x.id));

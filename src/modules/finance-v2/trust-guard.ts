@@ -9,6 +9,7 @@ import { auditRow } from "./audit";
 import { clientMoneyPosition, ownerPosition } from "./client-money";
 import { CLIENT_OR_BOX_KEYS } from "./manual-journal-warnings";
 import { h } from "./reports/common";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 /**
  * The trust overdraw guard (حساب الأمانات, accountant 15 Oct 2026): a payment OUT of a trust
@@ -221,7 +222,7 @@ async function ownOutflow(
 
 async function ledgerStarted(c: Pick<Fv2Client, "query">, scope: number): Promise<boolean> {
   const [s] = (await c.query(
-    `select finance_v2_enabled and ledger_started_at is not null as started from finance_settings where account_user_id = $1`, [scope])).rows;
+    `select finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")} and ledger_started_at is not null as started from finance_settings where account_user_id = $1`, [scope])).rows;
   return s?.started === true;
 }
 

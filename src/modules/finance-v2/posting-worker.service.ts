@@ -4,6 +4,7 @@ import { createAuxPool } from "@dara/database";
 import { FV2_POOL, type Fv2Pool } from "./db";
 import { PostingEngine } from "./posting.engine";
 import { LedgerEmitter } from "./ledger-emitter.service";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 const TICK_MS = 5_000;
 
@@ -82,7 +83,7 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
       `select distinct o.user_id from ledger_outbox o
          join finance_settings s on s.account_user_id = o.user_id
         where o.status = 'pending' and o.next_attempt_at <= now()
-          and s.finance_v2_enabled and s.ledger_started_at is not null`,
+          and s.finance_v2_enabled and ${fv2PlanEntitledSql("s.account_user_id")} and s.ledger_started_at is not null`,
     );
     return r.rows.map((x: any) => Number(x.user_id));
   }

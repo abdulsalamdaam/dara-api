@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { FinanceFlagService, FlagUnavailableError } from "./flag.service";
+import { FinanceFlagService, FlagUnavailableError, fv2PlanEntitledSql } from "./flag.service";
 import { runWithRequestContext } from "../../common/request-context";
 
 function fakePool(impl: (params: unknown[]) => any) {
@@ -29,7 +29,7 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
 
   it("reads the row", async () => {
     const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "manager", started: null })).pool);
-    assert.deepEqual(await f.state(1), { on: true, mode: "manager", ledgerStartedAt: null });
+    assert.deepEqual(await f.state(1), { on: true, mode: "manager", ledgerStartedAt: null, flagOn: true, planLocked: false });
   });
 
   it("a missing finance_settings table reads off, even strictly (0066 failed at boot)", async () => {
@@ -87,6 +87,54 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
     });
     await runWithRequestContext(ctx(), async () => {
       assert.equal(await f.isOn(3), true);
+    });
+  });
+
+  describe("plan gate (common/plan-features.ts): effective = stored flag && plan has accounting", () => {
+    for (const plan of ["basic", "tenant", "individual_owner"]) {
+      it(`${plan}: stored flag on reads off, the stored value is still reported`, async () => {
+        const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "manager", started: new Date(0), plan })).pool);
+        const s = await f.state(1);
+        assert.equal(s.on, false);
+        assert.equal(await f.isOn(1), false);
+        assert.equal(await f.resolve(1), false);
+        assert.equal(s.flagOn, true);
+        assert.equal(s.planLocked, true);
+        assert.equal((await f.stateStrict(1)).on, false);
+      });
+    }
+    for (const plan of ["professional", "enterprise", "advanced", "broker", null, "something-new"]) {
+      it(`${plan}: stored flag on reads on`, async () => {
+        const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "manager", started: null, plan })).pool);
+        const s = await f.state(1);
+        assert.equal(s.on, true);
+        assert.equal(s.planLocked, false);
+      });
+    }
+    it("no settings row on a locked plan: off, and planLocked says why the upgrade matters", async () => {
+      const f = new FinanceFlagService(fakePool(() => ({ on: null, mode: null, started: null, plan: "basic" })).pool);
+      assert.deepEqual(await f.state(1), { on: false, mode: null, ledgerStartedAt: null, flagOn: false, planLocked: true });
+    });
+    it("a downgrade then an upgrade restores the stored flag (it is never written), within the cache TTL", async () => {
+      let plan = "professional";
+      const fp = fakePool(() => ({ on: true, mode: "manager", started: null, plan }));
+      const f = new FinanceFlagService(fp.pool);
+      let t = 0;
+      f.now = () => t;
+      assert.equal(await f.isOn(2), true);
+      plan = "basic";
+      t = 16_000;
+      assert.equal(await f.isOn(2), false);
+      plan = "professional";
+      t = 32_000;
+      assert.equal(await f.isOn(2), true);
+    });
+    it("fv2PlanEntitledSql excludes exactly the plan keys without accounting; a null plan stays entitled", () => {
+      const sql = fv2PlanEntitledSql("s.account_user_id");
+      assert.match(sql, /pu\.id = s\.account_user_id/);
+      assert.match(sql, /not in \('basic', 'individual_owner', 'tenant'\)$/);
+      assert.match(sql, /coalesce\(/);
+      for (const k of ["professional", "enterprise", "advanced", "broker"]) assert.ok(!sql.includes(`'${k}'`), k);
     });
   });
 });

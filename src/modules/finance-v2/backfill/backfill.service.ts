@@ -14,6 +14,7 @@ import { auditRow, settingsEvent } from "../audit";
 import { loadSettings, type FinanceSettingsRow } from "../hooks/facts-loader";
 import { SYS, type AccountingMode } from "../rules";
 import { compareEvents, extractEvents, keyOf, rankOf, type ExtractOptions, type Note, type PlannedEvent } from "./extract";
+import { fv2PlanEntitledSql } from "../flag.service";
 
 export type BackfillMode = "full" | "cutover" | "catchup";
 
@@ -149,7 +150,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
     if (this.sweeping || this.lastSweepDay === day || h * 60 + m < REPAIR_AT_MIN) return;
     this.sweeping = true;
     try {
-      const r = await this.pool.query(`select account_user_id from finance_settings where finance_v2_enabled and ledger_started_at is not null order by 1`);
+      const r = await this.pool.query(`select account_user_id from finance_settings where finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")} and ledger_started_at is not null order by 1`);
       for (const x of r.rows) {
         try {
           const s = await this.run({ userId: Number(x.account_user_id), actorUserId: 0, mode: "catchup", dryRun: false, allowLate: true, origin: "repair" });

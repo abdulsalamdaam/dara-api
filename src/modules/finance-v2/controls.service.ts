@@ -8,6 +8,7 @@ import { ReconciliationService } from "./reports/reconciliation.service";
 import { riyadhNow } from "./reports/core-math";
 import { langOf, type Lang } from "./reports/common";
 import { BackfillService } from "./backfill/backfill.service";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 /**
  * The accountant's control checks (his sheet "فحوصات الرقابة", 21 checks) and
@@ -228,7 +229,7 @@ export class ControlChecksService implements OnModuleInit, OnModuleDestroy {
     this.running = true;
     let n = 0;
     try {
-      const r = await this.pool.query(`select account_user_id from finance_settings where finance_v2_enabled and ledger_started_at is not null order by 1`);
+      const r = await this.pool.query(`select account_user_id from finance_settings where finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")} and ledger_started_at is not null order by 1`);
       for (const x of r.rows) {
         try {
           const res = await this.run(Number(x.account_user_id), day, "nightly");

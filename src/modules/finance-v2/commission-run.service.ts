@@ -18,6 +18,7 @@ import {
   collectedLines, commissionSettings, landlordInfo, lineBase, monthLabel, monthSpan, planLandlord, previewMonth, previousMonth, rateResolver,
   transferEvents, unsentCommission, type MonthPreview,
 } from "./commission-run";
+import { fv2PlanEntitledSql } from "./flag.service";
 
 export { transferEvents } from "./commission-run";
 
@@ -436,7 +437,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
       ? `or exists (select 1 from finance_property_commission pc where pc.user_id = fs.account_user_id and pc.basis = 'collected')` : "";
     const r = await this.pool.query(
       `select fs.account_user_id from finance_settings fs left join finance_commission_settings cs on cs.account_user_id = fs.account_user_id
-        where fs.finance_v2_enabled and fs.ledger_started_at is not null and fs.accounting_mode = 'manager'
+        where fs.finance_v2_enabled and ${fv2PlanEntitledSql("fs.account_user_id")} and fs.ledger_started_at is not null and fs.accounting_mode = 'manager'
           and (fs.commission_basis = 'collected' ${anyProperty})
           and coalesce(cs.auto_run, true) and (cs.last_auto_month is null or cs.last_auto_month < $1::date)
         order by fs.account_user_id`,

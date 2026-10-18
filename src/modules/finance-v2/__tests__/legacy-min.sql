@@ -8,7 +8,8 @@ create table if not exists roles (id serial primary key, key text not null, perm
 create table if not exists users (
   id serial primary key, email text not null, name text not null default '',
   owner_user_id integer, role_id integer, user_type text not null default 'individual',
-  is_active boolean not null default true, deleted_at timestamptz
+  is_active boolean not null default true, deleted_at timestamptz,
+  package_plan text not null default 'broker'
 );
 create table if not exists owners (
   id serial primary key, user_id integer not null, name text not null,

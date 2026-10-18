@@ -9,6 +9,7 @@ import { riyadhToday } from "../dates";
 import { auditRow, isoDate, mapLedgerError } from "../audit";
 import { LOCK_KEYS } from "../lock-keys";
 import { assertTrustCovers } from "../trust-guard";
+import { fv2PlanEntitledSql } from "../flag.service";
 
 export interface AccountTransferOut {
   manualJournalId: number;
@@ -125,7 +126,7 @@ export class AccountTransferService {
       return await withTx(this.pool, async (c) => {
         await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.ACCOUNT_TRANSFER]);
         const [st] = (await c.query(
-          `select finance_v2_enabled as enabled, ledger_started_at is not null as started from finance_settings where account_user_id = $1`, [scope])).rows;
+          `select finance_v2_enabled and ${fv2PlanEntitledSql("finance_settings.account_user_id")} as enabled, ledger_started_at is not null as started from finance_settings where account_user_id = $1`, [scope])).rows;
         if (!st?.enabled || !st.started) {
           throw new ConflictException({ error: "LEDGER_NOT_STARTED", message: "لم يبدأ دفتر الأستاذ بعد · The ledger has not started yet" });
         }

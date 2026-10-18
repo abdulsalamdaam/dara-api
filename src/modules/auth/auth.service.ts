@@ -13,6 +13,7 @@ import { qaBypassEnabled, EMAIL_OTP_BYPASS_CODE } from "../../common/qa-bypass";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
 import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType, planUserTypeError } from "../../common/packages";
+import { planFeatures } from "../../common/plan-features";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 
@@ -726,6 +727,8 @@ export class AuthService {
       companyId: row.companyId,
       roleId: row.roleId,
       packagePlan,
+      // Features the account owner's plan unlocks (common/plan-features.ts).
+      planFeatures: planFeatures(packagePlan),
       loginCount: row.loginCount,
       lastLoginAt: row.lastLoginAt,
       createdAt: row.createdAt,
