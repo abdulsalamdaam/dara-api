@@ -350,7 +350,9 @@ class AdminController {
     for (const r of monthRows as Array<{ month: string | null; amount: string | null }>) {
       if (r.month) byMonth.set(r.month, Number(r.amount ?? 0));
     }
-    const monthlyData = months.map((m) => ({ month: m.label, revenue: byMonth.get(m.key) ?? 0 }));
+    // `month` stays the Arabic label for existing readers; `monthKey`
+    // (YYYY-MM) lets a client label the axis in its own language.
+    const monthlyData = months.map((m) => ({ month: m.label, monthKey: m.key, revenue: byMonth.get(m.key) ?? 0 }));
 
     return {
       totalCompanies: companies.total,
@@ -395,7 +397,9 @@ class AdminController {
     const paged = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
 
-    const conds: any[] = [isCustomerAccountSql];
+    // Live accounts only. A soft-deleted account was listed here (29 against
+    // the overview's 23) and its row opened a 404 in the customer drawer.
+    const conds: any[] = [isCustomerAccountSql, isNull(usersTable.deletedAt)];
     if (q.search) {
       const like = likeContains(q.search);
       conds.push(or(
@@ -555,9 +559,13 @@ class AdminController {
     const uid = parseInt(id, 10);
     if (uid === admin.id) throw new BadRequestException("لا يمكن تعديل حسابك الخاص");
     const updateData: Record<string, unknown> = {};
-    if (body.isActive !== undefined) updateData.isActive = body.isActive;
-    const [user] = await this.db.update(usersTable).set(updateData).where(eq(usersTable.id, uid)).returning();
+    if (typeof body?.isActive === "boolean") updateData.isActive = body.isActive;
+    if (Object.keys(updateData).length === 0) throw new BadRequestException("nothing to update");
+    const [user] = await this.db.update(usersTable).set(updateData)
+      .where(and(eq(usersTable.id, uid), isNull(usersTable.deletedAt))).returning();
     if (!user) throw new NotFoundException("Not found");
+    // Suspension reaches the account's employees through JwtAuthGuard, which
+    // checks the account holder's row on every employee request.
     return { success: true, id: user.id, isActive: user.isActive };
   }
 
@@ -565,7 +573,19 @@ class AdminController {
   async deleteCompany(@CurrentUser() admin: AuthUser, @Param("id") id: string) {
     const uid = parseInt(id, 10);
     if (uid === admin.id) throw new BadRequestException("لا يمكن حذف حسابك الخاص");
-    const [user] = await this.db.delete(usersTable).where(eq(usersTable.id, uid)).returning();
+    // The account's employees go with it. `owner_user_id` has no FK, so a hard
+    // delete of the holder alone left every employee login active, pointing at
+    // an account that no longer exists. Nothing references an employee row
+    // except login_logs (ON DELETE SET NULL): account data is keyed to the
+    // holder. One transaction, so a failure leaves both in place.
+    const user = await this.db.transaction(async (tx) => {
+      const [target] = await tx.select({ id: usersTable.id, ownerUserId: usersTable.ownerUserId })
+        .from(usersTable).where(eq(usersTable.id, uid));
+      if (!target) return null;
+      if (target.ownerUserId == null) await tx.delete(usersTable).where(eq(usersTable.ownerUserId, uid));
+      const [deleted] = await tx.delete(usersTable).where(eq(usersTable.id, uid)).returning();
+      return deleted ?? null;
+    });
     if (!user) throw new NotFoundException("Not found");
     await this.fv2h?.purgeAccount(uid); // finance-v2: purge the account's v2 rows after the hard delete (§2.4.5)
     return { success: true };
@@ -589,7 +609,7 @@ class AdminController {
     const paged = wantsPagination(rawQuery, ["search"]);
     const q = listQuerySchema.parse(rawQuery ?? {});
 
-    const conds: any[] = [inArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[])];
+    const conds: any[] = [inArray(rolesTable.key, STAFF_ROLE_KEYS as unknown as string[]), isNull(usersTable.deletedAt)];
     if (q.search) {
       const like = likeContains(q.search);
       conds.push(or(
@@ -696,6 +716,8 @@ class AdminController {
         ilike(loginLogsTable.ip, like),
         ilike(loginLogsTable.device, like),
         ilike(usersTable.name, like),
+        ilike(tenantsTable.name, like),
+        ilike(ownersTable.name, like),
       ));
     }
     const from = parseDateBound(rawQuery?.from);
@@ -719,9 +741,17 @@ class AdminController {
         device: loginLogsTable.device,
         createdAt: loginLogsTable.createdAt,
         userName: usersTable.name,
+        // Phone logins that are not a users row (see recordLogin): the web
+        // labels them by subject instead of a bare number.
+        tenantId: loginLogsTable.tenantId,
+        tenantName: tenantsTable.name,
+        ownerId: loginLogsTable.ownerId,
+        ownerName: ownersTable.name,
       })
       .from(loginLogsTable)
       .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
+      .leftJoin(tenantsTable, eq(loginLogsTable.tenantId, tenantsTable.id))
+      .leftJoin(ownersTable, eq(loginLogsTable.ownerId, ownersTable.id))
       .where(where)
       // `id` tiebreak - a burst of attempts shares a `created_at`.
       .orderBy(desc(loginLogsTable.createdAt), desc(loginLogsTable.id))
@@ -737,10 +767,14 @@ class AdminController {
       this.db.select({ total: count() })
         .from(loginLogsTable)
         .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
+        .leftJoin(tenantsTable, eq(loginLogsTable.tenantId, tenantsTable.id))
+        .leftJoin(ownersTable, eq(loginLogsTable.ownerId, ownersTable.id))
         .where(where),
       this.db.select({ status: loginLogsTable.status, cnt: count() })
         .from(loginLogsTable)
         .leftJoin(usersTable, eq(loginLogsTable.userId, usersTable.id))
+        .leftJoin(tenantsTable, eq(loginLogsTable.tenantId, tenantsTable.id))
+        .leftJoin(ownersTable, eq(loginLogsTable.ownerId, ownersTable.id))
         .where(statsWhere)
         .groupBy(loginLogsTable.status),
     ]);
@@ -867,8 +901,10 @@ class AdminController {
   }
 
   @Patch("users/:userId/force-logout")
-  async forceLogout(@Param("userId") userId: string) {
+  async forceLogout(@CurrentUser() admin: AuthUser, @Param("userId") userId: string) {
     const id = parseInt(userId, 10);
+    // Ending your own session from the console would sign you out mid-click.
+    if (id === admin.id) throw new BadRequestException("لا يمكن إنهاء جلستك من هنا — استخدم تسجيل الخروج");
     const [user] = await this.db.update(usersTable)
       .set({ tokenVersion: sql`${usersTable.tokenVersion} + 1` })
       .where(eq(usersTable.id, id))
@@ -924,7 +960,7 @@ class AdminController {
     const id = parseInt(userId, 10);
     if (id === admin.id) throw new BadRequestException("لا يمكن تعديل حسابك الخاص");
     const updateData: Record<string, unknown> = {};
-    if (body.isActive !== undefined) updateData.isActive = body.isActive;
+    if (typeof body?.isActive === "boolean") updateData.isActive = body.isActive;
     if (body.name !== undefined) updateData.name = body.name;
 
     // Role assignment is by role *key* (e.g. "user", "admin", "accountant")
@@ -983,7 +1019,9 @@ class AdminController {
     const q = listQuerySchema.parse(rawQuery ?? {});
     const status = typeof rawQuery?.status === "string" && rawQuery.status ? rawQuery.status : "all";
 
-    const conds: any[] = [isCustomerAccountSql];
+    // Soft-deleted accounts are not in the queue: they sat in it as "pending",
+    // inflated the badge, and could not be approved.
+    const conds: any[] = [isCustomerAccountSql, isNull(usersTable.deletedAt)];
     if (status !== "all") conds.push(eq(usersTable.accountStatus, status as any));
     if (q.search) {
       const like = likeContains(q.search);
@@ -1082,7 +1120,7 @@ class AdminController {
       .select({ c: count() })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
-      .where(and(isCustomerAccountSql, eq(usersTable.accountStatus, "pending")));
+      .where(and(isCustomerAccountSql, isNull(usersTable.deletedAt), eq(usersTable.accountStatus, "pending")));
     return { count: Number(row?.c ?? 0) };
   }
 
@@ -1149,7 +1187,7 @@ class AdminController {
       userType: usersTable.userType, trialConsumedAt: usersTable.trialConsumedAt,
       accountStatus: usersTable.accountStatus,
     })
-      .from(usersTable).where(eq(usersTable.id, uid));
+      .from(usersTable).where(and(eq(usersTable.id, uid), isNull(usersTable.deletedAt)));
     if (!existing) throw new NotFoundException("User not found");
     const plan = resolveAdminPlan(body?.packagePlan, existing.desiredPlan);
     // Company-only plans stay company-only even when an admin assigns them —
@@ -1305,7 +1343,7 @@ class AdminController {
     const uid = parseInt(id, 10);
     const [user] = await this.db.update(usersTable)
       .set({ accountStatus: "rejected", isActive: false })
-      .where(eq(usersTable.id, uid))
+      .where(and(eq(usersTable.id, uid), isNull(usersTable.deletedAt)))
       .returning();
     if (!user) throw new NotFoundException("User not found");
     void this.email.sendRegistrationRejected(user.email, user.name, body?.reason ?? null);

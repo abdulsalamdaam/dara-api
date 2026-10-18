@@ -138,12 +138,17 @@ describe("retention settings validation", () => {
     let written: any = null;
     const current = { id: 1, runTime: "07:00", daysOfWeek: [0, 1, 2, 3, 4, 5, 6], lookbackHours: 36, seenRetentionDays: 7 };
     const runner = { loadSettings: async () => current } as any;
-    const db: any = { update: () => ({ set: (v: any) => { written = v; return { where: () => ({ returning: async () => [v] }) }; } }) };
+    const db: any = {
+      update: () => ({ set: (v: any) => { written = v; return { where: () => ({ returning: async () => [v] }) }; } }),
+      // updatedBy → updatedByName lookup.
+      select: () => ({ from: () => ({ where: async () => [{ id: 1, name: "Admin" }] }) }),
+    };
     const c = new NewsAdminController(db, runner, { record() {} } as any);
     await assert.rejects(c.updateSettings({ lookbackHours: 168 }, { id: 1 } as any), /seenRetentionDays must cover the lookback window/);
     assert.equal(written, null);
-    await c.updateSettings({ lookbackHours: 168, seenRetentionDays: 9 }, { id: 1 } as any);
+    const saved: any = await c.updateSettings({ lookbackHours: 168, seenRetentionDays: 9 }, { id: 1 } as any);
     assert.equal(written.seenRetentionDays, 9);
+    assert.equal(saved.updatedByName, "Admin");
   });
 
   it("cleanup body: dryRun boolean, default false", () => {

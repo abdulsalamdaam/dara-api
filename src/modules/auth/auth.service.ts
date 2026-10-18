@@ -83,14 +83,37 @@ export class AuthService {
     return "Desktop";
   }
 
-  private async recordLogin(userId: number | null, email: string, status: "success" | "failed", ip: string, ua?: string) {
+  /**
+   * `subject` names who a phone login belongs to when it is not a `users` row:
+   * a tenant (mobile app) or an owner-kind landlord login. Those used to be
+   * logged with no id at all, so the admin log could not tell a tenant from an
+   * unknown number.
+   */
+  private async recordLogin(
+    userId: number | null, email: string, status: "success" | "failed", ip: string, ua?: string,
+    subject?: { tenantId?: number; ownerId?: number },
+  ) {
     await this.db.insert(loginLogsTable).values({
       userId,
+      tenantId: subject?.tenantId ?? null,
+      ownerId: subject?.ownerId ?? null,
       email,
       status,
       ip,
       device: this.device(ua),
     });
+  }
+
+  /**
+   * An employee's account holder is suspended (inactive) or gone. Suspension
+   * only flips the holder's row, so every employee login path asks this;
+   * JwtAuthGuard enforces the same rule on each request.
+   */
+  private async holderBlocked(ownerUserId: number | null | undefined): Promise<boolean> {
+    if (ownerUserId == null) return false;
+    const [holder] = await this.db.select({ isActive: usersTable.isActive })
+      .from(usersTable).where(and(eq(usersTable.id, ownerUserId), isNull(usersTable.deletedAt)));
+    return !holder || !holder.isActive;
   }
 
   /* ── User token ── */
@@ -281,6 +304,9 @@ export class AuthService {
       }
     }
     if (!user.isActive) throw new UnauthorizedException("الحساب غير مفعّل. تواصل مع الدعم");
+    if (await this.holderBlocked(user.ownerUserId)) {
+      throw new UnauthorizedException("حساب المنشأة موقوف. تواصل مع مسؤول الحساب");
+    }
 
     // OTP send cooldown — block requesting another code within
     // EMAIL_OTP_TTL_MIN minutes from the same IP (or the same email). This
@@ -902,13 +928,13 @@ export class AuthService {
 
     const tenant = await this.findTenantByLoginPhone(raw);
     if (!tenant || tenant.status !== "active") {
-      await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
+      await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua, tenant ? { tenantId: tenant.id } : undefined);
       throw new UnauthorizedException("بيانات غير صحيحة");
     }
 
     const ok = await this.phoneOtp.check(phone, code, "tenant");
     if (!ok) {
-      await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
+      await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua, { tenantId: tenant.id });
       throw new UnauthorizedException("رمز التحقق غير صحيح");
     }
 
@@ -921,7 +947,7 @@ export class AuthService {
       .returning({ tokenVersion: tenantsTable.tokenVersion });
     if (!bumped) throw new UnauthorizedException("بيانات غير صحيحة");
 
-    await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua);
+    await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua, { tenantId: tenant.id });
 
     const token = this.signTenantToken({ id: tenant.id, phone: tenant.phone || phone, tokenVersion: bumped.tokenVersion, loginAt: now.getTime() });
     return {
@@ -1034,10 +1060,10 @@ export class AuthService {
       const owner = await this.findOwnerByLoginPhone(raw);
       if (owner) {
         if (!(await this.checkPhoneCode(phone, code))) {
-          await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua);
+          await this.recordLogin(null, phone, "failed", ctx.ip, ctx.ua, { ownerId: owner.id });
           throw new UnauthorizedException("رمز التحقق غير صحيح");
         }
-        await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua);
+        await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua, { ownerId: owner.id });
         const effectiveEmail = owner.isRepresentative ? owner.originalOwnerEmail : owner.email;
         const effectivePhone = owner.isRepresentative ? owner.originalOwnerPhone : owner.phone;
         const token = this.signOwnerToken({ ownerId: owner.id, accountUserId: owner.userId });
@@ -1049,6 +1075,10 @@ export class AuthService {
     if (!(await this.checkPhoneCode(phone, code))) {
       await this.recordLogin(user.id, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("رمز التحقق غير صحيح");
+    }
+    if (await this.holderBlocked(user.ownerUserId)) {
+      await this.recordLogin(user.id, phone, "failed", ctx.ip, ctx.ua);
+      throw new UnauthorizedException("حساب المنشأة موقوف. تواصل مع مسؤول الحساب");
     }
     // Single session: this login revokes every earlier token for the account,
     // including a web session of the same users row.

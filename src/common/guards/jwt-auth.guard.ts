@@ -3,6 +3,7 @@ import { Reflector } from "@nestjs/core";
 import type { Request } from "express";
 import { JwtService } from "@nestjs/jwt";
 import { and, eq, isNull } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { ownersTable, rolesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { routeAllowsOwnerToken } from "../permissions.decorator";
@@ -40,6 +41,14 @@ export type AuthUser = {
   ownerScopeId?: number | null;
 };
 
+/**
+ * The account holder above an employee (or above an owner-kind login). An
+ * account is suspended by deactivating the holder's row only, so the holder's
+ * state has to be read on every request made inside the account: checking the
+ * requester's own row let a suspended account's employees carry on as before.
+ */
+const holderTable = alias(usersTable, "holder");
+
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   constructor(
@@ -72,10 +81,12 @@ export class JwtAuthGuard implements CanActivate {
       // would act as the account holder (team, audit, company, uploads...).
       if (!routeAllowsOwnerToken(this.reflector, ctx)) throw new ForbiddenException("Forbidden");
       const [owner] = await this.db
-        .select({ id: ownersTable.id, userId: ownersTable.userId })
+        .select({ id: ownersTable.id, userId: ownersTable.userId, holderActive: holderTable.isActive })
         .from(ownersTable)
+        .innerJoin(holderTable, and(eq(holderTable.id, ownersTable.userId), isNull(holderTable.deletedAt)))
         .where(and(eq(ownersTable.id, ownerId), eq(ownersTable.status, "active"), isNull(ownersTable.deletedAt)));
       if (!owner) throw new UnauthorizedException("Unauthorized");
+      if (!owner.holderActive) throw new UnauthorizedException("Account disabled");
       req.user = {
         id: owner.userId,
         email: "",
@@ -107,12 +118,19 @@ export class JwtAuthGuard implements CanActivate {
         roleKey: rolesTable.key,
         roleCompanyId: rolesTable.companyId,
         rolePermissions: rolesTable.permissions,
+        holderId: holderTable.id,
+        holderActive: holderTable.isActive,
       })
       .from(usersTable)
       .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+      .leftJoin(holderTable, and(eq(holderTable.id, usersTable.ownerUserId), isNull(holderTable.deletedAt)))
       .where(and(eq(usersTable.id, decoded.id), isNull(usersTable.deletedAt)));
     if (!row) throw new UnauthorizedException("User not found");
     if (!row.isActive) throw new UnauthorizedException("Account disabled");
+    // An employee of a suspended or deleted account is shut out with it.
+    if (row.ownerUserId != null && (row.holderId == null || !row.holderActive)) {
+      throw new UnauthorizedException("Account disabled");
+    }
     // Single session per account: every login bumps tokenVersion, so a stale
     // tv is either a later login elsewhere (SESSION_REPLACED) or a deliberate
     // revoke — logout, force-logout, password reset (SESSION_REVOKED).

@@ -114,6 +114,15 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure simple_invoices.zatca_status/zatca_error/zatca_qr failed: ${err?.message || err}`);
     }
 
+    // Login history (0083): who a phone login belongs to when it is not a
+    // `users` row. Nullable and additive; old rows read as "unknown subject".
+    try {
+      await client.query(`alter table login_logs add column if not exists tenant_id integer`);
+      await client.query(`alter table login_logs add column if not exists owner_id integer`);
+    } catch (err: any) {
+      log.warn(`ensure login_logs.tenant_id/owner_id failed: ${err?.message || err}`);
+    }
+
     // ZATCA link health. The taxpayer can remove our EGS device in the Fatoora
     // portal, and nothing tells us — the row keeps its certificate, so every
     // local check passes while every submission is refused. These two columns

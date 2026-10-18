@@ -505,6 +505,13 @@
       "when": 1792368000000,
       "tag": "0082_users_email_lower_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1792540800000,
+      "tag": "0083_login_logs_subject",
+      "breakpoints": true
     }
   ]
 }

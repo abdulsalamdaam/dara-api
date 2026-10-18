@@ -61,7 +61,6 @@ class SupportController {
     const conds: any[] = [];
     if (!admin) conds.push(eq(supportTicketsTable.userId, user.id));
     const statuses = parseEnumList(rawQuery?.status, ["open", "closed"] as const);
-    if (statuses) conds.push(inArray(supportTicketsTable.status, statuses));
     if (q.search) {
       const like = likeContains(q.search);
       conds.push(admin
@@ -73,6 +72,11 @@ class SupportController {
           )
         : sql`exists (select 1 from ${supportMessagesTable} where ${supportMessagesTable.ticketId} = ${supportTicketsTable.id} and ${supportMessagesTable.message} ilike ${like})`);
     }
+    // The tab badges count the same set as the table minus the status filter,
+    // so they honour the search (they counted every ticket before: a search
+    // with no results still read "Open 30").
+    const statsWhere = conds.length ? and(...conds) : undefined;
+    if (statuses) conds.push(inArray(supportTicketsTable.status, statuses));
     const where = conds.length ? and(...conds) : undefined;
 
     let rowsQ = this.db
@@ -110,7 +114,9 @@ class SupportController {
       // status filter itself.
       paged ? this.db.select({ status: supportTicketsTable.status, cnt: count() })
         .from(supportTicketsTable)
-        .where(admin ? undefined : eq(supportTicketsTable.userId, user.id))
+        .leftJoin(usersTable, eq(supportTicketsTable.userId, usersTable.id))
+        .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+        .where(statsWhere)
         .groupBy(supportTicketsTable.status) : Promise.resolve([]),
     ]);
     if (!paged) return rows;
@@ -194,7 +200,9 @@ class SupportController {
   async updateStatus(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     if (!this.isAdmin(user)) throw new ForbiddenException("غير مصرح");
     const tid = parseInt(id, 10);
-    const [row] = await this.db.update(supportTicketsTable).set({ status: body.status, updatedAt: new Date() })
+    const status = body?.status;
+    if (status !== "open" && status !== "closed") throw new BadRequestException("status must be open or closed");
+    const [row] = await this.db.update(supportTicketsTable).set({ status, updatedAt: new Date() })
       .where(eq(supportTicketsTable.id, tid)).returning();
     if (!row) throw new NotFoundException("التذكرة غير موجودة");
     return row;

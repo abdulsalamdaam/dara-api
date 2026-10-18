@@ -3,8 +3,8 @@ import {
   NotFoundException, Optional, Param, Patch, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
-import { and, asc, count, desc, eq, getTableColumns, sql, type SQL } from "drizzle-orm";
-import { newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable } from "@dara/database";
+import { and, asc, count, desc, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
+import { newsItemsTable, newsJobRunsTable, newsJobSettingsTable, newsSourcesTable, usersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard, type AuthUser } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
@@ -126,14 +126,42 @@ export class NewsAdminController {
     @Optional() private readonly cleaner?: NewsCleanerService,
   ) {}
 
-  /** `{ published, rejected, hidden, pinned, total }` over `where`. */
+  /**
+   * Staff names for `triggered_by` / `updated_by`. Both are bare user ids, so
+   * the console could only ever show "by —". One query for the whole page.
+   */
+  private async staffNames(ids: Array<number | null | undefined>): Promise<Map<number, string>> {
+    const unique = [...new Set(ids.filter((v): v is number => typeof v === "number"))];
+    if (!unique.length) return new Map();
+    const rows = await this.db.select({ id: usersTable.id, name: usersTable.name })
+      .from(usersTable).where(inArray(usersTable.id, unique));
+    return new Map(rows.map((r) => [r.id, r.name]));
+  }
+
+  private async withTriggeredByName<T extends { triggeredBy?: number | null }>(rows: T[]) {
+    const names = await this.staffNames(rows.map((r) => r.triggeredBy));
+    return rows.map((r) => ({ ...r, triggeredByName: r.triggeredBy != null ? names.get(r.triggeredBy) ?? null : null }));
+  }
+
+  private async withUpdatedByName<T extends { updatedBy?: number | null }>(row: T | null | undefined) {
+    if (!row) return row ?? null;
+    const names = await this.staffNames([row.updatedBy]);
+    return { ...row, updatedByName: row.updatedBy != null ? names.get(row.updatedBy) ?? null : null };
+  }
+
+  /**
+   * `{ published, rejected, hidden, pinned, total }` over `where`. `pinned`
+   * counts published items only: a pin only matters in the feed, and hiding a
+   * pinned item does not clear its flag, so it was counting hidden and
+   * rejected rows the feed never shows.
+   */
   private async statusCounts(where: SQL | undefined) {
     const [row] = await this.db.select({
       total: count(),
       published: sql<number>`count(*) filter (where ${newsItemsTable.status} = 'published')`,
       rejected: sql<number>`count(*) filter (where ${newsItemsTable.status} = 'rejected')`,
       hidden: sql<number>`count(*) filter (where ${newsItemsTable.status} = 'hidden')`,
-      pinned: sql<number>`count(*) filter (where ${newsItemsTable.pinned})`,
+      pinned: sql<number>`count(*) filter (where ${newsItemsTable.pinned} and ${newsItemsTable.status} = 'published')`,
     }).from(newsItemsTable).where(where);
     return {
       published: Number(row?.published ?? 0), rejected: Number(row?.rejected ?? 0), hidden: Number(row?.hidden ?? 0),
@@ -154,7 +182,11 @@ export class NewsAdminController {
       this.db.select(RUN_SUMMARY_COLUMNS).from(newsJobRunsTable).orderBy(desc(newsJobRunsTable.startedAt)).limit(1),
       this.statusCounts(undefined),
     ]);
-    const apify = await this.apifyStatus(cfg);
+    const [apify, [lastRun], namedSettings] = await Promise.all([
+      this.apifyStatus(cfg),
+      this.withTriggeredByName(last),
+      this.withUpdatedByName(settings),
+    ]);
     const warnings = [...cfg.warnings];
     if (apify?.overBudget) {
       warnings.push(`Apify budget reached ($${apify.spentUsd?.toFixed(2)} of $${apify.budgetUsd.toFixed(2)}) — X accounts are skipped until the cycle resets${apify.cycleEndAt ? ` (${apify.cycleEndAt.slice(0, 10)})` : ""}. RSS runs as normal.`);
@@ -175,9 +207,9 @@ export class NewsAdminController {
       model: cfg.filter === "ai" ? cfg.model : null,
       timezone: NEWS_TZ,
       runningRunId: running[0]?.id ?? null,
-      settings,
+      settings: namedSettings,
       nextRunAt: settings?.enabled ? settings.nextRunAt : null,
-      lastRun: last[0] ?? null,
+      lastRun: lastRun ?? null,
       /** Retention (v3): the last cleanup and what it removed; items per status now. */
       lastCleanupAt: settings?.lastCleanupAt ?? null,
       lastCleanupStats: settings?.lastCleanupStats ?? null,
@@ -216,8 +248,8 @@ export class NewsAdminController {
   // ── settings ──────────────────────────────────────────────────────────
 
   @Get("settings")
-  settings() {
-    return this.runner.loadSettings();
+  async settings() {
+    return this.withUpdatedByName(await this.runner.loadSettings());
   }
 
   @Patch("settings")
@@ -232,7 +264,7 @@ export class NewsAdminController {
       .where(eq(newsJobSettingsTable.id, 1))
       .returning();
     this.appLog.record({ level: "log", event: "news_settings_updated", context: "News", meta: patch });
-    return row;
+    return this.withUpdatedByName(row);
   }
 
   // ── sources ───────────────────────────────────────────────────────────
@@ -439,18 +471,19 @@ export class NewsAdminController {
           .limit(query.pageSize).offset((query.page - 1) * query.pageSize),
         this.db.select({ n: count() }).from(newsJobRunsTable),
       ]);
-      return { data, page: query.page, pageSize: query.pageSize, total: Number(total[0]?.n ?? 0) };
+      return { data: await this.withTriggeredByName(data), page: query.page, pageSize: query.pageSize, total: Number(total[0]?.n ?? 0) };
     }
     const n = Number(raw?.limit ?? 20);
     const limit = Number.isInteger(n) && n >= 1 ? Math.min(n, 100) : 20;
-    return this.db.select(RUN_SUMMARY_COLUMNS).from(newsJobRunsTable).orderBy(...order).limit(limit);
+    return this.withTriggeredByName(await this.db.select(RUN_SUMMARY_COLUMNS).from(newsJobRunsTable).orderBy(...order).limit(limit));
   }
 
   @Get("runs/:id")
   async runDetail(@Param("id") id: string) {
     const [row] = await this.db.select().from(newsJobRunsTable).where(eq(newsJobRunsTable.id, uuidParam(id)));
     if (!row) throw new NotFoundException("run not found");
-    return row;
+    const [named] = await this.withTriggeredByName([row]);
+    return named;
   }
 
   // ── items ─────────────────────────────────────────────────────────────

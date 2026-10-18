@@ -30,7 +30,7 @@ const jwt = (decoded: any) => ({ verify: () => decoded }) as any;
 const bearer = { headers: { authorization: "Bearer t" } };
 
 describe("JwtAuthGuard — owner-mobile tokens", () => {
-  const ownerRow = [{ id: 7, userId: 10 }];
+  const ownerRow = [{ id: 7, userId: 10, holderActive: true }];
   it("refuses an owner token on a route that does not opt in", async () => {
     const g = new JwtAuthGuard(jwt({ kind: "owner", ownerId: 7, id: 10 }), fakeDb(ownerRow), new Reflector());
     await assert.rejects(g.canActivate(ctx({}, { ...bearer })), ForbiddenException);
@@ -44,10 +44,15 @@ describe("JwtAuthGuard — owner-mobile tokens", () => {
       assert.deepEqual(req.user.permissions, []);
     }
   });
+  it("shuts out an owner token once the managing account is suspended", async () => {
+    const g = new JwtAuthGuard(jwt({ kind: "owner", ownerId: 7, id: 10 }), fakeDb([{ ...ownerRow[0], holderActive: false }]), new Reflector());
+    await assert.rejects(g.canActivate(ctx({ [OWNER_TOKEN_META]: true }, { ...bearer })), UnauthorizedException);
+  });
 });
 
 describe("JwtAuthGuard — staff role keys are pinned", () => {
-  const row = (o: any) => [{ id: 1, tokenVersion: 0, isActive: true, ownerUserId: null, companyId: null, roleId: 3, roleKey: "user", roleCompanyId: null, rolePermissions: [], ...o }];
+  // `holderId`/`holderActive` are the account holder's row, joined for employees.
+  const row = (o: any) => [{ id: 1, tokenVersion: 0, isActive: true, ownerUserId: null, companyId: null, roleId: 3, roleKey: "user", roleCompanyId: null, rolePermissions: [], holderId: 9, holderActive: true, ...o }];
   const run = (o: any) => new JwtAuthGuard(jwt({ id: 1, kind: "user", tv: 0 }), fakeDb(row(o)), new Reflector()).canActivate(ctx({}, { ...bearer }));
   it("refuses super_admin on an employee row", async () => {
     await assert.rejects(run({ roleKey: "super_admin", ownerUserId: 9 }), ForbiddenException);
@@ -61,6 +66,15 @@ describe("JwtAuthGuard — staff role keys are pinned", () => {
   });
   it("locks out a disabled account", async () => {
     await assert.rejects(run({ isActive: false }), UnauthorizedException);
+  });
+  it("locks out an employee of a suspended account", async () => {
+    await assert.rejects(run({ ownerUserId: 9, holderActive: false }), UnauthorizedException);
+  });
+  it("locks out an employee whose account holder is gone", async () => {
+    await assert.rejects(run({ ownerUserId: 9, holderId: null, holderActive: null }), UnauthorizedException);
+  });
+  it("does not consult a holder for a top-level account", async () => {
+    assert.equal(await run({ ownerUserId: null, holderId: null, holderActive: null }), true);
   });
 });
 

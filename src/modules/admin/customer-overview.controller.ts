@@ -542,6 +542,7 @@ export class AdminCustomerOverviewController {
         id: propertiesTable.id,
         name: propertiesTable.name,
         city: lookupsTable.labelAr,
+        cityEn: lookupsTable.labelEn,
         unitsCount: sql<number>`(select count(*)::int from units u
           where u.property_id = properties.id and u.deleted_at is null)`.as("units_count"),
         occupiedUnits: sql<number>`(select count(*)::int from units u
