@@ -56,8 +56,9 @@ export class PhoneOtpService {
 
   private message(code: string): string {
     // Short on purpose: Arabic is UCS-2, so ~70 characters is one SMS segment
-    // and anything past that doubles the cost of every login.
-    return `رمز الدخول إلى دارا: ${code}\nلا تشاركه مع أحد.`;
+    // and anything past that doubles the cost of every login. This renders at
+    // 62 characters with the 10-minute TTL — re-count before adding a word.
+    return `رمز الدخول إلى دارا: ${code}\nصالح لمدة ${minutesAr(PHONE_OTP_TTL_MIN)}. لا تشاركه مع أحد.`;
   }
 
   /**
@@ -165,4 +166,12 @@ export class PhoneOtpService {
       .where(eq(phoneOtpTokensTable.id, token.id));
     return true;
   }
+}
+
+/** Arabic count agreement: 3–10 take the plural (دقائق), 11+ the singular (دقيقة). */
+function minutesAr(n: number): string {
+  if (n === 1) return "دقيقة واحدة";
+  if (n === 2) return "دقيقتين";
+  if (n >= 3 && n <= 10) return `${n} دقائق`;
+  return `${n} دقيقة`;
 }

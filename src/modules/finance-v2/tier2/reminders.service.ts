@@ -9,8 +9,11 @@ import { envGateOn, REMINDER_SENDER, type ReminderChannel, type ReminderSender }
 
 const CHANNELS: readonly ReminderChannel[] = ["sms", "push"];
 const DEFAULT_OFFSETS = [-3, 0, 7];
-const DEFAULT_AR = "عزيزي {tenant}، نذكّركم بدفعة الإيجار بمبلغ {amount} ريال المستحق في {dueDate} للعقد {contract}.";
-const DEFAULT_EN = "Dear {tenant}, a reminder that your rent installment of SAR {amount} is due on {dueDate} (contract {contract}).";
+// Sent as SMS from the "DaamTech" sender, so the brand leads. Worded to read
+// right before, on and after the due date (offsets -3 / 0 / +7). Typically
+// renders at 100–130 Arabic characters = 2 UCS-2 segments.
+const DEFAULT_AR = "دارا: مرحباً {tenant}، نذكّرك بدفعة الإيجار بمبلغ {amount} ريال المستحقة في {dueDate} (عقد {contract}).";
+const DEFAULT_EN = "Dara: Hi {tenant}, a reminder of your rent payment of SAR {amount}, due {dueDate} (contract {contract}).";
 const DAY_MS = 86_400_000;
 
 export interface ReminderGates {

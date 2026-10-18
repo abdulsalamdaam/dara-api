@@ -24,3 +24,4 @@ src/modules/billing/billing.module.ts	befade62584a0f4f	C-1 (flag off too, accoun
 src/modules/billing/billing.module.ts	d431436941132ac7	C-1 (flag off too, accountant 14 Oct 2026): Receipt Vouchers links the document a voucher paid like Collections (via its collections installments; any confirmed non-voucher non-commission doc incl. RR-, latest confirmed; reads only this page vouchers docs); + linkedInvoiceId
 src/modules/ejar/ejar.module.ts	821b7fabd292580c	RBAC (not finance-v2, Oct 2026): POST /ejar/lookup spends the paid Ejar quota and is step 1 of an import, so it needs contracts.write like the import, not contracts.view
 src/modules/ejar/ejar.scope.spec.ts	402382d8d657441a	Legacy plans dropped (Oct 2026): the advanced plan no longer exists, so the unscoped-landlord-plans spec stops listing it
+src/modules/admin/admin.module.ts	9072d77d3eae7ea1	copy: admin test-push default text (Dara messages copy), no logic change

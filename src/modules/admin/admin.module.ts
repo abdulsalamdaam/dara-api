@@ -946,7 +946,7 @@ class AdminController {
     const result = await sendExpoPush([{
       to: tenant.fcmToken,
       title: body.title || "دارا",
-      body: body.body || `مرحباً ${tenant.name}، هذه رسالة تجريبية.`,
+      body: body.body || `مرحباً ${tenant.name}، هذا إشعار تجريبي من دارا.`,
       data: body.data || { type: "test" },
     }]);
 
