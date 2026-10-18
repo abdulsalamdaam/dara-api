@@ -1016,10 +1016,11 @@ would strand everything filed in between.
     close the gap. `/finance/v2/status` adds `planLocked` / `requiredPlan`;
     the admin finance-v2 list shows `planLocked` / `effective` next to the
     stored `enabled`.
-    Buying `professional` does NOT set the stored flag — Finance v2 is still
-    switched on per account by an admin (toggle + backfill), and the web's
-    accounting upsell says so. Admin backfill / ledger-start still read the
-    stored flag, so an admin can start a ledger on a plan-locked account.
+    Becoming entitled (approval, admin plan change, a paid upgrade) DOES
+    switch it on: automatic provisioning sets the stored flag and starts the
+    ledger with no admin step (§10 "Auto-activation"). A downgrade still never
+    writes the flag. Admin backfill / ledger-start still read the stored flag,
+    so an admin can start a ledger on a plan-locked account.
   - The custom report builder (`custom_reports`) was withdrawn on every plan
     (Oct 2026) and is no longer a key in `planFeatures` / `features`.
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
@@ -1490,8 +1491,9 @@ branch in both repos, merged to `master` only.
 
 A full ledger (chart of accounts, journal, periods, 26 reports, bank/cash,
 expenses, bank reconciliation, AP) behind a **per-account flag**, merged to
-`master` (staging) in both repos. On for one synthetic staging test account
-only; off for everyone else. Not on `main`.
+`master` (staging) in both repos. **On by default for every plan-entitled
+account** (professional / enterprise / unassigned `broker`) since Oct 2026 —
+provisioned automatically, see "Auto-activation" below. Not on `main`.
 
 - **The flag:** `finance_settings.finance_v2_enabled`, one row per account
   (`account_user_id` = scope). **A missing row means off.** The API reads it via
@@ -1502,7 +1504,49 @@ only; off for everyone else. Not on `main`.
   or `PATCH /api/admin/finance-v2/:accountUserId {enabled, accountingMode, reason}`.
   Reason is required; each change writes `finance_settings_events` plus an
   `audit_logs` row under the target account (visible in its activity log). The
-  first enable seeds the chart, two years of periods, and a cash + bank account.
+  first enable seeds the chart, two years of periods, and a cash + bank account
+  (+ the trust account in Manager mode). Since auto-activation the toggle is
+  for exceptions: switching an account OFF (sticky) or back ON.
+- **Auto-activation (Oct 2026, `auto-provision.service.ts`).** Effective =
+  plan-entitled AND not explicitly switched off by an admin. A live customer
+  account (no owner above it, not staff, `is_active`, `account_status =
+  'active'`, not deleted) whose plan includes `accounting` and that is off
+  without an admin OFF gets, with no admin step: (1) the SAME provisioning as
+  the admin first enable (`FinanceSetupService`: chart, two fiscal years,
+  cash + bank + trust, collected commission basis) in **Manager** mode —
+  Owner mode is never chosen automatically (DESIGN §4.2: only a suggestion an
+  admin confirms; the mode freezes at the first posting); (2) a `full` **dry
+  run**; only if it is balanced with 0 failed and 0 pending, (3) the **real**
+  backfill (sets `ledger_started_at`). A dirty dry run leaves it
+  enabled-but-not-started (nothing posts) and records why.
+  - **Triggers** (fire-and-forget, one in-process serial queue, the user action
+    never waits): `signalFv2Entitlement()` from admin approve, admin package
+    change, admin re-activation (`PATCH /admin/companies/:id isActive:true`)
+    and `activateFromPaidRow` (Moyasar webhook, pay self-heal, `/me/subscription/sync`);
+    `GET /finance/v2/status` for an entitled account still off (≤ once / 30 min
+    per account; response unchanged); and a **daily sweep at 02:30 Riyadh**
+    (catch-up on boot, like the others). Registration creates `pending`
+    accounts, so it is not a trigger — approval is.
+  - **Admin OFF is sticky:** the latest `finance_settings_events` row with
+    `field='finance_v2_enabled'` decides — `false` (any admin OFF, even on a
+    never-provisioned account, as an opt-out) and the sweep/triggers leave it
+    alone; an admin ON re-enables as before. No migration: automatic rows use
+    `actor_user_id = 0`, `enabled_by` null.
+  - **Not started → visible:** each attempt writes an `auto_provision` event
+    (`new_value.outcome`: `started` · `started_with_errors` · `dry_run_not_clean`
+    · `dry_run_error`) — in the Customer-360 history, and
+    `GET /admin/finance-v2/accounts` now adds `autoProvision {outcome, reason,
+    at, dryRunId, realRunId}` and `adminOff`; the dry run itself is in
+    `backfill-runs` (actor 0). An auto-enabled, not-started account is retried
+    by the sweep at most once a day (triggers: every 10 min at most). An account
+    an ADMIN enabled and has not backfilled is left to the admin.
+  - **Concurrency:** a session `pg_try_advisory_lock(acct, -192)`
+    (`LOCK_KEYS.AUTO_PROVISION`) across enable + backfill, the SETUP xact lock
+    + a re-check inside the enable transaction (serialises with the admin
+    toggle), and the backfill's own account lock: two triggers seed and
+    backfill once.
+  - **Kill switch:** `FINANCE_V2_AUTO_PROVISION_DISABLED=1` (or
+    `FINANCE_V2_WORKER_DISABLED=1`) — no sweep, signals are no-ops.
 - **Two switches.** The flag turns on UI, forks and enqueueing; nothing posts
   until `finance_settings.ledger_started_at` is set by the first **real**
   backfill. Until then reports show "ledger not started".
@@ -1534,7 +1578,8 @@ only; off for everyone else. Not on `main`.
   in `scripts/finance-v2-removed-lines.allow`. Web has its own allowlist and is
   checked by the same script with `--profile web` (not wired into web CI). Behaviour changes fork at the handler top into
   `finance-v2/overrides/`; the legacy body is not edited.
-- **Enable an account:** (1) toggle on with a reason and a mode (Manager is
+- **Enable an account by hand** (an account that is not entitled, wants Owner
+  mode, or whose automatic dry run was not clean): (1) toggle on with a reason and a mode (Manager is
   the default; Owner is refused if the account has third-party landlords); (2) **dry-run** backfill (Customer-360
   drawer → Backfill, or `POST /api/admin/finance-v2/:id/backfill
   {"mode":"full","dryRun":true}`) — must balance with 0 failures; (3) the same
@@ -1545,6 +1590,7 @@ only; off for everyone else. Not on `main`.
   (never loads `.env`; refuses port 4000; real run needs `--yes`).
 - **Turn off:** the same PATCH with `enabled:false` + reason. Every v2 row is
   kept; re-enabling shows "ledger behind by N" until a `catchup` backfill runs.
+  The OFF sticks — auto-activation never turns it back on; only an admin ON does.
 - **Changes that apply with the flag OFF** (approved at the merge gate):
   - **EX-1** (web): billing and receipts Excel exports page through 200 rows
     (`fetchAllPages`) — `pageSize=1000` was a 400 for everyone.

@@ -26,6 +26,7 @@ import { SubscriptionInvoiceService, subscriptionInvoiceNumber } from "../subscr
 import { AppLogService } from "../../common/logging/app-log.service";
 import { normalizeTrialDays } from "../../common/trial";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: account purge hook (DESIGN §2.4.5)
+import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal"; // finance-v2: on by default for entitled plans
 
 /**
  * Subscription window: starts now; ends after `trialDays`, or at the given
@@ -564,6 +565,7 @@ class AdminController {
     const [user] = await this.db.update(usersTable).set(updateData)
       .where(and(eq(usersTable.id, uid), isNull(usersTable.deletedAt))).returning();
     if (!user) throw new NotFoundException("Not found");
+    if (user.isActive) signalFv2Entitlement(user.id, "admin_reactivate"); // finance-v2: auto-provision when the plan includes accounting (async, never throws)
     // Suspension reaches the account's employees through JwtAuthGuard, which
     // checks the account holder's row on every employee request.
     return { success: true, id: user.id, isActive: user.isActive };
@@ -1236,6 +1238,7 @@ class AdminController {
     if (!user) throw new NotFoundException("User not found");
     // Fire-and-forget the approval notice — must not block the API response.
     void this.email.sendRegistrationApproved(user.email, user.name);
+    signalFv2Entitlement(user.id, "admin_approve"); // finance-v2: auto-provision when the plan includes accounting (async, never throws)
     return {
       success: true, id: user.id, accountStatus: user.accountStatus, packagePlan: plan,
       subscriptionStatus: user.subscriptionStatus, subscriptionEndsAt: user.subscriptionEndsAt,
@@ -1313,6 +1316,7 @@ class AdminController {
       .where(eq(usersTable.id, id))
       .returning();
     if (!user) throw new NotFoundException("User not found");
+    signalFv2Entitlement(user.id, "admin_package_change"); // finance-v2: auto-provision when the plan includes accounting (async, never throws)
     return {
       success: true, id: user.id, packagePlan: plan,
       subscriptionEndsAt: user.subscriptionEndsAt,

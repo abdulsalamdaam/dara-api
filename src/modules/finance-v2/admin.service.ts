@@ -5,7 +5,6 @@ import { FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-feature
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
-import { recordCollectedCutover } from "./commission-run";
 
 export interface ToggleBody {
   enabled: boolean;
@@ -80,11 +79,9 @@ export class FinanceV2AdminService {
       )).rows[0];
 
       if (!cur && newMode === "manager") {
-        // New Manager-mode accounts start on the COLLECTED commission basis (the accountant's rule: month-end, rent
-        // collected before VAT × the landlord's rate). Existing accounts keep what they have; see DESIGN §9 E1 cutover.
-        await c.query(`update finance_settings set commission_basis = 'collected' where account_user_id = $1`, [accountUserId]);
+        // New Manager-mode accounts start on the COLLECTED commission basis (setup.service.ts, shared with auto-provisioning).
+        await this.setup.startCollectedBasis(c, accountUserId, actorUserId);
         s.commission_basis = "collected";
-        await recordCollectedCutover(c, accountUserId, actorUserId);
       }
       await this.event(c, accountUserId, actorUserId, "finance_v2_enabled", cur ? wasOn : null, body.enabled, body.reason);
       if (newMode !== oldMode) await this.event(c, accountUserId, actorUserId, "accounting_mode", oldMode, newMode, body.reason);
@@ -109,6 +106,9 @@ export class FinanceV2AdminService {
 
   /**
    * Flag state per customer account, with the suggested mode for the enable dialog.
+   * `adminOff`: an admin's explicit OFF (sticky: auto-provisioning never turns it back on).
+   * `autoProvision`: the latest automatic provisioning outcome (auto-provision.service.ts) —
+   * `dry_run_not_clean` / `dry_run_error` mean enabled but the ledger is NOT started.
    * `enabled` is the STORED flag; `planLocked` (read-only info) says the plan
    * keeps it effectively off (common/plan-features.ts), `effective` is what
    * the account actually gets.
@@ -117,10 +117,20 @@ export class FinanceV2AdminService {
     const r = await this.pool.query(
       `select u.id, u.name, u.email, u.user_type as "userType", u.package_plan as "packagePlan",
               coalesce(fs.finance_v2_enabled, false) as enabled, fs.accounting_mode as mode,
-              fs.enabled_at as "enabledAt", fs.ledger_started_at as "ledgerStartedAt"
+              fs.enabled_at as "enabledAt", fs.ledger_started_at as "ledgerStartedAt",
+              coalesce(ev.new_value = 'false'::jsonb, false) as "adminOff",
+              case when ap.account_user_id is null then null
+                   else json_build_object('outcome', ap.new_value->>'outcome', 'reason', ap.reason, 'at', ap.created_at,
+                                          'dryRunId', ap.new_value->'dryRunId', 'realRunId', ap.new_value->'realRunId') end as "autoProvision"
          from users u
          left join roles r on r.id = u.role_id
          left join finance_settings fs on fs.account_user_id = u.id
+         left join lateral (select e.new_value from finance_settings_events e
+                             where e.account_user_id = u.id and e.field = 'finance_v2_enabled'
+                             order by e.created_at desc, e.id desc limit 1) ev on true
+         left join lateral (select e.account_user_id, e.new_value, e.reason, e.created_at from finance_settings_events e
+                             where e.account_user_id = u.id and e.field = 'auto_provision'
+                             order by e.created_at desc, e.id desc limit 1) ap on true
         where u.owner_user_id is null and u.deleted_at is null
           and coalesce(r.key, '') not in ('super_admin', 'admin')
         order by u.id`,

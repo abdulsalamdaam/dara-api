@@ -6,6 +6,7 @@ import { riyadhToday, periodFor } from "./dates";
 import { LOCK_KEYS } from "./lock-keys";
 import { captureDims } from "./hooks/facts-loader";
 import { sqlOf } from "./hooks/sql";
+import { recordCollectedCutover } from "./commission-run";
 
 export interface SetupResult {
   accountsInserted: number;
@@ -60,6 +61,18 @@ export class FinanceSetupService {
       await c.query("rollback to savepoint fv2_dims");
     }
     return { accountsInserted, cashBankAccountId: cash, bankBankAccountId: bank };
+  }
+
+  /**
+   * A NEW Manager-mode settings row starts on the COLLECTED commission basis
+   * (the accountant's rule: month-end, rent collected before VAT × the
+   * landlord's rate), with this month as the cutover. Existing accounts keep
+   * what they have (DESIGN §9 E1 cutover). Shared by the admin switch and the
+   * automatic provisioning, which create the row the same way.
+   */
+  async startCollectedBasis(c: Fv2Client, userId: number, actorId: number | null): Promise<void> {
+    await c.query(`update finance_settings set commission_basis = 'collected' where account_user_id = $1`, [userId]);
+    await recordCollectedCutover(c, userId, actorId);
   }
 
   /**

@@ -45,6 +45,8 @@ export const LOCK_KEYS = {
   TRUST_OUTFLOW: -174,
   /** The installments screen's rent receipt (accountant #3): the coverage check and the RR- insert, serialised per account. */
   INSTALLMENT_RR: -190,
+  /** Automatic provisioning (plan-entitled accounts, auto-provision.service.ts): a SESSION try-lock held across the enable and its backfill, so two triggers never double-seed or double-backfill. */
+  AUTO_PROVISION: -192,
 } as const;
 
 export type LockKey = (typeof LOCK_KEYS)[keyof typeof LOCK_KEYS];
