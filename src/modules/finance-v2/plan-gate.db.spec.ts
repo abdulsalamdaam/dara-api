@@ -18,7 +18,7 @@ describe("finance v2 plan gate (real Postgres)", { skip: fv2DbSkip }, () => {
   before(async () => {
     t = await withDb();
     flag = new FinanceFlagService(t.pool as any);
-    for (const plan of ["basic", "tenant", "professional", "enterprise", "broker", "individual_owner"]) {
+    for (const plan of ["basic", "tenant", "professional", "enterprise", "broker"]) {
       const id = (await q(`insert into users (email, name, package_plan) values ($1, 'Synthetic', $2) returning id`, [`${plan}@example.test`, plan])).rows[0].id;
       ids[plan] = id;
       await q(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, enabled_at, ledger_started_at) values ($1, true, 'manager', now(), now())`, [id]);
@@ -30,9 +30,9 @@ describe("finance v2 plan gate (real Postgres)", { skip: fv2DbSkip }, () => {
   after(async () => t?.drop());
 
   const entitled = ["professional", "enterprise", "broker"];
-  const locked = ["basic", "tenant", "individual_owner"];
+  const locked = ["basic", "tenant"];
 
-  it("the flag service: effective off on basic/tenant (and their legacy alias), stored flag reported as on", async () => {
+  it("the flag service: effective off on basic/tenant, stored flag reported as on", async () => {
     for (const p of entitled) assert.equal(await flag.isOn(ids[p]), true, p);
     for (const p of locked) {
       const s = await flag.stateStrict(ids[p]);

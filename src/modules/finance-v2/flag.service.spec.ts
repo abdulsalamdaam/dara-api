@@ -91,7 +91,7 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
   });
 
   describe("plan gate (common/plan-features.ts): effective = stored flag && plan has accounting", () => {
-    for (const plan of ["basic", "tenant", "individual_owner"]) {
+    for (const plan of ["basic", "tenant"]) {
       it(`${plan}: stored flag on reads off, the stored value is still reported`, async () => {
         const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "manager", started: new Date(0), plan })).pool);
         const s = await f.state(1);
@@ -103,7 +103,7 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
         assert.equal((await f.stateStrict(1)).on, false);
       });
     }
-    for (const plan of ["professional", "enterprise", "advanced", "broker", null, "something-new"]) {
+    for (const plan of ["professional", "enterprise", "broker", null, "something-new"]) {
       it(`${plan}: stored flag on reads on`, async () => {
         const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "manager", started: null, plan })).pool);
         const s = await f.state(1);
@@ -132,9 +132,9 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
     it("fv2PlanEntitledSql excludes exactly the plan keys without accounting; a null plan stays entitled", () => {
       const sql = fv2PlanEntitledSql("s.account_user_id");
       assert.match(sql, /pu\.id = s\.account_user_id/);
-      assert.match(sql, /not in \('basic', 'individual_owner', 'tenant'\)$/);
+      assert.match(sql, /not in \('basic', 'tenant'\)$/);
       assert.match(sql, /coalesce\(/);
-      for (const k of ["professional", "enterprise", "advanced", "broker"]) assert.ok(!sql.includes(`'${k}'`), k);
+      for (const k of ["professional", "enterprise", "broker"]) assert.ok(!sql.includes(`'${k}'`), k);
     });
   });
 });

@@ -21,7 +21,7 @@ describe("planAllowedForUserType", () => {
   });
 
   it("leaves unrestricted plans open to both account types", () => {
-    for (const plan of ["basic", "advanced", "professional", "enterprise"]) {
+    for (const plan of ["basic", "professional", "enterprise"]) {
       assert.equal(planAllowedForUserType(plan, "individual"), true, plan);
       assert.equal(planAllowedForUserType(plan, "company"), true, plan);
       assert.equal(planRequiredUserType(plan), null, plan);

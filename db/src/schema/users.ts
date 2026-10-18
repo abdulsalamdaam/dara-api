@@ -49,8 +49,10 @@ export const usersTable = pgTable("users", {
   /** FK → roles.id. Source of role key + permissions + label. */
   roleId: integer("role_id"),
   /**
-   * Subscription package — "individual_owner" | "broker". Drives the
-   * landlord/property/unit quota limits (see src/common/packages.ts).
+   * Subscription package — a PackagePlan key (tenant | basic | professional |
+   * enterprise), or the "broker" default for an unassigned account, which
+   * resolves to professional. Drives seats and feature gates (see
+   * src/common/packages.ts).
    * Only meaningful on a top-level account; employees inherit the owner's.
    */
   packagePlan: text("package_plan").notNull().default("broker"),

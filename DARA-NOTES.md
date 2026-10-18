@@ -959,8 +959,11 @@ would strand everything filed in between.
 
 ## 3. Packages, roles and account classification
 
-- Packages: `tenant`, `basic`, `advanced` (legacy), `professional`,
-  `enterprise`. Two modes: `tenant` (self-tracker) and `landlord` (full portal).
+- Packages: `tenant`, `basic`, `professional`, `enterprise`. Two modes:
+  `tenant` (self-tracker) and `landlord` (full portal). `broker` is the
+  `users.package_plan` column default (an unassigned account) and resolves to
+  `professional` via `LEGACY_ALIASES`. The old `advanced` tier and the
+  `individual_owner` alias were dropped (Oct 2026; no rows used them).
 - **Quotas plus three feature gates** (`src/common/plan-features.ts`, Oct 2026).
   Every plan opens the same portal (no tab whitelist; `mode` shapes content,
   not access) and units/properties are unlimited; tiers differ by seats
@@ -970,8 +973,8 @@ would strand everything filed in between.
   | plan | `accounting` | `advanced_reports` | `custom_reports` |
   |---|---|---|---|
   | tenant, basic (عقاري) | ✗ | ✗ | ✗ |
-  | advanced (legacy), professional, enterprise | ✓ | ✓ | ✓ |
-  | null / unknown (→ DEFAULT_PACKAGE) | ✓ | ✓ | ✓ |
+  | professional, enterprise | ✓ | ✓ | ✓ |
+  | broker / null / unknown (→ professional) | ✓ | ✓ | ✓ |
 
   Always the ACCOUNT OWNER's plan (`users.package_plan` of `scopeId(user)`),
   like the seat quota. `requiredPlan` is always `professional`. Clients get

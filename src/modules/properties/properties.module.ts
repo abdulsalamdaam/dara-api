@@ -4,7 +4,7 @@ import {
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, notInArray, inArray, sql, or, ilike, count, asc, desc } from "drizzle-orm";
-import { deedsTable, propertiesTable, unitsTable, usersTable, ownersTable, contractsTable, contractUnitsTable } from "@dara/database";
+import { deedsTable, propertiesTable, unitsTable, ownersTable, contractsTable, contractUnitsTable } from "@dara/database";
 import {
   BOUNDS, LIMITS, applyBoolNonNull, applyForeignKey, applyFourDigitCode, applyInt,
   applyIntNonNull, applyOneOfNonNull, applyPercent, applyPostalCode, applyRequiredText,
@@ -450,9 +450,8 @@ class PropertiesController {
       if (clash) throw new ConflictException("الصك مرتبط بعقار آخر · This deed is already linked to another property");
     }
 
-    // Resolve the landlord when the form sends none:
-    //   1. Use the account's flagged default landlord, if any.
-    //   2. Otherwise, individual-owner accounts auto-link their sole landlord.
+    // Resolve the landlord when the form sends none: use the account's
+    // flagged default landlord, if any.
     let ownerId: number | null = foreignKeyId(body.ownerId, "المؤجر");
     if (ownerId != null) await this.assertOwnerInScope(ownerId, owner);
     if (ownerId == null) {
@@ -462,18 +461,6 @@ class PropertiesController {
         .orderBy(asc(ownersTable.id))
         .limit(1);
       ownerId = def?.id ?? null;
-    }
-    if (ownerId == null) {
-      const [u] = await this.db.select({ packagePlan: usersTable.packagePlan })
-        .from(usersTable).where(eq(usersTable.id, owner));
-      if (u?.packagePlan === "individual_owner") {
-        const [soleOwner] = await this.db.select({ id: ownersTable.id })
-          .from(ownersTable)
-          .where(and(eq(ownersTable.userId, owner), isNull(ownersTable.deletedAt)))
-          .orderBy(asc(ownersTable.id))
-          .limit(1);
-        ownerId = soleOwner?.id ?? null;
-      }
     }
 
     // Resolve the property type to a lookup FK; if it matches no option, keep

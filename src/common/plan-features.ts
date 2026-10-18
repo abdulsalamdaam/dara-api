@@ -2,8 +2,8 @@
  * Package feature gates — what a plan unlocks beyond its quotas.
  *
  * The analysis features are exclusive to المكاتب العقارية (`professional`) and
- * الشركات (`enterprise`); the legacy `advanced` tier is grandfathered in, and a
- * null/unknown plan resolves to DEFAULT_PACKAGE (professional) as everywhere
+ * الشركات (`enterprise`). A null/unknown plan — and the `broker` column
+ * default — resolves to DEFAULT_PACKAGE (professional) as everywhere
  * else in packages.ts, so nobody is locked out by a missing value.
  *
  * Always resolve with the ACCOUNT OWNER's plan (`users.package_plan` of
@@ -30,7 +30,6 @@ const ALL: readonly PlanFeature[] = PLAN_FEATURE_KEYS;
 const FEATURES_BY_PLAN: Record<PackagePlan, readonly PlanFeature[]> = {
   tenant: [],
   basic: [],
-  advanced: ALL,
   professional: ALL,
   enterprise: ALL,
 };

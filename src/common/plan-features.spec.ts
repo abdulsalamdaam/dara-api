@@ -16,14 +16,13 @@ describe("plan features (pricing table → enforcement)", () => {
     }
   });
 
-  it("professional, enterprise and the grandfathered advanced unlock everything", () => {
-    for (const p of ["professional", "enterprise", "advanced"]) assert.deepEqual(planFeatures(p), ["accounting", "advanced_reports", "custom_reports"]);
+  it("professional and enterprise unlock everything", () => {
+    for (const p of ["professional", "enterprise"]) assert.deepEqual(planFeatures(p), ["accounting", "advanced_reports", "custom_reports"]);
   });
 
-  it("null / unknown resolve to DEFAULT_PACKAGE (professional): unlocked; legacy aliases follow their tier", () => {
+  it("null / unknown resolve to DEFAULT_PACKAGE (professional): unlocked; broker (column default) follows professional", () => {
     for (const p of [null, undefined, "", "nope"]) assert.equal(planHasFeature(p, "accounting"), true, String(p));
     assert.equal(planHasFeature("broker", "advanced_reports"), true);
-    assert.equal(planHasFeature("individual_owner", "advanced_reports"), false);
   });
 
   it("returns a fresh array each time", () => {
@@ -42,7 +41,7 @@ describe("plan features (pricing table → enforcement)", () => {
   });
 
   it("planKeysWithout lists stored keys (incl. legacy aliases) that lack the feature", () => {
-    assert.deepEqual(planKeysWithout("accounting"), ["basic", "individual_owner", "tenant"]);
+    assert.deepEqual(planKeysWithout("accounting"), ["basic", "tenant"]);
   });
 
   it("the 403 body", () => {

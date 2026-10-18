@@ -15,7 +15,7 @@ describe("resolveEjarScope", () => {
   });
 
   it("leaves landlord packages unscoped", async () => {
-    for (const plan of ["basic", "professional", "enterprise", "advanced"]) {
+    for (const plan of ["basic", "professional", "enterprise"]) {
       const scope = await resolveEjarScope(dbReturning({ packagePlan: plan, commercialReg: "7030955236" }), 1);
       assert.equal(scope.locked, false, plan);
     }

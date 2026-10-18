@@ -9,7 +9,7 @@
 
 import { daraSeller, isTaxInvoice, SUBSCRIPTION_VAT_RATE } from "./dara-seller";
 
-export type PackagePlan = "tenant" | "basic" | "advanced" | "professional" | "enterprise";
+export type PackagePlan = "tenant" | "basic" | "professional" | "enterprise";
 
 /** Two product modes: the tenant self-tracker vs the full landlord portal. */
 export type PackageMode = "tenant" | "landlord";
@@ -75,17 +75,6 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
     maxUnits: UNLIMITED,
     maxUsers: 2,
   },
-  // Legacy tier — not offered anymore; mapped to the closest current limits.
-  advanced: {
-    key: "advanced",
-    labelAr: "المتقدمة",
-    labelEn: "Advanced",
-    mode: "landlord",
-    maxLandlords: UNLIMITED,
-    maxProperties: UNLIMITED,
-    maxUnits: UNLIMITED,
-    maxUsers: 3,
-  },
   professional: {
     key: "professional",
     labelAr: "المكاتب العقارية",
@@ -111,9 +100,11 @@ export const PACKAGES: Record<PackagePlan, PackageDef> = {
 /** Existing/unassigned accounts fall back to this — never lock anyone out. */
 export const DEFAULT_PACKAGE: PackagePlan = "professional";
 
-/** Pre-tier plan keys map onto the closest new tier (kept for old rows). */
+/**
+ * Pre-tier plan keys map onto the closest new tier. `broker` is still the
+ * `users.package_plan` column default (an unassigned account), so it stays.
+ */
 export const LEGACY_ALIASES: Readonly<Record<string, PackagePlan>> = {
-  individual_owner: "basic",
   broker: "professional",
 };
 
@@ -209,7 +200,6 @@ export function purchasableCycle(v: unknown): BillingCycle {
 export const PLAN_YEARLY_PRICE: Record<PackagePlan, number | null> = {
   tenant: 1000,
   basic: 4200,
-  advanced: 4200,
   professional: 5400,
   enterprise: null,
 };
@@ -224,7 +214,6 @@ export const PLAN_YEARLY_PRICE: Record<PackagePlan, number | null> = {
 export const PLAN_EJAR_LOOKUPS_PER_YEAR: Record<PackagePlan, number | null> = {
   tenant: 30,
   basic: 90,
-  advanced: 90,
   professional: 150,
   enterprise: null,
 };
