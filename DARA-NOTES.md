@@ -995,6 +995,10 @@ would strand everything filed in between.
     close the gap. `/finance/v2/status` adds `planLocked` / `requiredPlan`;
     the admin finance-v2 list shows `planLocked` / `effective` next to the
     stored `enabled`.
+    Buying `professional` does NOT set the stored flag — Finance v2 is still
+    switched on per account by an admin (toggle + backfill), and the web's
+    accounting upsell says so. Admin backfill / ledger-start still read the
+    stored flag, so an admin can start a ledger on a plan-locked account.
   - `custom_reports` = the web's custom report builder (client-side over list
     data, so the API only advertises it).
 - **Billing cycles:** quarterly (default), semiannual and yearly, priced from a
