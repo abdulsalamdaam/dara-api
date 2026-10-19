@@ -73,7 +73,7 @@ export const BOX_LABELS: Record<number, { ar: string; en: string }> = {
   11: { ar: "المشتريات المعفاة", en: "Exempt purchases" },
   12: { ar: "إجمالي المشتريات", en: "Total purchases" },
   13: { ar: "إجمالي ضريبة القيمة المضافة المستحقة عن الفترة الحالية", en: "Total VAT due for current period" },
-  14: { ar: "تصحيحات من الفترات السابقة (بين ±5,000 ريال)", en: "Corrections from previous period (between SAR ±5,000)" },
+  14: { ar: "تصحيحات من الفترات السابقة (بين ±5,000 ر.س)", en: "Corrections from previous period (between SAR ±5,000)" },
   15: { ar: "ضريبة القيمة المضافة المرحّلة من الفترات السابقة", en: "VAT credit carried forward from previous period(s)" },
   16: { ar: "صافي الضريبة المستحقة (أو المطالب بها)", en: "Net VAT due (or claimed)" },
 };

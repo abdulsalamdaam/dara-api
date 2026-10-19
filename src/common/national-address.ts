@@ -31,3 +31,25 @@ export function assertNationalAddress(body: any): void {
     throw new BadRequestException("الرمز البريدي يجب أن يكون 5 أرقام · Postal code must be 5 digits");
   }
 }
+
+/**
+ * Tenant variant (business-owner note #7). The full address is required only
+ * where ZATCA needs a buyer address — a company tenant or a VAT-registered one
+ * (`taxNumber` set): their invoices are STANDARD (B2B). An individual without
+ * VAT gets a simplified invoice that carries no buyer address, so the address
+ * is optional there: empty or partial is accepted, but a postal code that is
+ * given must still be 5 digits. Mirrors the web's `validateNationalAddress`
+ * with `required: company || vatRegistered`. Landlords keep the full rule.
+ */
+export function assertTenantNationalAddress(body: any): void {
+  if (body?.isDraft) return;
+  const hasVat = body?.taxNumber != null && String(body.taxNumber).trim() !== "";
+  if (body?.type === "company" || hasVat) {
+    assertNationalAddress(body);
+    return;
+  }
+  const pc = body?.postalCode == null ? "" : String(body.postalCode).trim();
+  if (pc && !/^\d{5}$/.test(pc)) {
+    throw new BadRequestException("الرمز البريدي يجب أن يكون 5 أرقام · Postal code must be 5 digits");
+  }
+}

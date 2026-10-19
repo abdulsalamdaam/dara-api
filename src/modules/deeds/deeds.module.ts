@@ -17,6 +17,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { assertDeedNumberFormat, assertDeedUpdateFormat, toLatinDigits } from "../../common/deed-number";
 
 /**
  * Deeds (الصكوك) — property title documents.
@@ -27,38 +28,7 @@ import { scopeId } from "../../common/scope";
  * the same convention as the rest of the codebase.
  */
 
-/**
- * Deed-number format (business-owner test, 19 Oct 2026: "رقم الصك يجب حده بعدد").
- * Digits only (Arabic-Indic digits are normalised to Latin first). An
- * electronic deed — the format every new Saudi deed is issued in — is exactly
- * 12 digits; older paper deeds, hujjat esthkam and registry deeds vary in
- * length, so they are only capped. Checked on create, and on edit only when
- * the number actually changes, so rows saved before this rule (and Ejar
- * imports, which never pass through here) can still be edited.
- */
-const ELECTRONIC_DEED_DIGITS = 12;
-const MAX_DEED_DIGITS = 20;
-function toLatinDigits(v: unknown): unknown {
-  return typeof v === "string"
-    ? v.replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-       .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
-    : v;
-}
-function assertDeedNumberFormat(deedNumber: string, deedType: string | null | undefined): void {
-  if (!/^\d+$/.test(deedNumber)) {
-    throw new BadRequestException("رقم الصك يقبل الأرقام فقط · Deed number must contain digits only");
-  }
-  if ((deedType ?? "electronic") === "electronic" && deedNumber.length !== ELECTRONIC_DEED_DIGITS) {
-    throw new BadRequestException(
-      `رقم الصك الإلكتروني يتكون من ${ELECTRONIC_DEED_DIGITS} رقماً · An electronic deed number is ${ELECTRONIC_DEED_DIGITS} digits`,
-    );
-  }
-  if (deedNumber.length > MAX_DEED_DIGITS) {
-    throw new BadRequestException(
-      `رقم الصك لا يتجاوز ${MAX_DEED_DIGITS} رقماً · Deed number is at most ${MAX_DEED_DIGITS} digits`,
-    );
-  }
-}
+// Deed-number format rule lives in common/deed-number.ts (shared with bulk import).
 
 const deedCreateSchema = z.object({
   deedNumber: z.preprocess(toLatinDigits, z.string().trim().min(1, "رقم الصك مطلوب · Deed number is required")),
@@ -90,7 +60,10 @@ const deedCreateSchema = z.object({
 });
 type DeedCreateInput = z.infer<typeof deedCreateSchema>;
 
-const deedUpdateSchema = deedCreateSchema.partial();
+// No default on edit: zod v4 applies a default inside .partial(), so a PATCH
+// without deedType silently turned a paper deed electronic (and tripped the
+// format check on every legacy paper deed).
+const deedUpdateSchema = deedCreateSchema.extend({ deedType: z.string().trim().min(1) }).partial();
 
 /**
  * Pagination + search query params, extending the shared schema so `page`,
@@ -278,15 +251,14 @@ class DeedsController {
     const body = this.parseOrThrow(deedUpdateSchema, rawBody);
     const owner = scopeId(user);
 
-    // A changed number must meet the format rule; an unchanged legacy one is
-    // let through so old rows stay editable.
-    if (body.deedNumber) {
+    // A changed number OR type must leave a valid number+type pair (a
+    // type-only paper→electronic switch on an 8-digit number is refused); an
+    // edit touching neither lets a legacy row through so old rows stay editable.
+    if (body.deedNumber || body.deedType) {
       const [cur] = await this.db.select({ deedNumber: deedsTable.deedNumber, deedType: deedsTable.deedType })
         .from(deedsTable)
         .where(and(eq(deedsTable.id, id), eq(deedsTable.userId, owner), isNull(deedsTable.deletedAt)));
-      if (cur && cur.deedNumber !== body.deedNumber) {
-        assertDeedNumberFormat(body.deedNumber, body.deedType ?? cur.deedType);
-      }
+      assertDeedUpdateFormat(cur, body);
     }
 
     // If renaming, re-check uniqueness.

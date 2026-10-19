@@ -15,6 +15,8 @@ import { scopeId } from "../../common/scope";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import { buildInstallments } from "../contracts/installments";
 import { assertWithinQuota } from "../../common/quota"; // finance-v2: n/a — plan landlord cap
+import { BadRequestException } from "@nestjs/common"; // finance-v2: n/a — per-row deed-number error
+import { deedNumberFormatError, toLatinDigits } from "../../common/deed-number"; // finance-v2: n/a — deed-number rule
 
 /**
  * Bulk import — one spreadsheet row carries an owner + deed + property +
@@ -93,6 +95,21 @@ class ImportController {
   }
 
   private async importRow(scope: number, row: Row, res: RowResult) {
+    /* ── Deed number format — checked before anything is written ── finance-v2: n/a (deed rule)
+     * Same rule as POST /deeds (common/deed-number.ts): Arabic/Persian digits
+     * normalised to Latin (written back onto the row, so the deed step below
+     * saves the Latin form), digits only, 12 for an electronic deed. A number
+     * already on the account is linked as-is (legacy rows). */
+    if (str(row.deed_number)) {
+      row.deed_number = str(toLatinDigits(str(row.deed_number)));
+      const fmtErr = deedNumberFormatError(row.deed_number, str(row.deed_type) || "electronic");
+      if (fmtErr) {
+        const [existing] = await this.db.select({ id: deedsTable.id }).from(deedsTable)
+          .where(and(eq(deedsTable.userId, scope), eq(deedsTable.deedNumber, row.deed_number), isNull(deedsTable.deletedAt))).limit(1);
+        if (!existing) throw new BadRequestException(fmtErr);
+      }
+    }
+
     /* ── Owner (landlord) ── */
     let ownerId: number | null = null;
     let ownerName = "", ownerPhone: string | null = null, ownerEmail: string | null = null;

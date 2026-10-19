@@ -8,7 +8,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { assertNationalAddress } from "../../common/national-address";
+import { assertTenantNationalAddress } from "../../common/national-address";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
@@ -243,7 +243,7 @@ class TenantsController {
   @RequirePermissions(PERMISSIONS.TENANTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
-    assertNationalAddress(body);
+    assertTenantNationalAddress(body); // full address only for a company / VAT-registered tenant
     assertCompanyCommercialReg(body);
     // "This tenant is my own account" — claimable once, on create only, while
     // the account has no such record. See owners.create for the reasoning.
@@ -354,7 +354,7 @@ class TenantsController {
       const mergedType = body.type ?? prior.type ?? null;
       sanitizeTenantFields(merged, mergedType, false);
       assertCompanyCommercialReg({ type: mergedType, nationalId: merged.nationalId as string | null, isDraft: false });
-      assertNationalAddress({ ...merged, isDraft: false });
+      assertTenantNationalAddress({ ...merged, type: mergedType, isDraft: false });
       for (const f of FIELDS) {
         if (f in updateData) continue;
         if (!(f in merged)) continue;
