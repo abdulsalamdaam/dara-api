@@ -183,7 +183,7 @@ export const PLAN_MONTHLY_PRICE: Record<PackagePlan, number | null> = {
  * 1 SAR so the Moyasar flow can be exercised with real money cheaply.
  * Revert by deleting this flag / the early return below to restore real pricing.
  */
-export const TEST_FLAT_PRICE_SAR: number | null = 1;
+export const TEST_FLAT_PRICE_SAR: number | null = null;
 
 /** Amount charged (SAR) for a plan on the given cycle, or null if on-request. */
 export function planPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {
