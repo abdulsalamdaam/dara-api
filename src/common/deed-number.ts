@@ -5,7 +5,7 @@ import { BadRequestException } from "@nestjs/common";
  * Digits only (Arabic-Indic / Persian digits are normalised to Latin first).
  * An electronic deed — the format every new Saudi deed is issued in — is
  * exactly 12 digits; older paper deeds, hujjat esthkam and registry deeds
- * vary in length, so they are only capped.
+ * vary in length, so they have no length rule (account holder, 20 Oct 2026).
  *
  * Checked on create, on bulk import, and on edit whenever the number OR the
  * type changes (the resulting number+type pair is validated). An edit that
@@ -13,7 +13,6 @@ import { BadRequestException } from "@nestjs/common";
  * (and Ejar imports, which never pass through here) stay editable.
  */
 export const ELECTRONIC_DEED_DIGITS = 12;
-export const MAX_DEED_DIGITS = 20;
 
 export function toLatinDigits(v: unknown): unknown {
   return typeof v === "string"
@@ -29,9 +28,6 @@ export function deedNumberFormatError(deedNumber: string, deedType: string | nul
   }
   if ((deedType ?? "electronic") === "electronic" && deedNumber.length !== ELECTRONIC_DEED_DIGITS) {
     return `رقم الصك الإلكتروني يتكون من ${ELECTRONIC_DEED_DIGITS} رقماً · An electronic deed number is ${ELECTRONIC_DEED_DIGITS} digits`;
-  }
-  if (deedNumber.length > MAX_DEED_DIGITS) {
-    return `رقم الصك لا يتجاوز ${MAX_DEED_DIGITS} رقماً · Deed number is at most ${MAX_DEED_DIGITS} digits`;
   }
   return null;
 }

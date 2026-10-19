@@ -8,7 +8,7 @@ describe("deed number format", () => {
     assert.equal(deedNumberFormatError("123456789012", "electronic"), null);
     assert.ok(deedNumberFormatError("12345678", "electronic"));
     assert.equal(deedNumberFormatError("12345678", "paper"), null);
-    assert.ok(deedNumberFormatError("1".repeat(21), "paper"));
+    assert.equal(deedNumberFormatError("1".repeat(30), "paper"), null); // no length rule for paper deeds
     assert.ok(deedNumberFormatError("12a45678", "paper"));
     assert.throws(() => assertDeedNumberFormat("123", null)); // null type = electronic
   });

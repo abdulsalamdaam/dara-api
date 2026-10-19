@@ -116,7 +116,9 @@ describe("finance v2 auto-provisioning for plan-entitled accounts (real Postgres
   it("is idempotent: a second trigger and the sweep do nothing to a started account", async () => {
     const before = await q(`select (select count(*) from accounts where user_id = $1)::int a, (select count(*) from journal_entries where user_id = $1)::int j,
                                    (select count(*) from finance_backfill_runs where user_id = $1)::int r`, [A]);
-    assert.equal((await auto.ensure(A, "spec-again", { today: TODAY })).outcome, "not_eligible");
+    // Already started: a trigger only checks for documents the ledger is missing (none) and writes nothing.
+    assert.equal((await auto.ensure(A, "spec-again", { today: TODAY })).outcome, "up_to_date");
+    assert.equal((await auto.ensure(A, "sweep", { today: TODAY })).outcome, "not_eligible");
     assert.deepEqual((await auto.candidates(A)), []);
     const after = await q(`select (select count(*) from accounts where user_id = $1)::int a, (select count(*) from journal_entries where user_id = $1)::int j,
                                   (select count(*) from finance_backfill_runs where user_id = $1)::int r`, [A]);

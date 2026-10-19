@@ -19,6 +19,36 @@ const SWEEP_RETRY_HOURS = 20;
 const TRIGGER_RETRY_MINUTES = 10;
 /** The actor recorded for automatic changes (the repair sweep's backfill runs use 0 too). */
 export const AUTO_ACTOR = 0;
+/**
+ * Triggers that do NOT catch up an already-started ledger: the daily sweep (the
+ * 03:30 repair sweep does that for every started account) and /status (only
+ * signals accounts whose stored flag is off).
+ */
+const NO_CATCH_UP_TRIGGERS = new Set(["sweep", "status"]);
+/** How many missing events a catch-up lists (the count is always exact). */
+const CATCH_UP_LIST_CAP = 500;
+
+export type CatchUpOutcome =
+  | "would_post"            // dry run: `planned` would be posted
+  | "up_to_date"            // nothing is missing (nothing written)
+  | "caught_up"             // the missing events were posted
+  | "caught_up_with_errors" // posted, but some rows failed or are pending (posting-errors list)
+  | "not_eligible"          // the stored flag is off, the ledger has not started, or (automatic) the plan is not entitled
+  | "busy"                  // another provisioning / catch-up holds this account right now
+  | "error";                // the real catch-up run threw
+
+export interface CatchUpResult {
+  accountUserId: number;
+  outcome: CatchUpOutcome;
+  dryRun: boolean;
+  /** Events issued before activation (or while the plan locked it) that are not in the ledger or the outbox. */
+  missing: number;
+  /** The first CATCH_UP_LIST_CAP of them, in posting order. */
+  planned: Array<{ sourceType: string; sourceId: number; event: string; date: string; rule: string }>;
+  runId?: number;
+  entries?: number;
+  detail?: string;
+}
 
 export type AutoAction = "provision" | "backfill";
 
@@ -29,7 +59,9 @@ export type AutoOutcome =
   | "dry_run_error"        // enabled, ledger NOT started: the dry run threw
   | "not_eligible"         // not entitled / not a live customer account / admin turned it off / already started
   | "busy"                 // another trigger holds this account right now
-  | "throttled";           // auto-enabled but not started, and retried too recently
+  | "throttled"            // auto-enabled but not started, and retried too recently
+  | "caught_up"            // already started: the documents issued while it was off were posted (catch-up)
+  | "up_to_date";          // already started: nothing was missing
 
 export interface AutoResult {
   accountUserId: number;
@@ -233,7 +265,14 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
    */
   async ensure(accountUserId: number, trigger: string, opts: { today?: string; retryMinutes?: number } = {}): Promise<AutoResult> {
     const [first] = await this.candidates(accountUserId);
-    if (!first) return { accountUserId, outcome: "not_eligible", provisioned: false };
+    if (!first) {
+      // Already provisioned and started (e.g. a ledger that sat plan-locked until this upgrade): post what it missed.
+      if (NO_CATCH_UP_TRIGGERS.has(trigger)) return { accountUserId, outcome: "not_eligible", provisioned: false };
+      const c = await this.catchUp(accountUserId, trigger, { automatic: true, today: opts.today });
+      const outcome: AutoOutcome = c.outcome === "caught_up" || c.outcome === "caught_up_with_errors" ? "caught_up"
+        : c.outcome === "up_to_date" ? "up_to_date" : c.outcome === "busy" ? "busy" : "not_eligible";
+      return { accountUserId, outcome, provisioned: false, realRunId: c.runId, detail: c.detail };
+    }
     const retryMs = (opts.retryMinutes ?? TRIGGER_RETRY_MINUTES) * 60_000;
     if (first.action === "backfill" && first.lastAutoAt && this.now() - first.lastAutoAt.getTime() < retryMs) {
       return { accountUserId, outcome: "throttled", provisioned: false };
@@ -318,6 +357,83 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
         ? `Automatic backfill: dry run #${dry.runId} clean, real run #${real.runId} posted ${real.entries.count} entries; ledger started`
         : `Automatic backfill: ledger started, but real run #${real.runId} left ${after.why}; see posting errors`);
     return { accountUserId, outcome, provisioned, dryRunId: dry.runId, realRunId: real.runId, detail: after.clean ? undefined : after.why };
+  }
+
+  /**
+   * Catch-up for an account whose ledger has ALREADY started: everything issued
+   * before activation (or while the plan kept accounting off — the hooks do not
+   * enqueue then) that is neither in the ledger nor in the outbox is posted at
+   * its original date, through the existing backfill in `catchup` mode — the
+   * same extraction, keys and order as a full backfill on a fresh setup, so
+   * running it twice posts nothing twice. External settlements of a contract
+   * set to SKIP stay out (extract.ts). Closed periods get late entries, as the
+   * nightly repair sweep does.
+   *
+   *  - `dryRun`: lists what would be posted (rolled back; nothing is written,
+   *    not even a backfill-runs row).
+   *  - `automatic`: also requires the plan to include accounting (a trigger);
+   *    an admin can catch up a plan-locked account, as the admin backfill can.
+   * Nothing missing → nothing written. Holds the AUTO_PROVISION session lock.
+   */
+  async catchUp(
+    accountUserId: number, trigger: string,
+    opts: { dryRun?: boolean; automatic?: boolean; actorUserId?: number; today?: string } = {},
+  ): Promise<CatchUpResult> {
+    const dryRun = opts.dryRun === true;
+    const base = { accountUserId, dryRun, missing: 0, planned: [] as CatchUpResult["planned"] };
+    const [st] = (await this.pool.query(
+      `select coalesce(fs.finance_v2_enabled, false) and fs.ledger_started_at is not null as started,
+              ${fv2PlanEntitledSql("fs.account_user_id")} as entitled
+         from finance_settings fs where fs.account_user_id = $1`,
+      [accountUserId],
+    )).rows;
+    if (!st?.started || (opts.automatic && !st.entitled)) {
+      return { ...base, outcome: "not_eligible", detail: !st?.started ? "finance v2 is off or the ledger has not started" : "the plan does not include accounting" };
+    }
+    // The cached flag may still say off for a few seconds after an upgrade; live hooks should see it on now.
+    this.flag.invalidate(accountUserId);
+
+    const lockClient = await this.pool.connect();
+    let locked = false;
+    try {
+      locked = (await lockClient.query(`select pg_try_advisory_lock($1, $2) as ok`, [accountUserId, LOCK_KEYS.AUTO_PROVISION])).rows[0]?.ok === true;
+      if (!locked) return { ...base, outcome: "busy" };
+      const missing = await this.backfill.missingKeys(accountUserId, "0001-01-01", "9999-12-31", opts.today);
+      const listed = { ...base, missing: missing.length, planned: missing.slice(0, CATCH_UP_LIST_CAP) };
+      if (missing.length === 0) return { ...listed, outcome: "up_to_date" };
+      if (dryRun) return { ...listed, outcome: "would_post" };
+
+      const actor = opts.actorUserId ?? AUTO_ACTOR;
+      let run: BackfillSummary;
+      try {
+        run = await this.backfill.run({ userId: accountUserId, actorUserId: actor, mode: "catchup", dryRun: false, allowLate: true, today: opts.today });
+      } catch (err: any) {
+        const detail = String(err?.response?.error ?? err?.message ?? err).slice(0, 300);
+        await this.recordCatchUp(accountUserId, actor, { outcome: "error", trigger, missing: missing.length, detail }, `Catch-up failed (${detail})`);
+        return { ...listed, outcome: "error", detail };
+      }
+      const after = dryRunIsClean(run);
+      const outcome: CatchUpOutcome = after.clean ? "caught_up" : "caught_up_with_errors";
+      await this.recordCatchUp(accountUserId, actor, { outcome, trigger, runId: run.runId, events: run.events.new, entries: run.entries.count },
+        `Catch-up (${trigger}): run #${run.runId} added ${run.events.new} event(s) issued before activation, ${run.entries.count} entries`
+        + (after.clean ? "" : `; ${after.why}, see posting errors`));
+      if (run.events.new > 0) this.log.log(`finance v2 catch-up for scope ${accountUserId} (${trigger}): ${run.events.new} event(s), run #${run.runId}`);
+      return { ...listed, outcome, runId: run.runId, entries: run.entries.count, detail: after.clean ? undefined : after.why };
+    } finally {
+      let broken = false;
+      if (locked) {
+        await lockClient.query(`select pg_advisory_unlock($1, $2)`, [accountUserId, LOCK_KEYS.AUTO_PROVISION]).catch(() => { broken = true; });
+      }
+      lockClient.release(broken || undefined);
+    }
+  }
+
+  private async recordCatchUp(accountUserId: number, actor: number, value: Record<string, unknown>, reason: string): Promise<void> {
+    try {
+      await settingsEvent(this.pool, accountUserId, actor, "catch_up", null, value, reason.slice(0, 500));
+    } catch (err: any) {
+      this.log.warn(`finance v2 catch-up: could not record the outcome for scope ${accountUserId}: ${err?.message ?? err}`);
+    }
   }
 
   private async record(accountUserId: number, value: Record<string, unknown>, reason: string): Promise<void> {

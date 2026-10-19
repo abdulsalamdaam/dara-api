@@ -5,6 +5,7 @@ import { FinanceV2AdminService } from "../admin.service";
 import { PostingErrorsService } from "../posting-errors.service";
 import type { Fv2Request } from "../finance-v2.guard";
 import { BackfillService } from "../backfill/backfill.service";
+import { FinanceV2AutoProvisionService } from "../auto-provision.service";
 
 /** The switch and its support views (DESIGN §1.5, §10.2). Super admin only. */
 @Controller("admin/finance-v2")
@@ -14,7 +15,20 @@ export class FinanceV2AdminController {
     private readonly admin: FinanceV2AdminService,
     private readonly postingErrors: PostingErrorsService,
     private readonly backfill: BackfillService,
+    private readonly auto: FinanceV2AutoProvisionService,
   ) {}
+
+  /**
+   * Catch-up for an account whose ledger already started: posts every document,
+   * collection and installment event issued before activation (or while the plan
+   * kept accounting off) that the ledger is missing. Body: { dryRun?: boolean
+   * (default TRUE — lists what would be posted, writes nothing) }. Idempotent.
+   */
+  @Post(":accountUserId/catch-up")
+  @HttpCode(200)
+  catchUp(@Req() req: Fv2Request, @Param("accountUserId", ParseIntPipe) id: number, @Body() body: any) {
+    return this.auto.catchUp(id, "admin", { dryRun: body?.dryRun !== false, actorUserId: req.user!.id });
+  }
 
   /**
    * The backfill (DESIGN §6). Body: { mode: full|cutover|catchup, cutover?: YYYY-MM-DD,

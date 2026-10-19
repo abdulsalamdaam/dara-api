@@ -253,7 +253,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
     return this.inRollback(async (c) => {
       const s = await this.prepareSimulation(c, req.userId, mode);
       const since = await this.maxEntryId(c, req.userId);
-      const plan = await this.plan(c, req.userId, s, this.extractOpts(req, today), { origin: req.origin ?? "backfill", runId });
+      const plan = await this.plan(c, req.userId, s, this.extractOpts(req, today, s.goLive), { origin: req.origin ?? "backfill", runId });
       if (req.mode === "cutover") {
         await c.query(`update finance_settings set ledger_go_live_date = coalesce(ledger_go_live_date, $2) where account_user_id = $1`, [req.userId, req.cutover]);
         if (proposal) await this.insertMarkers(c, req.userId, proposal);
@@ -289,7 +289,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
           manualJournalId = await this.insertOpeningDraft(c, req.userId, req.actorUserId, proposal);
         }
       }
-      const p = await this.plan(c, req.userId, s, this.extractOpts(req, today), { origin: req.origin ?? "backfill", runId });
+      const p = await this.plan(c, req.userId, s, this.extractOpts(req, today, s.goLive), { origin: req.origin ?? "backfill", runId });
       await this.ledgerStart.markStarted(c, req.userId);
       return p;
     });
@@ -302,8 +302,12 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
 
   // ── planning and enqueue ────────────────────────────────────────────────
 
-  private extractOpts(req: BackfillRequest, today: string): ExtractOptions {
-    return { today, from: req.mode === "cutover" ? req.cutover : null };
+  /**
+   * `catchup` inserts only missing keys of the SAME history the ledger holds: on a cutover ledger
+   * that is from the go-live date (what came before is in the opening), as `missingKeys` reads it.
+   */
+  private extractOpts(req: BackfillRequest, today: string, goLive: string | null = null): ExtractOptions {
+    return { today, from: req.mode === "cutover" ? req.cutover : req.mode === "catchup" ? goLive : null };
   }
 
   /**
@@ -529,7 +533,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
   // ── catch-up check used by the period close (§8.1) ──────────────────────
 
   /** Keys a catch-up would add that are dated in [from, to]; nothing is written. */
-  async missingKeys(userId: number, from: string, to: string, today = riyadhToday()): Promise<Array<{ sourceType: string; sourceId: number; event: string; date: string }>> {
+  async missingKeys(userId: number, from: string, to: string, today = riyadhToday()): Promise<Array<{ sourceType: string; sourceId: number; event: string; date: string; rule: string }>> {
     return this.inRollback(async (c) => {
       const s = await loadSettings(sqlOf(c), userId);
       if (!s) return [];
@@ -541,7 +545,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
       }
       return events
         .filter((e) => e.occurredOn >= from && e.occurredOn <= to && !known.has(keyOf(e)))
-        .map((e) => ({ sourceType: e.sourceType, sourceId: e.sourceId, event: e.event, date: e.occurredOn }));
+        .map((e) => ({ sourceType: e.sourceType, sourceId: e.sourceId, event: e.event, date: e.occurredOn, rule: e.code }));
     });
   }
 

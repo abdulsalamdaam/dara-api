@@ -240,7 +240,7 @@ export function ejarLookupQuota(plan: string | null | undefined, cycle: BillingC
  * 1 SAR so the Moyasar flow can be exercised with real money cheaply.
  * Revert by deleting this flag / the early return below to restore real pricing.
  */
-export const TEST_FLAT_PRICE_SAR: number | null = 1;
+export const TEST_FLAT_PRICE_SAR: number | null = null;
 
 /** Price-list amount (SAR, VAT EXCLUDED) for a plan on a cycle, before any test override. */
 export function listPrice(plan: string | null | undefined, cycle: BillingCycle): number | null {

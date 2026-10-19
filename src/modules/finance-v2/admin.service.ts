@@ -5,6 +5,7 @@ import { FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-feature
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
+import { signalFv2Entitlement } from "./auto-provision-signal";
 
 export interface ToggleBody {
   enabled: boolean;
@@ -98,6 +99,9 @@ export class FinanceV2AdminService {
     });
 
     this.flag.invalidate(accountUserId);
+    // Re-enabling a started ledger: post what was issued while it was off (auto-provision.service.ts catchUp;
+    // async, never throws). A first enable is left to the admin's own backfill, which covers all history.
+    if (body.enabled) signalFv2Entitlement(accountUserId, "admin_enable");
     // Read-only: the stored flag is what was just set; the plan may still keep it effectively off.
     const st = await this.flag.state(accountUserId);
     const plan = { planLocked: st.planLocked === true, requiredPlan: st.planLocked ? FEATURE_REQUIRED_PLAN : null, effective: st.on };
