@@ -18,6 +18,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { riyadhToday } from "../../common/payment-status";
 import { notifyTenant } from "../../common/notify";
 import { TenantAuthGuard, type TenantPayload } from "../../common/guards/tenant-auth.guard";
 import { CurrentTenant } from "../../common/decorators/current-tenant.decorator";
@@ -473,7 +474,7 @@ export class PaymentConfirmationsController {
             items,
             subtotal: net.toFixed(2),
             total: gross.toFixed(2),
-            issueDate: new Date().toISOString().slice(0, 10),
+            issueDate: riyadhToday(),
             // The installment's own due date, which is what this invoice is
             // for. Left null, every invoice raised this way read as having no
             // due date and so never became overdue.

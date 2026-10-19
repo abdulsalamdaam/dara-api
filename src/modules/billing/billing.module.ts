@@ -18,6 +18,7 @@ import { UploadsModule } from "../uploads/uploads.module";
 import { listQuerySchema, wantsPagination, pageBounds, parseIdList, likeContains } from "../../common/pagination";
 import { contractFilterSql, parseContractFilter } from "../../common/contract-filter";
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
+import { riyadhToday } from "../../common/payment-status";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -46,7 +47,8 @@ const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
 const DEPOSIT_DESC = "تأمين (وديعة)";
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-const today = () => new Date().toISOString().slice(0, 10);
+// Riyadh, not UTC: between 00:00 and 03:00 Riyadh the UTC date is still yesterday.
+const today = () => riyadhToday();
 
 type LineItem = {
   description: string; quantity: number; unitPrice: number; amount: number; vat?: boolean;

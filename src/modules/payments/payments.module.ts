@@ -15,7 +15,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { liveStatus, liveStatusSql } from "../../common/payment-status";
+import { liveStatus, liveStatusSql, riyadhToday } from "../../common/payment-status";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks and v2 guards (DESIGN §5.1, §9 E7)
 
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
@@ -667,7 +667,7 @@ class PaymentsController {
     const remaining = round2(total - collectedBefore);
     if (amount > remaining + 0.01) throw new BadRequestException(`مبلغ التحصيل يتجاوز المتبقي (${remaining.toFixed(2)})`);
 
-    const collectedDate = body?.collectedDate || new Date().toISOString().slice(0, 10);
+    const collectedDate = body?.collectedDate || riyadhToday();
     const [collection] = await tx.insert(paymentCollectionsTable).values({
       paymentId: id,
       userId: scopeId(user),

@@ -58,3 +58,17 @@ describe("riyadhToday", () => {
     assert.match(riyadhToday(), /^\d{4}-\d{2}-\d{2}$/);
   });
 });
+
+describe("riyadhToday", () => {
+  it("is the Riyadh calendar date, not UTC's, between 00:00 and 03:00 Riyadh", () => {
+    // 01:30 Riyadh on 20 Oct = 22:30 UTC on 19 Oct. Vouchers, collections and
+    // notes stamped at that hour used to carry the 19th.
+    assert.equal(riyadhToday(new Date("2026-10-19T22:30:00Z")), "2026-10-20");
+  });
+
+  it("matches UTC once Riyadh and UTC share a date", () => {
+    assert.equal(riyadhToday(new Date("2026-10-20T12:00:00Z")), "2026-10-20");
+    assert.equal(riyadhToday(new Date("2026-10-20T20:59:59Z")), "2026-10-20");
+    assert.equal(riyadhToday(new Date("2026-10-20T21:00:00Z")), "2026-10-21");
+  });
+});

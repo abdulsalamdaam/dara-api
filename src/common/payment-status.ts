@@ -26,9 +26,9 @@ import { paymentsTable } from "@dara/database";
 export const SETTLED_STATUSES = ["paid", "cancelled", "settled_external", "partially_paid"] as const;
 
 /** Today's date in Asia/Riyadh as `YYYY-MM-DD`. */
-export function riyadhToday(): string {
+export function riyadhToday(now: Date = new Date()): string {
   // en-CA formats as YYYY-MM-DD, which is also how the column is stored.
-  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Riyadh" });
+  return now.toLocaleDateString("en-CA", { timeZone: "Asia/Riyadh" });
 }
 
 /** Derive an installment's status from its stored value and due date. */

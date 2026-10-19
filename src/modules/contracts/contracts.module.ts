@@ -180,6 +180,7 @@ import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
+import { riyadhToday } from "../../common/payment-status";
 import { buildInstallments, applyExternalSettlement, type FeeEntry } from "./installments";
 import {
   ADVANCE_NOTE, DEPOSIT_KIND, RECEIPT_KIND, classifyContractDocs, collectionsTotal,
@@ -728,7 +729,7 @@ class ContractsController {
     // on exempt residential rent, and headed for a ZATCA invoice.
     const rentVat = await this.resolveRentVat(body, Boolean(body.vatEnabled ?? false));
     // Draft contracts may be incomplete — fall back so NOT NULL columns hold.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = riyadhToday();
     const tenantName = body.tenantName || (isDraft ? "—" : body.tenantName);
     const startDate = dateOnly(body.startDate, "تاريخ بداية العقد") ?? today;
     const endDate = dateOnly(body.endDate, "تاريخ نهاية العقد") ?? today;
@@ -975,7 +976,7 @@ class ContractsController {
     const rows = this.buildScheduleRows(contract.id, p);
     const inserted = rows.length > 0 ? await db.insert(paymentsTable).values(rows).returning() : [];
 
-    const nowStr = new Date().toISOString().slice(0, 10);
+    const nowStr = riyadhToday();
     const startDay = p.startDate || nowStr;
 
     // Advance/prepaid rent → record as a collection on the earliest rent
@@ -1204,7 +1205,7 @@ class ContractsController {
       return { voucher: existing };
     }
 
-    const date = body?.paidDate || new Date().toISOString().slice(0, 10);
+    const date = body?.paidDate || riyadhToday();
     const method = body?.method || contract.depositMethod || "bank_transfer";
     const voucher = await this.createDepositVoucher(this.db, ownerId, contract, amt, date, method);
     await this.db.update(contractsTable)
@@ -1738,7 +1739,7 @@ class ContractsController {
     const unsettled = ["pending", "overdue", "partially_paid"] as any;
     if (mode === "paid") {
       await this.db.update(paymentsTable)
-        .set({ status: "paid", paidDate: now.toISOString().slice(0, 10) } as any)
+        .set({ status: "paid", paidDate: riyadhToday(now) } as any)
         .where(and(eq(paymentsTable.contractId, id), isNull(paymentsTable.deletedAt), inArray(paymentsTable.status, unsettled)));
     } else if (mode === "cancelled") {
       await this.db.update(paymentsTable)
@@ -1854,7 +1855,7 @@ class ContractsController {
     const id = requiredForeignKeyId(contractId, "رقم العقد");
     const ownerId = scopeId(user);
     const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = riyadhToday();
     const mode = body?.mode as string | undefined;
     const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: E25 — "mark as paid" refused (409) before any write
     this.fv2h?.refuseMarkPaid(fv2, mode); // finance-v2:
