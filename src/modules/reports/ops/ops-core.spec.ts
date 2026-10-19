@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import {
   OpsParamError, ROW_CAP, addDays, capRows, agingBucket, collectedOf, completionDate, contractStatusAt, daysBetween, daysOverdue, expiryBucket,
   inForceOn, instStatus, isIsoDate, lastOfMonth, monthsIn, occupancyDay, occupiedUnits, pct, remainingOf, resolveParams,
-  riyadhDate, riyadhToday, type ContractLike, type Installment,
+  riyadhDate, riyadhToday, countedInstallments, type ContractLike, type Installment,
 } from "./ops-core";
+import { externalSettlementMode, isSkippedExternal, skippedExternalRaw } from "../../../common/external-settlement";
 
 const inst = (o: Partial<Installment>): Installment => ({
   id: 1, contractId: 1, amount: 1000, dueDate: "2026-09-01", paidDate: null, status: "pending", collections: [], ...o,
@@ -216,5 +217,48 @@ describe("credit / debit notes (noteAdj)", () => {
     assert.equal(collectedOf(i), 800);
     assert.equal(remainingOf(i), 0);
     assert.equal(instStatus(i), "paid");
+  });
+});
+
+describe("externally-settled installments: count or skip (0084)", () => {
+  // Contract 1 counts them (the default), contract 2 skips them.
+  const list = [
+    inst({ id: 1, contractId: 1, status: "settled_external", paidDate: "2026-01-01", dueDate: "2026-01-01" }),
+    inst({ id: 2, contractId: 1, status: "pending", dueDate: "2026-02-01" }),
+    inst({ id: 3, contractId: 2, status: "settled_external", paidDate: "2026-01-01", dueDate: "2026-01-01" }),
+    inst({ id: 4, contractId: 2, status: "settled_external", paidDate: "2026-02-01", dueDate: "2026-02-01" }),
+    inst({ id: 5, contractId: 2, status: "paid", dueDate: "2026-03-01", collections: [{ date: "2026-03-02", amount: 1000 }] }),
+    inst({ id: 6, contractId: 2, status: "pending", dueDate: "2026-04-01" }),
+  ];
+  const due = (xs: Installment[]) => xs.reduce((s, i) => s + i.amount, 0);
+  const collected = (xs: Installment[]) => xs.reduce((s, i) => s + collectedOf(i), 0);
+
+  it("no skip contract leaves the list untouched (same array)", () => {
+    assert.equal(countedInstallments(list, new Set()), list);
+  });
+  it("a skip contract drops its settled_external rows only — due and collected together", () => {
+    const out = countedInstallments(list, new Set([2]));
+    assert.deepEqual(out.map((i) => i.id), [1, 2, 5, 6]);
+    // all counted: 6,000 due / 4,000 collected (three external + one paid); with contract 2 skipping: 4,000 / 2,000
+    assert.deepEqual([due(list), collected(list)], [6000, 4000]);
+    assert.deepEqual([due(out), collected(out)], [4000, 2000]);
+  });
+  it("the collection rate is not distorted: the skipped contract's rate is its own platform collections", () => {
+    const own = countedInstallments(list, new Set([2])).filter((i) => i.contractId === 2);
+    assert.equal(pct(collected(own), due(own)), 50);
+  });
+  it("a live row of a skip contract still counts; a settled_external row of a count contract still counts", () => {
+    const out = countedInstallments(list, new Set([2]));
+    assert.ok(out.some((i) => i.id === 6));
+    assert.ok(out.some((i) => i.id === 1));
+  });
+  it("helpers: mode parsing, the in-memory check and the SQL predicate", () => {
+    assert.equal(externalSettlementMode("skip"), "skip");
+    assert.equal(externalSettlementMode(undefined), "count");
+    assert.equal(externalSettlementMode("SKIP"), "count");
+    assert.equal(isSkippedExternal("settled_external", "skip"), true);
+    assert.equal(isSkippedExternal("settled_external", "count"), false);
+    assert.equal(isSkippedExternal("paid", "skip"), false);
+    assert.match(skippedExternalRaw("x"), /x\.status::text = 'settled_external'.*external_settlement_mode = 'skip'/);
   });
 });

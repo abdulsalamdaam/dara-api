@@ -15,6 +15,7 @@ import { riyadhToday } from "../../common/payment-status";
 import { attachLookupLabels } from "../../common/lookups-resolve";
 import { invoiceQrSvg } from "../../common/zatca-qr";
 import { UploadsService } from "../uploads/uploads.service";
+import { skippedExternalSql } from "../../common/external-settlement"; // finance-v2: 0084
 
 /**
  * May this caller see data of a given kind on the two un-gated home routes
@@ -139,7 +140,7 @@ class LandlordMobileController {
    * against one is still real money that came in.
    */
   private buckets(
-    rows: { id: number; amount: string | null; dueDate: string | null; status: string }[],
+    rows: { id: number; amount: string | null; dueDate: string | null; status: string; skipExt?: boolean | null }[],
     collected: Map<number, number>,
   ) {
     const today = riyadhToday();
@@ -148,6 +149,7 @@ class LandlordMobileController {
       const amount = this.num(r.amount);
       collectedTotal += collected.get(r.id) ?? 0;
       if (r.status === "cancelled") continue;
+      if (r.skipExt) continue; // finance-v2: 0084 — settled outside the platform on a contract set to skip them: neither expected nor collected
       expected += amount;
       if (r.status === "paid" || r.status === "settled_external") continue;
       const remaining = this.round2(amount - (collected.get(r.id) ?? 0));
@@ -361,7 +363,8 @@ class LandlordMobileController {
     const activeContractsCount = contracts.filter((c) => c.status === "active").length;
     const monthlyRecurring = contracts.filter((c) => c.status === "active").reduce((s, c) => s + this.num(c.monthlyRent), 0);
 
-    const payments = await this.db.select({ id: paymentsTable.id, status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate, dueDate: paymentsTable.dueDate })
+    const payments = await this.db.select({ id: paymentsTable.id, status: paymentsTable.status, amount: paymentsTable.amount, paidDate: paymentsTable.paidDate, dueDate: paymentsTable.dueDate,
+      skipExt: skippedExternalSql }) // finance-v2: 0084
       .from(paymentsTable).where(and(eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
         ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])));
     // Collected money comes from the collection log, never from the status —
@@ -712,6 +715,7 @@ class LandlordMobileController {
         receiptNumber: paymentsTable.receiptNumber, description: paymentsTable.description,
         contractId: paymentsTable.contractId,
         contractNumber: contractsTable.contractNumber, tenantName: contractsTable.tenantName,
+        skipExt: skippedExternalSql, // finance-v2: 0084
       })
       .from(paymentsTable)
       .leftJoin(contractsTable, eq(contractsTable.id, paymentsTable.contractId))
@@ -759,6 +763,7 @@ class LandlordMobileController {
         contractNumber: r.contractNumber, tenantName: r.tenantName,
         collectedAmount: collected,
         receipts: receiptsByPayment.get(r.id) ?? [],
+        externalSkipped: r.skipExt === true, // finance-v2: 0084 — shown, but not counted
       };
     });
     // The summary counts MONEY, not statuses: what was collected (including a
@@ -767,7 +772,7 @@ class LandlordMobileController {
     // status instead dropped a part-paid installment out of every bucket —
     // recording 1,000 against a 57,500 overdue row took the whole 57,500 out of
     // "overdue" and added the 1,000 to nothing.
-    const money = this.buckets(rows.map((r) => ({ id: r.id, amount: r.amount, dueDate: r.dueDate, status: r.status as string })), collMap);
+    const money = this.buckets(rows.map((r) => ({ id: r.id, amount: r.amount, dueDate: r.dueDate, status: r.status as string, skipExt: r.skipExt })), collMap); // finance-v2: 0084
     const summary = {
       paid: money.collected,
       pending: money.pending,
@@ -959,7 +964,8 @@ class LandlordMobileController {
         ...(scope.contractIds ? [inArray(contractsTable.id, scope.contractIds)] : [])));
     const monthlyRecurring = contracts.filter((c) => c.status === "active").reduce((s, c) => s + this.num(c.monthlyRent), 0);
 
-    const payments = await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status, contractId: paymentsTable.contractId })
+    const payments = await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, dueDate: paymentsTable.dueDate, paidDate: paymentsTable.paidDate, status: paymentsTable.status, contractId: paymentsTable.contractId,
+      skipExt: skippedExternalSql }) // finance-v2: 0084
       .from(paymentsTable).where(and(eq(paymentsTable.userId, uid), isNull(paymentsTable.deletedAt),
         ...(scope.contractIds ? [inArray(paymentsTable.contractId, scope.contractIds)] : [])));
     const cols = await this.collectionsOf(payments.map((p) => p.id));
@@ -1025,6 +1031,7 @@ class LandlordMobileController {
       // "expected" bars (and the collection rate) balloon on any contract that
       // was cancelled and replaced by a renewal.
       if (p.status === "cancelled") continue;
+      if (p.skipExt) continue; // finance-v2: 0084 — skipped externally-settled rows are not expected
       const due = (p.dueDate || "").slice(0, 7);
       if (idx.has(due)) monthlySeries[idx.get(due)!].expected += this.num(p.amount);
     }
@@ -1160,7 +1167,7 @@ class LandlordMobileController {
     // Financial summary across the property's contracts.
     const cIds = contracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
+      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate, skipExt: skippedExternalSql }) // finance-v2: 0084
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
     // Derived, not stored — nothing ever writes 'overdue', so reading the
@@ -1229,7 +1236,7 @@ class LandlordMobileController {
     // Financial summary for this unit (across its contracts).
     const cIds = allContracts.map((c) => c.id);
     const pays = cIds.length
-      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate })
+      ? await this.db.select({ id: paymentsTable.id, amount: paymentsTable.amount, status: paymentsTable.status, dueDate: paymentsTable.dueDate, skipExt: skippedExternalSql }) // finance-v2: 0084
           .from(paymentsTable).where(and(inArray(paymentsTable.contractId, cIds), isNull(paymentsTable.deletedAt)))
       : [];
     // Derived, not stored — nothing ever writes 'overdue', so reading the

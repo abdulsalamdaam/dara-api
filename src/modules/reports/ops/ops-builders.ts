@@ -96,6 +96,7 @@ const NOTE = {
   terminatedUnlinked: { ar: "العقد المفسوخ تُفك وحداته عند الفسخ، لذا لا يُنسب إلى عقار ولا يظهر عند التصفية بالعقار أو المؤجر.", en: "A terminated contract has its units unlinked at termination, so it cannot be attributed to a property and drops out under a property or landlord filter." },
   firstUnit: { ar: "العقد متعدد الوحدات يُنسب مالياً إلى عقار أول وحدة فيه (وعند التصفية: أول وحدة له ضمن التصفية).", en: "A multi-unit contract's money is attributed to the property of its first unit (under a filter, its first unit inside the filter)." },
   external: { ar: "«محصّل خارج المنصة» = دفعات عقد قائم سُدّدت قبل إدارته على المنصة (أو أبلغت إيجار بسدادها). هي جزء من المستحق والمحصّل لأنها سُدّدت فعلاً، وتُقيَّد في الدفاتر المحاسبية كإيراد بعد تاريخ استحقاقها، لكنها لم تمرّ بسندات قبض المنصة.", en: "\"Collected outside the platform\" = installments of an existing contract paid before it was managed here (or reported paid by Ejar). They count as due and collected because they were paid, and the ledger books them as revenue after their due date, but no platform receipt voucher backs them." },
+  externalSkipped: { ar: "العقد المضبوط على «تجاهل المحصّل خارج المنصة» تُستبعد دفعاته المُسوّاة خارجياً من المستحق والمحصّل ونسبة التحصيل، ولا تُقيَّد في الدفاتر؛ تبقى ظاهرة في جدول دفعات العقد فقط.", en: "A contract set to \"skip collected outside the platform\" has its externally-settled installments left out of due, collected and the collection rate, and not posted to the ledger; they remain visible in the contract's payment schedule only." },
   notes: { ar: "إشعارات الدائن المعتمدة تُنقص المستحق على الدفعة المرتبطة بفاتورتها، وإشعارات المدين تزيده.", en: "Confirmed credit notes reduce, and debit notes increase, what is due on the installment their invoice covers." },
   annual: { ar: "الإيجار السنوي = الإيجار الشهري × 12 قبل الزيادات.", en: "Annual rent = monthly rent × 12, before escalation." },
 };
@@ -373,7 +374,7 @@ function landlordPortfolio(ds: OpsDataset, p: ResolvedParams): Body {
     notes: [
       { ar: "يظهر المؤجر الذي يملك عقاراً واحداً على الأقل في النطاق.", en: "Lists landlords who own at least one property in scope." },
       { ar: "الإشغال والعقود السارية في التاريخ المرجعي (اليوم افتراضياً).", en: "Occupancy and active contracts are as of the reference date (today by default)." },
-      NOTE.dueBasis, NOTE.firstUnit, NOTE.annual, NOTE.terminatedUnlinked, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
+      NOTE.dueBasis, NOTE.firstUnit, NOTE.annual, NOTE.terminatedUnlinked, NOTE.cancelled, NOTE.deposits, NOTE.drafts, NOTE.externalSkipped,
     ],
   };
 }
@@ -493,7 +494,7 @@ function propertyPerformance(ds: OpsDataset, p: ResolvedParams): Body {
       col("outstanding", "المتبقي", "Outstanding", "sar"), col("collectionRate", "نسبة التحصيل", "Collection rate", "pct"),
     ],
     rows, totals: t,
-    notes: [NOTE.occupancy, NOTE.dueBasis, NOTE.firstUnit, NOTE.annual, NOTE.terminatedUnlinked, NOTE.cancelled, NOTE.deposits, NOTE.drafts],
+    notes: [NOTE.occupancy, NOTE.dueBasis, NOTE.firstUnit, NOTE.annual, NOTE.terminatedUnlinked, NOTE.cancelled, NOTE.deposits, NOTE.drafts, NOTE.externalSkipped],
   };
 }
 
@@ -723,7 +724,7 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
     rows, totals: { due: t.billed, collected: t.collected, external, outstanding: t.outstanding },
     notes: [
       { ar: "تُجمع الدفعات حسب شهر استحقاقها؛ هذا تقرير تشغيلي من جدول الدفعات وليس دفتر المحاسبة.", en: "Installments are grouped by due month; this is an operational view of the installment schedule, not the accounting ledger." },
-      NOTE.dueBasis, NOTE.external, NOTE.notes, NOTE.overdue, NOTE.paidNoCollections, NOTE.firstUnit, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
+      NOTE.dueBasis, NOTE.external, NOTE.notes, NOTE.overdue, NOTE.paidNoCollections, NOTE.firstUnit, NOTE.cancelled, NOTE.deposits, NOTE.drafts, NOTE.externalSkipped,
     ],
   };
 }

@@ -222,7 +222,9 @@ export async function contractSummaryV2(q: Sql, scope: number, contractId: numbe
        left join finance_contract_dims d on d.contract_id = c.id and d.user_id = c.user_id
       where p.user_id = $1 and p.contract_id = $2 and p.deleted_at is null and c.deleted_at is null
         and p.due_date < $3::date and coalesce(p.description, '') <> $4
-        and not (c.status::text in ('terminated','cancelled') and d.ended_on is not null and p.due_date > d.ended_on)`,
+        and not (c.status::text in ('terminated','cancelled') and d.ended_on is not null and p.due_date > d.ended_on)
+        -- 0084: a contract set to SKIP its externally-settled rows bills and settles none of them
+        and not (p.status::text = 'settled_external' and c.external_settlement_mode = 'skip')`,
     [scope, contractId, today, DEPOSIT_DESC],
   );
   const [od] = await q.rows(

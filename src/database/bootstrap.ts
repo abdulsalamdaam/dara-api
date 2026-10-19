@@ -123,6 +123,20 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure login_logs.tenant_id/owner_id failed: ${err?.message || err}`);
     }
 
+    // Externally-settled installments, counted or skipped per contract (0084).
+    // Inline rather than read from the file: every contract query selects this
+    // column, so it must exist even when db/drizzle was not copied into the
+    // image. NOT NULL DEFAULT 'count' — every existing contract keeps today's
+    // behaviour.
+    try {
+      await client.query(`alter table contracts add column if not exists external_settlement_mode text not null default 'count'`);
+      await client.query(`do $$ begin
+        alter table contracts add constraint contracts_external_settlement_mode_check check (external_settlement_mode in ('count', 'skip'));
+      exception when duplicate_object then null; end $$`);
+    } catch (err: any) {
+      log.warn(`ensure contracts.external_settlement_mode failed: ${err?.message || err}`);
+    }
+
     // ZATCA link health. The taxpayer can remove our EGS device in the Fatoora
     // portal, and nothing tells us — the row keeps its certificate, so every
     // local check passes while every submission is refused. These two columns

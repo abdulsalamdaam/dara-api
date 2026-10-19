@@ -308,6 +308,7 @@ CREATE TABLE "contracts" (
 	"is_demo" boolean DEFAULT false NOT NULL,
 	"attachment_key" text,
 	"settled_external_until" date,
+	"external_settlement_mode" text DEFAULT 'count' NOT NULL,
 	"notes" text,
 	"deleted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

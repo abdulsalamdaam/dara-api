@@ -8,6 +8,7 @@ import {
   applyText, applyVatNumber, applyWith, applyWithNonNull, assertDateOrder, dateOnly, money,
   partyIdentityNumber, percent, requiredForeignKeyId, applyDraftPhone,
 } from "../../common/validation";
+import { EXTERNAL_SETTLEMENT_MODES } from "../../common/external-settlement"; // finance-v2: count or skip externally-settled installments (0084)
 
 const DEPOSIT_DESC = "تأمين (وديعة)";
 
@@ -118,6 +119,7 @@ function sanitizeContractFields(v: Record<string, unknown>, isDraft: boolean, es
   applyOneOf(v, "depositStatus", DEPOSIT_STATUSES, "حالة التأمين");
   applyBoolNonNull(v, "vatEnabled", "احتساب ضريبة القيمة المضافة");
   applyBoolNonNull(v, "isDraft", "مسودة");
+  applyOneOfNonNull(v, "externalSettlementMode", EXTERNAL_SETTLEMENT_MODES, "احتساب المحصّل خارج المنصة"); // finance-v2: 0084
 
   if (!isDraft) {
     applyWith(v, "tenantIdNumber", (raw) => partyIdentityNumber(raw, null, "رقم هوية المستأجر"));
@@ -200,6 +202,7 @@ const CONTRACT_FIELDS = [
   "landlordName", "landlordIdNumber", "landlordPhone", "landlordEmail",
   "landlordTaxNumber", "landlordAddress", "landlordPostalCode", "landlordAdditionalNumber", "landlordBuildingNumber",
   "status", "notes", "isDraft", "attachmentKey", "settledExternalUntil",
+  "externalSettlementMode", // finance-v2: count or skip the settled_external installments (0084)
 ] as const;
 
 @ApiTags("contracts")
@@ -445,6 +448,7 @@ class ContractsController {
       notes: contractsTable.notes,
       attachmentKey: contractsTable.attachmentKey,
       settledExternalUntil: contractsTable.settledExternalUntil,
+      externalSettlementMode: contractsTable.externalSettlementMode, // finance-v2: 0084
       isDraft: contractsTable.isDraft,
       createdAt: contractsTable.createdAt,
     };
@@ -812,6 +816,8 @@ class ContractsController {
       status: body.isDraft ? "pending" : "active",
       attachmentKey: body.attachmentKey ?? null,
       settledExternalUntil: settledExternalUntil,
+      // finance-v2: 0084 — only when sent, so a rebuild that omits it keeps the stored choice (a create gets the default 'count')
+      ...(body.externalSettlementMode !== undefined ? { externalSettlementMode: body.externalSettlementMode } : {}),
       notes: body.notes ?? null,
       isDraft,
       isDemo: false,
@@ -1334,6 +1340,7 @@ class ContractsController {
     // never a draft — a draft is exempt from the identity formats, the period
     // check and the rent check, none of which a live contract may skip.
     const p = await this.prepareContract(user, { ...body, isDraft: false });
+    if (p.values.externalSettlementMode === "skip") await this.fv2h?.guardExternalSkip(ownerId, id); // finance-v2: 0084 — refused when already in the ledger
 
     return this.db.transaction(async (tx) => {
       // The SAME lock the create path takes, in the same key space. Without it
@@ -1590,6 +1597,8 @@ class ContractsController {
     // `tenantId` is an integer FK; the sanitiser coerces and range-checks it
     // (and `null` still clears it) — `Number("abc")` used to reach the driver.
     sanitizeContractFields(updateData, willBeDraft, escalationType);
+    // finance-v2: 0084 — count → skip is refused once those installments are in the ledger (no reversal is invented)
+    if (updateData.externalSettlementMode === "skip" && (prior as any).externalSettlementMode !== "skip") await this.fv2h?.guardExternalSkip(ownerId, id); // finance-v2:
 
     /* ── Finalising a draft re-validates the WHOLE contract ──
      *

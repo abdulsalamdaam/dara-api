@@ -21,6 +21,7 @@ import type { Sql } from "./hooks/sql";
 import { riyadhToday } from "./dates";
 import { commissionCarriesVat } from "./account-seller";
 import { propertyBasis } from "./commission-basis";
+import { assertPlanAllowsCommission, planAllowsCommission } from "../../common/plan-features";
 
 /** Is 0070 applied (the monthly run's counted lines)? */
 async function hasRunItemsTable(q: Sql): Promise<boolean> {
@@ -158,6 +159,22 @@ export async function nextDocNumber(q: Sql, scope: number, prefix: string): Prom
   return `${prefix}-${String(Number(r?.m ?? 0) + 1).padStart(6, "0")}`;
 }
 
+/** The account holder's stored plan (`users.package_plan` of the scope id). */
+async function scopePlan(q: Sql, scope: number): Promise<string | null> {
+  const [u] = await q.rows(`select package_plan from users where id = $1`, [scope]);
+  return u?.package_plan ?? null;
+}
+
+/** Whether the account's plan issues commission (عقاري never does — plan-features.ts planAllowsCommission). */
+export async function scopeAllowsCommission(q: Sql, scope: number): Promise<boolean> {
+  return planAllowsCommission(await scopePlan(q, scope));
+}
+
+/** 403 CommissionNotInPlanException unless the account's plan issues commission. */
+export async function assertScopeAllowsCommission(q: Sql, scope: number): Promise<void> {
+  assertPlanAllowsCommission(await scopePlan(q, scope));
+}
+
 /**
  * Create the draft v2 commission document for an approved rent document
  * (idempotent: one COM per rent document number). Returns the new row's id,
@@ -166,6 +183,7 @@ export async function nextDocNumber(q: Sql, scope: number, prefix: string): Prom
 export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
   id: number; number: string; contractId: number | null; paymentId: number | null; paymentIds: number[] | null; dueDate: string | null;
 }): Promise<number | null> {
+  if (!(await scopeAllowsCommission(q, scope))) return null; // عقاري: never a COM-, whatever the flag or a stale fee %
   const paymentIds = rentDoc.paymentIds?.length ? rentDoc.paymentIds.map(Number) : rentDoc.paymentId ? [Number(rentDoc.paymentId)] : [];
   const plan = await planCommission(q, scope, { contractId: rentDoc.contractId, paymentIds });
   if (!plan) return null;

@@ -265,6 +265,17 @@ export type Installment = {
 /** Collected outside the platform before it went live (contract wizard's "existing contract" option, Ejar import). */
 export const isExternal = (i: Installment) => i.status === "settled_external";
 
+/**
+ * Migration 0084: a contract whose `external_settlement_mode` is 'skip' keeps
+ * its externally-settled installments in the schedule only. They leave every
+ * operational report — due AND collected together, so the collection rate is
+ * not distorted — while a live installment of the same contract still counts.
+ */
+export function countedInstallments(list: Installment[], skipContracts: ReadonlySet<number>): Installment[] {
+  if (!skipContracts.size) return list;
+  return list.filter((i) => !(isExternal(i) && skipContracts.has(i.contractId)));
+}
+
 /** Stored statuses that mean "fully settled", whether or not collection rows back it. */
 const FULLY_SETTLED = new Set(["paid", "settled_external"]);
 

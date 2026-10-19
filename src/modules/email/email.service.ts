@@ -121,7 +121,7 @@ export interface AdminRegistrationEmailPayload {
 export class EmailService {
   private readonly log = new Logger(EmailService.name);
   private readonly apiKey = process.env.RESEND_API_KEY || "";
-  private readonly from = process.env.RESEND_FROM || `Dara <hello@${SITE_DOMAIN}>`;
+  private readonly from = process.env.RESEND_FROM || `Dara <info@${SITE_DOMAIN}>`;
   private readonly adminEmail = process.env.ADMIN_NOTIFY_EMAIL || "";
   /**
    * Default Reply-To. Sending `noreply@`-style addresses tanks deliverability;

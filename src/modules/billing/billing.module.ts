@@ -40,6 +40,7 @@ import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acc
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
 import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
 import { parseEnumList } from "../../common/pagination"; // finance-v2: ?kind= filter on the documents list
+import { accountAllowsCommission, assertAccountAllowsCommission } from "../../common/account-plan"; // finance-v2: commission is Offices/Companies only (plan-features.ts planAllowsCommission)
 
 const DOC_TYPES = ["invoice", "credit", "debit"] as const;
 const DOC_STATUSES = ["draft", "confirmed", "cancelled"] as const;
@@ -1093,6 +1094,7 @@ class SimpleInvoicesController {
     if (docKind != null && !KNOWN_DOC_KINDS.has(docKind)) {
       throw new BadRequestException(`نوع المستند غير معروف: ${docKind} · Unknown document kind`);
     }
+    if (type === "invoice" && docKind === "commission") await assertAccountAllowsCommission(this.db, scopeId(user)); // finance-v2: no commission invoice on عقاري (403)
 
     if (type === "invoice" && !isTaxExemptKind(docKind) && paymentIds.length && !body?.billDeposit) {
       const linked = await this.db.select({ description: paymentsTable.description })
@@ -1249,6 +1251,7 @@ class SimpleInvoicesController {
    * the account is VAT-registered (its company carries a VAT number).
    */
   private async maybeCreateCommissionInvoice(uid: number, rentDoc: any, contractId: number) {
+    if (!(await accountAllowsCommission(this.db, uid))) return null; // finance-v2: عقاري never gets a COM-, even with a stale fee % from before a downgrade
     const [propRow] = await this.db.select({ pct: propertiesTable.managementFeePercent })
       .from(contractUnitsTable)
       .innerJoin(unitsTable, eq(contractUnitsTable.unitId, unitsTable.id))
@@ -1572,6 +1575,7 @@ class SimpleInvoicesController {
       .where(and(eq(simpleInvoicesTable.id, requiredForeignKeyId(id, "رقم المستند")), eq(simpleInvoicesTable.userId, uid), isNull(simpleInvoicesTable.deletedAt)));
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
+    if (doc.type === "invoice" && doc.kind === "commission") await assertAccountAllowsCommission(this.db, uid); // finance-v2: a COM- draft left from before a downgrade to عقاري is never issued (403)
     if (fv2 && isV2DocKind(doc.kind)) return this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); // finance-v2: E8/E9 — their own approve, never ZATCA
     refuseV2KindOnLegacyApprove(doc.kind); // finance-v2: EX-4 — a v2 kind never takes the tax-invoice path (flag off)
     await this.fv2h?.guardCommissionApprove(fv2, uid, doc); // finance-v2: §9 E8 — a VAT-bearing commission is never reported, so never approved

@@ -20,7 +20,8 @@ create table if not exists properties (id serial primary key, user_id integer no
 create table if not exists units (id serial primary key, property_id integer not null, deleted_at timestamptz);
 create table if not exists contracts (
   id serial primary key, user_id integer not null, status text not null default 'active', deleted_at timestamptz,
-  tenant_id integer, landlord_id_number text, landlord_name text, updated_at timestamptz not null default now()
+  tenant_id integer, landlord_id_number text, landlord_name text, updated_at timestamptz not null default now(),
+  external_settlement_mode text not null default 'count'
 );
 create table if not exists contract_units (id serial primary key, contract_id integer not null, unit_id integer not null);
 create table if not exists audit_logs (

@@ -22,7 +22,7 @@ import {
 } from "./__tests__/lookup-harness";
 import { EjarImportService, EjarImportRunner, type EjarImportRunnerLike } from "./ejar.import.service";
 import { DrizzleEjarLookupStore } from "./ejar.lookup.store";
-import type { ImportPlan, ImportResult } from "./ejar.import.writer";
+import { EjarImportWriter, type ImportPlan, type ImportResult } from "./ejar.import.writer";
 import { mapEjarToContract } from "./ejar.map";
 import { computeRequired, mapLookup } from "./ejar.lookup.map";
 import type { EjarBody, JsonApiResource } from "./ejar.types";
@@ -296,6 +296,43 @@ describe("POST /ejar/import (service)", () => {
     const fees = [{ id: "f1", typeKey: "maintenance", name: "صيانة", amount: "500", recurrence: "one_time" }];
     await svc.import(USER, { ...baseBody(), additionalFees: fees });
     assert.deepEqual(runner.plans[0].additionalFees, fees);
+  });
+
+  it("0084: the skip choice for Ejar-paid installments reaches the plan", async () => {
+    await seed();
+    await svc.import(USER, { ...baseBody(), externalSettlementMode: "skip" });
+    assert.equal(runner.plans[0].contract.externalSettlementMode, "skip");
+  });
+
+  it("0084: no choice (or an unknown value) is count", async () => {
+    await seed();
+    await svc.import(USER, { ...baseBody(), externalSettlementMode: "nonsense" });
+    assert.equal(runner.plans[0].contract.externalSettlementMode, "count");
+  });
+});
+
+describe("Ejar attach, flag off (0084)", () => {
+  // A fake Drizzle: the attach reads descriptions, then updates each matched row.
+  const fakeDb = (sets: Array<Record<string, unknown>>) => ({
+    select: () => ({ from: () => ({ where: async () => [{ id: 1, description: null }, { id: 2, description: null }] }) }),
+    update: () => ({ set: (v: Record<string, unknown>) => { sets.push(v); return { where: async () => undefined }; } }),
+  });
+  const invoice = (n: string, dueDate: string, status: string, remaining: string) =>
+    ({ id: n, number: n, dueDate, issueDate: null, lateDate: null, amount: "1000", remaining, status, scheduleNumber: null });
+  const rows = [{ id: 1, dueDate: "2026-01-01" }, { id: 2, dueDate: "2026-02-01" }];
+  const invoices = [invoice("I1", "2026-01-01", "مدفوعة", "0"), invoice("I2", "2026-02-01", "غير مدفوعة", "1000")];
+
+  it("count (default): an Ejar-paid row is stored paid, as before", async () => {
+    const sets: Array<Record<string, unknown>> = [];
+    await new EjarImportWriter(fakeDb(sets) as never).attachEjarInvoices(rows, invoices);
+    assert.equal(sets[0].status, "paid");
+    assert.equal(sets[0].paidDate, undefined);
+  });
+  it("skip: an Ejar-paid row is stored settled_external (paid date = due date), so the reports can leave it out", async () => {
+    const sets: Array<Record<string, unknown>> = [];
+    await new EjarImportWriter(fakeDb(sets) as never).attachEjarInvoices(rows, invoices, { skipExternal: true });
+    assert.deepEqual([sets[0].status, sets[0].paidDate], ["settled_external", "2026-01-01"]);
+    assert.notEqual(sets[1].status, "settled_external", "an unpaid invoice is untouched by the choice");
   });
 });
 

@@ -19,6 +19,7 @@ import {
 } from "./ejar.lookup.service";
 import { EjarImportWriter, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
+import { externalSettlementMode } from "../../common/external-settlement"; // finance-v2: 0084
 
 export const EJAR_IMPORT_RUNNER = Symbol("EJAR_IMPORT_RUNNER");
 
@@ -44,7 +45,7 @@ export class EjarImportRunner implements EjarImportRunnerLike {
     if (installments.length && plan.invoices.length) {
       try {
         if (fv2) await this.fv2h!.ejarAttachV2({ fv2, userId: ownerId }, installments, plan.invoices as any[]); // finance-v2: v2 replaces the attach step (E7)
-        else await new EjarImportWriter(this.db).attachEjarInvoices(installments, plan.invoices); // finance-v2: flag off → the legacy attach, unchanged
+        else await new EjarImportWriter(this.db).attachEjarInvoices(installments, plan.invoices, { skipExternal: plan.contract.externalSettlementMode === "skip" }); // finance-v2: flag off → the legacy attach (0084: skip stores Ejar-paid as settled_external)
       } catch {
         // The contract and its schedule are saved; only the invoice stamps are missing.
       }
@@ -387,7 +388,10 @@ export class EjarImportService {
     const plan: ImportPlan = {
       contractNumber,
       landlord, tenant, property, unit,
-      contract: this.contractFields(mapped, startDate, endDate, status, vatFallback, body?.contract?.notes),
+      contract: {
+        ...this.contractFields(mapped, startDate, endDate, status, vatFallback, body?.contract?.notes),
+        externalSettlementMode: externalSettlementMode(body?.externalSettlementMode), // finance-v2: 0084 — the user's choice for Ejar-paid installments
+      },
       additionalFees: Array.isArray(body?.additionalFees) ? body.additionalFees : [],
       invoices: summarizeInvoices(saved.invoicesBody as EjarBody | null),
     };

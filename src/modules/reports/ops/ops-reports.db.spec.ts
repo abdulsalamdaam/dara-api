@@ -201,6 +201,29 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     assert.deepEqual([byProp["Tower A"].collected, byProp["Tower A"].outstanding, byProp["بلا عقار مرتبط"].collected, byProp["بلا عقار مرتبط"].labelEn], [4900, 3600, 800, "No linked property"]);
   });
 
+  it("0084: a contract set to skip its externally-settled installments drops them from due AND collected (restored after)", async () => {
+    // I9 (500, settled_external) belongs to C3. Counted: due 9,300 / collected 5,700 / external 500.
+    await pool.query(`update contracts set external_settlement_mode = 'skip' where id = $1`, [ids.C3]);
+    try {
+      const r = await run(A, "collections_summary");
+      assert.deepEqual(r.totals, { due: 8800, collected: 5200, external: 0, outstanding: 3600 });
+      const k = kpis(r);
+      assert.deepEqual([k.external, k.collectionRate], [0, 59.1]);
+      assert.ok(r.notes!.some((n) => /تجاهل المحصّل خارج المنصة/.test(n.ar)), "the report says why");
+      const sched = await run(A, "installments_schedule", { from: d(-400), to: d(30) });
+      assert.ok(!sched.rows.some((x) => x.dueDate === d(-300) && x.amount === 500), "I9 is not in the operational schedule");
+      // Tenant balances: billed and collected drop together, outstanding is unchanged.
+      const tb = await run(A, "tenant_balances");
+      assert.deepEqual([tb.totals!.billed, tb.totals!.collected, tb.totals!.outstanding], [8800, 5200, 3600]);
+    } finally {
+      await pool.query(`update contracts set external_settlement_mode = 'count' where id = $1`, [ids.C3]);
+    }
+    const schedBack = await run(A, "installments_schedule", { from: d(-400), to: d(30) });
+    assert.ok(schedBack.rows.some((x) => x.dueDate === d(-300) && x.amount === 500), "counted again once restored");
+    const back = await run(A, "collections_summary");
+    assert.deepEqual(back.totals, { due: 9300, collected: 5700, external: 500, outstanding: 3600 });
+  });
+
   it("credit / debit notes on an installment's invoice change what is due", async () => {
     const pid = (await pool.query(`select id from payments where user_id = $1 and deleted_at is null order by id limit 1`, [B])).rows[0].id;
     const ins = (num: string, type: string, total: number, o: { pay?: number; ref?: string; status?: string } = {}) =>

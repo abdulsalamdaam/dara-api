@@ -96,3 +96,35 @@ export class PlanUpgradeRequiredException extends ForbiddenException {
     super(planUpgradeRequiredBody(feature, teaser));
   }
 }
+
+/**
+ * Commission (فاتورة عمولة, COM-…) — the office billing a landlord for managing
+ * his property — is an Offices/Companies activity: it rides on `accounting`,
+ * exactly as Finance v2's own commission run does (`fv2PlanEntitledSql`), so
+ * عقاري (`basic`) and `tenant` never issue one, by any path: the legacy paired
+ * commission on rent-invoice approval, a manual commission document, approving
+ * a commission draft left from before a downgrade, or the v2 month-end run.
+ * A stale `management_fee_percent` on a property does not change that.
+ *
+ * Same resolution as every other plan gate: the ACCOUNT OWNER's stored
+ * `users.package_plan` through resolvePackage — a trial is the plan it grants,
+ * an admin-assigned plan is that plan, null/unknown/`broker` → professional.
+ */
+export function planAllowsCommission(plan: string | null | undefined): boolean {
+  return planHasFeature(plan, "accounting");
+}
+
+export const COMMISSION_LOCK_MESSAGE_AR =
+  "فواتير العمولة متاحة في باقة «المكاتب العقارية» وباقة «الشركات» فقط، ولا تصدر في باقة «عقاري». قم بترقية باقتك لإصدارها.";
+
+/** The 403 a commission document answers with on a plan without it (same shape as every plan gate). */
+export class CommissionNotInPlanException extends ForbiddenException {
+  constructor() {
+    super({ ...planUpgradeRequiredBody("accounting"), message: COMMISSION_LOCK_MESSAGE_AR });
+  }
+}
+
+/** Throws CommissionNotInPlanException unless `plan` includes commission. */
+export function assertPlanAllowsCommission(plan: string | null | undefined): void {
+  if (!planAllowsCommission(plan)) throw new CommissionNotInPlanException();
+}

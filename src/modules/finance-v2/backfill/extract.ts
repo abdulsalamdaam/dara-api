@@ -55,7 +55,7 @@ export interface Note {
 
 export interface ExtractResult {
   events: PlannedEvent[];
-  /** Extraction-level findings for the dry-run report (cancelled_history, paid_without_collection, covered_by_opening). */
+  /** Extraction-level findings for the dry-run report (cancelled_history, paid_without_collection, covered_by_opening, external_skipped). */
   notes: Record<string, Note>;
 }
 
@@ -195,8 +195,9 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
 
   // ── Installments: due-date charges (E02), external settlements (E33), releases (E35) ──
   const pays = await q.rows<InstallmentRow & { created: string; doc_date: string | null; collected: string; has_col: boolean;
-    c_status: string; ended: string | null; charge_events: number; written_off: boolean; ejar_reported: string | null; ejar_partial_posted: string | null }>(
-    `select ${INSTALLMENT_COLS}, p.created_at::text as created, c.status::text as c_status,
+    c_status: string; ended: string | null; charge_events: number; written_off: boolean; ejar_reported: string | null; ejar_partial_posted: string | null;
+    ext_mode: string | null }>(
+    `select ${INSTALLMENT_COLS}, p.created_at::text as created, c.status::text as c_status, c.external_settlement_mode as ext_mode,
             to_char(coalesce(d.ended_on, case when c.status::text in ('terminated','cancelled') then (c.updated_at at time zone 'Asia/Riyadh')::date end),'YYYY-MM-DD') as ended,
             (select to_char(min(coalesce(si.issue_date, (si.confirmed_at at time zone 'Asia/Riyadh')::date)),'YYYY-MM-DD')
                from simple_invoices si where si.user_id = p.user_id and si.status = 'confirmed' and si.deleted_at is null
@@ -248,6 +249,12 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
     }
     if (p.ended && p.due > p.ended) continue;
     if (opts.from && p.due < opts.from) continue;
+    // 0084: an externally-settled row of a contract set to SKIP them is not charged — as the recognizer.
+    // (One live posting already charged is kept: switching to skip is refused while that is so.)
+    if (p.status === "settled_external" && p.ext_mode === "skip" && Number(p.charge_events) === 0) {
+      note(notes, "external_skipped", { sourceType: "payment", sourceId: p.id, date: p.due });
+      continue;
+    }
     if (p.status === "paid" && toHalalas(p.collected) < toHalalas(p.amount) && inRange(p.due)) {
       note(notes, "paid_without_collection", { sourceType: "payment", sourceId: p.id, date: p.due });
     }

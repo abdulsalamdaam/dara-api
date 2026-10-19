@@ -20,7 +20,7 @@ import {
 } from "@dara/database";
 import type { Drizzle } from "../../../database/database.module";
 import { DEPOSIT_DESC } from "../../contract-deposit/deposit-rules";
-import { riyadhDate, round2, type Installment } from "./ops-core";
+import { countedInstallments, riyadhDate, round2, type Installment } from "./ops-core";
 
 export type DsProperty = {
   id: number; name: string; ownerId: number | null; hasDeed: boolean;
@@ -96,6 +96,7 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
       landlordName: contractsTable.landlordName,
       startDate: contractsTable.startDate, endDate: contractsTable.endDate, monthlyRent: contractsTable.monthlyRent,
       paymentFrequency: contractsTable.paymentFrequency, status: contractsTable.status, updatedAt: contractsTable.updatedAt,
+      externalSettlementMode: contractsTable.externalSettlementMode,
     }).from(contractsTable)
       .where(contractScope)
       .orderBy(asc(contractsTable.id)),
@@ -223,7 +224,9 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
       byPay.set(c.paymentId, arr);
     }
     const adj = await noteAdjustments(db, uid, paysAll.map((p) => ({ id: p.id, amount: round2(num(p.amount)) })));
-    installments = pays.map((p) => {
+    // 0084: contracts set to skip their externally-settled installments.
+    const skipExternal = new Set(contractsRaw.filter((c) => c.externalSettlementMode === "skip").map((c) => c.id));
+    installments = countedInstallments(pays.map((p) => {
       const a = adj.get(p.id) ?? 0;
       return {
         id: p.id, contractId: p.contractId, amount: round2(Math.max(0, num(p.amount) + a)),
@@ -231,7 +234,7 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
         collections: byPay.get(p.id) ?? [],
         ...(a ? { noteAdj: round2(Math.max(0, num(p.amount) + a) - num(p.amount)) } : {}),
       };
-    });
+    }), skipExternal);
   }
 
   let maintenance: DsMaintenance[] = [];

@@ -512,6 +512,13 @@
       "when": 1792540800000,
       "tag": "0083_login_logs_subject",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792886400000,
+      "tag": "0084_contract_external_settlement_mode",
+      "breakpoints": true
     }
   ]
 }

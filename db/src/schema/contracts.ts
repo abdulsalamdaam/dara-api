@@ -113,6 +113,12 @@ export const contractsTable = pgTable("contracts", {
   // outside the portal. Those installments are generated as `settled_external`
   // (history only, excluded from all financial reporting).
   settledExternalUntil: date("settled_external_until"),
+  // What the reports and the ledger do with those `settled_external`
+  // installments (migration 0084): 'count' = they count as due + collected and
+  // the ledger books them (the default, and every pre-existing contract);
+  // 'skip' = they stay in the schedule only — left out of the operational
+  // reports and KPIs, and never posted to the ledger.
+  externalSettlementMode: text("external_settlement_mode").$type<"count" | "skip">().notNull().default("count"),
   notes: text("notes"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

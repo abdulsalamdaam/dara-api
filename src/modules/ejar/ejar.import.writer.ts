@@ -93,6 +93,7 @@ export class EjarImportWriter {
   async attachEjarInvoices(
     rows: Array<{ id: number; dueDate: string }>,
     invoices: EjarInvoiceRow[],
+    opts: { skipExternal?: boolean } = {}, // finance-v2: 0084
   ): Promise<void> {
     if (rows.length === 0 || invoices.length === 0) return;
     // Invoices are RENT: match rent rows only, each invoice once, so a fee on
@@ -104,13 +105,17 @@ export class EjarImportWriter {
     const descOf = new Map(described.map((d) => [d.id, d.description]));
     for (const { row, inv } of matchEjarInvoices(rows.map((r) => ({ ...r, description: descOf.get(r.id) ?? null })), invoices)) {
       // "مدفوعة جزئياً" is a part payment, never fully paid (issue 11b).
-      const status = mapEjarStatusLegacy(inv);
+      const legacyStatus = mapEjarStatusLegacy(inv);
+      // finance-v2: 0084 — on a contract set to SKIP them, an Ejar-paid row is stored `settled_external` (as v2 does),
+      // so the reports can leave it out; `paid` with no collection behind it would count as collected everywhere.
+      const status = opts.skipExternal && legacyStatus === "paid" ? "settled_external" : legacyStatus; // finance-v2:
       await this.db
         .update(paymentsTable)
         .set(
           onlyPresent({
             receiptNumber: inv.number,
             status: status as never,
+            ...(status === "settled_external" ? { paidDate: row.dueDate } : {}), // finance-v2: 0084
             // Deliberately no Ejar payment status here: the row's own `status`
             // column already carries it, and repeating "غير مدفوعة" in the
             // description froze a moment-in-time verdict into text that never
@@ -654,6 +659,7 @@ export class EjarImportWriter {
         vatEnabled: rentVat, // finance-v2: 11g — was always false
         status: status as never,
         notes: c.notes,
+        externalSettlementMode: c.externalSettlementMode === "skip" ? "skip" : "count", // finance-v2: 0084
         ejarRaw: c.ejarRaw,
         additionalFees: additionalFees.length ? (additionalFees as never) : null,
       })
@@ -751,6 +757,8 @@ export interface ImportPlan {
     vatFallback: boolean;
     notes: string | null;
     ejarRaw: Record<string, unknown> | null;
+    /** finance-v2: 0084 — count or skip the installments Ejar reports already paid (default count). */
+    externalSettlementMode?: "count" | "skip";
   };
   additionalFees: Array<Record<string, unknown>>;
   invoices: EjarInvoiceRow[];

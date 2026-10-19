@@ -12,7 +12,7 @@ import { riyadhToday, lastDayOfMonth, parseIsoDate } from "./dates";
 import { nextDocNumber } from "./commission";
 import { accountZatcaIntegrated, commissionCarriesVat } from "./account-seller";
 import { hasPropertyBasisTable, propertyBasis, setPropertyBasis } from "./commission-basis";
-import { effectiveFeeForProperty } from "./commission";
+import { assertScopeAllowsCommission, effectiveFeeForProperty } from "./commission";
 import { commissionSellerCheckById } from "./overrides/commission-approve";
 import {
   collectedLines, commissionSettings, landlordInfo, lineBase, monthLabel, monthSpan, planLandlord, previewMonth, previousMonth, rateResolver,
@@ -114,6 +114,7 @@ export class CommissionRunService implements OnModuleInit, OnModuleDestroy {
   async run(scope: number, actor: { id: number } | null, body: any, origin: "manual" | "scheduled" = "manual") {
     const span = monthSpan(body?.month);
     if (!span) throw bad("BAD_MONTH", "month must be YYYY-MM");
+    await assertScopeAllowsCommission(this.q(), scope); // عقاري: 403 before anything is computed (manual and scheduled)
     const only: number[] | null = Array.isArray(body?.ownerIds)
       ? body.ownerIds.map(Number).filter((n: number) => Number.isInteger(n) && n > 0) : null;
     const pv = await previewMonth(this.q(), scope, span.month);

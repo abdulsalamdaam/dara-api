@@ -24,6 +24,7 @@ import { assertPayoutWithinDue } from "../overrides/landlord-dues";
 import { createPayoutV2, type PayoutV2Result } from "../overrides/landlord-payout";
 import { fromHalalas } from "../money";
 import { trustRefusal, trustRefusalFor, type TrustTarget } from "../overrides/installment-docs";
+import { EXTERNAL_SKIP_POSTED, externalPostedCount } from "../external-skip";
 
 /** Tier 1 (§8.2 a): the optional "received into / paid from" account a legacy money route's body names. */
 export interface MoneyMeta {
@@ -136,6 +137,22 @@ export class FinanceV2Hooks {
       [scope, paymentId],
     );
     if (r.rowCount) throw new ConflictException(FV2_ERRORS.SETTLE_AGAIN);
+  }
+
+  /**
+   * 0084: PATCH/rebuild of a contract to `externalSettlementMode: 'skip'` —
+   * refused (409) while any of its `settled_external` installments is in the
+   * ledger (external-skip.ts). Runs whatever the flag says now: a ledger
+   * booked before the flag was switched off still holds those entries.
+   * A contract already on `skip` passes.
+   */
+  async guardExternalSkip(scope: number, contractId: number): Promise<void> {
+    if (!Number.isInteger(contractId)) return;
+    const q = this.sqlPool();
+    const [c] = await q.rows(`select external_settlement_mode as mode from contracts where id = $1 and user_id = $2 and deleted_at is null`, [contractId, scope]);
+    if (!c || c.mode === "skip") return;
+    const n = await externalPostedCount(q, scope, contractId);
+    if (n > 0) throw new ConflictException(EXTERNAL_SKIP_POSTED(n));
   }
 
   /** E23: generate-installments under v2 refuses to delete a charged or invoiced row. */

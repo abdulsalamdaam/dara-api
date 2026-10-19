@@ -26,6 +26,8 @@ export interface RecognizerSummary {
  *    Riyadh) that is not cancelled, deleted, a deposit row, after its ended
  *    contract's `ended_on`, before the cutover go-live date, already charged,
  *    covered by a confirmed charge document, or already queued;
+ *    An externally-settled row of a contract whose `external_settlement_mode`
+ *    is 'skip' (migration 0084) is not charged: it stays in the schedule only;
  *  - E33 `payment,<id>,settled_external` for a charged `settled_external` row,
  *    and E33 `payment,<id>,ejar_partial` for the part Ejar reported paid on a
  *    charged open row;
@@ -169,6 +171,8 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
         where p.user_id = $1 and p.deleted_at is null and c.deleted_at is null
           and p.due_date < $2::date
           and p.status::text <> 'cancelled'
+          -- 0084: an externally-settled row of a contract set to SKIP them is never charged (so never settled by E33 either)
+          and not (p.status::text = 'settled_external' and c.external_settlement_mode = 'skip')
           and coalesce(p.description, '') <> $3
           and ($4::date is null or p.due_date >= $4::date)
           and not (c.status::text in ('terminated','cancelled')
