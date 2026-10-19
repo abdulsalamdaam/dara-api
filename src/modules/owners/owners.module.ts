@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, ForbiddenException, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, ne, isNull, isNotNull, or, ilike, count, asc, desc, inArray, sql } from "drizzle-orm";
 import { ownersTable, contractsTable, ownerNotificationsTable } from "@dara/database";
@@ -300,6 +300,16 @@ class OwnersController {
     // The WHOLE prior row — finalising a draft re-checks the stored values too.
     const [prior] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, id), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
+    // The account holder's own landlord row IS the organisation's identity
+    // (seller on invoices / ZATCA: name, CR, VAT, IBAN, address) — the same
+    // data Settings → Company edits. owners.write alone is not enough: it
+    // takes company.manage, like PATCH /companies/me.
+    if (prior?.isAccountHolder && !(user.permissions ?? []).includes(PERMISSIONS.COMPANY_MANAGE)) {
+      throw new ForbiddenException({
+        statusCode: 403, code: "COMPANY_MANAGE_REQUIRED",
+        message: "بيانات المنشأة يعدّلها صاحب الحساب فقط · Only the account owner can edit the organisation's own details",
+      });
+    }
     const updateData: Record<string, unknown> = {};
     for (const f of FIELDS) if (body[f] !== undefined) updateData[f] = body[f];
     const willBeDraft = body.isDraft !== undefined ? Boolean(body.isDraft) : Boolean(prior?.isDraft);

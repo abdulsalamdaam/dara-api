@@ -303,15 +303,19 @@ function buyerBlockers(buyer: {
   name?: unknown; email?: unknown; phone?: unknown; idNumber?: unknown; type?: unknown;
   vatNumber?: unknown; street?: unknown; buildingNumber?: unknown; district?: unknown;
   city?: unknown; postalCode?: unknown;
-}): string[] {
+}, opts?: { consumerIdOptional?: boolean }): string[] {
   const missing: string[] = [];
   if (blank(buyer.name)) missing.push("name");
   if (blank(buyer.email)) missing.push("email");
   if (blank(buyer.phone)) missing.push("phone");
   // CR for a company, national ID or iqama for an individual. ZATCA's BT-46 on
   // a standard invoice, and the only way to tell two same-named customers apart
-  // on any of them.
-  if (blank(buyer.idNumber)) missing.push("idNumber");
+  // on any of them. An EXTERNAL individual with no VAT number gets a simplified
+  // (B2C) invoice, which identifies the buyer by name only — so there (and only
+  // there; tenant/landlord records keep their own rule) the ID is optional.
+  const consumer = opts?.consumerIdOptional
+    && String(buyer.type ?? "").trim() === "individual" && blank(buyer.vatNumber);
+  if (blank(buyer.idNumber) && !consumer) missing.push("idNumber");
   const type = String(buyer.type ?? "").trim();
   if (type !== "individual" && type !== "company") {
     missing.push("buyerType");
@@ -406,7 +410,7 @@ async function standaloneReadiness(
       idNumber: client.idNumber, type: client.type, vatNumber: client.vatNumber,
       street: client.street, buildingNumber: client.buildingNumber,
       district: client.district, city: client.city, postalCode: client.postalCode,
-    });
+    }, { consumerIdOptional: true });
     if (missing.length) {
       blockers.push({
         entity: "buyer", id: null,

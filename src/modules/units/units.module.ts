@@ -109,6 +109,9 @@ async function isMixedProperty(db: any, propertyUsageLookupId: number | null): P
   return row?.key === "mixed";
 }
 
+/** Raised when a live unit is created, or edited, without a positive area. */
+const AREA_REQUIRED_MSG = "مساحة الوحدة مطلوبة (م²) · Unit area is required";
+
 /** Raised when a mixed-use property's unit arrives without its own usage. */
 const USAGE_REQUIRED_MSG =
   "استخدام الوحدة مطلوب: العقار مسجَّل كـ (سكني - تجاري)، فلا يمكن اشتقاق استخدام الوحدة منه. " +
@@ -498,6 +501,12 @@ class UnitsController {
     if (!isDraft && values.usageLookupId == null && (await isMixedProperty(this.db, prop.usageLookupId))) {
       throw new BadRequestException(USAGE_REQUIRED_MSG);
     }
+    // Area is required on a live unit (business rule). Drafts are exempt, like
+    // `type`. Ejar imports write through their own writer, not this endpoint,
+    // so an Ejar unit that arrives without an area is not blocked.
+    if (!isDraft && !(Number(values.area) > 0)) {
+      throw new BadRequestException(AREA_REQUIRED_MSG);
+    }
 
     const [unit] = await this.db.insert(unitsTable).values(values as any).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
@@ -563,6 +572,11 @@ class UnitsController {
       if (nextUsage == null && (await isMixedProperty(this.db, unit0.propertyUsageLookupId ?? null))) {
         throw new BadRequestException(USAGE_REQUIRED_MSG);
       }
+    }
+    // An edit may not clear a live unit's area. Absent `area` is left alone,
+    // so older units (and Ejar units) that never had one can still be edited.
+    if (!willBeDraft && updateData.area !== undefined && !(Number(updateData.area) > 0)) {
+      throw new BadRequestException(AREA_REQUIRED_MSG);
     }
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [unit] = await this.db.update(unitsTable).set(updateData).where(eq(unitsTable.id, id)).returning();

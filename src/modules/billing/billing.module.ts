@@ -400,13 +400,29 @@ class SimpleInvoicesController {
     // Approved but no money against it yet.
     if (flag(rawQuery?.awaitingCollection)) {
       conds.push(eq(simpleInvoicesTable.status, "confirmed") as any);
-      conds.push(isNull(simpleInvoicesTable.paidDate) as any);
-      conds.push(isNull(simpleInvoicesTable.receiptNumber) as any);
       // finance-v2: R4-3 — not when every installment behind it is already paid (collected another way, e.g. a voucher)
       const behind = (a: string) => sql`(${sql.raw(a)}.id = ${simpleInvoicesTable.paymentId} or coalesce(${simpleInvoicesTable.paymentIds}, '[]'::jsonb) @> jsonb_build_array(${sql.raw(a)}.id))`;
-      conds.push(sql`(not exists (select 1 from payments p0 where p0.user_id = ${simpleInvoicesTable.userId} and ${behind("p0")})
+      const notYetCollected = and(
+        isNull(simpleInvoicesTable.paidDate),
+        isNull(simpleInvoicesTable.receiptNumber),
+        sql`(not exists (select 1 from payments p0 where p0.user_id = ${simpleInvoicesTable.userId} and ${behind("p0")})
         or exists (select 1 from payments p1 where p1.user_id = ${simpleInvoicesTable.userId} and p1.deleted_at is null
-                     and p1.status::text not in ('paid', 'settled_external') and ${behind("p1")}))` as any);
+                     and p1.status::text not in ('paid', 'settled_external') and ${behind("p1")}))`,
+      );
+      // …or a confirmed debit note raised it after it was collected (#17). On an
+      // installment-backed invoice the extra is what collect() books against the
+      // invoice only; on one with no installment it is net total − collected.
+      const notesNet = sql`coalesce((select sum(case when n.type = 'debit' then n.total else -n.total end) from simple_invoices n
+          where n.user_id = ${simpleInvoicesTable.userId} and n.billing_reference = ${simpleInvoicesTable.number}
+            and n.type in ('credit', 'debit') and n.status = 'confirmed' and n.deleted_at is null), 0)`;
+      const hasInstallment = sql`(${simpleInvoicesTable.paymentId} is not null or jsonb_array_length(case when jsonb_typeof(${simpleInvoicesTable.paymentIds}) = 'array' then ${simpleInvoicesTable.paymentIds} else '[]'::jsonb end) > 0)`;
+      const raisedByDebit = sql`(exists (select 1 from simple_invoices dn where dn.user_id = ${simpleInvoicesTable.userId}
+            and dn.billing_reference = ${simpleInvoicesTable.number} and dn.type = 'debit' and dn.status = 'confirmed' and dn.deleted_at is null)
+        and (case when ${hasInstallment}
+              then ${notesNet} - coalesce((select sum(pc.amount) from payment_collections pc where pc.invoice_id = ${simpleInvoicesTable.id} and pc.payment_id is null), 0)
+              else ${simpleInvoicesTable.total} + ${notesNet} - coalesce((select sum(pc.amount) from payment_collections pc where pc.invoice_id = ${simpleInvoicesTable.id}), 0)
+             end) > 0.01)`;
+      conds.push(or(notYetCollected, raisedByDebit) as any);
       // finance-v2: R4-3 — under v2 a confirmed commission was settled from the landlord's dues at approval
       if ((await this.fv2h?.resolve(scopeId(user))) === true) conds.push(or(isNull(simpleInvoicesTable.kind), ne(simpleInvoicesTable.kind, "commission")) as any);
     }
@@ -857,6 +873,19 @@ class SimpleInvoicesController {
          and (pc.invoice_id is null or pc.invoice_id = d.id or o.kind in ('receipt', 'deposit'))
        group by d.id`);
     for (const r of (Array.isArray(res) ? res : (res?.rows ?? [])) as Array<{ id: number; total: string }>) out.set(Number(r.id), Number(r.total ?? 0));
+    // Plus what was booked against the invoice only (no installment) — on an
+    // installment-backed invoice that is the debit-note extra collect() places
+    // once the installments are full; without it a voucher-collected
+    // installment would mask the extra and the invoice never read as paid.
+    const own: any = await db.execute(sql`
+      select pc.invoice_id as id, coalesce(sum(pc.amount), 0) as total
+        from payment_collections pc
+       where pc.user_id = ${uid} and pc.payment_id is null
+         and pc.invoice_id in (${sql.join(docIds.map((i) => sql`${i}`), sql`, `)})
+       group by pc.invoice_id`);
+    for (const r of (Array.isArray(own) ? own : (own?.rows ?? [])) as Array<{ id: number; total: string }>) {
+      if (out.has(Number(r.id))) out.set(Number(r.id), round2(out.get(Number(r.id))! + Number(r.total ?? 0)));
+    }
     return out;
   }
 
@@ -2261,6 +2290,32 @@ class SimpleInvoicesController {
       }).where(eq(paymentsTable.id, pid));
       applied = round2(applied + amt);
       toCollect = round2(toCollect - amt);
+    }
+
+    // A confirmed debit note raises what is owed on the invoice but not on the
+    // installment behind it, so the loop above cannot place that extra — it
+    // used to be dropped, leaving the debit amount uncollectable (business-owner
+    // note #17). Book it against the invoice only, up to the net debit not
+    // already collected that way. Bounded by the notes, never by a cancelled or
+    // settled installment, so the "nothing landed" guard below still holds.
+    if (ids.length && toCollect > 0.01) {
+      const notesAdj = round2(netTotal - Number(doc.total));
+      if (notesAdj > 0.01) {
+        const [ownOnly] = await tx.select({ total: sum(paymentCollectionsTable.amount) })
+          .from(paymentCollectionsTable)
+          .where(and(eq(paymentCollectionsTable.invoiceId, doc.id), isNull(paymentCollectionsTable.paymentId)));
+        const room = round2(notesAdj - Number(ownOnly?.total ?? 0));
+        const extra = round2(Math.min(room, toCollect));
+        if (extra > 0.01) {
+          await tx.insert(paymentCollectionsTable).values({
+            paymentId: null, userId: uid, amount: extra.toFixed(2), collectedDate: paidDate,
+            method, receiptNumber: receipt, invoiceId: doc.id, attachmentKey: body?.attachmentKey ?? null,
+            notes: body?.notes ?? `فاتورة ${doc.number}`,
+          } as any);
+          applied = round2(applied + extra);
+          toCollect = round2(toCollect - extra);
+        }
+      }
     }
 
     // Invoices not backed by an installment (commission / free invoices) still

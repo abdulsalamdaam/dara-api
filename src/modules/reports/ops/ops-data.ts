@@ -222,11 +222,16 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
       arr.push({ date: dstr(c.date), amount: round2(num(c.amount)) });
       byPay.set(c.paymentId, arr);
     }
-    installments = pays.map((p) => ({
-      id: p.id, contractId: p.contractId, amount: round2(num(p.amount)),
-      dueDate: dstr(p.dueDate), paidDate: p.paidDate ? dstr(p.paidDate) : null, status: p.status,
-      collections: byPay.get(p.id) ?? [],
-    }));
+    const adj = await noteAdjustments(db, uid, paysAll.map((p) => ({ id: p.id, amount: round2(num(p.amount)) })));
+    installments = pays.map((p) => {
+      const a = adj.get(p.id) ?? 0;
+      return {
+        id: p.id, contractId: p.contractId, amount: round2(Math.max(0, num(p.amount) + a)),
+        dueDate: dstr(p.dueDate), paidDate: p.paidDate ? dstr(p.paidDate) : null, status: p.status,
+        collections: byPay.get(p.id) ?? [],
+        ...(a ? { noteAdj: round2(Math.max(0, num(p.amount) + a) - num(p.amount)) } : {}),
+      };
+    });
   }
 
   let maintenance: DsMaintenance[] = [];
@@ -254,4 +259,40 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
     contracts: filtered ? contracts : allContracts,
     installments, maintenance,
   };
+}
+
+/**
+ * Per installment: the net of confirmed credit (−) and debit (+) notes that
+ * reference (by `billing_reference` = invoice number) the confirmed tax invoice
+ * covering it. An invoice covering several installments spreads its notes over
+ * them in proportion to their amounts (the last one takes the rounding).
+ */
+export async function noteAdjustments(db: Drizzle, uid: number, pays: { id: number; amount: number }[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (!pays.length) return out;
+  const res: any = await db.execute(sql`
+    select inv.id, inv.payment_id, inv.payment_ids,
+           sum(case when n.type::text = 'credit' then -n.total else n.total end)::text as adj
+      from simple_invoices inv
+      join simple_invoices n on n.user_id = inv.user_id and n.billing_reference = inv.number
+       and n.type::text in ('credit', 'debit') and n.status::text = 'confirmed' and n.deleted_at is null
+     where inv.user_id = ${uid} and inv.deleted_at is null and inv.type::text = 'invoice' and inv.status::text = 'confirmed'
+       and coalesce(inv.kind, '') not in ('receipt', 'deposit', 'commission')
+     group by inv.id, inv.payment_id, inv.payment_ids`);
+  const amountOf = new Map(pays.map((p) => [p.id, p.amount]));
+  for (const r of (Array.isArray(res) ? res : (res?.rows ?? [])) as any[]) {
+    const listed: number[] = Array.isArray(r.payment_ids) && r.payment_ids.length ? r.payment_ids.map(Number)
+      : r.payment_id != null ? [Number(r.payment_id)] : [];
+    const ids = [...new Set(listed)].filter((id) => amountOf.has(id));
+    const total = num(r.adj);
+    if (!ids.length || !total) continue;
+    const base = ids.reduce((s, id) => s + (amountOf.get(id) ?? 0), 0);
+    let left = total;
+    ids.forEach((id, k) => {
+      const share = k === ids.length - 1 ? round2(left) : round2(base ? (total * (amountOf.get(id) ?? 0)) / base : total / ids.length);
+      left -= share;
+      out.set(id, round2((out.get(id) ?? 0) + share));
+    });
+  }
+  return out;
 }

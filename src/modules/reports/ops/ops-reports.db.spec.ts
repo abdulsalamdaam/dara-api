@@ -192,13 +192,32 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
 
   it("collections_summary", async () => {
     const r = await run(A, "collections_summary");
-    assert.deepEqual(r.totals, { due: 9300, collected: 5700, outstanding: 3600 });
+    assert.deepEqual(r.totals, { due: 9300, collected: 5700, external: 500, outstanding: 3600 });
     const k = kpis(r);
-    assert.deepEqual([k.overdue, k.collectionRate], [3600, 61.3]);
+    assert.deepEqual([k.overdue, k.collectionRate, k.external], [3600, 61.3, 500]);
     const monthSum = r.rows.reduce((s, x) => s + (x.due as number), 0);
     assert.equal(monthSum, 9300);
     const byProp = Object.fromEntries(r.charts[1].data.map((x) => [x.label, x]));
     assert.deepEqual([byProp["Tower A"].collected, byProp["Tower A"].outstanding, byProp["بلا عقار مرتبط"].collected, byProp["بلا عقار مرتبط"].labelEn], [4900, 3600, 800, "No linked property"]);
+  });
+
+  it("credit / debit notes on an installment's invoice change what is due", async () => {
+    const pid = (await pool.query(`select id from payments where user_id = $1 and deleted_at is null order by id limit 1`, [B])).rows[0].id;
+    const ins = (num: string, type: string, total: number, o: { pay?: number; ref?: string; status?: string } = {}) =>
+      pool.query(`insert into simple_invoices (user_id, number, type, status, payment_id, payment_ids, subtotal, total, billing_reference)
+                  values ($1, $2, $3, $4, $5, $6, $7, $7, $8)`,
+        [B, num, type, o.status ?? "confirmed", o.pay ?? null, o.pay != null ? JSON.stringify([o.pay]) : null, total, o.ref ?? null]);
+    try {
+      await ins("INV-T1", "invoice", 5000, { pay: pid });
+      await ins("CRN-T1", "credit", 600, { ref: "INV-T1" });
+      await ins("DBN-T1", "debit", 100, { ref: "INV-T1" });
+      await ins("CRN-T2", "credit", 999, { ref: "INV-T1", status: "draft" }); // not confirmed: ignored
+      const r = await run(B, "collections_summary");
+      assert.equal(r.totals!.due, 4500);
+      assert.equal(r.totals!.outstanding, 4500);
+    } finally {
+      await pool.query(`delete from simple_invoices where user_id = $1 and number like '%-T_'`, [B]);
+    }
   });
 
   it("installments_schedule with live status", async () => {

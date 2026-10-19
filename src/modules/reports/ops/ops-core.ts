@@ -248,11 +248,22 @@ export function resolveParams(raw: Record<string, unknown>, opts: { dates: DateD
 export type Collection = { date: string; amount: number };
 export type Installment = {
   id: number; contractId: number;
+  /** What is due: the stored amount plus `noteAdj`. */
   amount: number; dueDate: string; paidDate: string | null;
   /** The STORED status — never 'overdue' in practice; see common/payment-status.ts. */
   status: string;
   collections: Collection[];
+  /**
+   * Net of the confirmed credit (−) and debit (+) notes on the tax invoice that
+   * covers this installment, already included in `amount`. The invoice itself is
+   * immutable (ZATCA), so this is how a note changes what is due, the same
+   * way the invoice list nets it (billing: netTotal = total − credits + debits).
+   */
+  noteAdj?: number;
 };
+
+/** Collected outside the platform before it went live (contract wizard's "existing contract" option, Ejar import). */
+export const isExternal = (i: Installment) => i.status === "settled_external";
 
 /** Stored statuses that mean "fully settled", whether or not collection rows back it. */
 const FULLY_SETTLED = new Set(["paid", "settled_external"]);
@@ -266,8 +277,11 @@ const FULLY_SETTLED = new Set(["paid", "settled_external"]);
 export function moneyEvents(i: Installment): Collection[] {
   const ev = [...i.collections].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   if (FULLY_SETTLED.has(i.status)) {
+    // Fill up to the STORED amount: a debit note issued after the row was paid
+    // is still owed, not silently "collected".
+    const stored = round2(i.amount - (i.noteAdj ?? 0));
     const sum = ev.reduce((s, c) => s + c.amount, 0);
-    if (i.amount - sum > EPS) ev.push({ date: i.paidDate ?? i.dueDate, amount: round2(i.amount - sum) });
+    if (stored - sum > EPS) ev.push({ date: i.paidDate ?? i.dueDate, amount: round2(stored - sum) });
   }
   return ev;
 }
@@ -308,6 +322,8 @@ export function completionDate(i: Installment): string | null {
 export type InstStatus = "paid" | "partial" | "pending" | "overdue" | "cancelled";
 export function instStatus(i: Installment): InstStatus {
   const s = liveStatus(i.status, i.dueDate);
+  // A debit note on a paid installment reopens it for the noted amount.
+  if (s === "paid" && (i.noteAdj ?? 0) > EPS && remainingOf(i) > EPS) return i.dueDate < riyadhToday() ? "overdue" : "partial";
   if (s === "paid" || s === "settled_external") return "paid";
   if (s === "partially_paid") return "partial";
   if (s === "cancelled") return "cancelled";

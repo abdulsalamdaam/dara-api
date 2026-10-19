@@ -202,3 +202,19 @@ describe("row cap", () => {
     assert.match(out.notes![0].ar, /10 صف من 12/);
   });
 });
+
+describe("credit / debit notes (noteAdj)", () => {
+  it("a debit note on a paid row is still owed, not filled in as collected", () => {
+    // stored 1000 paid with no collection rows, +150 debit note → due 1150
+    const i = inst({ amount: 1150, noteAdj: 150, status: "paid", paidDate: "2026-09-01", dueDate: "2000-01-01" });
+    assert.equal(collectedOf(i), 1000);
+    assert.equal(remainingOf(i), 150);
+    assert.equal(instStatus(i), "overdue");
+  });
+  it("a credit note lowers what is due; collections are capped at it", () => {
+    const i = inst({ amount: 800, noteAdj: -200, status: "paid", collections: [{ date: "2026-09-01", amount: 1000 }] });
+    assert.equal(collectedOf(i), 800);
+    assert.equal(remainingOf(i), 0);
+    assert.equal(instStatus(i), "paid");
+  });
+});

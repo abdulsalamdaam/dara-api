@@ -16,7 +16,7 @@
 import {
   type ContractLike, type Installment, type Lbl, type OpsChart, type OpsColumn, type OpsKpi, type OpsReport, type OpsReportId,
   type OpsRow, type ResolvedParams, type Tone, type Unit,
-  EPS, agingBucket, collectedOf, completionDate, contractStatusAt, daysBetween, daysOverdue, expiryBucket, inForceOn,
+  EPS, agingBucket, collectedOf, isExternal, completionDate, contractStatusAt, daysBetween, daysOverdue, expiryBucket, inForceOn,
   instStatus, monthLabel, monthsIn, occupancyDay, occupiedUnits, pct, remainingOf, round1, round2, addDays, moneyEvents,
   LEASE_STATUSES,
 } from "./ops-core";
@@ -95,6 +95,8 @@ const NOTE = {
   occupancy: { ar: "الوحدة مشغولة إذا غطّاها عقد ساري في ذلك اليوم؛ المقام = جميع الوحدات في النطاق دون استثناء.", en: "A unit is occupied when an in-force contract covers it that day; the denominator is every unit in scope, none excluded." },
   terminatedUnlinked: { ar: "العقد المفسوخ تُفك وحداته عند الفسخ، لذا لا يُنسب إلى عقار ولا يظهر عند التصفية بالعقار أو المؤجر.", en: "A terminated contract has its units unlinked at termination, so it cannot be attributed to a property and drops out under a property or landlord filter." },
   firstUnit: { ar: "العقد متعدد الوحدات يُنسب مالياً إلى عقار أول وحدة فيه (وعند التصفية: أول وحدة له ضمن التصفية).", en: "A multi-unit contract's money is attributed to the property of its first unit (under a filter, its first unit inside the filter)." },
+  external: { ar: "«محصّل خارج المنصة» = دفعات عقد قائم سُدّدت قبل إدارته على المنصة (أو أبلغت إيجار بسدادها). هي جزء من المستحق والمحصّل لأنها سُدّدت فعلاً، وتُقيَّد في الدفاتر المحاسبية كإيراد بعد تاريخ استحقاقها، لكنها لم تمرّ بسندات قبض المنصة.", en: "\"Collected outside the platform\" = installments of an existing contract paid before it was managed here (or reported paid by Ejar). They count as due and collected because they were paid, and the ledger books them as revenue after their due date, but no platform receipt voucher backs them." },
+  notes: { ar: "إشعارات الدائن المعتمدة تُنقص المستحق على الدفعة المرتبطة بفاتورتها، وإشعارات المدين تزيده.", en: "Confirmed credit notes reduce, and debit notes increase, what is due on the installment their invoice covers." },
   annual: { ar: "الإيجار السنوي = الإيجار الشهري × 12 قبل الزيادات.", en: "Annual rent = monthly rent × 12, before escalation." },
 };
 
@@ -672,9 +674,11 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
   const rows = monthsIn(p.from, p.to).map((m) => {
     const mm = money(all.filter((i) => i.dueDate >= m.start && i.dueDate <= m.end));
     const l = monthLabel(m.ym);
-    return { month: l.ar, monthEn: l.en, ym: m.ym, due: mm.billed, collected: mm.collected, outstanding: mm.outstanding, collectionRate: pct(mm.collected, mm.billed) };
+    const ext = sum(all.filter((i) => isExternal(i) && i.dueDate >= m.start && i.dueDate <= m.end).map((i) => collectedOf(i)));
+    return { month: l.ar, monthEn: l.en, ym: m.ym, due: mm.billed, collected: mm.collected, external: ext, outstanding: mm.outstanding, collectionRate: pct(mm.collected, mm.billed) };
   });
   const t = money(all);
+  const external = sum(all.filter(isExternal).map((i) => collectedOf(i)));
   const overdue = sum(all.filter((i) => i.dueDate < p.today).map((i) => remainingOf(i)));
   const cById = x.contractById();
   // Keyed by property id (two properties may share a name); "—" = no linked unit.
@@ -692,6 +696,7 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
     kpis: [
       kpi("due", "المستحق", "Due", t.billed, "sar", "neutral"),
       kpi("collected", "المحصّل", "Collected", t.collected, "sar", "good"),
+      kpi("external", "منه محصّل خارج المنصة", "Of which collected outside the platform", external, "sar", "neutral"),
       kpi("outstanding", "المتبقي", "Outstanding", t.outstanding, "sar", "warn"),
       kpi("overdue", "منه متأخر", "Of which overdue", overdue, "sar", "bad"),
       kpi("collectionRate", "نسبة التحصيل", "Collection rate", pct(t.collected, t.billed), "pct", "brand"),
@@ -712,12 +717,13 @@ function collectionsSummary(ds: OpsDataset, p: ResolvedParams): Body {
     ],
     columns: [
       col("month", "الشهر", "Month", "text"), col("due", "المستحق", "Due", "sar"), col("collected", "المحصّل", "Collected", "sar"),
+      col("external", "منه خارج المنصة", "Of which outside the platform", "sar"),
       col("outstanding", "المتبقي", "Outstanding", "sar"), col("collectionRate", "نسبة التحصيل", "Collection rate", "pct"),
     ],
-    rows, totals: { due: t.billed, collected: t.collected, outstanding: t.outstanding },
+    rows, totals: { due: t.billed, collected: t.collected, external, outstanding: t.outstanding },
     notes: [
       { ar: "تُجمع الدفعات حسب شهر استحقاقها؛ هذا تقرير تشغيلي من جدول الدفعات وليس دفتر المحاسبة.", en: "Installments are grouped by due month; this is an operational view of the installment schedule, not the accounting ledger." },
-      NOTE.dueBasis, NOTE.overdue, NOTE.paidNoCollections, NOTE.firstUnit, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
+      NOTE.dueBasis, NOTE.external, NOTE.notes, NOTE.overdue, NOTE.paidNoCollections, NOTE.firstUnit, NOTE.cancelled, NOTE.deposits, NOTE.drafts,
     ],
   };
 }

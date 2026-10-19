@@ -434,7 +434,9 @@ export class EmailService {
   }
 
   /**
-   * The tax invoice for a subscription payment, with the PDF attached.
+   * The invoice for a subscription payment, with the PDF attached. Worded as
+   * "invoice", not "tax invoice": Dara's own seller VAT identity is not set yet
+   * (see common/dara-seller.ts), so the attachment is not a tax invoice.
    *
    * Sent once, from the activation path, right after the payment is confirmed.
    * Transactional — never `marketing`, or Gmail files a receipt in Promotions.
@@ -463,9 +465,9 @@ export class EmailService {
       <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">فاتورة اشتراكك 🧾</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
         ${greetingAr(safeName)}،<br/>
-        استلمنا دفعة اشتراكك في <strong>دارا</strong> بنجاح، وتجد الفاتورة الضريبية مرفقة بهذه الرسالة بصيغة PDF.
+        استلمنا دفعة اشتراكك في <strong>دارا</strong> بنجاح، وتجد الفاتورة مرفقة بهذه الرسالة بصيغة PDF.
       </p>
-      ${en("We've received your Dara subscription payment. Your tax invoice is attached as a PDF.")}
+      ${en("We've received your Dara subscription payment. Your invoice is attached as a PDF.")}
       <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;color:#334155;">
         <tr><td style="padding:8px 0;color:#64748b;">رقم الفاتورة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${number}</td></tr>
         <tr><td style="padding:8px 0;color:#64748b;">الباقة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${plan} — ${cycleLabel}</td></tr>
@@ -487,7 +489,7 @@ export class EmailService {
       to,
       subject: `فاتورة اشتراك دارا · Dara subscription invoice ${payload.invoiceNumber}`,
       html,
-      text: `استلمنا دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة الضريبية مرفقة بصيغة PDF.\n\nWe've received your Dara subscription payment (invoice ${payload.invoiceNumber}). Your tax invoice is attached as a PDF.`,
+      text: `استلمنا دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة مرفقة بصيغة PDF.\n\nWe've received your Dara subscription payment (invoice ${payload.invoiceNumber}). Your invoice is attached as a PDF.`,
       category: "subscription-invoice",
       attachments: [{ filename: `${payload.invoiceNumber}.pdf`, content: pdf, contentType: "application/pdf" }],
     });
