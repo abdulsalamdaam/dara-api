@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { EjarAccessError, EjarClientService, EjarConfigError, ejarAccessDenial } from "./ejar.client.service";
+import { EjarAccessError, EjarClientService, EjarConfigError, ejarAccessDenial, replayEnabled } from "./ejar.client.service";
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -15,7 +15,7 @@ const tokenOk = (token = "tok-1") => json(200, { access_token: token, expires_in
 const ENV_KEYS = [
   "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
   "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
-  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS",
+  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS", "EJAR_REPLAY",
 ];
 
 describe("EjarClientService gateways", () => {
@@ -161,6 +161,84 @@ describe("EjarClientService gateways", () => {
     await assert.rejects(client().request("contractDetails", { uuid: "11111111-2222-4333-8444-555555555555" }), EjarConfigError);
     await assert.rejects(client().checkToken(), EjarConfigError);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe("EjarClientService replay (EJAR_REPLAY)", () => {
+  const realFetch = globalThis.fetch;
+  const saved: Record<string, string | undefined> = {};
+  let fetches: string[];
+  let lookups: Array<[string, string, string]>;
+  let recorded: Record<string, { id: number; responseBody: unknown }>;
+  const client = () => new EjarClientService({
+    insert: async (r: unknown) => r,
+    findReplay: async (endpoint: string, key: string, value: string) => {
+      lookups.push([endpoint, key, value]);
+      return recorded[`${endpoint}:${value}`] ?? null;
+    },
+  } as never);
+  const envelope = { statusDetails: { code: 200, message: "Ok" }, data: { responseCode: "1", responseId: "r-9", result: BODY } };
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+    process.env.EJAR_BALADY_BASE_URL = "https://apiservicesstg.balady.gov.sa/";
+    process.env.EJAR_BALADY_CLIENT_ID = "bal-id";
+    process.env.EJAR_BALADY_CLIENT_SECRET = "bal-secret";
+    fetches = []; lookups = []; recorded = {};
+    globalThis.fetch = (async (url: string) => {
+      fetches.push(String(url));
+      return String(url).endsWith("/oauth/v1/token") ? tokenOk() : baladyOk();
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  });
+
+  it("answers from the recorded response without calling the gateway", async () => {
+    process.env.EJAR_REPLAY = "on";
+    recorded["contractDetails:" + U1] = { id: 42, responseBody: envelope };
+    const { body, log } = await client().request("contractDetails", { uuid: U1 });
+    assert.deepEqual(body, BODY);
+    assert.equal(fetches.length, 0);
+    assert.deepEqual(lookups, [["contractDetails", "uuid", U1]]);
+    const l = log as { env: string; status: number; attempts: number; transactionId: string };
+    assert.equal(l.env, "balady-replay");
+    assert.equal(l.status, 200);
+    assert.equal(l.attempts, 1);
+    assert.equal(l.transactionId, "replay-42");
+  });
+
+  it("keys each lookup endpoint by its own parameter", async () => {
+    process.env.EJAR_REPLAY = "on";
+    recorded["rentalContractInvoices:10000000001"] = { id: 1, responseBody: envelope };
+    recorded["getRentalContracts:" + U1] = { id: 2, responseBody: envelope };
+    await client().request("rentalContractInvoices", { contractNumber: "10000000001" });
+    await client().request("getRentalContracts", { id_number: "1", contract_ids: U1, skip_filter_id_number: "true" });
+    assert.deepEqual(lookups.map((x) => x[1]), ["contractNumber", "contract_ids"]);
+    assert.equal(fetches.length, 0);
+  });
+
+  it("goes to the gateway when nothing is recorded", async () => {
+    process.env.EJAR_REPLAY = "on";
+    const { log } = await client().request("contractDetails", { uuid: U1 });
+    assert.equal(fetches.length, 2);
+    assert.equal((log as { env: string }).env, "balady-stg");
+  });
+
+  it("is off unless EJAR_REPLAY=on", async () => {
+    recorded["contractDetails:" + U1] = { id: 42, responseBody: envelope };
+    await client().request("contractDetails", { uuid: U1 });
+    assert.equal(lookups.length, 0);
+    assert.equal(fetches.length, 2);
+  });
+
+  it("never applies outside the staging and loopback gateways", () => {
+    const env = { EJAR_REPLAY: "on" } as NodeJS.ProcessEnv;
+    assert.equal(replayEnabled("balady-stg", env), true);
+    assert.equal(replayEnabled("balady-local", env), true);
+    assert.equal(replayEnabled("balady-prod", env), false);
+    assert.equal(replayEnabled("uat", env), false);
   });
 });
 

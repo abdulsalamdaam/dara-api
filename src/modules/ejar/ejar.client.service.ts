@@ -59,6 +59,22 @@ export function ejarAccessDenial(userId: number | null | undefined, env = proces
   return allowed.includes(userId) ? null : `Ejar access is restricted on this server; user ${userId} is not allowed.`;
 }
 
+/**
+ * Staging-only replay (`EJAR_REPLAY=on`): a lookup call is answered from the
+ * newest recorded 200 for the same endpoint and key instead of the gateway, so
+ * the whole import journey can be tested while Balady is not answering. A miss
+ * still goes to the gateway. Never on production: only the staging and
+ * loopback Balady envs qualify.
+ */
+const REPLAY_KEY: Partial<Record<EjarEndpointKey, string>> = {
+  rentalContractInvoices: "contractNumber",
+  contractDetails: "uuid",
+  getRentalContracts: "contract_ids",
+};
+export function replayEnabled(logEnv: string, env = process.env): boolean {
+  return (env.EJAR_REPLAY ?? "").trim().toLowerCase() === "on" && (logEnv === "balady-stg" || logEnv === "balady-local");
+}
+
 export interface EjarCallResult<T = Record<string, unknown>> {
   body: EjarBody<T> | null;
   log: Record<string, unknown>;
@@ -260,6 +276,9 @@ export class EjarClientService {
       error: null,
     };
 
+    const replayed = await this.replay<T>(endpoint, strParams, rec, opts.skipLog);
+    if (replayed) return replayed;
+
     const startedAt = Date.now();
     let lastErr: unknown = null;
     let refreshedToken = false;
@@ -337,6 +356,29 @@ export class EjarClientService {
       throw lastErr;
     }
     throw new EjarApiError(rec.error, rec.status, rec.transactionId, null, log);
+  }
+
+  /**
+   * Answer from a recorded response (see `replayEnabled`). Logged as
+   * `balady-replay`, which the lookup budget counts like a real call.
+   */
+  private async replay<T>(
+    endpoint: EjarEndpointKey, params: Record<string, string>, rec: EjarLogRecordInput, skipLog?: boolean,
+  ): Promise<EjarCallResult<T> | null> {
+    if (!replayEnabled(rec.env)) return null;
+    const key = REPLAY_KEY[endpoint];
+    const value = key ? params[key] : undefined;
+    if (!key || !value) return null;
+    const hit = await this.logs.findReplay(endpoint, key, value).catch(() => null);
+    if (!hit) return null;
+    const envelope = (hit.responseBody && typeof hit.responseBody === "object" ? hit.responseBody : {}) as BaladyEnvelope<T>;
+    const code = Number(envelope.statusDetails?.code);
+    Object.assign(rec, {
+      env: "balady-replay", status: 200, ejarStatus: Number.isFinite(code) ? code : 200,
+      transactionId: `replay-${hit.id}`, attempts: 1, responseBody: hit.responseBody, bodyTruncated: false,
+    });
+    this.logger.log(`[replay] ${endpoint} ${key}=${value} ← log #${hit.id}`);
+    return { body: envelope.data?.result ?? null, log: await this.safeLog(rec, skipLog) };
   }
 
   /**
