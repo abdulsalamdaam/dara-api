@@ -57,6 +57,8 @@ const OPEN: Record<string, string> = {
   "GET /auth/me/permissions": "the caller's own permission list (the web gates its UI on it)",
   "POST /auth/logout": "end the caller's own sessions (no-op for owner tokens)",
   "POST /auth/me/change-password": "the caller's own password",
+  "POST /auth/me/email-change/request": "the caller's own login email",
+  "POST /auth/me/email-change/verify": "the caller's own login email",
   "GET /profile": "the caller's own profile",
   "PATCH /profile": "the caller's own name/phone only",
   "GET /me/package": "plan limits — every screen's quota hints read it",
