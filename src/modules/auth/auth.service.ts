@@ -763,6 +763,13 @@ export class AuthService {
       if (isEmailUniqueViolation(err)) throw emailTakenException();
       throw err;
     }
+    // The account holder's own landlord/tenant row carries the same address in
+    // the settings profile — keep it in step so the two never disagree.
+    // An employee's userId owns no such row, so this touches only the holder.
+    await this.db.update(ownersTable).set({ email: newEmail })
+      .where(and(eq(ownersTable.userId, userId), eq(ownersTable.isAccountHolder, true)));
+    await this.db.update(tenantsTable).set({ email: newEmail })
+      .where(and(eq(tenantsTable.userId, userId), eq(tenantsTable.isAccountHolder, true)));
     // Burn this and any other pending change codes for the account.
     await this.db.update(emailOtpTokensTable)
       .set({ consumedAt: now })
