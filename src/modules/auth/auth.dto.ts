@@ -24,6 +24,20 @@ export class EmailOtpVerifyDto {
   code!: string;
 }
 
+/* ── Change own login email (JWT) ───────────────────────────────── */
+// Format/same/taken checks live in the service so the client gets the coded
+// errors (EMAIL_INVALID / EMAIL_SAME / EMAIL_TAKEN) rather than a generic 400.
+
+export class EmailChangeRequestDto {
+  @IsString()
+  newEmail!: string;
+}
+
+export class EmailChangeVerifyDto {
+  @IsString()
+  code!: string;
+}
+
 export class RegisterDto {
   @IsString()
   name!: string;

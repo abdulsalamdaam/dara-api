@@ -519,6 +519,13 @@
       "when": 1792886400000,
       "tag": "0084_contract_external_settlement_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1792972800000,
+      "tag": "0085_email_otp_purpose",
+      "breakpoints": true
     }
   ]
 }

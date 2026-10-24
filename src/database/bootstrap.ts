@@ -137,6 +137,17 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure contracts.external_settlement_mode failed: ${err?.message || err}`);
     }
 
+    // Login-email change codes share email_otp_tokens (0085). Inline: the
+    // login OTP queries select and filter on `purpose`, so it must exist
+    // before the first login after this deploy.
+    try {
+      await client.query(`alter table email_otp_tokens add column if not exists purpose text not null default 'login'`);
+      await client.query(`alter table email_otp_tokens add column if not exists user_id integer`);
+      await client.query(`create index if not exists email_otp_tokens_user_purpose_idx on email_otp_tokens (user_id, purpose, created_at)`);
+    } catch (err: any) {
+      log.warn(`ensure email_otp_tokens.purpose/user_id failed: ${err?.message || err}`);
+    }
+
     // ZATCA link health. The taxpayer can remove our EGS device in the Fatoora
     // portal, and nothing tells us — the row keeps its certificate, so every
     // local check passes while every submission is refused. These two columns

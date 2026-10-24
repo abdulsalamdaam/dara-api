@@ -238,6 +238,56 @@ export class EmailService {
   }
 
   /**
+   * Code confirming a change of login email. Sent to the NEW address, so
+   * receiving it proves the user controls that mailbox.
+   */
+  async sendEmailChangeOtp(to: string, code: string, ttlMinutes: number): Promise<boolean> {
+    if (!to) return false;
+    const safeCode = escapeHtml(code);
+    const html = layout(`
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">طلبتَ تغيير البريد الإلكتروني لحسابك في دارا إلى هذا العنوان. لتأكيد التغيير، أدخل الرمز التالي:</p>
+      <div style="margin:24px 0;text-align:center;">
+        <div style="display:inline-block;font-family:'SFMono-Regular',Menlo,monospace;font-size:32px;letter-spacing:8px;font-weight:700;color:#010f35;padding:14px 28px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
+          ${safeCode}
+        </div>
+      </div>
+      <p style="margin:0 0 6px;color:#64748b;font-size:13px;">
+        الرمز صالح لمدة ${minutesAr(ttlMinutes)}. إذا لم تطلب هذا التغيير، يمكنك تجاهل هذه الرسالة.
+      </p>
+      <p dir="ltr" style="margin:16px 0 0;color:#64748b;font-size:13px;text-align:left;">
+        You asked to change your Dara login email to this address. Enter the code above to confirm. It expires in ${ttlMinutes} minutes. If you did not ask for this, ignore this email.
+      </p>
+    `);
+    return this.send({
+      to,
+      subject: "رمز تأكيد تغيير البريد الإلكتروني · Confirm your new email",
+      html,
+      text: `طلبتَ تغيير البريد الإلكتروني لحسابك في دارا إلى هذا العنوان. رمز التأكيد: ${code}\nالرمز صالح لمدة ${minutesAr(ttlMinutes)}. إذا لم تطلب هذا التغيير، يمكنك تجاهل هذه الرسالة.\n\nYour Dara email-change code: ${code} (expires in ${ttlMinutes} minutes). If you did not ask for this, ignore this email.`,
+      category: "otp_email_change",
+    });
+  }
+
+  /** Heads-up to the OLD address after the login email was changed. */
+  async sendEmailChangedNotice(to: string, newEmail: string): Promise<boolean> {
+    if (!to) return false;
+    const safeNew = escapeHtml(newEmail);
+    const html = layout(`
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">تم تغيير البريد الإلكتروني لتسجيل الدخول إلى حسابك في دارا إلى <strong dir="ltr">${safeNew}</strong>. لن يُستخدم هذا العنوان لتسجيل الدخول بعد الآن.</p>
+      <p style="margin:0 0 6px;color:#64748b;font-size:13px;">إذا لم تقم بهذا التغيير، تواصل معنا فوراً على: ${SUPPORT_EMAIL}</p>
+      <p dir="ltr" style="margin:16px 0 0;color:#64748b;font-size:13px;text-align:left;">
+        Your Dara login email was changed to ${safeNew}. If this wasn't you, contact ${SUPPORT_EMAIL} right away.
+      </p>
+    `);
+    return this.send({
+      to,
+      subject: "تم تغيير البريد الإلكتروني لحسابك · Your email was changed",
+      html,
+      text: `تم تغيير البريد الإلكتروني لتسجيل الدخول إلى حسابك في دارا إلى ${newEmail}. إذا لم تقم بهذا التغيير، تواصل معنا فوراً على: ${SUPPORT_EMAIL}\n\nYour Dara login email was changed to ${newEmail}. If this wasn't you, contact ${SUPPORT_EMAIL} right away.`,
+      category: "email_changed",
+    });
+  }
+
+  /**
    * Email-verification via a 6-digit OTP code (replaces the verification
    * link). The user types the code on the verify page to confirm ownership.
    */

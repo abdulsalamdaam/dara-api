@@ -64,6 +64,10 @@ const EMAIL_OTP_TTL_MIN = 2;
 const EMAIL_OTP_MAX_ATTEMPTS = 5;
 /** Minimum gap before another login OTP can be requested (per IP / email). */
 const OTP_RESEND_COOLDOWN_MIN = 2;
+/** Change-of-login-email code: lifetime, resend gap, wrong-code budget. */
+const EMAIL_CHANGE_TTL_MIN = 10;
+const EMAIL_CHANGE_RESEND_SEC = 60;
+const EMAIL_CHANGE_MAX_ATTEMPTS = 5;
 
 
 @Injectable()
@@ -320,7 +324,7 @@ export class AuthService {
     const [recent] = await this.db
       .select({ createdAt: emailOtpTokensTable.createdAt })
       .from(emailOtpTokensTable)
-      .where(and(gt(emailOtpTokensTable.createdAt, since), senderMatch))
+      .where(and(gt(emailOtpTokensTable.createdAt, since), eq(emailOtpTokensTable.purpose, "login"), senderMatch))
       .orderBy(desc(emailOtpTokensTable.createdAt))
       .limit(1);
     if (recent) {
@@ -385,6 +389,7 @@ export class AuthService {
         .from(emailOtpTokensTable)
         .where(and(
           eq(emailOtpTokensTable.email, email),
+          eq(emailOtpTokensTable.purpose, "login"),
           gt(emailOtpTokensTable.expiresAt, now),
           isNull(emailOtpTokensTable.consumedAt),
         ))
@@ -641,6 +646,136 @@ export class AuthService {
       message: "تم استلام طلب التسجيل. أرسلنا رمز تأكيد إلى بريدك الإلكتروني — أدخله لتأكيد بريدك، ثم سيقوم المشرف بمراجعة الحساب وتفعيله.",
       user: { id: user!.id, email: user!.email, name: user!.name, accountStatus: user!.accountStatus },
     };
+  }
+
+  /* ── User: change own login email (OTP to the NEW address) ────── */
+
+  /**
+   * Step 1: send a 6-digit code to `newEmail`. The code row lives in
+   * email_otp_tokens with purpose 'email_change', `email` = the new address and
+   * `userId` = the caller. A new request supersedes earlier ones (verify reads
+   * only the newest row). 60s DB-enforced resend gap per user.
+   */
+  async requestEmailChange(userId: number, rawNewEmail: string, ctx: { ip: string; ua?: string }) {
+    const newEmail = normalizeEmail(rawNewEmail);
+    if (!newEmail || newEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+      throw new BadRequestException({ error: "EMAIL_INVALID", code: "EMAIL_INVALID", message: "البريد الإلكتروني غير صالح · Invalid email address" });
+    }
+    const [user] = await this.db
+      .select({ id: usersTable.id, email: usersTable.email })
+      .from(usersTable)
+      .where(and(eq(usersTable.id, userId), isNull(usersTable.deletedAt)));
+    if (!user) throw new UnauthorizedException("User not found");
+    if (normalizeEmail(user.email) === newEmail) {
+      throw new BadRequestException({ error: "EMAIL_SAME", code: "EMAIL_SAME", message: "هذا هو بريدك الحالي · This is already your email" });
+    }
+    await assertEmailAvailable(this.db, newEmail, userId);
+
+    const cooldownMs = EMAIL_CHANGE_RESEND_SEC * 1000;
+    const [recent] = await this.db
+      .select({ createdAt: emailOtpTokensTable.createdAt })
+      .from(emailOtpTokensTable)
+      .where(and(
+        eq(emailOtpTokensTable.userId, userId),
+        eq(emailOtpTokensTable.purpose, "email_change"),
+        gt(emailOtpTokensTable.createdAt, new Date(Date.now() - cooldownMs)),
+      ))
+      .orderBy(desc(emailOtpTokensTable.createdAt))
+      .limit(1);
+    if (recent) {
+      const waitSec = Math.max(1, Math.ceil((recent.createdAt.getTime() + cooldownMs - Date.now()) / 1000));
+      throw new HttpException(
+        {
+          error: `الرجاء الانتظار ${waitSec} ثانية قبل طلب رمز جديد · Please wait ${waitSec}s before requesting another code.`,
+          code: "OTP_COOLDOWN",
+          retryAfter: waitSec,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+    const codeHash = await bcrypt.hash(code, 8);
+    await this.db.insert(emailOtpTokensTable).values({
+      email: newEmail,
+      codeHash,
+      expiresAt: new Date(Date.now() + EMAIL_CHANGE_TTL_MIN * 60_000),
+      ip: ctx.ip,
+      userAgent: ctx.ua?.slice(0, 400) ?? null,
+      purpose: "email_change",
+      userId,
+    });
+
+    const sent = await this.email.sendEmailChangeOtp(newEmail, code, EMAIL_CHANGE_TTL_MIN);
+    if (!sent) new Logger("AuthService").error(`Email-change OTP send failed for user ${userId}`);
+    return { success: true as const, expiresInSec: EMAIL_CHANGE_TTL_MIN * 60, resendInSec: EMAIL_CHANGE_RESEND_SEC };
+  }
+
+  /**
+   * Step 2: check the code against the caller's newest pending change row,
+   * then move users.email to that row's address (marked verified).
+   */
+  async verifyEmailChange(userId: number, rawCode: string) {
+    const code = (rawCode || "").trim();
+    const invalid = () => new BadRequestException({ error: "OTP_INVALID", code: "OTP_INVALID", message: "الرمز غير صحيح · Invalid code" });
+    const expired = () => new BadRequestException({ error: "OTP_EXPIRED", code: "OTP_EXPIRED", message: "انتهت صلاحية الرمز. اطلب رمزاً جديداً · Code expired, request a new one" });
+    if (!/^\d{6}$/.test(code)) throw invalid();
+
+    const now = new Date();
+    const [token] = await this.db
+      .select()
+      .from(emailOtpTokensTable)
+      .where(and(
+        eq(emailOtpTokensTable.userId, userId),
+        eq(emailOtpTokensTable.purpose, "email_change"),
+        isNull(emailOtpTokensTable.consumedAt),
+      ))
+      .orderBy(desc(emailOtpTokensTable.createdAt))
+      .limit(1);
+    if (!token) throw invalid();
+    if (token.expiresAt.getTime() <= now.getTime()) throw expired();
+    if ((token.attempts ?? 0) >= EMAIL_CHANGE_MAX_ATTEMPTS) {
+      await this.db.update(emailOtpTokensTable).set({ consumedAt: now }).where(eq(emailOtpTokensTable.id, token.id));
+      throw expired();
+    }
+    if (!(await bcrypt.compare(code, token.codeHash))) {
+      const attempts = (token.attempts ?? 0) + 1;
+      // The fifth wrong code burns the row; the next try reads as no pending code.
+      await this.db.update(emailOtpTokensTable)
+        .set({ attempts, ...(attempts >= EMAIL_CHANGE_MAX_ATTEMPTS ? { consumedAt: now } : {}) })
+        .where(eq(emailOtpTokensTable.id, token.id));
+      throw invalid();
+    }
+
+    const newEmail = token.email;
+    const [user] = await this.db
+      .select({ id: usersTable.id, email: usersTable.email })
+      .from(usersTable)
+      .where(and(eq(usersTable.id, userId), isNull(usersTable.deletedAt)));
+    if (!user) throw new UnauthorizedException("User not found");
+    await assertEmailAvailable(this.db, newEmail, userId);
+
+    try {
+      await this.db.update(usersTable)
+        .set({ email: newEmail, emailVerified: true, emailVerifiedAt: now, emailVerifyTokenHash: null, emailVerifyExpiresAt: null })
+        .where(eq(usersTable.id, userId));
+    } catch (err) {
+      if (isEmailUniqueViolation(err)) throw emailTakenException();
+      throw err;
+    }
+    // Burn this and any other pending change codes for the account.
+    await this.db.update(emailOtpTokensTable)
+      .set({ consumedAt: now })
+      .where(and(
+        eq(emailOtpTokensTable.userId, userId),
+        eq(emailOtpTokensTable.purpose, "email_change"),
+        isNull(emailOtpTokensTable.consumedAt),
+      ));
+
+    if (user.email && normalizeEmail(user.email) !== newEmail) {
+      void this.email.sendEmailChangedNotice(user.email, newEmail).catch(() => undefined);
+    }
+    return { success: true as const, email: newEmail };
   }
 
   /** Verify an email-verification OTP code (email + 6-digit code). */

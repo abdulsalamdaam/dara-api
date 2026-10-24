@@ -22,6 +22,8 @@ import {
   TenantOtpVerifyDto,
   EmailOtpRequestDto,
   EmailOtpVerifyDto,
+  EmailChangeRequestDto,
+  EmailChangeVerifyDto,
 } from "./auth.dto";
 
 /**
@@ -143,6 +145,28 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   changePassword(@CurrentUser() user: AuthUser, @Body() body: ChangePasswordDto) {
     return this.auth.changePassword(user.id, body.currentPassword ?? "", body.newPassword);
+  }
+
+  /**
+   * Change the logged-in user's own login email: a 6-digit code goes to the
+   * NEW address (10 min, 60s resend gap enforced in the service), and verify
+   * moves users.email over. The session stays valid — the guard resolves the
+   * user by id, not by email.
+   */
+  @Post("me/email-change/request")
+  @HttpCode(200)
+  @Throttle({ short: { limit: 5, ttl: 60_000 }, long: { limit: 20, ttl: 3600_000 } })
+  @UseGuards(JwtAuthGuard)
+  emailChangeRequest(@CurrentUser() user: AuthUser, @Body() body: EmailChangeRequestDto, @Req() req: Request) {
+    return this.auth.requestEmailChange(user.id, body?.newEmail ?? "", clientCtx(req));
+  }
+
+  @Post("me/email-change/verify")
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 300_000 } })
+  @UseGuards(JwtAuthGuard)
+  emailChangeVerify(@CurrentUser() user: AuthUser, @Body() body: EmailChangeVerifyDto) {
+    return this.auth.verifyEmailChange(user.id, body?.code ?? "");
   }
 
   /* ── User: forgot/reset password (OTP-based) ── */

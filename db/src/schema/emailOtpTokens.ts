@@ -21,6 +21,14 @@ export const emailOtpTokensTable = pgTable("email_otp_tokens", {
   ip: text("ip"),
   userAgent: text("user_agent"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * What the code is for (migration 0085): 'login' (default — every row before
+   * 0085) or 'email_change', where `email` is the NEW address and `userId` the
+   * account asking to move to it. Login queries filter on 'login' so a change
+   * code can never sign anybody in.
+   */
+  purpose: text("purpose").notNull().default("login"),
+  userId: integer("user_id"),
 }, (t) => ({
   byEmail: index("email_otp_tokens_email_idx").on(t.email, t.expiresAt),
 }));
