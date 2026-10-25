@@ -8,6 +8,8 @@ import {
   invoicesTable,
   invoiceLinesTable,
   ownersTable,
+  usersTable,
+  companiesTable,
 } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../../database/database.module";
 import { CsrService } from "./csr.service";
@@ -91,10 +93,100 @@ export function nextEgsSerial(current: string): string {
   // second branch would then collide with. ZATCA allows free text in that third
   // segment, so anything outside our shape gets a plain suffix rather than a
   // reinterpreted one.
-  const m = /^(.*\|3-\d+)(?:-(\d+))?$/.exec(v);
+  // `3-acct-<userId>` is the account-level seller's device (the office's own
+  // seller, no landlord) — ours too, so it is versioned the same way.
+  const m = /^(.*\|3-(?:acct-)?\d+)(?:-(\d+))?$/.exec(v);
   if (!m) return `${v}-2`;
   const gen = m[2] ? Number(m[2]) + 1 : 2;
   return `${m[1]}-${gen}`;
+}
+
+/** The per-environment ZATCA state of one credentials row, as the integration tab reads it. */
+export function credsStatus(c: ZatcaCredentials | null | undefined) {
+  return {
+    configured: !!c,
+    activeEnvironment: c?.activeEnvironment ?? null,
+    sandboxOnboarded: !!c?.sandboxCertPem,
+    // "production" means a real production CSID — a simulation rehearsal
+    // fills the same columns and must not be reported as live.
+    productionOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "production",
+    simulationOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "simulation",
+    onboardedAt: c?.sandboxOnboardedAt ?? c?.prodOnboardedAt ?? null,
+    // ZATCA refused these credentials — the device was most likely removed
+    // in Fatoora. The row still holds a certificate, so without this the
+    // landlord would keep reading as perfectly integrated.
+    linkInvalidAt: c?.linkInvalidAt ?? null,
+    linkInvalidReason: c?.linkInvalidReason ?? null,
+  };
+}
+
+type CompanyIdentity = {
+  name: string; vatNumber: string | null; commercialReg?: string | null;
+  buildingNumber: string | null; street: string | null; district: string | null;
+  city: string | null; postalCode: string | null; additionalNumber: string | null;
+};
+
+/**
+ * The office's own seller row for the integration tab — the account-level
+ * seller (credentials with owner_id NULL). An office registered without an
+ * account-holder landlord has no landlord row to link, yet its commission and
+ * agency-fee tax invoices are filed under this seller (account-seller.ts) and
+ * held with OFFICE_NOT_LINKED until it is linked. Same shape as a landlord
+ * row, with `ownerId: null` and `isAccount: true`. Pure.
+ */
+export function officeSellerRow(company: CompanyIdentity, c: ZatcaCredentials | null) {
+  const vatNumber = (company.vatNumber ?? "").trim() || null;
+  const address = {
+    buildingNumber: company.buildingNumber || null,
+    street: company.street || null,
+    district: company.district || null,
+    city: company.city || null,
+    postalCode: company.postalCode || null,
+    additionalNumber: company.additionalNumber || null,
+  };
+  return {
+    ownerId: null as number | null,
+    isAccount: true,
+    name: company.name,
+    type: "company" as string | null,
+    vatNumber,
+    vatReady: !!vatNumber,
+    crn: (company.commercialReg ?? "").trim() || null,
+    nationalAddress: c?.locationAddress || null,
+    address,
+    addressReady: !!(address.buildingNumber && address.street && address.district && address.city && address.postalCode),
+    ...credsStatus(c),
+  };
+}
+
+/**
+ * Fill the CSR fields of a seller profile the caller left out — the same values
+ * the portal sends — so a bare profile (name, VAT, address) saves instead of
+ * failing on the NOT NULL columns. An existing row's values win over the
+ * computed ones: its serial may already carry a re-onboarding generation
+ * (nextEgsSerial) that the base serial would silently undo. Pure.
+ */
+export function withProfileDefaults(
+  p: Partial<SellerProfileInput>,
+  ctx: { userId: number; ownerId: number | null; existing?: Partial<ZatcaCredentials> | null },
+): SellerProfileInput {
+  const blank = (v: unknown) => v == null || !String(v).trim();
+  const id = ctx.ownerId == null ? `acct-${ctx.userId}` : String(ctx.ownerId);
+  const ex = ctx.existing ?? {};
+  const pick = <K extends keyof SellerProfileInput>(k: K, dflt: string): string =>
+    !blank(p[k]) ? String(p[k]) : !blank((ex as any)[k]) ? String((ex as any)[k]) : dflt;
+  // ASCII only — it goes into the certificate's subjectAltName (see the portal).
+  const location = [p.sellerBuildingNo, p.sellerPostalZone, p.sellerAdditionalNo, "SA"]
+    .map((x) => (x ?? "").toString().trim()).filter(Boolean).join(" ").replace(/[^ -~]/g, "").trim();
+  return {
+    ...(p as SellerProfileInput),
+    commonName: pick("commonName", `Dara-${id}`),
+    serialNumber: pick("serialNumber", `1-Dara|2-PMS|3-${id}`),
+    organizationIdentifier: pick("organizationIdentifier", String(p.sellerVatNumber ?? "").trim()),
+    organizationUnitName: pick("organizationUnitName", String(p.sellerCrn ?? "").trim() || String(p.sellerName ?? "").trim()),
+    industryCategory: pick("industryCategory", "Real estate"),
+    locationAddress: pick("locationAddress", location),
+  };
 }
 
 @Injectable()
@@ -141,8 +233,12 @@ export class ZatcaOnboardingService {
       this.listByAccount(userId),
     ]);
     const byOwner = new Map<number, ZatcaCredentials>();
-    for (const c of creds) if (c.ownerId != null) byOwner.set(c.ownerId, c);
-    return owners.map((o: any) => {
+    let accountCreds: ZatcaCredentials | null = null;
+    for (const c of creds) {
+      if (c.ownerId != null) byOwner.set(c.ownerId, c);
+      else accountCreds = c;
+    }
+    const rows: any[] = owners.map((o: any) => {
       const c = byOwner.get(o.id);
       // National (short) address: the code saved on the seller profile during onboarding.
       const nationalAddress = c?.locationAddress || null;
@@ -161,6 +257,7 @@ export class ZatcaOnboardingService {
       const addressReady = !!(address.buildingNumber && address.street && address.district && address.city && address.postalCode);
       return {
         ownerId: o.id,
+        isAccount: false,
         name: o.name,
         type: o.type,
         vatNumber,
@@ -168,25 +265,25 @@ export class ZatcaOnboardingService {
         nationalAddress,
         address,
         addressReady,
-        configured: !!c,
-        activeEnvironment: c?.activeEnvironment ?? null,
-        sandboxOnboarded: !!c?.sandboxCertPem,
-        // "production" means a real production CSID — a simulation rehearsal
-        // fills the same columns and must not be reported as live.
-        productionOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "production",
-        simulationOnboarded: !!c?.prodCertPem && c?.prodSlotEnv === "simulation",
-        onboardedAt: c?.sandboxOnboardedAt ?? c?.prodOnboardedAt ?? null,
-        // ZATCA refused these credentials — the device was most likely removed
-        // in Fatoora. The row still holds a certificate, so without this the
-        // landlord would keep reading as perfectly integrated.
-        linkInvalidAt: c?.linkInvalidAt ?? null,
-        linkInvalidReason: c?.linkInvalidReason ?? null,
+        ...credsStatus(c),
       };
     });
+    // The office itself, FIRST — only when no landlord row already is the
+    // account's seller (an account holder is: resolveStandaloneSellerId).
+    if (!owners.some((o: any) => o.isAccountHolder)) {
+      const [co] = await this.db
+        .select({ company: companiesTable })
+        .from(usersTable)
+        .innerJoin(companiesTable, and(eq(companiesTable.id, usersTable.companyId), isNull(companiesTable.deletedAt)))
+        .where(eq(usersTable.id, userId));
+      if (co?.company) rows.unshift(officeSellerRow(co.company, accountCreds));
+    }
+    return rows;
   }
 
-  async upsertProfile(userId: number, profile: SellerProfileInput, ownerId: number | null = null): Promise<ZatcaCredentials> {
+  async upsertProfile(userId: number, input: SellerProfileInput, ownerId: number | null = null): Promise<ZatcaCredentials> {
     const existing = await this.getCredentials(userId, ownerId);
+    const profile = withProfileDefaults(input, { userId, ownerId, existing });
     if (existing) {
       const [row] = await this.db
         .update(zatcaCredentialsTable)
