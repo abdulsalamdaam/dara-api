@@ -172,6 +172,7 @@ import {
   likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 import { rentVatFromUsage } from "../../common/usage-vat";
+import { bodyUnitIds, parseUnitIdsQuery, rentVatForUnits } from "../../common/landlord-vat"; // finance-v2: VC-1 — rent VAT needs taxable usage AND a VAT-registered landlord (R1)
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -597,6 +598,21 @@ class ContractsController {
   }
 
   /**
+   * GET /contracts/vat-preview?unitIds=1,2 — the server's rent-VAT verdict for
+   * those units (R1: taxable usage AND a VAT-registered landlord), so the
+   * wizard shows the same decision create/rebuild/PATCH will store. Units are
+   * restricted to the caller's account; an unknown id is simply not counted.
+   * Declared before `:contractId` so the literal path is not read as an id.
+   */ // finance-v2: VC-1
+  @Get("vat-preview") // finance-v2: VC-1
+  @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW) // finance-v2: VC-1
+  async vatPreview(@CurrentUser() user: AuthUser, @Query("unitIds") unitIds: unknown, @Query("vatEnabled") vatEnabled?: string) { // finance-v2: VC-1
+    const ids = parseUnitIdsQuery(unitIds); // finance-v2: VC-1
+    if (!ids.length) throw new BadRequestException("حدد وحدة واحدة على الأقل · unitIds is required"); // finance-v2: VC-1
+    return rentVatForUnits(this.db, ids, vatEnabled === "true" || vatEnabled === "1", scopeId(user)); // finance-v2: VC-1
+  } // finance-v2: VC-1
+
+  /**
    * One contract, in the same shape as a list row (units, primary property,
    * rent terms). The Contracts tab's deep link used to download every
    * contract in the account to find this one.
@@ -634,6 +650,8 @@ class ContractsController {
    * decide: a mixed-use property whose unit has no usage of its own.
    */
   private async resolveRentVat(body: any, requested: boolean): Promise<boolean> {
+    // finance-v2: VC-1 (R1) — usage AND the landlord's VAT registration, over EVERY unit (taxable if any is); common/landlord-vat.ts. The body below now runs only with no unit ids (returns the caller's choice).
+    if (bodyUnitIds(body).length) return (await rentVatForUnits(this.db, bodyUnitIds(body), requested)).vatEnabled; // finance-v2: VC-1
     const unitId = Number(body?.unitId ?? (Array.isArray(body?.unitIds) ? body.unitIds[0] : null));
     if (!Number.isFinite(unitId) || unitId <= 0) return requested;
 
@@ -1249,6 +1267,12 @@ class ContractsController {
     );
 
     const freq = (body?.paymentFrequency as string) || contract.paymentFrequency || "monthly";
+    // finance-v2: VC-1 (R1) — re-derive rent VAT before building (usage + landlord registration may have changed since the contract was stored); Ejar imports keep Ejar's verdict
+    if (!(contract as any).ejarSource) { // finance-v2: VC-1
+      const vatUnitIds = (await this.db.select({ unitId: contractUnitsTable.unitId }).from(contractUnitsTable).where(eq(contractUnitsTable.contractId, id))).map((r) => r.unitId); // finance-v2: VC-1
+      const vat = vatUnitIds.length ? (await rentVatForUnits(this.db, vatUnitIds, Boolean(contract.vatEnabled))).vatEnabled : Boolean(contract.vatEnabled); // finance-v2: VC-1
+      if (vat !== Boolean(contract.vatEnabled)) { await this.db.update(contractsTable).set({ vatEnabled: vat } as any).where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId))); (contract as any).vatEnabled = vat; } // finance-v2: VC-1
+    } // finance-v2: VC-1
     const termRows = await this.db.select().from(contractRentTermsTable)
       .where(eq(contractRentTermsTable.contractId, id));
     const rentTerms = termRows.map((t) => ({ year: t.year, amount: Number(t.amount) }));
@@ -1598,6 +1622,11 @@ class ContractsController {
     // `tenantId` is an integer FK; the sanitiser coerces and range-checks it
     // (and `null` still clears it) — `Number("abc")` used to reach the driver.
     sanitizeContractFields(updateData, willBeDraft, escalationType);
+    // finance-v2: VC-1 (R1) — a sent vatEnabled is re-derived from the contract's units, never trusted; an Ejar-imported contract keeps Ejar's verdict (its amounts are VAT-inclusive)
+    if (updateData.vatEnabled !== undefined && !(prior as any).ejarSource) { // finance-v2: VC-1
+      const vatUnitIds = (await this.db.select({ unitId: contractUnitsTable.unitId }).from(contractUnitsTable).where(eq(contractUnitsTable.contractId, id))).map((r) => r.unitId); // finance-v2: VC-1
+      if (vatUnitIds.length) updateData.vatEnabled = (await rentVatForUnits(this.db, vatUnitIds, Boolean(updateData.vatEnabled))).vatEnabled; // finance-v2: VC-1
+    } // finance-v2: VC-1
     // finance-v2: 0084 — count → skip is refused once those installments are in the ledger (no reversal is invented)
     if (updateData.externalSettlementMode === "skip" && (prior as any).externalSettlementMode !== "skip") await this.fv2h?.guardExternalSkip(ownerId, id); // finance-v2:
 

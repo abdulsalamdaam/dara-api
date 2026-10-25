@@ -25,3 +25,7 @@ src/modules/billing/billing.module.ts	d431436941132ac7	C-1 (flag off too, accoun
 src/modules/ejar/ejar.module.ts	821b7fabd292580c	RBAC (not finance-v2, Oct 2026): POST /ejar/lookup spends the paid Ejar quota and is step 1 of an import, so it needs contracts.write like the import, not contracts.view
 src/modules/ejar/ejar.scope.spec.ts	402382d8d657441a	Legacy plans dropped (Oct 2026): the advanced plan no longer exists, so the unscoped-landlord-plans spec stops listing it
 src/modules/admin/admin.module.ts	9072d77d3eae7ea1	copy: admin test-push default text (Dara messages copy), no logic change
+src/modules/billing/billing.module.ts	30097fd037c767e6	VC-2 (flag off too, VAT rules Oct 2026 R2): legacy paired commission no longer forces 15% — VAT iff the office is VAT-registered (account-seller commissionCarriesVat)
+src/modules/billing/billing.module.ts	224fb7fcdfe4e123	VC-2: legacy commission line carries vatCategory S when VAT, O (out of scope) when the office is unregistered
+src/modules/billing/billing.module.ts	a6fe24ee54966f1e	VC-3 (R3): an office supply (commission, agency fee; v2 marker only) picks standard/simplified by buyer type — a company is standard without a VAT number; every other document keeps buyer-VAT
+src/modules/billing/billing.module.ts	a0e3a8b5ec31ab35	VC-3 (R3): the buyer check accepts a CR in place of the VAT number for an office supply only (eInvoiceBuyerBlockers idInsteadOfVat)

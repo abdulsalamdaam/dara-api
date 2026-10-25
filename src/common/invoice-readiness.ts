@@ -655,12 +655,19 @@ export function eInvoiceBuyerBlockers(
     city?: unknown; postalZone?: unknown;
   } | null | undefined,
   profile: "standard" | "simplified",
+  /**
+   * R3 (Oct 2026): a business buyer that is not VAT-registered still gets a
+   * standard invoice, identified by its CR (`id` + `idScheme`, demanded below
+   * anyway) instead of a VAT number. Only the office-supply path (commission,
+   * agency fee) asks for this today.
+   */
+  opts: { idInsteadOfVat?: boolean } = {},
 ): string[] {
   const b = buyer ?? {};
   const missing: string[] = [];
   if (blank(b.name)) missing.push("name");
   if (profile !== "standard") return missing;
-  if (blank(b.vat)) missing.push("vat");
+  if (blank(b.vat) && !opts.idInsteadOfVat) missing.push("vat");
   // The snapshot's own field names, not `ADDRESS_REQUIRED`'s: these keys travel
   // back to a form that is bound to the document, not to a tenant record.
   for (const [key, v] of [

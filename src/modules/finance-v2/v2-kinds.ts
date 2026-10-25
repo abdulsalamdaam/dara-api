@@ -2,8 +2,11 @@ import { ConflictException } from "@nestjs/common";
 
 /**
  * The two document kinds only Finance v2 issues (DESIGN §9 E8, E9): the
- * non-tax rent receipt and the brokerage (agency) fee. Neither is a ZATCA
- * document in the beta. EX-4 keeps them away from ZATCA and from the legacy
+ * non-tax rent receipt and the brokerage (agency) fee. The rent receipt is
+ * never a ZATCA document; a VAT-bearing agency fee of a registered, linked
+ * office IS reported (R4, Oct 2026) — the billing ZATCA path turns it into an
+ * office-seller invoice (agency-fee-approve.ts) BEFORE this skip is reached,
+ * with the flag on only. EX-4 keeps the rest away from ZATCA and from the legacy
  * tax-invoice approve path in EVERY flag state (a no-op for accounts that
  * never had v2, because these kinds do not exist there). Pure: no DB, no DI,
  * so the legacy files can call it even when no finance-v2 provider is wired.

@@ -18,6 +18,7 @@ import { paymentsListV2 } from "../overrides/payments-list";
 import { accountingV2, contractPropertySnapshots, dashboardV2 } from "../overrides/reads";
 import { approveV2Kind, ensureAgencyFeeDraft, guardCommissionApprove } from "../overrides/documents-v2";
 import { commissionZatcaDocV2 } from "../overrides/commission-approve";
+import { agencyFeeZatcaDocV2 } from "../overrides/agency-fee-approve";
 import { applyDispositions } from "../overrides/terminate";
 import { guardTerminateTrust } from "../overrides/terminate-trust";
 import { assertPayoutWithinDue } from "../overrides/landlord-dues";
@@ -662,7 +663,24 @@ export class FinanceV2Hooks {
     }
   }
 
-  /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA. `db` is the legacy Drizzle handle (same row shape). */
+  /**
+   * R4: the ZATCA submission of a VAT-bearing agency fee goes out under the
+   * office's own seller with the tenant as buyer (agency-fee-approve.ts).
+   * Returns the document as the submission should see it, or null (flag off,
+   * any other document, a non-VAT fee, an unlinked office, any error) so the
+   * legacy EX-4 skip still applies.
+   */
+  async agencyFeeZatcaDoc(scope: number, doc: any): Promise<any | null> {
+    try {
+      if (doc?.kind !== "agency_fee" || !(await this.resolve(scope))) return null;
+      return await agencyFeeZatcaDocV2(this.sqlPool(), scope, doc);
+    } catch (err) {
+      this.fail("agency_fee_zatca", scope, err);
+      return null;
+    }
+  }
+
+  /** E8/E9: the v2 approve of `rent_receipt` / `agency_fee`; never ZATCA itself (the billing approve submits a VAT-bearing agency fee after it, R4). `db` is the legacy Drizzle handle (same row shape). */
   async approveV2Kind(ctx: HookCtx, db: any, doc: any): Promise<any> {
     return approveV2Kind(this.sqlPool(), db, ctx.userId, doc, (id) => this.documentConfirmed(ctx, id));
   }

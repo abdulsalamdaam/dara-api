@@ -160,6 +160,31 @@ const commissionLine = (id: string, property: string, pct: string, base: string,
 const commissionTwoProperties = [commissionLine("1", "برج الأعمال", "5.00", "36000.00", 1800), commissionLine("2", "مجمع الواحة", "10.00", "2608.70", 260.87)];
 const commissionOneProperty = [commissionLine("1", "عمارة النخيل", "7.50", "10500.00", 787.5)];
 
+// R3 (Oct 2026): a BUSINESS buyer that is not VAT-registered gets a STANDARD
+// invoice identified by its commercial registration (schemeID CRN) and no
+// buyer VAT number — the builder emits an empty PartyTaxScheme. The office's
+// commission to such a landlord, its credit note, and the same shape for the
+// brokerage fee to a company tenant. Synthetic values only.
+const commissionLandlordCompanyNoVat = {
+  name: "شركة النخبة للاستثمار العقاري",
+  id: "1010999999", idScheme: "CRN",
+  street: "طريق الملك عبدالله", buildingNo: "6543", district: "الملقا", city: "الرياض", postalZone: "13521", additionalNo: "3344",
+};
+// R4: the brokerage (agency) fee — the OFFICE's supply to the TENANT, one S line,
+// worded exactly as documents-v2.ts AGENCY_FEE_LINE writes it.
+const agencyFeeLine = [{ id: "1", name: "أتعاب الوساطة (السعي) / Brokerage fee", quantity: 1, unitPrice: 2500, vatPercent: 15, vatCategory: "S" as const }];
+const tenantCompanyVat = {
+  name: "شركة المستأجر للتجارة",
+  vat: "344444444400003", id: "1010888888", idScheme: "CRN",
+  street: "شارع التحلية", buildingNo: "2468", district: "السلامة", city: "جدة", postalZone: "23525", additionalNo: "1357",
+};
+const tenantCompanyNoVat = {
+  name: "مؤسسة المستأجر الناشئة",
+  id: "4030777777", idScheme: "CRN",
+  street: "شارع فلسطين", buildingNo: "1357", district: "الحمراء", city: "جدة", postalZone: "23212", additionalNo: "2468",
+};
+const tenantIndividual = { name: "مستأجر فرد", id: "1076543210", idScheme: "NAT" };
+
 const MATRIX = [
   { file: "01-standard-invoice", profile: "standard", docType: "invoice", buyer, lines: [commercialRent] },
   { file: "02-standard-credit", profile: "standard", docType: "credit", buyer, lines: [commercialRent], ref: true },
@@ -224,6 +249,11 @@ const MATRIX = [
   { file: "24-simplified-commission", profile: "simplified", docType: "invoice", buyer: commissionLandlordIndividual, lines: commissionOneProperty },
   { file: "25-standard-commission-credit", profile: "standard", docType: "credit", buyer: commissionLandlordCompany, lines: commissionTwoProperties, ref: true },
   { file: "26-simplified-commission-credit", profile: "simplified", docType: "credit", buyer: commissionLandlordIndividual, lines: commissionOneProperty, ref: true },
+  { file: "27-standard-commission-buyer-crn-no-vat", profile: "standard", docType: "invoice", buyer: commissionLandlordCompanyNoVat, lines: commissionTwoProperties },
+  { file: "28-standard-commission-credit-buyer-crn-no-vat", profile: "standard", docType: "credit", buyer: commissionLandlordCompanyNoVat, lines: commissionTwoProperties, ref: true },
+  { file: "29-standard-agency-fee", profile: "standard", docType: "invoice", buyer: tenantCompanyVat, lines: agencyFeeLine },
+  { file: "30-standard-agency-fee-buyer-crn-no-vat", profile: "standard", docType: "invoice", buyer: tenantCompanyNoVat, lines: agencyFeeLine },
+  { file: "31-simplified-agency-fee", profile: "simplified", docType: "invoice", buyer: tenantIndividual, lines: agencyFeeLine },
 ] as const;
 
 async function main() {

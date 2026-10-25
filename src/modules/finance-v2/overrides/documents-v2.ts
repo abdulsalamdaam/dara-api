@@ -6,21 +6,22 @@
  *    must issue tax invoices; 400). RR-######, category O, no VAT, no QR, never
  *    sent to ZATCA. Approval posts E08 (charges its installments like E01)
  *    and triggers the v2 commission (E1).
- *  - `agency_fee` "أتعاب الوساطة (السعي) / Brokerage fee": the account's own
- *    supply billed to the tenant, AGF-######, 15% only when the account is
- *    VAT-registered AND linked to ZATCA (else O, printed "not a tax invoice").
- *    A VAT-bearing AGF is refused at approval in every case (409
- *    FINANCE_V2_TAX_DOC_NOT_REPORTABLE): it is never sent to Fatoora, and a
- *    15% document that never reaches Fatoora is not a valid tax invoice.
- *    Approval posts E17.
+ *  - `agency_fee` "أتعاب الوساطة (السعي) / Brokerage fee": the OFFICE's own
+ *    supply billed to the tenant, AGF-######, 15% whenever the office is
+ *    VAT-registered (R4, Oct 2026; else O, printed "not a tax invoice").
+ *    Approval routing is agency-fee-approve.ts: unregistered → approves, never
+ *    sent; registered but unlinked → held (409 OFFICE_NOT_LINKED); registered
+ *    and linked → approves and is reported to ZATCA under the office's seller
+ *    (the billing approve submits it after `approveV2Kind`). Approval posts E17.
  *
  * Both are approved by `approveV2Kind` (the legacy approve forks to it at the
- * top), which never calls the ZATCA orchestration. No ZATCA file is touched.
+ * top), which itself never calls the ZATCA orchestration. No ZATCA file is touched.
  */
 import { BadRequestException, ConflictException, NotFoundException } from "@nestjs/common";
 import { and, eq } from "drizzle-orm";
 import { simpleInvoicesTable } from "@dara/database";
-import { accountZatcaIntegrated, createCommissionV2, nextDocNumber, ownFeeCarriesVat } from "../commission";
+import { accountZatcaIntegrated, commissionCarriesVat, createCommissionV2, nextDocNumber } from "../commission";
+import { guardAgencyFeeApprove } from "./agency-fee-approve";
 import { captureDims } from "../hooks/facts-loader";
 import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
@@ -166,9 +167,10 @@ export async function ensureAgencyFeeDraft(q: Sql, scope: number, contractId: nu
     [scope, contractId],
   );
   if (existing) return { existing: true, ...(await docById(q, scope, Number(existing.id))) };
-  // 15% only for a VAT-registered account that is linked to ZATCA (§9 E8): an
-  // unlinked account's AGF prints as "not a tax invoice" with no VAT.
-  const reg = await ownFeeCarriesVat(q, scope);
+  // R4: 15% whenever the office is VAT-registered, linked or not (an unlinked
+  // registered office's AGF is held at approval, like its commission); an
+  // unregistered office's AGF prints as "not a tax invoice" with no VAT.
+  const reg = await commissionCarriesVat(q, scope);
   const vat = reg ? Math.floor((fee * 15 + 50) / 100) : 0;
   const net = Number(fromHalalas(fee));
   const items = [{ description: AGENCY_FEE_LINE, quantity: 1, unitPrice: net, amount: net, vat: reg, vatCategory: reg ? "S" : "O" }];
@@ -288,7 +290,7 @@ export async function approveV2Kind(
       }
     }
   }
-  if (doc.kind === "agency_fee" && total > subtotal) await refuseUnreportableTaxDoc(q, scope);
+  if (doc.kind === "agency_fee") await guardAgencyFeeApprove(q, scope, doc); // R4: agency-fee-approve.ts
   const [updated] = await db.update(simpleInvoicesTable).set({ status: "confirmed", confirmedAt: new Date() } as any)
     .where(and(eq(simpleInvoicesTable.id, doc.id), eq(simpleInvoicesTable.userId, scope))).returning();
   await emitConfirmed(updated.id);

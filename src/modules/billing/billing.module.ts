@@ -40,6 +40,9 @@ import { clearedInvoiceQr } from "../../common/zatca-qr";
 import { isZatcaAccepted, ZATCA_ACCEPTED_STATUSES } from "../../common/zatca-acceptance";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks (DESIGN §5.1)
 import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
+import { commissionCarriesVat } from "../finance-v2/account-seller"; // finance-v2: VC-2 — commission VAT iff the office is VAT-registered (R2)
+import { sqlOf } from "../finance-v2/hooks/sql"; // finance-v2: VC-2
+import { officeSupplyProfile } from "../finance-v2/office-supply"; // finance-v2: VC-3 — office supplies pick standard/simplified by buyer type (R3)
 import { parseEnumList } from "../../common/pagination"; // finance-v2: ?kind= filter on the documents list
 import { accountAllowsCommission, assertAccountAllowsCommission } from "../../common/account-plan"; // finance-v2: commission is Offices/Companies only (plan-features.ts planAllowsCommission)
 
@@ -1287,9 +1290,8 @@ class SimpleInvoicesController {
         .limit(1);
       vatReg = !!(defOwner?.tax && String(defOwner.tax).trim());
     }
-    // Business rule: a property-management commission invoice ALWAYS carries
-    // 15% VAT, regardless of the seller's VAT-registration status.
-    vatReg = true;
+    // finance-v2: VC-2 (R2) — commission carries 15% iff the OFFICE is VAT-registered (company VAT, else the account-holder/default landlord's tax number), never forced
+    vatReg = await commissionCarriesVat(sqlOf(this.db as any), uid);
 
     // Commission base = pre-VAT RENT only. Rent installments have a null
     // description; service-fee installments carry a name and are excluded.
@@ -1322,7 +1324,7 @@ class SimpleInvoicesController {
         phone: c.landlordPhone ?? undefined, email: c.landlordEmail ?? undefined,
         address: c.landlordAddress ?? undefined, vatNumber: c.landlordTaxNumber ?? undefined,
       },
-      items: [{ description: "عمولة إدارة الأملاك", quantity: 1, unitPrice: commissionNet, amount: commissionNet, vat: vatReg }],
+      items: [{ description: "عمولة إدارة الأملاك", quantity: 1, unitPrice: commissionNet, amount: commissionNet, vat: vatReg, vatCategory: vatReg ? "S" : "O" }], // finance-v2: VC-2 — an unregistered office's commission is out of scope (O), not 15%
       subtotal: commissionNet.toFixed(2), total: total.toFixed(2),
       issueDate: today(), dueDate: rentDoc.dueDate ?? null,
       billingReference: rentDoc.number,
@@ -1578,6 +1580,7 @@ class SimpleInvoicesController {
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.status === "confirmed") throw new BadRequestException("المستند معتمد مسبقاً");
     if (doc.type === "invoice" && doc.kind === "commission") await assertAccountAllowsCommission(this.db, uid); // finance-v2: a COM- draft left from before a downgrade to عقاري is never issued (403)
+    if (fv2 && doc.kind === "agency_fee") { const agf = await this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); const { commission: _c, zatca: _z, ...agfRow } = agf; void _c; void _z; return { ...agf, zatca: Number(agf.total) > Number(agf.subtotal) ? await this.submitApprovedDocToZatca(uid, agfRow) : null }; } // finance-v2: VC-4 (R4) — a VAT-bearing agency fee (registered + linked office; the guard holds the rest) is reported to ZATCA under the office's seller
     if (fv2 && isV2DocKind(doc.kind)) return this.fv2h!.approveV2Kind({ fv2, userId: uid }, this.db, doc); // finance-v2: E8/E9 — their own approve, never ZATCA
     refuseV2KindOnLegacyApprove(doc.kind); // finance-v2: EX-4 — a v2 kind never takes the tax-invoice path (flag off)
     await this.fv2h?.guardCommissionApprove(fv2, uid, doc); // finance-v2: §9 E8 — a VAT-bearing commission is never reported, so never approved
@@ -1889,6 +1892,7 @@ class SimpleInvoicesController {
    */
   private async runZatcaSubmission(uid: number, doc: any): Promise<ZatcaSubmitOutcome> {
     try {
+      doc = (await this.fv2h?.agencyFeeZatcaDoc(uid, doc)) ?? doc; // finance-v2: VC-4 (R4) — a VAT-bearing agency fee of a registered + linked office files under the office's seller (becomes kind "invoice"); anything else still takes the EX-4 skip below
       if (isV2DocKind(doc?.kind)) return V2_KIND_ZATCA_SKIP; // finance-v2: EX-4 — rent receipts and agency fees never reach ZATCA
       doc = (await this.fv2h?.commissionZatcaDoc(uid, doc)) ?? doc; // finance-v2: Q6b — the monthly landlord commission is reported under the office's seller
       // Commission invoices (فاتورة عمولة) are intentionally NOT sent to ZATCA.
@@ -2017,13 +2021,14 @@ class SimpleInvoicesController {
       // does not override it; it decides the identification scheme above, and
       // the readiness gate uses it to insist a company actually carries the VAT
       // number and address this branch would otherwise silently do without.
-      const profile: "standard" | "simplified" = buyer?.vat ? "standard" : "simplified";
+      // finance-v2: VC-3 (R3) — an office supply (commission, agency fee) picks the profile by the buyer's type: a company is standard even without a VAT number (identified by CRN)
+      const profile: "standard" | "simplified" = officeSupplyProfile((doc as any).officeSupply, buyer) ?? (buyer?.vat ? "standard" : "simplified");
 
       // A standard invoice identifies its buyer in full or is rejected after the
       // ICV is spent. The approve gate reads the tenant record for this; notes
       // and rebuilds skip that gate, and the record may have changed since — so
       // the snapshot that is actually about to be signed is what gets checked.
-      const buyerMissing = eInvoiceBuyerBlockers(buyer, profile);
+      const buyerMissing = eInvoiceBuyerBlockers(buyer, profile, { idInsteadOfVat: !!(doc as any).officeSupply }); // finance-v2: VC-3 — a company buyer without VAT is identified by its CR instead
       if (buyerMissing.length) {
         this.logger.warn(`ZATCA: ${doc.number} not sent — buyer incomplete for a ${profile} invoice: ${buyerMissing.join(", ")}`);
         return { submitted: false, code: "error", reason: `بيانات العميل ناقصة للفاتورة الضريبية: ${buyerMissing.join("، ")}` };

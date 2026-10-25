@@ -305,6 +305,16 @@ Simulation deliberately does **not** move the pointer: it fills the same
 `prod_*` columns, and a record marked live while holding a simulation
 certificate signs every real invoice with something `/core` rejects.
 
+**A linked seller's tax identity is frozen** (Oct 2026, `common/zatca-lock.ts`):
+while the account holds live credentials (`isOnboarded`: not deleted, not
+revoked), `PATCH /companies/me` refuses a CHANGE to `vatNumber` / `taxNumber` /
+`commercialReg`, and `PATCH /owners/:id` a change to the account holder's
+`taxNumber` / `idNumber` or to any landlord's `taxNumber` when THAT landlord is
+linked — 409 `{code: "VAT_LOCKED_ZATCA_LINKED", fields, message}`. The same value
+or an omitted field passes. Reads carry the state: `GET /companies/me` →
+`zatcaLinked`, `lockedFields`; each `GET /owners` row → `zatcaLinked`,
+`vatLocked`, `lockedFields`. Onboarding/unlink write only `zatca_credentials`.
+
 `seller_id_scheme` is per-INVOICE (`PartyIdentification/@schemeID`), not baked
 into the CSR — so it can be corrected on a live seller without re-onboarding.
 An individual landlord is `NAT` (national ID) or `IQA` (iqama), never `CRN`.
@@ -1073,7 +1083,8 @@ would strand everything filed in between.
 
 ## 4. Money, VAT and installment status
 
-- **Rent VAT is decided by usage, not by the client.** Residential is exempt,
+- **Rent VAT is decided by usage AND the landlord's registration, not by the
+  client** (R1, see "VAT decision rules" below). Residential is exempt,
   everything else taxable — expressed as an allowlist of residential usages so a
   new usage defaults to **taxable**. Under-charging VAT is a liability;
   over-charging is visible and gets corrected. Mirrored in
@@ -1086,6 +1097,24 @@ would strand everything filed in between.
   filtering the stored column is how the "متأخرة" tab ended up permanently
   empty while the summary card above it counted correctly. Both resolve "today"
   in **Asia/Riyadh**, not UTC.
+
+### VAT decision rules (Oct 2026)
+
+Staging only (branch `fix/vat-commission`). One rule each, one place each:
+
+| | Rule | Enforced in |
+|---|---|---|
+| **R1** rent | 15% iff the usage is taxable (above) **and** the LANDLORD is VAT-registered = non-empty `owners.tax_number` of `properties.owner_id` (the readiness gate's source). Unregistered landlord → no VAT even on commercial rent, and a rent receipt instead of a tax invoice. Multi-unit contract: taxable if ANY unit is. No landlord linked → usage alone. | `common/landlord-vat.ts` (`decideRentVat`, `rentVatForUnits`); contracts create / rebuild (`resolveRentVat`), plain PATCH (a sent `vatEnabled` is re-derived), `generate-installments` (re-derived and stored before building). Ejar-imported contracts (`ejar_source`) keep Ejar's verdict — their amounts are VAT-inclusive. `GET /contracts/vat-preview?unitIds=1,2` → `{vatEnabled, locked, reason: residential\|taxable_usage\|landlord_not_registered\|undecided, landlordVatRegistered, usage}` |
+| **R2** commission | 15% iff the OFFICE is VAT-registered (company VAT, else the account-holder/default landlord's tax number) — never by usage, never by the landlord's status. | `finance-v2/account-seller.ts` `commissionCarriesVat`, used by v2 commission, the monthly run, the agency fee and now the legacy paired commission (`billing.module.ts maybeCreateCommissionInvoice` forced 15% before; unregistered → line `O`). |
+| **R3** standard vs simplified | By the BUYER's nature, not its VAT number: business (`type = 'company'`) or VAT-registered → standard; individual → simplified. A company without a VAT number is identified by its CR (`schemeID="CRN"`, `700` for a 7-prefixed unified number) and no buyer VAT. | `finance-v2/office-supply.ts` `buyerProfileByType`; applied to the office's supplies only (commission, agency fee: the v2 ZATCA transforms put an `officeSupply` marker on the doc and `billing.module.ts runZatcaSubmission` honours it; `eInvoiceBuyerBlockers(…, {idInsteadOfVat})`). **Rent keeps the buyer-VAT rule** — a company tenant without VAT is still refused by the readiness gate. Sample matrix 27–28. |
+| **R4** agency fee (AGF-) | The OFFICE's supply to the TENANT. 15% iff the office is registered (linked or not). Unregistered → `O`, approves, never sent. Registered + unlinked → held (409 `OFFICE_NOT_LINKED`). Registered + linked → approves and is reported to ZATCA under the office's standalone seller, tenant as buyer (R3). A registered office's old VAT-less AGF draft → 409 `AGENCY_FEE_VAT_MISSING` (cancel, re-issue). | `finance-v2/overrides/agency-fee-approve.ts` (`agencyFeeRouting`, guard, `agencyFeeZatcaDocV2`); billing approve submits it after `approveV2Kind`; flag on only. Sample matrix 29–31. |
+
+Changing a property's usage or landlord never rewrites its live contracts:
+`PATCH /properties/:id` adds `vatImpact: {activeContracts, usageChanged, ownerChanged}`
+so the web can warn; the edit wizard / generate-installments re-derive.
+`managementFeePercent` on a landlord: 0–100, two decimals; a plan without
+commission (عقاري) may not SET a positive one (400 `COMMISSION_NOT_IN_PLAN`;
+re-sending the stored value passes).
 
 ### Moyasar webhooks
 
@@ -1565,7 +1594,7 @@ provisioned automatically, see "Auto-activation" below. Not on `main`.
   landlord, rent collected before VAT (from the ledger) × the property/landlord
   rate → one tax invoice per landlord issued by the OFFICE through the billing
   approve handler, reported to ZATCA under the office's own seller (standard if
-  the landlord has a VAT number, else simplified). Scheduled at 23:00 Riyadh on
+  the landlord is a company or has a VAT number, else simplified — R3, §4). Scheduled at 23:00 Riyadh on
   the month's last day, with catch-up; `FINANCE_V2_COMMISSION_DISABLED=1` (or the
   worker switch) turns it off, and each account has an auto-run switch. New
   Manager-mode accounts start on "collected"; existing ones keep their basis.
@@ -1602,7 +1631,9 @@ provisioned automatically, see "Auto-activation" below. Not on `main`.
   - **EX-4** (api): legacy approve refuses the v2-only `rent_receipt` /
     `agency_fee` kinds (409) and ZATCA submission skips them, so a non-tax
     document never reaches ZATCA, even after a flag flip-back. The four signing
-    files are untouched.
+    files are untouched. Exception since Oct 2026 (R4, §4): with the flag ON, a VAT-bearing
+    agency fee of a registered + linked office is reported under the office's
+    seller; flag off it is still skipped.
   - Also structural: one extra `GET /status` per portal load; a 3 MB body limit
     on the two v2 bank-statement routes only; admin hard-delete also purges v2
     rows.

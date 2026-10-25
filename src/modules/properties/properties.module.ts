@@ -615,7 +615,30 @@ class PropertiesController {
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)))
       .returning();
     if (!prop) throw new NotFoundException("Property not found");
-    return overlayTypeOther(await attachLookupLabels(this.db, [{ ...prop }], PROPERTY_LOOKUP_SPEC))[0];
+    const out = overlayTypeOther(await attachLookupLabels(this.db, [{ ...prop }], PROPERTY_LOOKUP_SPEC))[0];
+    // Rent VAT depends on the usage AND the landlord (common/landlord-vat.ts).
+    // Changing either never rewrites the live contracts on this property — their
+    // VAT and installments stay as issued; the edit wizard / generate-installments
+    // re-derive it. `vatImpact` tells the web how many live contracts the change
+    // touches so it can warn. Additive: absent when neither changed.
+    const usageChanged = "usageLookupId" in updateData && (updateData.usageLookupId ?? null) !== (priorProp.usageLookupId ?? null);
+    const ownerChanged = "ownerId" in updateData && (updateData.ownerId ?? null) !== (priorProp.ownerId ?? null);
+    if (usageChanged || ownerChanged) {
+      const [row] = await this.db
+        .select({ n: sql<number>`count(distinct ${contractsTable.id})::int` })
+        .from(contractUnitsTable)
+        .innerJoin(unitsTable, eq(unitsTable.id, contractUnitsTable.unitId))
+        .innerJoin(contractsTable, eq(contractsTable.id, contractUnitsTable.contractId))
+        .where(and(
+          eq(unitsTable.propertyId, id),
+          eq(contractsTable.userId, owner),
+          isNull(contractsTable.deletedAt),
+          eq(contractsTable.isDraft, false),
+          notInArray(contractsTable.status, [...ENDED_CONTRACT_STATUSES, "expired"] as any),
+        ));
+      return { ...out, vatImpact: { activeContracts: Number(row?.n ?? 0), usageChanged, ownerChanged } };
+    }
+    return out;
   }
 
   @Delete(":propertyId")

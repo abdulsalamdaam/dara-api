@@ -14,14 +14,16 @@
  *    approval is refused (OFFICE_NOT_LINKED) until the office is linked.
  *  - office VAT-registered AND linked: the document is a tax invoice in the
  *    office's name (15%), reported to ZATCA under the office's own seller with
- *    the landlord as the buyer (standard/cleared when the landlord has a VAT
- *    number, simplified/reported otherwise). It approves when the office's
+ *    the landlord as the buyer — standard/cleared when the landlord is a
+ *    business (`owners.type = 'company'`, identified by VAT number or, when
+ *    unregistered, by its CR) or VAT-registered, simplified/reported for an
+ *    individual (R3, office-supply.ts). It approves when the office's
  *    seller identity is complete and the landlord buyer can be named.
  *  - a document that carries VAT although the office cannot issue a tax
  *    invoice (not registered, or not linked: DARA-NOTES §2b-iii) is refused,
  *    naming the office's missing registration / link and "remove the VAT".
  *
- * The landlord's VAT number is never demanded (it only decides standard vs
+ * The landlord's VAT number is never demanded (his type decides standard vs
  * simplified), nor the landlord's ZATCA link, nor any tenant confirmation.
  * `commissionSellerCheck` is the one verdict: the approve guard refuses on it
  * and `GET /finance/v2/commission-documents/:id/seller-check` shows it to the
@@ -32,6 +34,7 @@ import type { Sql } from "../hooks/sql";
 import { accountVatRegistered, accountZatcaIntegrated } from "../account-seller";
 import { effectiveManagementFee } from "../commission";
 import { toHalalas } from "../money";
+import { buyerProfileByType, type OfficeSupplyMarker } from "../office-supply";
 
 export interface CommissionSellerIssue {
   code: string;
@@ -44,7 +47,7 @@ export interface CommissionSellerCheck {
   /** What the document is: a tax invoice in the office's name, or a non-tax commission document. */
   document: "tax" | "non_tax";
   office: { name: string | null; vatRegistered: boolean; vatNumber: string | null; zatcaLinked: boolean };
-  /** The landlord billed (the buyer); his VAT number only decides the ZATCA profile. */
+  /** The landlord billed (the buyer); his type (company / VAT-registered) decides the ZATCA profile (R3). */
   buyer: { ownerId: number | null; name: string | null; vatNumber: string | null; profile: "standard" | "simplified" | null; addressComplete: boolean | null };
   ok: boolean;
   blockers: CommissionSellerIssue[];
@@ -64,7 +67,7 @@ export async function commissionBuyerOwnerId(q: Sql, scope: number, doc: any): P
 }
 
 /** The office (the account) as the seller of its own commission. */
-async function officeOf(q: Sql, scope: number) {
+export async function officeOf(q: Sql, scope: number) {
   const [r] = await q.rows(
     `select coalesce(nullif(trim(c.name),''), nullif(trim(u.name),'')) as name,
             coalesce(nullif(trim(c.vat_number),''),
@@ -98,7 +101,7 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
   const ownerId = await commissionBuyerOwnerId(q, scope, doc);
   const [b] = ownerId
     ? await q.rows(
-      `select name, nullif(trim(coalesce(tax_number,'')),'') as tax,
+      `select name, nullif(trim(coalesce(tax_number,'')),'') as tax, type::text as type, nullif(trim(coalesce(id_number,'')),'') as id_number,
               (nullif(trim(coalesce(national_address_street,'')),'') is not null and nullif(trim(coalesce(building_number,'')),'') is not null
                and nullif(trim(coalesce(national_address_city,'')),'') is not null and nullif(trim(coalesce(national_address_district,'')),'') is not null
                and nullif(trim(coalesce(postal_code,'')),'') is not null) as addr
@@ -132,12 +135,21 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
         code: "COMMISSION_BUYER_UNRESOLVED",
         message: "تعذّر تحديد المؤجر المفوتر في فاتورة العمولة · The landlord billed by this commission invoice could not be determined",
       });
-    } else if (b.tax && b.addr !== true) {
-      notices.push({
-        code: "BUYER_ADDRESS_INCOMPLETE",
-        message: "المؤجر مسجّل ضريبياً فتصدر له فاتورة ضريبية قياسية، وعنوانه الوطني ناقص؛ ستُعتمد الفاتورة لكن إرسالها للهيئة يحتاج العنوان · "
-          + "The landlord is VAT-registered (a standard invoice) and his national address is incomplete: the invoice approves, but its ZATCA clearance needs the address",
-      });
+    } else if (buyerProfileByType(b.type, b.tax) === "standard") {
+      if (b.addr !== true) {
+        notices.push({
+          code: "BUYER_ADDRESS_INCOMPLETE",
+          message: "المؤجر منشأة أو مسجّل ضريبياً فتصدر له فاتورة ضريبية قياسية، وعنوانه الوطني ناقص؛ ستُعتمد الفاتورة لكن إرسالها للهيئة يحتاج العنوان · "
+            + "The landlord is a business or VAT-registered (a standard invoice) and his national address is incomplete: the invoice approves, but its ZATCA clearance needs the address",
+        });
+      }
+      if (!b.tax && !b.id_number) {
+        notices.push({
+          code: "BUYER_CRN_MISSING",
+          message: "المؤجر منشأة غير مسجّلة ضريبياً فتُعرَّف في الفاتورة القياسية بالسجل التجاري، وهو غير مُدخل؛ ستُعتمد الفاتورة لكن إرسالها للهيئة يحتاج السجل التجاري · "
+            + "The landlord is a business without a VAT number, so the standard invoice identifies it by its commercial registration, which is missing: the invoice approves, but its ZATCA clearance needs the CR",
+        });
+      }
     }
   } else if (office.vatRegistered && doc?.type === "invoice") {
     // Accountant round 4 (COM-000002): a notice let this approve as a non-tax document. A registered office never
@@ -154,7 +166,7 @@ export async function commissionSellerCheck(q: Sql, scope: number, doc: any): Pr
     office: { name: office.name, vatRegistered: office.vatRegistered, vatNumber: office.vatNumber, zatcaLinked: office.zatcaLinked },
     buyer: {
       ownerId, name: b?.name ?? null, vatNumber: b?.tax ?? null,
-      profile: tax && b ? (b.tax ? "standard" : "simplified") : null, addressComplete: b ? b.addr === true : null,
+      profile: tax && b ? buyerProfileByType(b.type, b.tax) : null, addressComplete: b ? b.addr === true : null,
     },
     ok: blockers.length === 0,
     blockers,
@@ -205,5 +217,8 @@ export async function commissionZatcaDocV2(q: Sql, scope: number, doc: any): Pro
   if (doc.contractId != null && !carriesVat(doc)) return null;
   const ownerId = await commissionBuyerOwnerId(q, scope, doc);
   if (!ownerId) return null;
-  return { ...doc, kind: "invoice", contractId: null, client: { ...(doc.client ?? {}), kind: "landlord", ownerId } };
+  // R3: the profile follows the landlord's type (billing.module.ts reads the marker).
+  const [o] = await q.rows(`select type::text as type from owners where id = $1 and user_id = $2`, [ownerId, scope]);
+  const officeSupply: OfficeSupplyMarker = { buyerType: (o?.type as string | undefined) ?? null };
+  return { ...doc, kind: "invoice", contractId: null, client: { ...(doc.client ?? {}), kind: "landlord", ownerId }, officeSupply };
 }

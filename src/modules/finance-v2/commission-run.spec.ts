@@ -103,11 +103,13 @@ describe("fv2 commission run: the collected-basis calculation", () => {
   });
 
   it("finding 1: a contract-bound (billed) commission reaches ZATCA under the office only when it carries VAT; its landlord is the buyer", async () => {
-    const q: any = { rows: async () => { throw new Error("no DB needed when client.ownerId is on the document"); } };
+    // Only the landlord's type is read (R3 marker); the buyer id comes from client.ownerId.
+    const q: any = { rows: async (t: string) => { if (/from owners/.test(t)) return [{ type: "company" }]; throw new Error("no other DB read needed when client.ownerId is on the document"); } };
     const base = { id: 2, kind: "commission", type: "invoice", contractId: 9, client: { kind: "landlord", ownerId: 7 }, subtotal: "210.00" };
     assert.equal(await commissionZatcaDocV2(q, 1, { ...base, total: "210.00" }), null, "a non-tax commission document is never sent");
     const z = await commissionZatcaDocV2(q, 1, { ...base, total: "241.50" });
     assert.deepEqual([z.kind, z.contractId, z.client.kind, z.client.ownerId], ["invoice", null, "landlord", 7]);
+    assert.deepEqual(z.officeSupply, { buyerType: "company" }, "R3: the landlord's type rides along to pick the profile");
     assert.equal(await commissionZatcaDocV2(q, 1, { ...base, kind: "invoice", total: "241.50" }), null);
   });
 
