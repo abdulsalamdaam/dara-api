@@ -13,6 +13,8 @@ import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
+import { accountAllowsCommission } from "../../common/account-plan";
+import { assertNotLocked, lockedChanges, ownerLockedFields, zatcaLinks } from "../../common/zatca-lock";
 import { EmailService } from "../email/email.service";
 import { sendExpoPush } from "../../common/push";
 import { IsInt, IsString, IsNotEmpty, IsOptional } from "class-validator";
@@ -73,6 +75,25 @@ const OWNER_STATUSES = ["active", "inactive"] as const;
  * individual a national ID / Iqama, and both live in `id_number`. On a PATCH
  * that does not send `type`, the caller passes the stored one.
  */
+/**
+ * A management fee % is commission, and commission is Offices/Companies only
+ * (plan-features.ts planAllowsCommission): a plan without it may not SET a
+ * positive fee (400 COMMISSION_NOT_IN_PLAN). Re-sending the stored value — a
+ * stale % from before a downgrade, carried by a form that saves every field —
+ * or clearing it always passes. Range (0–100) and two decimals are checked by
+ * sanitizeOwnerFields (applyPercent).
+ */
+async function assertFeeAllowedByPlan(db: Drizzle, scope: number, next: unknown, prior: unknown): Promise<void> {
+  const n = next == null || next === "" ? 0 : Number(next);
+  if (!(n > 0)) return;
+  if (prior != null && Number(prior) === n) return;
+  if (await accountAllowsCommission(db, scope)) return;
+  throw new BadRequestException({
+    statusCode: 400, code: "COMMISSION_NOT_IN_PLAN",
+    message: "نسبة رسوم الإدارة (العمولة) متاحة في باقتي المكاتب والشركات فقط · A management fee % (commission) is available on the Offices and Companies plans only",
+  });
+}
+
 function sanitizeOwnerFields(v: Record<string, unknown>, type: unknown, isDraft: boolean): void {
   applyRequiredText(v, "name", "اسم المؤجر", LIMITS.name);
   applyText(v, "shortName", "الاسم المختصر", LIMITS.shortName);
@@ -207,6 +228,14 @@ class OwnersController {
         : Promise.resolve([]),
     ]);
     await attachLookupLabels(this.db, rows as any[], NATIONALITY_SPEC);
+    // ZATCA lock state per row (common/zatca-lock.ts): the web disables the locked inputs.
+    const links = await zatcaLinks(this.db, owner);
+    for (const r of rows as any[]) {
+      const locked = ownerLockedFields(links, r);
+      r.zatcaLinked = links.owners.has(r.id) || (r.isAccountHolder === true && links.account);
+      r.vatLocked = locked.length > 0;
+      r.lockedFields = [...locked];
+    }
     if (!usePaginated) return rows;
     const byType: Record<string, number> = {};
     for (const r of typeRows as Array<{ type: string; cnt: number }>) byType[r.type] = Number(r.cnt);
@@ -273,6 +302,7 @@ class OwnersController {
       isDemo: "false",
     };
     sanitizeOwnerFields(values, values.type, Boolean(values.isDraft));
+    await assertFeeAllowedByPlan(this.db, scopeId(user), values.managementFeePercent, null);
     const [owner] = await this.db.insert(ownersTable).values(values as any).returning();
     await attachLookupLabels(this.db, [owner] as any[], NATIONALITY_SPEC);
     return owner;
@@ -317,6 +347,14 @@ class OwnersController {
     // body into the numeric columns verbatim — hence the 500s on "abc" and on
     // 999999999999, and the silently-stored -50 management fee.
     sanitizeOwnerFields(updateData, body.type ?? prior?.type ?? null, willBeDraft);
+    // A ZATCA-linked landlord's tax identity is frozen: 409 on a CHANGE, an identical value passes.
+    if (prior && (updateData.taxNumber !== undefined || updateData.idNumber !== undefined)) {
+      const locked = ownerLockedFields(await zatcaLinks(this.db, scopeId(user)), prior);
+      assertNotLocked(lockedChanges(prior as any, updateData, locked));
+    }
+    if ("managementFeePercent" in updateData) {
+      await assertFeeAllowedByPlan(this.db, scopeId(user), updateData.managementFeePercent, prior?.managementFeePercent ?? null);
+    }
 
     /* Finalising a draft re-validates the WHOLE landlord.
      *

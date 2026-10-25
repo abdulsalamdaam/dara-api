@@ -11,6 +11,7 @@ import { scopeId } from "../../common/scope";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
+import { assertNotLocked, COMPANY_LOCKED_FIELDS, lockedChanges, zatcaLinks } from "../../common/zatca-lock";
 
 class CompanyDto {
   @IsString() @MaxLength(200) name!: string;
@@ -65,7 +66,10 @@ class CompaniesController {
       .select()
       .from(companiesTable)
       .where(and(eq(companiesTable.id, owner.companyId), isNull(companiesTable.deletedAt)));
-    return c ?? null;
+    if (!c) return null;
+    // The web disables the VAT / CR inputs while the account is linked to ZATCA (common/zatca-lock.ts).
+    const zatcaLinked = (await zatcaLinks(this.db, ownerId)).account;
+    return { ...c, zatcaLinked, lockedFields: zatcaLinked ? [...COMPANY_LOCKED_FIELDS] : [] };
   }
 
   /**
@@ -111,6 +115,11 @@ class CompaniesController {
     }
     for (const f of COMPANY_FIELDS) if ((body as any)[f] !== undefined) updateData[f] = (body as any)[f];
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث");
+    // A ZATCA-linked account's VAT number / CR are frozen: 409 on a CHANGE, an identical value passes.
+    if (COMPANY_LOCKED_FIELDS.some((f) => updateData[f] !== undefined) && (await zatcaLinks(this.db, ownerId)).account) {
+      const [prior] = await this.db.select().from(companiesTable).where(eq(companiesTable.id, owner.companyId));
+      assertNotLocked(lockedChanges(prior as any, updateData, COMPANY_LOCKED_FIELDS));
+    }
 
     const [row] = await this.db
       .update(companiesTable)
