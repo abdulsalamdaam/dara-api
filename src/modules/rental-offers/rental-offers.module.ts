@@ -125,6 +125,10 @@ class RentalOffersController {
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const values = normalizeOffer(body, false);
     assertFreeMonths(Number(values.durationMonths ?? 12), Number(values.freeMonths ?? 0));
+    // An offer is always for one of the account's units — no free-typed space.
+    if (body?.unitId === undefined || body?.unitId === null || body?.unitId === "") {
+      throw new BadRequestException("اختر الوحدة المعروضة · Choose the unit being offered");
+    }
     const link = await this.resolveUnit(user, body?.unitId);
     const status = (values.status as string | undefined) ?? "draft";
     return withEffectiveStatus(await this.insertNumbered(scopeId(user), {
@@ -155,7 +159,10 @@ class RentalOffersController {
   async update(@CurrentUser() user: AuthUser, @Param("id") id: string, @Body() body: any) {
     const prev = await this.load(user, id);
     const values: Record<string, unknown> = normalizeOffer(body, true);
-    if (body?.unitId !== undefined) Object.assign(values, await this.resolveUnit(user, body.unitId));
+    if (body?.unitId !== undefined) {
+      if (body.unitId === null || body.unitId === "") throw new BadRequestException("اختر الوحدة المعروضة · Choose the unit being offered");
+      Object.assign(values, await this.resolveUnit(user, body.unitId));
+    }
     if (Object.keys(values).length === 0) throw new BadRequestException("لا توجد بيانات للتحديث · Nothing to update");
     assertFreeMonths(
       Number(values.durationMonths ?? prev.durationMonths),

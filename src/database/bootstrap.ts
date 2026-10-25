@@ -737,6 +737,10 @@ export async function ensureSchema(): Promise<void> {
       const rentalOffers = findSqlFile(join("drizzle", "0086_rental_offers.sql"));
       if (rentalOffers) await client.query(readFileSync(rentalOffers, "utf8"));
       else log.warn("0086_rental_offers.sql not found — rental_offers table not ensured");
+      // 0087: contract-style cycles, escalation type. After 0086, same rules.
+      const rentalOffersTerms = findSqlFile(join("drizzle", "0087_rental_offers_contract_terms.sql"));
+      if (rentalOffersTerms) await client.query(readFileSync(rentalOffersTerms, "utf8"));
+      else log.warn("0087_rental_offers_contract_terms.sql not found — rental_offers escalation_type not ensured");
     } catch (err: any) {
       log.warn(`ensure rental_offers failed: ${err?.message || err}`);
     }

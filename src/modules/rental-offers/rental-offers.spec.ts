@@ -37,13 +37,29 @@ describe("normalizeOffer", () => {
     ]) assert.throws(() => normalizeOffer(body, true), BadRequestException, JSON.stringify(body));
   });
 
+  it("takes the contract wizard's cycle, fee and escalation keys", () => {
+    const v = normalizeOffer({
+      paymentFrequency: "semi_annual", escalationType: "amount", escalationAmount: "5000",
+      fees: [{ typeKey: "services", label: "", amount: 1200, recurrence: "quarterly", vat: true }, { label: "x", amount: 1, recurrence: "weird" }],
+    }, true);
+    assert.equal(v.paymentFrequency, "semi_annual");
+    assert.equal(v.escalationType, "amount");
+    assert.equal(v.escalationAmount, "5000.00");
+    assert.deepEqual(v.fees, [
+      { typeKey: "services", label: "", amount: 1200, recurrence: "quarterly", vat: true },
+      { typeKey: null, label: "x", amount: 1, recurrence: "one_time", vat: false },
+    ]);
+    for (const f of ["monthly", "semiannual", "custom"]) assert.throws(() => normalizeOffer({ paymentFrequency: f }, true), BadRequestException);
+    assert.throws(() => normalizeOffer({ escalationType: "x" }, true), BadRequestException);
+  });
+
   it("cleans fees, terms and the unit snapshot", () => {
     const v = normalizeOffer({
       fees: [{ label: "رسوم خدمات", amount: "1500", recurrence: "annual", vat: 1 }, { label: "", amount: 0 }],
       terms: ["  شرط  ", "", null],
       unitSnapshot: { propertyName: "برج", unitNumber: "401", floor: "4", evil: "<x>" },
     }, true);
-    assert.deepEqual(v.fees, [{ label: "رسوم خدمات", amount: 1500, recurrence: "annual", vat: true }]);
+    assert.deepEqual(v.fees, [{ typeKey: null, label: "رسوم خدمات", amount: 1500, recurrence: "annual", vat: true }]);
     assert.deepEqual(v.terms, ["شرط"]);
     assert.deepEqual(v.unitSnapshot, { propertyName: "برج", unitNumber: "401", floor: 4 });
   });
@@ -117,6 +133,18 @@ describe("RentalOffersController", () => {
     if (year === 2026) assert.equal(v.number, "RO-2026-0005");
   });
 
+  it("create: an offer without a unit is refused", async () => {
+    const { db, ops } = fakeDb();
+    await assert.rejects(ctrl(db).create(employee, { clientName: "شركة" }), BadRequestException);
+    await assert.rejects(ctrl(db).create(employee, { clientName: "شركة", unitId: "" }), BadRequestException);
+    assert.equal(ops.length, 0);
+  });
+
+  it("update: a unit cannot be unlinked", async () => {
+    const prev = { id: 5, status: "draft", durationMonths: 12, freeMonths: 0, sentAt: null };
+    await assert.rejects(ctrl(fakeDb({ "select:rental_offers": [[prev]] }).db).update(employee, "5", { unitId: null }), BadRequestException);
+  });
+
   it("create: another account's unit is refused before anything is written", async () => {
     const { db, ops } = fakeDb({ "select:units": [[]] });
     await assert.rejects(ctrl(db).create(employee, { clientName: "شركة", unitId: 9 }), BadRequestException);
@@ -126,10 +154,11 @@ describe("RentalOffersController", () => {
   it("create: a number collision retries with the next number", async () => {
     const dup = Object.assign(new Error("dup"), { code: "23505" });
     const { db, ops } = fakeDb({
+      "select:units": [[{ id: 9, propertyId: 3 }]],
       "select:rental_offers": [[], []],
       "insert:rental_offers": [dup, [{ id: 2, status: "draft", validUntil: null }]],
     });
-    const row = await ctrl(db).create(employee, { clientName: "شركة" });
+    const row = await ctrl(db).create(employee, { clientName: "شركة", unitId: 9 });
     assert.equal(row.id, 2);
     const inserts = ops.filter((o) => o.kind === "insert").map((o) => valuesOf(o).number);
     assert.notEqual(inserts[0], inserts[1]);

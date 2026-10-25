@@ -11,7 +11,10 @@ import type { RentalOfferFee, RentalOfferUnitSnapshot } from "@dara/database";
  */
 
 export const OFFER_STATUSES = ["draft", "sent", "accepted", "rejected", "cancelled"] as const;
-export const OFFER_FREQUENCIES = ["monthly", "quarterly", "semiannual", "annual"] as const;
+/** The contract wizard's cycle keys, minus monthly and custom (an offer quotes in periods). */
+export const OFFER_FREQUENCIES = ["quarterly", "semi_annual", "annual"] as const;
+export const FEE_RECURRENCES = ["one_time", "quarterly", "semi_annual", "annual"] as const;
+export const ESCALATION_TYPES = ["percent", "amount"] as const;
 export const COMMISSION_TYPES = ["none", "percent", "amount"] as const;
 
 const MAX_TEXT = 500;
@@ -58,13 +61,14 @@ function fees(v: unknown): RentalOfferFee[] {
   if (!Array.isArray(v)) throw bad("الرسوم غير صالحة", "Invalid fees");
   if (v.length > MAX_FEES) throw bad("عدد الرسوم كبير جداً", "Too many fees");
   return v
-    .map((f: any) => ({
+    .map((f: any): RentalOfferFee => ({
+      typeKey: text(f?.typeKey, 100),
       label: text(f?.label, 200) ?? "",
       amount: Number(money(f?.amount, "fee")),
-      recurrence: f?.recurrence === "annual" ? "annual" as const : "one_time" as const,
+      recurrence: (FEE_RECURRENCES as readonly string[]).includes(f?.recurrence) ? f.recurrence : "one_time",
       vat: !!f?.vat,
     }))
-    .filter((f) => f.label || f.amount > 0);
+    .filter((f) => f.label || f.typeKey || f.amount > 0);
 }
 
 function terms(v: unknown): string[] {
@@ -74,7 +78,7 @@ function terms(v: unknown): string[] {
   return out;
 }
 
-const SNAPSHOT_KEYS = ["propertyName", "unitNumber", "unitType", "area", "city", "district", "street", "usage", "deedNumber", "description"] as const;
+const SNAPSHOT_KEYS = ["propertyName", "unitNumber", "unitType", "area", "city", "district", "street", "usage", "usageKey", "deedNumber", "description"] as const;
 
 function snapshot(v: unknown): RentalOfferUnitSnapshot {
   if (!v || typeof v !== "object" || Array.isArray(v)) return {};
@@ -117,6 +121,8 @@ export function normalizeOffer(body: any, partial: boolean): OfferWrite {
     if (!Number.isFinite(e) || e < 0 || e > 100) throw bad("نسبة الزيادة غير صالحة", "Invalid escalation");
     out.escalationPercent = e.toFixed(2);
   }
+  if (has("escalationType")) out.escalationType = oneOf(b.escalationType, ESCALATION_TYPES, "escalationType");
+  if (has("escalationAmount")) out.escalationAmount = money(b.escalationAmount, "escalationAmount");
   if (has("durationMonths")) out.durationMonths = int(b.durationMonths, "durationMonths", 1, 360);
   if (has("freeMonths")) out.freeMonths = int(b.freeMonths || 0, "freeMonths", 0, 359);
   if (has("paymentFrequency")) out.paymentFrequency = oneOf(b.paymentFrequency, OFFER_FREQUENCIES, "paymentFrequency");

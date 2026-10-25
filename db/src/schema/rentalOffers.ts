@@ -14,11 +14,20 @@ export type RentalOfferUnitSnapshot = {
   district?: string | null;
   street?: string | null;
   usage?: string | null;
+  /** property_usage lookup key the VAT rule was resolved from. */
+  usageKey?: string | null;
   deedNumber?: string | null;
   description?: string | null;
 };
 
-export type RentalOfferFee = { label: string; amount: number; recurrence: "one_time" | "annual"; vat: boolean };
+/** `amount` is per occurrence for one_time, and an ANNUAL figure split across the cycle otherwise (as contract fees). */
+export type RentalOfferFee = {
+  typeKey?: string | null;
+  label: string;
+  amount: number;
+  recurrence: "one_time" | "quarterly" | "semi_annual" | "annual";
+  vat: boolean;
+};
 
 /**
  * Rental offers (عروض التأجير): a formal, non-binding offer to a prospective
@@ -55,7 +64,11 @@ export const rentalOffersTable = pgTable("rental_offers", {
   startDate: date("start_date"),
   paymentFrequency: text("payment_frequency").notNull().default("quarterly"),
   vatApplies: boolean("vat_applies").notNull().default(false),
+  /** `percent` uses escalationPercent, `amount` adds escalationAmount SAR per contract year (0087). */
+  escalationType: text("escalation_type").notNull().default("percent"),
   escalationPercent: numeric("escalation_percent", { precision: 6, scale: 2 }).notNull().default("0"),
+  escalationAmount: numeric("escalation_amount", { precision: 14, scale: 2 }).notNull().default("0"),
+  /** Grace period: rent starts this many months after the lease start. */
   freeMonths: integer("free_months").notNull().default(0),
   depositAmount: numeric("deposit_amount", { precision: 14, scale: 2 }).notNull().default("0"),
   commissionType: text("commission_type").notNull().default("none"),
