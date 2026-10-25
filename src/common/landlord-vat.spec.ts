@@ -13,7 +13,7 @@ describe("rent VAT — usage × landlord registration (R1)", () => {
       [true, false, true, false, "landlord_not_registered"],
       [true, null, false, true, "taxable_usage"], // no landlord linked: usage alone, as before R1
       [false, true, true, false, "residential"],
-      [false, false, true, false, "landlord_not_registered"],
+      [false, false, true, false, "residential"], // exempt by usage is the reason shown, whatever the registration
       [false, null, true, false, "residential"],
       [null, true, true, true, "undecided"],
       [null, false, true, false, "landlord_not_registered"],

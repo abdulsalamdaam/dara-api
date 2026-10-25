@@ -71,6 +71,8 @@ export function decideRentVat(units: UnitVatFacts[], requested: boolean): RentVa
     ({ vatEnabled, locked, reason, landlordVatRegistered, usage });
 
   if (units.length === 0) return out(requested, false, "undecided");
+  // Exempt by usage everywhere: say so, whatever the landlord's registration.
+  if (units.every((u) => u.usageTaxable === false)) return out(false, true, "residential");
   // Units whose landlord may charge VAT (registered, or unknown).
   const eligible = units.filter((u) => u.landlordRegistered !== false);
   if (eligible.some((u) => u.usageTaxable === true)) return out(true, true, "taxable_usage");
