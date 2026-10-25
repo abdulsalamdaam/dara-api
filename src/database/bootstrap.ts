@@ -731,6 +731,15 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) {
       log.warn(`ensure ejar_lookups.contracts_body failed: ${err?.message || err}`);
     }
+    // 0086: rental offers. Same rules — idempotent, and only /rental-offers
+    // needs the table, so a failure warns and boots anyway.
+    try {
+      const rentalOffers = findSqlFile(join("drizzle", "0086_rental_offers.sql"));
+      if (rentalOffers) await client.query(readFileSync(rentalOffers, "utf8"));
+      else log.warn("0086_rental_offers.sql not found — rental_offers table not ensured");
+    } catch (err: any) {
+      log.warn(`ensure rental_offers failed: ${err?.message || err}`);
+    }
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

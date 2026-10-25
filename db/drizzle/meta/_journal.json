@@ -526,6 +526,13 @@
       "when": 1792972800000,
       "tag": "0085_email_otp_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1793318400000,
+      "tag": "0086_rental_offers",
+      "breakpoints": true
     }
   ]
 }

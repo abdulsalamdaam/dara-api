@@ -33,6 +33,7 @@ import { TenantsModule } from "./modules/tenants/tenants.module";
 import { MaintenanceModule } from "./modules/maintenance/maintenance.module";
 import { FacilitiesModule } from "./modules/facilities/facilities.module";
 import { CampaignsModule } from "./modules/campaigns/campaigns.module";
+import { RentalOffersModule } from "./modules/rental-offers/rental-offers.module";
 import { SupportModule } from "./modules/support/support.module";
 import { TenantPortalModule } from "./modules/tenant-portal/tenant-portal.module";
 import { ContactModule } from "./modules/contact/contact.module";
@@ -127,6 +128,7 @@ import { FinanceV2Module } from "./modules/finance-v2/finance-v2.module";
     MaintenanceModule,
     FacilitiesModule,
     CampaignsModule,
+    RentalOffersModule,
     SupportModule,
     TenantPortalModule,
     ContactModule,

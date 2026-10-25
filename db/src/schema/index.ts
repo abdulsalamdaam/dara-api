@@ -36,3 +36,4 @@ export * from "./ejarLookups";
 export * from "./appSettings";
 export * from "./appLogs";
 export * from "./news";
+export * from "./rentalOffers";
