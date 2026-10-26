@@ -199,7 +199,7 @@ describe("account limits — billing, housekeeping, customer routes (real Postgr
     await q(`insert into app_settings (key, value) values ('limit_addon_catalog', $1::jsonb) on conflict (key) do update set value = excluded.value`,
       [JSON.stringify({ items: [{ key: "seat_1", limitKey: "users", quantity: 1, priceSar: 50, period: "subscription_period", labelAr: "s", labelEn: "s" }] })]);
     const v = await me.myLimits(employee);
-    assert.deepEqual(v.limits.map((l) => l.key), ["users", "landlords", "ejar_lookups"]);
+    assert.deepEqual(v.limits.map((l) => l.key), ["users", "landlords"], "the Ejar quota is never sent to a customer");
     const users = v.limits.find((l) => l.key === "users")!;
     assert.equal(users.base, 2);
     assert.equal(users.addons, 1);
@@ -212,8 +212,8 @@ describe("account limits — billing, housekeeping, customer routes (real Postgr
     assert.ok(n.payUrl?.startsWith("https://checkout.moyasar.test/"));
     assert.equal(n.amountInclVat, 40);
     assert.equal(typeof v.ejar.enabled, "boolean");
-    assert.equal(v.ejar.gateway.limit, 50);
-    assert.equal(v.ejar.gateway.remaining, 50);
+    assert.deepEqual(Object.keys(v.ejar).sort(), ["available", "enabled"], "yes/no only, no counts");
+    assert.equal(v.ejar.available, v.ejar.enabled);
 
     // Ack the grant: it leaves the notices, stays in addons. Another account's id is a 404.
     assert.deepEqual(await me.ack(employee, String(grant.id)), { ok: true });

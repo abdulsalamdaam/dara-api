@@ -36,13 +36,14 @@ describe("add-on pricing", () => {
     assert.equal(addonCharge({ priceSar: null, period: "one_off" }, null), null);
   });
 
-  it("the invoice line names packs from the catalog, or the limit and quantity", () => {
+  it("the invoice line names packs from the catalog, or the limit and quantity (no count for Ejar)", () => {
     const seat = { key: "seat_1", limitKey: "users" as const, quantity: 1, priceSar: 50, period: "subscription_period" as const, labelAr: "مستخدم إضافي", labelEn: "Extra user", active: true };
     assert.equal(addonDescription({ limitKey: "users", quantity: 2, period: "subscription_period" }, seat, 3), "إضافة على الباقة: مستخدم إضافي × 2 — 3 أشهر");
     assert.equal(addonDescription({ limitKey: "users", quantity: 1, period: "subscription_period" }, seat, 1), "إضافة على الباقة: مستخدم إضافي — شهر واحد");
     const pack = { ...seat, key: "ejar_50", limitKey: "ejar_lookups" as const, quantity: 50, period: "one_off" as const, labelAr: "50 استعلام إيجار" };
-    assert.equal(addonDescription({ limitKey: "ejar_lookups", quantity: 100, period: "one_off" }, pack, 1), "إضافة على الباقة: 50 استعلام إيجار × 2");
-    assert.equal(addonDescription({ limitKey: "ejar_lookups", quantity: 30, period: "one_off" }, null, 1), "إضافة على الباقة: استعلامات إيجار +30");
+    // An Ejar pack never states its lookup count on the customer's invoice.
+    assert.equal(addonDescription({ limitKey: "ejar_lookups", quantity: 100, period: "one_off" }, pack, 1), "إضافة على الباقة: عمليات إيجار إضافية");
+    assert.equal(addonDescription({ limitKey: "ejar_lookups", quantity: 30, period: "one_off" }, null, 1), "إضافة على الباقة: عمليات إيجار إضافية");
   });
 });
 
@@ -98,6 +99,21 @@ describe("limit emails (stubbed sender)", () => {
     assert.match(m.text, /Users\): 2 → 5/);
     assert.equal(await e.sendLimitsChanged(TO, "", { changes: [], note: null }), false, "nothing changed → nothing sent");
     assert.equal(out.length, 1);
+  });
+
+  it("an Ejar add-on / allowance change states no count", async () => {
+    const { e, out } = svc();
+    await e.sendLimitAddonOffer(TO, "x", {
+      items: [{ labelAr: "عمليات إيجار إضافية", labelEn: "Additional Ejar lookups", quantity: null }],
+      amountInclVat: null, expiresAt: null,
+    });
+    await e.sendLimitsChanged(TO, "", {
+      changes: [{ labelAr: "استعلامات إيجار", labelEn: "Ejar lookups", oldValue: 90, newValue: 140, hideValues: true }], note: null,
+    });
+    const [offer, changed] = out;
+    assert.ok(!/×/.test(offer.html) && !/×/.test(offer.text), "no quantity on the offer");
+    assert.match(changed.html, /تم التحديث · Updated/);
+    assert.ok(!/90|140/.test(changed.html) && !/90|140/.test(changed.text), "no old/new values");
   });
 
   it("expired: the item and the end date", async () => {

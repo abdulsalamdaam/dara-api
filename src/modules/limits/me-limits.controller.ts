@@ -12,8 +12,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { effectiveLimits } from "../../common/limits";
 import { fetchMoyasarInvoice, isMoyasarConfigured } from "../../common/moyasar";
-import { lookupConfig, windowBounds } from "../ejar/ejar.budget";
-import { ejarLookupUsage } from "../ejar/ejar.usage";
+import { ejarAvailableFor } from "../ejar/ejar.usage";
 import { ejarEnabledFor } from "../ejar/ejar.access";
 import { activateFromPaidRow, evidenceFromInvoice, verifyMoyasarPaid } from "../subscription/subscription.module";
 import { SubscriptionInvoiceService } from "../subscription/subscription-invoice.service";
@@ -21,14 +20,27 @@ import { LimitsService } from "./limits.service";
 import { LIMITS_BILLING_PORT, type LimitsBillingPort } from "./limits-billing.port";
 import type { AddonView, CatalogItem, EffectiveLimit } from "./limits.types";
 
+/**
+ * An add-on as the customer sees it: an Ejar lookups add-on carries no
+ * quantity (`null`) — how many lookups an account has is never shown to it.
+ */
+export type CustomerAddonView = Omit<AddonView, "quantity"> & { quantity: number | null };
+
 export interface MyLimitsView {
+  /** users and landlords only — the Ejar quota is never sent to a customer (admins see it). */
   limits: EffectiveLimit[];
-  addons: AddonView[];
+  addons: CustomerAddonView[];
   /** Offers / pending add-ons to pay, and admin grants not yet acknowledged — the banner's items. */
-  notices: AddonView[];
+  notices: CustomerAddonView[];
   /** Always empty: add-ons are created by the admin only, nothing is sold self-serve. */
   catalog: CatalogItem[];
-  ejar: { enabled: boolean; gateway: { limit: number; window: string; remaining: number } };
+  /** Yes/no only: `available` = a lookup can run now. No counts. */
+  ejar: { enabled: boolean; available: boolean };
+}
+
+/** Hide an Ejar add-on's lookup count from the customer. */
+export function customerAddon(a: AddonView): CustomerAddonView {
+  return a.limitKey === "ejar_lookups" ? { ...a, quantity: null } : a;
 }
 
 /**
@@ -56,25 +68,23 @@ export class MeLimitsController {
   async myLimits(@CurrentUser() user: AuthUser): Promise<MyLimitsView> {
     const accountId = scopeId(user);
     const now = new Date();
-    const cfg = lookupConfig(process.env);
-    const { start } = windowBounds(cfg.window, now);
-    const [limits, addons, unacked, enabled, usage] = await Promise.all([
+    const [all, addons, unacked, enabled] = await Promise.all([
       effectiveLimits(this.db, accountId, { now }),
       this.limits.addonViews(accountId),
       this.db.select({ id: accountLimitAddonsTable.id }).from(accountLimitAddonsTable)
         .where(and(eq(accountLimitAddonsTable.accountId, accountId), isNull(accountLimitAddonsTable.acknowledgedAt))),
       ejarEnabledFor(this.db, accountId, user.id),
-      ejarLookupUsage(this.db, start, accountId),
     ]);
+    const ejarRow = all.find((l) => l.key === "ejar_lookups");
+    const available = await ejarAvailableFor(this.db, accountId, enabled, ejarRow?.remaining, now);
     const open = new Set(unacked.map((r) => r.id));
     const notices = addons.filter((a) => open.has(a.id) && isNotice(a, now));
-    const gatewayUsed = Math.max(usage.invoices, usage.contracts, usage.details);
     return {
-      limits,
-      addons,
-      notices,
+      limits: all.filter((l) => l.key !== "ejar_lookups"),
+      addons: addons.map(customerAddon),
+      notices: notices.map(customerAddon),
       catalog: [],
-      ejar: { enabled, gateway: { limit: cfg.limit, window: cfg.window, remaining: Math.max(0, cfg.limit - gatewayUsed) } },
+      ejar: { enabled, available },
     };
   }
 

@@ -13,6 +13,7 @@ import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purc
 import { packageUsage, quotaView } from "../../common/quota";
 import { effectiveLimits, type EffectiveLimit } from "../../common/limits";
 import { ejarEnabledFor } from "../ejar/ejar.access";
+import { ejarAvailableFor } from "../ejar/ejar.usage";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
 
@@ -44,9 +45,10 @@ class PackageController {
     // Same numbers as plan.maxLandlords/maxUsers + usage.landlords/employees.
     // Seats and landlords are the EFFECTIVE limits (admin override + active
     // add-ons, common/limits.ts); `plan.max*` stays the package base.
-    // `ejarLookups` is the Ejar quota for the current paid period.
     // Each entry: {used, limit (null = unlimited), canAdd, over} plus the
     // breakdown {base, override, addons, effective, remaining, resetsAt}.
+    // `ejarLookups` is only `{ available }`: how many Ejar lookups the account
+    // has, used or has left is never sent to a customer (admins see it).
     const [eff, ejarEnabled] = await Promise.all([
       effectiveLimits(this.db, ownerId),
       ejarEnabledFor(this.db, ownerId, user.id),
@@ -59,7 +61,11 @@ class PackageController {
         remaining: l.remaining, resetsAt: l.resetsAt,
       };
     };
-    const limits = { users: view("users"), landlords: view("landlords"), ejarLookups: view("ejar_lookups") };
+    const ejarRow = eff.find((x) => x.key === "ejar_lookups");
+    const limits = {
+      users: view("users"), landlords: view("landlords"),
+      ejarLookups: { available: await ejarAvailableFor(this.db, ownerId, ejarEnabled, ejarRow?.remaining) },
+    };
 
     // Settings completeness — drives the post-payment "complete your settings"
     // lock. Complete when EITHER the account company OR the account's own party

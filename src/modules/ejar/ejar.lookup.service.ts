@@ -9,8 +9,8 @@ import { ejarDenialFor } from "./ejar.access";
 import { combineLimit } from "../../common/limit-core";
 import { signalLimitRefused } from "../limits/limits-signals";
 import {
-  canLookup, computeBudget, hasHeadroom, lookupConfig, planQuotaWindow, windowBounds,
-  type EjarBudget, type LookupConfig, type PlanQuota,
+  canLookup, computeBudget, hasHeadroom, lookupConfig, planQuotaWindow, toCustomerBudget, windowBounds,
+  type CustomerEjarBudget, type EjarBudget, type LookupConfig, type PlanQuota,
 } from "./ejar.budget";
 import {
   allPartyIdentifiers, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyIdentifiers, pickContractsResource,
@@ -24,12 +24,15 @@ export const EJAR_LOOKUP_STORE = Symbol("EJAR_LOOKUP_STORE");
 
 export const SCOPE_MISMATCH_MESSAGE =
   "هذا العقد غير مرتبط بالسجل التجاري لحسابك · This contract is not linked to your account's commercial registration.";
+export const EJAR_BUDGET_EXHAUSTED_MESSAGE =
+  "تم استهلاك رصيد عمليات إيجار المتاح لحسابك — تواصل مع دعم دارا · Your account's Ejar lookups are used up — contact Dara support.";
 export const BAD_FORMAT_MESSAGE = "رقم عقد إيجار غير صالح — أرقام فقط · Invalid Ejar contract number (digits only).";
 
 export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> {
   source: "ejar" | "cache";
   lookedUpAt: string;
-  budget: EjarBudget;
+  /** Available / not only — the counts are never sent to a customer. */
+  budget: CustomerEjarBudget;
   alreadyImported: { contractId: number } | null;
   matches: {
     /** Always null: parties are not linked to existing records (kept for the web's shape). */
@@ -157,6 +160,12 @@ export class EjarLookupService {
     return { ...computeBudget(cfg, usage, new Date(), plan), enabled: ejarDenialFor(mode, userId) == null };
   }
 
+  /** The budget as a customer may see it (`GET /ejar/budget`, lookup responses and refusals): no counts. */
+  async customerBudget(accountId: number, cfg = this.config(), userId?: number | null): Promise<CustomerEjarBudget> {
+    const b = await this.budget(accountId, cfg, userId);
+    return toCustomerBudget(b, b.enabled);
+  }
+
   /**
    * The account's Ejar quota for this paid period and what it has used of it;
    * null = uncapped. The quota is the EFFECTIVE one (common/limits.ts): the
@@ -274,8 +283,9 @@ export class EjarLookupService {
         throw new HttpException(
           {
             code: "budget_exhausted",
-            message: "تم استهلاك رصيد الاستعلام من إيجار لهذه الفترة · The Ejar lookup budget for this period is used up.",
-            budget: outcome.budget,
+            message: EJAR_BUDGET_EXHAUSTED_MESSAGE,
+            // No counts: a customer is never told the allowance, use or remainder.
+            budget: toCustomerBudget(outcome.budget),
             // Ejar packs are granted by the admin only — the web says "contact us".
             addonAvailable: false,
             contactAdmin: true,
@@ -287,7 +297,7 @@ export class EjarLookupService {
           code: "not_found",
           message: "لم يُعثر على العقد في إيجار — تحقق من الرقم · Ejar has no contract with this number.",
           logs: outcome.logs,
-          budget: await this.budget(accountId, cfg, user.id),
+          budget: await this.customerBudget(accountId, cfg, user.id),
         });
       case "wrong_number_cap":
         throw new HttpException(
@@ -306,7 +316,7 @@ export class EjarLookupService {
             message:
               "لم يُرجع إيجار تفاصيل العقد ولا يسمح الرصيد بطلبها · Ejar returned no contract details, and the Details budget has no room to fetch them.",
             logs: outcome.logs,
-            budget: await this.budget(accountId, cfg, user.id),
+            budget: await this.customerBudget(accountId, cfg, user.id),
           },
           HttpStatus.TOO_MANY_REQUESTS,
         );
@@ -326,7 +336,7 @@ export class EjarLookupService {
     const [ctx, alreadyImported, budget] = await Promise.all([
       lookupContext(this.store, accountId, { ...mapped, contractsResource: _internal }),
       this.store.findImported(accountId, saved.contractNumber),
-      this.budget(accountId, cfg),
+      this.customerBudget(accountId, cfg),
     ]);
     const { matches, resolved } = ctx;
     return {

@@ -174,6 +174,23 @@ export function computeBudget(cfg: LookupConfig, usage: LookupUsage, now = new D
   };
 }
 
+/**
+ * What a CUSTOMER sees of the budget: whether a lookup can run, never how
+ * many the account has, used or has left (product rule — the counts are for
+ * Dara's admins only). Every customer-facing response carries this shape,
+ * never `EjarBudget`.
+ */
+export interface CustomerEjarBudget {
+  /** False when Ejar is switched off for the account. */
+  enabled: boolean;
+  /** A lookup can run now (enabled and allowance left). */
+  available: boolean;
+}
+
+export function toCustomerBudget(b: Pick<EjarBudget, "remaining">, enabled = true): CustomerEjarBudget {
+  return { enabled, available: enabled && b.remaining > 0 };
+}
+
 /** One more call to `endpoint` fits — globally, for the account, and in its plan quota. */
 export function hasHeadroom(cfg: LookupConfig, usage: LookupUsage, endpoint: BudgetEndpoint, plan: PlanQuota | null = null): boolean {
   if (cfg.limit - usage[endpoint] < 1) return false;

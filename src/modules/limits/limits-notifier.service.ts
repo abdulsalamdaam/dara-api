@@ -8,6 +8,7 @@ import { EmailService, BILLING_PAGE_URL, type LimitAddonItem } from "../email/em
 import { AddonCatalogService } from "./addon-catalog.service";
 import type { AddonPaymentResult, LimitsChangedNotice, LimitsNotifier } from "./limits-billing.port";
 import { setLimitAddonPaidHandler } from "./limits-signals";
+import { EJAR_ADDON_LABEL_AR, EJAR_ADDON_LABEL_EN } from "./limits-billing.service";
 
 /**
  * LIMITS_NOTIFIER: the account-limit emails. Every message goes to the
@@ -50,6 +51,8 @@ export class LimitsEmailNotifier implements LimitsNotifier, OnModuleInit, OnModu
 
   /** How an add-on reads in an email: the catalog item's label, else the limit's. */
   async item(addon: Pick<AccountLimitAddon, "limitKey" | "quantity" | "catalogKey">): Promise<LimitAddonItem> {
+    // No lookup count for an Ejar pack: customers are never told the number.
+    if (addon.limitKey === "ejar_lookups") return { labelAr: EJAR_ADDON_LABEL_AR, labelEn: EJAR_ADDON_LABEL_EN, quantity: null };
     const entry = addon.catalogKey ? await this.catalog.find(addon.catalogKey) : null;
     if (entry && entry.quantity > 0 && addon.quantity % entry.quantity === 0) {
       return { labelAr: entry.labelAr, labelEn: entry.labelEn, quantity: addon.quantity / entry.quantity };
@@ -64,7 +67,11 @@ export class LimitsEmailNotifier implements LimitsNotifier, OnModuleInit, OnModu
     const def = isLimitKey(n.limitKey) ? LIMIT_KEYS[n.limitKey] : null;
     if (!def) return;
     const ok = await this.email.sendLimitsChanged(r.to, r.name, {
-      changes: [{ labelAr: def.labelAr, labelEn: def.labelEn, oldValue: n.oldValue, newValue: n.newValue }],
+      // The Ejar allowance is never shown to a customer: say it changed, not to what.
+      changes: [{
+        labelAr: def.labelAr, labelEn: def.labelEn, oldValue: n.oldValue, newValue: n.newValue,
+        ...(n.limitKey === "ejar_lookups" ? { hideValues: true } : {}),
+      }],
       note: n.note,
     });
     if (!ok) this.log.warn(`limits-changed email to account ${n.accountId} not sent`);

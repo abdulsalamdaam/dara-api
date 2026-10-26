@@ -51,7 +51,10 @@ export function buildVerifyEmailLink(token: string): string {
 /** Where the account holder sees limits, add-ons and their Pay buttons. */
 export const BILLING_PAGE_URL = `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard/settings?section=billing`;
 
-export interface LimitAddonItem { labelAr: string; labelEn: string; quantity: number }
+/** `quantity: null` = don't state a count (an Ejar lookups pack). */
+export interface LimitAddonItem { labelAr: string; labelEn: string; quantity: number | null }
+
+const qty = (i: LimitAddonItem) => (i.quantity == null ? "" : ` × ${i.quantity}`);
 
 export interface LimitAddonOfferPayload {
   items: LimitAddonItem[];
@@ -65,7 +68,8 @@ export interface LimitAddonOfferPayload {
 
 export interface LimitsChangedPayload {
   /** null = unlimited. */
-  changes: Array<{ labelAr: string; labelEn: string; oldValue: number | null; newValue: number | null }>;
+  /** `hideValues`: say the limit changed without the numbers (the Ejar allowance). */
+  changes: Array<{ labelAr: string; labelEn: string; oldValue: number | null; newValue: number | null; hideValues?: boolean }>;
   note: string | null;
 }
 
@@ -586,7 +590,7 @@ export class EmailService {
     if (!to) return false;
     const safeName = escapeHtml(name || "");
     const items = payload.items.map((i) =>
-      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)} × ${i.quantity}</td></tr>`).join("");
+      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)}${qty(i)}</td></tr>`).join("");
     const amount = payload.amountInclVat != null ? sarAmount(payload.amountInclVat) : null;
     const expires = payload.expiresAt ? riyadhDate(payload.expiresAt) : null;
     const url = payload.payUrl || BILLING_PAGE_URL;
@@ -610,7 +614,7 @@ export class EmailService {
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار عن الفوترة راسلنا على ${SUPPORT_EMAIL}.</p>
       ${en(`Billing questions: ${SUPPORT_EMAIL}.`, "muted")}
     `);
-    const list = payload.items.map((i) => `${i.labelAr} × ${i.quantity}`).join("، ");
+    const list = payload.items.map((i) => `${i.labelAr}${qty(i)}`).join("، ");
     return this.send({
       to,
       subject: "إضافة على باقتك بانتظار الدفع · A Dara add-on is ready to pay",
@@ -625,7 +629,7 @@ export class EmailService {
     if (!to || !payload.changes.length) return false;
     const safeName = escapeHtml(name || "");
     const rows = payload.changes.map((c) =>
-      `<tr><td style="padding:8px 0;color:#64748b;">${escapeHtml(c.labelAr)} <span dir="ltr">· ${escapeHtml(c.labelEn)}</span></td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;" dir="ltr">${limitValue(c.oldValue)} → ${limitValue(c.newValue)}</td></tr>`).join("");
+      `<tr><td style="padding:8px 0;color:#64748b;">${escapeHtml(c.labelAr)} <span dir="ltr">· ${escapeHtml(c.labelEn)}</span></td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;" dir="ltr">${limitChange(c)}</td></tr>`).join("");
     const html = layout(`
       <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تحديث على حدود حسابك</h1>
       <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
@@ -643,7 +647,7 @@ export class EmailService {
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار راسلنا على ${SUPPORT_EMAIL}.</p>
       ${en(`Questions: ${SUPPORT_EMAIL}.`, "muted")}
     `);
-    const lines = payload.changes.map((c) => `${c.labelAr} (${c.labelEn}): ${limitValue(c.oldValue)} → ${limitValue(c.newValue)}`).join("\n");
+    const lines = payload.changes.map((c) => `${c.labelAr} (${c.labelEn}): ${limitChange(c)}`).join("\n");
     return this.send({
       to,
       subject: "تحديث على حدود حسابك في دارا · Your Dara limits changed",
@@ -658,7 +662,7 @@ export class EmailService {
     if (!to || !payload.items.length) return false;
     const safeName = escapeHtml(name || "");
     const items = payload.items.map((i) =>
-      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)} × ${i.quantity}</td></tr>`).join("");
+      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)}${qty(i)}</td></tr>`).join("");
     const ended = riyadhDate(payload.endedAt);
     const html = layout(`
       <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">انتهت مدة إضافة على باقتك</h1>
@@ -676,7 +680,7 @@ export class EmailService {
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار راسلنا على ${SUPPORT_EMAIL}.</p>
       ${en(`Questions: ${SUPPORT_EMAIL}.`, "muted")}
     `);
-    const list = payload.items.map((i) => `${i.labelAr} × ${i.quantity}`).join("، ");
+    const list = payload.items.map((i) => `${i.labelAr}${qty(i)}`).join("، ");
     return this.send({
       to,
       subject: "انتهت مدة إضافة على باقتك · A Dara add-on ended",
@@ -1012,6 +1016,10 @@ function sarAmount(n: number): string {
 /** A limit as printed; null = unlimited. */
 function limitValue(n: number | null): string {
   return n == null ? "غير محدود · Unlimited" : String(n);
+}
+
+function limitChange(c: { oldValue: number | null; newValue: number | null; hideValues?: boolean }): string {
+  return c.hideValues ? "تم التحديث · Updated" : `${limitValue(c.oldValue)} → ${limitValue(c.newValue)}`;
 }
 
 /** `YYYY-MM-DD` in Riyadh. */

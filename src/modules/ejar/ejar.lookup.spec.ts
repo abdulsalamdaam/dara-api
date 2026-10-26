@@ -60,8 +60,10 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.deepEqual(res.invoices.map((i) => i.status), ["paid", "unpaid"]);
     assert.equal(res.logs.length, 2);
     assert.equal(res.alreadyImported, null);
-    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 0, details: 1 });
-    assert.equal(res.budget.remaining, 49);
+    assert.deepEqual(res.budget, { enabled: true, available: true }, "the customer sees no counts");
+    const b = await w.svc.budget(1);
+    assert.deepEqual(b.used, { invoices: 1, contracts: 0, details: 1 });
+    assert.equal(b.remaining, 49);
     assert.ok(w.store.lookups.get(`1:${CN}`), "the lookup is saved for the import");
   });
 
@@ -73,7 +75,7 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(w.calls.length, before, "no call at all, not even a token");
     assert.equal(res.source, "cache");
     assert.deepEqual(res.logs, []);
-    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 0, details: 1 });
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 0, details: 1 });
   });
 
   it("refresh: true spends a fresh lookup", async () => {
@@ -105,9 +107,11 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(status, 404);
     assert.equal(body.code, "not_found");
     assert.equal(w.dataCalls().length, 1, "Details is never called without a UUID");
-    assert.equal(body.budget.used.invoices, 0, "a wrong number is not counted toward the budget");
-    assert.equal(body.budget.remaining, 50);
-    assert.equal(body.budget.used.details, 0);
+    assert.deepEqual(body.budget, { enabled: true, available: true }, "no counts in the refusal");
+    const b = await w.svc.budget(1);
+    assert.equal(b.used.invoices, 0, "a wrong number is not counted toward the budget");
+    assert.equal(b.remaining, 50);
+    assert.equal(b.used.details, 0);
     assert.equal(w.store.lookups.size, 0);
   });
 
@@ -117,7 +121,8 @@ describe("POST /ejar/lookup — the two calls", () => {
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(status, 404);
     assert.equal(w.dataCalls().length, 1);
-    assert.equal(body.budget.used.invoices, 0, "the empty 200 is a wrong number too");
+    assert.equal(body.code, "not_found");
+    assert.equal((await w.svc.budget(1)).used.invoices, 0, "the empty 200 is a wrong number too");
   });
 
   it("a bad number format spends nothing", async () => {
@@ -172,7 +177,7 @@ describe("POST /ejar/lookup — the two calls", () => {
     const res = await w.svc.lookup(USER, { contract_number: CN });
     const inv = w.store.logs.find((l) => l.endpoint === "rentalContractInvoices")!;
     assert.equal(inv.attempts, 2, "both sent requests are counted");
-    assert.deepEqual(res.budget.used, { invoices: 2, contracts: 0, details: 1 });
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 2, contracts: 0, details: 1 });
   });
 });
 
@@ -185,7 +190,9 @@ describe("the lookup budget", () => {
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000002" }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
-    assert.equal(body.budget.remaining, 0);
+    assert.deepEqual(body.budget, { enabled: true, available: false }, "no counts: only that it is used up");
+    assert.doesNotMatch(String(body.message), /\d/, "the message states no number");
+    assert.equal((await w.svc.budget(1)).remaining, 0);
     assert.equal(w.calls.length, sent, "not a single call — not even the token");
   });
 
@@ -252,12 +259,16 @@ describe("the lookup budget", () => {
     const employee = { id: 7, ownerUserId: 1 } as never;
     const { status, body } = await httpError(w.svc.lookup(employee, { contract_number: "10000000002" }));
     assert.equal(status, 429, "the employee shares the owner's cap");
-    assert.equal(body.budget.perAccount.limit, 1);
-    assert.equal(body.budget.perAccount.used, 1);
+    assert.equal(body.budget.available, false);
+    const acct = (await w.svc.budget(1)).perAccount;
+    assert.equal(acct.limit, 1);
+    assert.equal(acct.used, 1);
     const res = await w.svc.lookup(OTHER, { contract_number: "10000000002" });
     assert.equal(res.source, "ejar", "another account still has its own allowance");
-    assert.equal(res.budget.perAccount.used, 1);
-    assert.equal(res.budget.used.invoices, 2, "the global count includes both accounts");
+    assert.equal(res.budget.available, false, "OTHER's own cap is now spent too");
+    const other = await w.svc.budget(2);
+    assert.equal(other.perAccount.used, 1);
+    assert.equal(other.used.invoices, 2, "the global count includes both accounts");
   });
 
   it("concurrent lookups cannot exceed the limit", async () => {
@@ -318,7 +329,8 @@ describe("the plan's Ejar lookup quota", () => {
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22] }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
-    assert.equal(body.budget.plan.used, 22);
+    assert.equal(body.budget.available, false);
+    assert.equal((await w.svc.budget(1)).plan?.used, 22);
     assert.equal(w.calls.length, sent, "nothing is sent past the quota");
   });
 
@@ -564,7 +576,7 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     });
     assert.deepEqual(res.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop" }]);
     assert.equal(res.invoices.length, 2, "Invoices stay the payment schedule");
-    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 1, details: 0 });
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 1, details: 0 });
     assert.equal((res as unknown as Record<string, unknown>).contractsResource, undefined, "internal, not in the response");
 
     const saved = w.store.lookups.get(`1:${CN}`)!;
@@ -603,7 +615,7 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     assert.equal(res.contract.source, "details");
     assert.equal(res.property, null);
     assert.deepEqual(res.units, []);
-    assert.deepEqual(res.budget.used, { invoices: 1, contracts: 1, details: 1 });
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 1, details: 1 });
   });
 
   it("a list entry for another contract number also falls back", async () => {
@@ -666,7 +678,7 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.deepEqual(w.dataCalls().map((c) => c.url), [`${STG}/v1/ejar-services/contracts/${CN}/invoices`, `${STG}/v1/ejar-services/contracts/${UUID}`]);
     assert.equal(res.contract.source, "details");
-    assert.equal(res.budget.secondCall, "details");
+    assert.equal((await w.svc.budget(1)).secondCall, "details");
   });
 
   it("matches property/unit by Ejar UUID but never landlord/tenant", async () => {
@@ -740,7 +752,7 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     // Add-ons come from the admin only: nothing for sale, "contact us".
     assert.equal(body.addonAvailable, false);
     assert.equal(body.contactAdmin, true);
-    assert.equal(body.budget.plan.limit, 1);
+    assert.equal((await w.svc.budget(1)).plan?.limit, 1);
     assert.equal(w.calls.length, sent);
   });
 

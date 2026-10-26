@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { Drizzle } from "../../database/database.module";
-import type { LookupUsage } from "./ejar.budget";
+import { computeBudget, lookupConfig, windowBounds, type LookupUsage } from "./ejar.budget";
 import { LOOKUP_ENDPOINTS } from "./ejar.types";
 
 /**
@@ -42,4 +42,21 @@ export async function ejarLookupUsage(db: Drizzle, since: Date | null, accountId
     details: total("contractDetails"),
     account: { invoices: acct("rentalContractInvoices"), contracts: acct("getRentalContracts"), details: acct("contractDetails") },
   };
+}
+
+/**
+ * Whether a lookup can run for the account — the yes/no a customer is shown
+ * (`/me/limits`, `/me/package`) in place of any count. `planRemaining` is the
+ * account's effective `ejar_lookups` remaining (null = uncapped); the
+ * gateway-wide and per-account caps are checked here.
+ */
+export async function ejarAvailableFor(
+  db: Drizzle, accountId: number, enabled: boolean, planRemaining: number | null | undefined, now = new Date(),
+): Promise<boolean> {
+  if (!enabled) return false;
+  if (planRemaining != null && planRemaining <= 0) return false;
+  const cfg = lookupConfig(process.env);
+  const { start } = windowBounds(cfg.window, now);
+  const usage = await ejarLookupUsage(db, start, accountId);
+  return computeBudget(cfg, usage, now).remaining > 0;
 }

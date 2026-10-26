@@ -65,11 +65,18 @@ export function addonCharge(
   return { net, total: amountInclVat(net, vatRate)!, vatRate, months };
 }
 
+/** How an Ejar lookups add-on reads to the customer (no count). */
+export const EJAR_ADDON_LABEL_AR = "عمليات إيجار إضافية";
+export const EJAR_ADDON_LABEL_EN = "Additional Ejar lookups";
+
 /** The invoice line for an add-on: "مستخدم إضافي × 2 — 3 أشهر". */
 export function addonDescription(addon: Pick<AccountLimitAddon, "limitKey" | "quantity" | "period">, item: CatalogEntry | null, months: number): string {
   const key = isLimitKey(addon.limitKey) ? addon.limitKey : null;
   let label: string;
-  if (item && item.quantity > 0 && addon.quantity % item.quantity === 0) {
+  // An Ejar pack never states its lookup count — the customer is not told
+  // how many lookups the account has (admins see it on the add-on itself).
+  if (key === "ejar_lookups") label = EJAR_ADDON_LABEL_AR;
+  else if (item && item.quantity > 0 && addon.quantity % item.quantity === 0) {
     const packs = addon.quantity / item.quantity;
     label = packs === 1 ? item.labelAr : `${item.labelAr} × ${packs}`;
   } else {

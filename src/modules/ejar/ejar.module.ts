@@ -44,11 +44,15 @@ export class EjarController {
     private readonly importer: EjarImportService,
   ) {}
 
-  /** How many lookups are left in the current window (global and for this account). */
+  /**
+   * Whether the account can look a contract up now: `{ enabled, available }`.
+   * The counts (allowance, used, remaining) are never sent to a customer —
+   * the admin console has them.
+   */
   @Get("budget")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async budget(@CurrentUser() user: AuthUser) {
-    return this.lookups.budget(scopeId(user), undefined, user.id);
+    return this.lookups.customerBudget(scopeId(user), undefined, user.id);
   }
 
   /**
