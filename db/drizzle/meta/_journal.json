@@ -547,6 +547,13 @@
       "when": 1793491200000,
       "tag": "0088_account_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1793577600000,
+      "tag": "0089_rental_offers_grace_extends",
+      "breakpoints": true
     }
   ]
 }

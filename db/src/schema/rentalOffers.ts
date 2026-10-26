@@ -68,7 +68,7 @@ export const rentalOffersTable = pgTable("rental_offers", {
   escalationType: text("escalation_type").notNull().default("percent"),
   escalationPercent: numeric("escalation_percent", { precision: 6, scale: 2 }).notNull().default("0"),
   escalationAmount: numeric("escalation_amount", { precision: 14, scale: 2 }).notNull().default("0"),
-  /** Grace period: rent starts this many months after the lease start. */
+  /** Grace period (0–36): added on top of durationMonths — rent starts this many months after the lease start and the full duration is billed (0089). */
   freeMonths: integer("free_months").notNull().default(0),
   depositAmount: numeric("deposit_amount", { precision: 14, scale: 2 }).notNull().default("0"),
   commissionType: text("commission_type").notNull().default("none"),

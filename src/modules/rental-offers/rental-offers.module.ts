@@ -13,7 +13,7 @@ import { likeContains, listQuerySchema, wantsPagination } from "../../common/pag
 import { riyadhToday } from "../../common/payment-status";
 import { accountPlan } from "../../common/account-plan";
 import { PlanUpgradeRequiredException, planHasFeature } from "../../common/plan-features";
-import { assertFreeMonths, formatOfferNumber, normalizeOffer, offerPrefix, offerSeq } from "./rental-offers.normalize";
+import { formatOfferNumber, normalizeOffer, offerPrefix, offerSeq } from "./rental-offers.normalize";
 
 /**
  * Rental offers (عروض التأجير) — the formal, non-binding offer an office sends
@@ -23,7 +23,10 @@ import { assertFreeMonths, formatOfferNumber, normalizeOffer, offerPrefix, offer
  * by package: only «المكاتب العقارية» / «الشركات» (`rental_offers`) — every
  * route, reads included, answers 403 PLAN_UPGRADE_REQUIRED on tenant / عقاري.
  * The server stores the offer's INPUTS; the schedule and totals are derived
- * from them by the web (lib/rental-offer.ts), which is what prints them.
+ * from them by the web (lib/rental-offer.ts), which is what prints them — so
+ * no stored total can disagree when the money rules change. The grace period
+ * (`free_months`) is added on top of `duration_months` (lease = grace +
+ * duration, full rent billed after the grace), Oct 2026.
  *
  * `expired` is never stored: an offer still `draft` / `sent` whose
  * `valid_until` is before Riyadh today reads as expired (`effectiveStatus`),
@@ -146,7 +149,6 @@ class RentalOffersController {
   @RequirePermissions(PERMISSIONS.CAMPAIGNS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const values = normalizeOffer(body, false);
-    assertFreeMonths(Number(values.durationMonths ?? 12), Number(values.freeMonths ?? 0));
     // An offer is always for one of the account's units — no free-typed space.
     if (body?.unitId === undefined || body?.unitId === null || body?.unitId === "") {
       throw new BadRequestException("اختر الوحدة المعروضة · Choose the unit being offered");
@@ -186,10 +188,6 @@ class RentalOffersController {
       Object.assign(values, await this.resolveUnit(user, body.unitId));
     }
     if (Object.keys(values).length === 0) throw new BadRequestException("لا توجد بيانات للتحديث · Nothing to update");
-    assertFreeMonths(
-      Number(values.durationMonths ?? prev.durationMonths),
-      Number(values.freeMonths ?? prev.freeMonths),
-    );
     if (values.status !== undefined && values.status !== prev.status) Object.assign(values, statusStamps(values.status, prev));
     const [row] = await this.db.update(rentalOffersTable).set(values as any)
       .where(and(eq(rentalOffersTable.id, prev.id), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)))

@@ -6,7 +6,7 @@ import type { RentalOfferFee, RentalOfferUnitSnapshot } from "@dara/database";
  *
  * Every field is optional on PATCH; `partial=false` (create) additionally
  * requires a client name. Values the table constrains (status, frequency,
- * commission type, duration, free months) are checked here so a bad request is
+ * commission type, duration, grace months) are checked here so a bad request is
  * a 400 with a reason rather than a constraint-violation 500.
  */
 
@@ -21,6 +21,12 @@ const MAX_TEXT = 500;
 const MAX_LONG_TEXT = 4000;
 const MAX_TERMS = 40;
 const MAX_FEES = 20;
+/**
+ * The grace period EXTENDS the lease (grace + duration months, full rent
+ * billed after it), so it is no longer bounded by the duration — only by a
+ * sane cap. Same cap as the web's MAX_GRACE_MONTHS and the 0089 constraint.
+ */
+export const MAX_GRACE_MONTHS = 36;
 
 const bad = (ar: string, en: string) => new BadRequestException(`${ar} · ${en}`);
 
@@ -124,7 +130,13 @@ export function normalizeOffer(body: any, partial: boolean): OfferWrite {
   if (has("escalationType")) out.escalationType = oneOf(b.escalationType, ESCALATION_TYPES, "escalationType");
   if (has("escalationAmount")) out.escalationAmount = money(b.escalationAmount, "escalationAmount");
   if (has("durationMonths")) out.durationMonths = int(b.durationMonths, "durationMonths", 1, 360);
-  if (has("freeMonths")) out.freeMonths = int(b.freeMonths || 0, "freeMonths", 0, 359);
+  if (has("freeMonths")) {
+    const g = Number(b.freeMonths || 0);
+    if (!Number.isInteger(g) || g < 0 || g > MAX_GRACE_MONTHS) {
+      throw bad(`فترة السماح يجب ألا تتجاوز ${MAX_GRACE_MONTHS} شهراً`, `Grace period must be 0–${MAX_GRACE_MONTHS} months`);
+    }
+    out.freeMonths = g;
+  }
   if (has("paymentFrequency")) out.paymentFrequency = oneOf(b.paymentFrequency, OFFER_FREQUENCIES, "paymentFrequency");
   if (has("commissionType")) out.commissionType = oneOf(b.commissionType, COMMISSION_TYPES, "commissionType");
   if (has("status")) out.status = oneOf(b.status, OFFER_STATUSES, "status");
@@ -142,17 +154,6 @@ export function normalizeOffer(body: any, partial: boolean): OfferWrite {
     throw bad("تاريخ انتهاء العرض قبل تاريخ إصداره", "Valid-until is before the issue date");
   }
   return out;
-}
-
-/**
- * Free months must leave at least one paying month — the table enforces it,
- * but only a merged (row + patch) view can check it for a PATCH that moves one
- * side only.
- */
-export function assertFreeMonths(durationMonths: number, freeMonths: number) {
-  if (freeMonths >= durationMonths) {
-    throw bad("فترة السماح يجب أن تكون أقل من مدة العقد", "Free period must be shorter than the term");
-  }
 }
 
 /** `RO-2026-0007` → 7 for the given year prefix; anything else → 0. */

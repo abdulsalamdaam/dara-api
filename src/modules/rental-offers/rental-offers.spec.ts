@@ -6,7 +6,7 @@ import { getTableName } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PlanUpgradeRequiredException } from "../../common/plan-features";
 import { RentalOffersModule, RentalOffersPlanGuard } from "./rental-offers.module";
-import { assertFreeMonths, formatOfferNumber, normalizeOffer, offerSeq } from "./rental-offers.normalize";
+import { MAX_GRACE_MONTHS, formatOfferNumber, normalizeOffer, offerSeq } from "./rental-offers.normalize";
 
 describe("normalizeOffer", () => {
   it("requires a client on create, not on patch", () => {
@@ -65,9 +65,14 @@ describe("normalizeOffer", () => {
     assert.deepEqual(v.unitSnapshot, { propertyName: "برج", unitNumber: "401", floor: 4 });
   });
 
-  it("free months must leave a paying month", () => {
-    assert.throws(() => assertFreeMonths(12, 12), BadRequestException);
-    assert.doesNotThrow(() => assertFreeMonths(12, 2));
+  it("grace extends the lease: not bounded by the duration, capped at MAX_GRACE_MONTHS", () => {
+    assert.equal(normalizeOffer({ durationMonths: 12, freeMonths: 12 }, true).freeMonths, 12);
+    assert.equal(normalizeOffer({ durationMonths: 3, freeMonths: 6 }, true).freeMonths, 6);
+    assert.equal(normalizeOffer({ freeMonths: MAX_GRACE_MONTHS }, true).freeMonths, 36);
+    assert.equal(normalizeOffer({ freeMonths: "" }, true).freeMonths, 0);
+    assert.throws(() => normalizeOffer({ freeMonths: 37 }, true), BadRequestException);
+    assert.throws(() => normalizeOffer({ freeMonths: -1 }, true), BadRequestException);
+    assert.throws(() => normalizeOffer({ freeMonths: 1.5 }, true), BadRequestException);
   });
 
   it("numbers", () => {
@@ -175,10 +180,10 @@ describe("RentalOffersController", () => {
     assert.ok(whereSql(d.ops[0]).params.includes(34));
   });
 
-  it("update: empty patch is a 400; a free period longer than the stored term is refused", async () => {
+  it("update: empty patch is a 400; a grace period over the cap is refused", async () => {
     const prev = { id: 5, status: "draft", durationMonths: 12, freeMonths: 0, sentAt: null };
     await assert.rejects(ctrl(fakeDb({ "select:rental_offers": [[prev]] }).db).update(employee, "5", {}), BadRequestException);
-    await assert.rejects(ctrl(fakeDb({ "select:rental_offers": [[prev]] }).db).update(employee, "5", { freeMonths: 12 }), BadRequestException);
+    await assert.rejects(ctrl(fakeDb({ "select:rental_offers": [[prev]] }).db).update(employee, "5", { freeMonths: 37 }), BadRequestException);
   });
 
   it("update: marking sent stamps sent_at; expired is derived on read", async () => {

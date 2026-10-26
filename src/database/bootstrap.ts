@@ -741,6 +741,10 @@ export async function ensureSchema(): Promise<void> {
       const rentalOffersTerms = findSqlFile(join("drizzle", "0087_rental_offers_contract_terms.sql"));
       if (rentalOffersTerms) await client.query(readFileSync(rentalOffersTerms, "utf8"));
       else log.warn("0087_rental_offers_contract_terms.sql not found — rental_offers escalation_type not ensured");
+      // 0089: grace extends the lease — free_months no longer < duration, capped at 36.
+      const rentalOffersGrace = findSqlFile(join("drizzle", "0089_rental_offers_grace_extends.sql"));
+      if (rentalOffersGrace) await client.query(readFileSync(rentalOffersGrace, "utf8"));
+      else log.warn("0089_rental_offers_grace_extends.sql not found — rental_offers grace check not relaxed");
     } catch (err: any) {
       log.warn(`ensure rental_offers failed: ${err?.message || err}`);
     }
