@@ -19,6 +19,7 @@ import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
+import { activateAddonFromPaidRow } from "./addon-activation";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
@@ -132,6 +133,9 @@ export async function activateFromPaidRow(
   paid: { moyasarPaymentId?: string | null; paidAt?: Date | null } = {},
   invoices?: SubscriptionInvoiceService,
 ): Promise<boolean> {
+  // An account-limit add-on payment activates the add-on and NOTHING else —
+  // never the plan, the cycle or the subscription period below.
+  if (row.kind === "addon") return activateAddonFromPaidRow(db, row, paid, invoices);
   if (row.status === "paid") return false;
   const [claimed] = await db.update(subscriptionPaymentsTable)
     .set({ status: "paid", paidAt: paid.paidAt ?? new Date(), moyasarPaymentId: paid.moyasarPaymentId ?? row.moyasarPaymentId ?? null })
@@ -197,7 +201,9 @@ export class SubscriptionController {
       .orderBy(desc(subscriptionPaymentsTable.createdAt));
     // The single open invoice the user can resume (if any) — lets the UI offer
     // "Continue payment" instead of minting a fresh link on every click.
-    const open = payments.find((p) => p.status === "pending" && !!p.paymentUrl);
+    // Subscription rows only: an add-on's open invoice is paid from the
+    // limits card, never offered as "Continue payment" for the plan.
+    const open = payments.find((p) => p.kind !== "addon" && p.status === "pending" && !!p.paymentUrl);
     return {
       plan: resolvePackage(owner?.packagePlan).key,
       // What the plan unlocks (common/plan-features.ts) — the same list /auth/me carries as `planFeatures`.
@@ -224,7 +230,9 @@ export class SubscriptionController {
       daysUntilLock: sub.daysUntilLock,
       subscriptionStartedAt: owner?.subscriptionStartedAt ?? null,
       subscriptionEndsAt: owner?.subscriptionEndsAt ?? null,
-      payments,
+      // Every row carries `kind` ('subscription' | 'addon'), `addonId` and
+      // `description` (the add-on's line text) straight from the table.
+      payments: payments.map((p) => ({ ...p, kind: p.kind ?? "subscription", addonId: p.addonId ?? null, description: p.description ?? null })),
     };
   }
 
@@ -274,11 +282,13 @@ export class SubscriptionController {
   async sync(@CurrentUser() user: AuthUser) {
     const ownerId = scopeId(user);
     if (!isMoyasarConfigured()) return { activated: 0 };
-    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const DAY = 24 * 60 * 60 * 1000;
+    // Add-on invoices stay payable for the 14-day offer window; subscription ones a week.
+    const since = (p: SubscriptionPaymentRow) => new Date(Date.now() - (p.kind === "addon" ? 15 : 7) * DAY);
     const pendings = (await this.db.select().from(subscriptionPaymentsTable)
       .where(and(eq(subscriptionPaymentsTable.userId, ownerId), eq(subscriptionPaymentsTable.status, "pending")))
       .orderBy(desc(subscriptionPaymentsTable.createdAt)))
-      .filter((p) => p.moyasarInvoiceId && new Date(p.createdAt) >= since);
+      .filter((p) => p.moyasarInvoiceId && new Date(p.createdAt) >= since(p));
     let activated = 0;
     for (const p of pendings) {
       const inv = await fetchMoyasarInvoice(p.moyasarInvoiceId!).catch(() => null);
@@ -297,6 +307,8 @@ export class SubscriptionController {
         continue;
       }
       if (await activateFromPaidRow(this.db, p, { moyasarPaymentId: ev.paymentId, paidAt: ev.paidAt }, this.invoices)) activated++;
+      // Add-on rows are independent of each other and of the plan: keep walking.
+      if (p.kind === "addon") continue;
       // One paid invoice is the live subscription; older pending rows stay for the pay path to close.
       break;
     }
@@ -349,8 +361,14 @@ export class SubscriptionController {
     // Reuse-or-replace: an account keeps at most ONE open invoice. Walk every
     // pending row (not just the latest — old ones can pile up), reuse a still-
     // open invoice that matches this exact selection, and supersede the rest.
+    // Subscription rows only: an open add-on invoice is a separate purchase
+    // and must never be cancelled by paying for the plan.
     const pendings = await this.db.select().from(subscriptionPaymentsTable)
-      .where(and(eq(subscriptionPaymentsTable.userId, ownerId), eq(subscriptionPaymentsTable.status, "pending")))
+      .where(and(
+        eq(subscriptionPaymentsTable.userId, ownerId),
+        eq(subscriptionPaymentsTable.status, "pending"),
+        eq(subscriptionPaymentsTable.kind, "subscription"),
+      ))
       .orderBy(desc(subscriptionPaymentsTable.createdAt));
 
     let reuse: typeof pendings[number] | null = null;

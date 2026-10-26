@@ -19,6 +19,7 @@ import {
 import { computeBudget, lookupConfig, windowBounds } from "./ejar.budget";
 import { EjarConfigError, EjarApiError } from "./ejar.client.service";
 import { mapLookup, computeRequired, normalizeContractNumber, lookupUuid } from "./ejar.lookup.map";
+import { EjarImportService } from "./ejar.import.service";
 
 const USER = { id: 1 } as never;
 const OTHER = { id: 2 } as never;
@@ -706,5 +707,118 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     await assert.rejects(w.client.request("getRentalContracts", { id_number: "1", skip_filter_id_number: "true" }), /contract_ids/);
     await assert.rejects(w.client.request("getRentalContracts", { id_number: "1", contract_ids: "10000000001" }), /UUID/);
     assert.equal(w.calls.length, 0);
+  });
+});
+
+describe("account limits on the Ejar quota (override / add-ons)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const period = (plan: string, cycle: string) => ({
+    packagePlan: plan, billingCycle: cycle,
+    subscriptionStartedAt: new Date(Date.now() - DAY), subscriptionEndsAt: new Date(Date.now() + 80 * DAY),
+  });
+
+  it("an active Ejar pack adds to the period quota", async () => {
+    w = dworld();
+    w.store.plans[1] = period("basic", "quarterly"); // 22
+    w.store.quotaAdjust[1] = { override: undefined, addons: 50 };
+    const b = await w.svc.budget(1);
+    assert.equal(b.limit, 72);
+    assert.equal(b.plan?.limit, 72);
+    assert.equal(b.window, "period");
+  });
+
+  it("an override replaces the plan quota — down to 1, the second lookup is refused, pointing at the admin", async () => {
+    w = dworld();
+    w.store.plans[1] = period("basic", "quarterly");
+    w.store.quotaAdjust[1] = { override: 1, addons: 0 };
+    w.known.add("10000000201");
+    await w.svc.lookup(USER, { contract_number: CN });
+    const sent = w.calls.length;
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201" }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "budget_exhausted");
+    // Add-ons come from the admin only: nothing for sale, "contact us".
+    assert.equal(body.addonAvailable, false);
+    assert.equal(body.contactAdmin, true);
+    assert.equal(body.budget.plan.limit, 1);
+    assert.equal(w.calls.length, sent);
+  });
+
+  it("addonAvailable is always false (admin-only add-ons)", async () => {
+    w = dworld();
+    w.store.plans[1] = period("basic", "quarterly");
+    w.store.quotaAdjust[1] = { override: 0, addons: 0 };
+    const { body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(body.code, "budget_exhausted");
+    assert.equal(body.addonAvailable, false);
+  });
+
+  it("an unlimited override lifts the plan quota (the gateway budget still applies)", async () => {
+    w = dworld();
+    w.store.plans[1] = period("basic", "quarterly");
+    w.store.quotaAdjust[1] = { override: null, addons: 0 };
+    const b = await w.svc.budget(1);
+    assert.equal(b.plan, null);
+    assert.equal(b.limit, 50);
+  });
+
+  it("an override can cap an uncapped plan", async () => {
+    w = dworld();
+    w.store.plans[1] = period("enterprise", "yearly");
+    w.store.quotaAdjust[1] = { override: 5, addons: 2 };
+    const b = await w.svc.budget(1);
+    assert.equal(b.plan?.limit, 7);
+  });
+});
+
+describe("the per-account Ejar switch (ejar.access.ts)", () => {
+  it("disabled: 403 ejar_disabled_for_account, nothing sent, budget says enabled:false", async () => {
+    w = dworld();
+    w.store.ejarModes[1] = "disabled";
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 403);
+    assert.equal(body.code, "ejar_disabled_for_account");
+    assert.equal(w.calls.length, 0);
+    assert.equal((await w.svc.budget(1, undefined, 1)).enabled, false);
+  });
+
+  it("disabled also blocks the import (which never calls Ejar)", async () => {
+    w = dworld();
+    w.store.ejarModes[1] = "disabled";
+    const importer = new EjarImportService(w.store, {} as never);
+    const { status, body } = await httpError(importer.import(USER, { contract_number: CN }));
+    assert.equal(status, 403);
+    assert.equal(body.code, "ejar_disabled_for_account");
+  });
+
+  it("enabled overrides EJAR_ACCESS=allowlist for that account only", async () => {
+    w = dworld({ env: { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" } });
+    w.store.ejarModes[1] = "enabled";
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.source, "ejar");
+    assert.equal((await w.svc.budget(1, undefined, 1)).enabled, true);
+    // Another account on default is still shut out by the allowlist.
+    const { status, body } = await httpError(w.svc.lookup(OTHER, { contract_number: CN }));
+    assert.equal(status, 403);
+    assert.equal(body.code, "access_denied");
+  });
+
+  it("enabled does NOT override EJAR_ACCESS=off (the server kill switch)", async () => {
+    w = dworld({ env: { EJAR_ACCESS: "off" } });
+    w.store.ejarModes[1] = "enabled";
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 403);
+    assert.equal(body.code, "access_denied");
+    assert.equal(w.calls.length, 0);
+    assert.equal((await w.svc.budget(1, undefined, 1)).enabled, false);
+  });
+
+  it("client.request honours the account switch it is handed", async () => {
+    w = dworld();
+    await assert.rejects(
+      w.client.request("contractDetails", { uuid: UUID }, { userId: 1, accountId: 1, accountMode: "disabled" }),
+      (e: unknown) => e instanceof EjarApiError && (e as EjarApiError).status === 403,
+    );
+    assert.equal(w.dataCalls().length, 0);
   });
 });

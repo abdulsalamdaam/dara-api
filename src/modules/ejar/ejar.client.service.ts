@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import {
   EJAR_ENDPOINTS,
   type BaladyEnvelope,
@@ -8,6 +8,8 @@ import {
   type EjarLogRecordInput,
 } from "./ejar.types";
 import { EjarLogService, truncateBody } from "./ejar.log.service";
+import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { accountEjarMode, ejarAccessDenial, ejarDenialFor, type EjarAccountMode } from "./ejar.access";
 
 const SECRET_HEADER = "X-IBM-Client-Secret";
 const REDACTED = "***redacted***";
@@ -42,22 +44,9 @@ export class EjarAccessError extends EjarApiError {
   }
 }
 
-/**
- * Who may make outbound Ejar calls, from `EJAR_ACCESS`:
- * - unset / `all` — any caller the route's permission check lets through;
- * - `allowlist` — only the user ids in `EJAR_ALLOWED_USER_IDS` (comma
- *   separated; empty means nobody), plus the unattended health probe;
- * - `off` — nothing at all, not even the probe.
- * Any other value is treated as `off`: a typo must not open the gate.
- */
-export function ejarAccessDenial(userId: number | null | undefined, env = process.env): string | null {
-  const mode = (env.EJAR_ACCESS ?? "all").trim().toLowerCase() || "all";
-  if (mode === "all") return null;
-  if (mode !== "allowlist") return "Ejar access is switched off on this server (EJAR_ACCESS).";
-  if (userId == null) return null; // the unattended health probe
-  const allowed = (env.EJAR_ALLOWED_USER_IDS ?? "").split(",").map((v) => Number(v.trim())).filter(Number.isInteger);
-  return allowed.includes(userId) ? null : `Ejar access is restricted on this server; user ${userId} is not allowed.`;
-}
+// The EJAR_ACCESS rule moved to ejar.access.ts (with the per-account switch);
+// re-exported so existing imports keep working.
+export { ejarAccessDenial } from "./ejar.access";
 
 /**
  * Staging-only replay (`EJAR_REPLAY=on`): a lookup call is answered from the
@@ -112,7 +101,12 @@ export class EjarClientService {
   private readonly logger = new Logger("Ejar");
   private token: { value: string; expiresAt: number } | null = null;
   private tokenInFlight: Promise<string> | null = null;
-  constructor(private readonly logs: EjarLogService) {}
+  constructor(
+    private readonly logs: EjarLogService,
+    // Optional so the specs can build the client from a log stub alone; in the
+    // app it is always there, for the per-account Ejar switch.
+    @Optional() @Inject(DRIZZLE) private readonly db?: Drizzle,
+  ) {}
 
   private nhcConfig(): GatewayConfig | null {
     const baseUrl = process.env.EJAR_BASE_URL?.trim();
@@ -211,7 +205,14 @@ export class EjarClientService {
   async request<T = Record<string, unknown>>(
     endpoint: EjarEndpointKey,
     params: Record<string, string | number | undefined> = {},
-    opts: { userId?: number | null; skipLog?: boolean } = {},
+    opts: {
+      userId?: number | null;
+      skipLog?: boolean;
+      /** The scope owner the call is for — its per-account Ejar switch applies. */
+      accountId?: number | null;
+      /** The account's switch, when the caller already read it (saves a query). */
+      accountMode?: EjarAccountMode;
+    } = {},
   ): Promise<EjarCallResult<T>> {
     const def = EJAR_ENDPOINTS[endpoint];
     if (!def) throw new EjarConfigError(`Unknown Ejar endpoint: ${endpoint}`);
@@ -220,7 +221,7 @@ export class EjarClientService {
     // budgeted lookup makes any), so this is the one place the access rule
     // cannot be missed.
     // A refused attempt is still logged, so the log shows who tried.
-    const denial = ejarAccessDenial(opts.userId);
+    const denial = await this.denialFor(opts);
     if (denial) {
       this.logger.warn(`blocked ${endpoint} for user ${opts.userId ?? "system"}: ${denial}`);
       const log = await this.safeLog(
@@ -379,6 +380,14 @@ export class EjarClientService {
     });
     this.logger.log(`[replay] ${endpoint} ${key}=${value} ← log #${hit.id}`);
     return { body: envelope.data?.result ?? null, log: await this.safeLog(rec, skipLog) };
+  }
+
+  /** EJAR_ACCESS plus, when the call names its account, that account's switch (ejar.access.ts). */
+  private async denialFor(opts: { userId?: number | null; accountId?: number | null; accountMode?: EjarAccountMode }): Promise<string | null> {
+    let mode = opts.accountMode;
+    if (!mode && opts.accountId != null && this.db) mode = await accountEjarMode(this.db, opts.accountId);
+    if (!mode) return ejarAccessDenial(opts.userId);
+    return ejarDenialFor(mode, opts.userId)?.message ?? null;
   }
 
   /**

@@ -4,7 +4,10 @@ import {
 } from "@nestjs/common";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
-import { EjarAccessError, EjarApiError, EjarClientService, EjarConfigError, ejarAccessDenial } from "./ejar.client.service";
+import { EjarAccessError, EjarApiError, EjarClientService, EjarConfigError } from "./ejar.client.service";
+import { ejarDenialFor } from "./ejar.access";
+import { combineLimit } from "../../common/limit-core";
+import { signalLimitRefused } from "../limits/limits-signals";
 import {
   canLookup, computeBudget, hasHeadroom, lookupConfig, planQuotaWindow, windowBounds,
   type EjarBudget, type LookupConfig, type PlanQuota,
@@ -140,15 +143,29 @@ export class EjarLookupService {
     return lookupConfig(process.env);
   }
 
-  async budget(accountId: number, cfg = this.config()): Promise<EjarBudget> {
+  /**
+   * The budget, plus `enabled`: false when the account's Ejar switch (or the
+   * server's EJAR_ACCESS) shuts it out, so the import screen can say so
+   * before the user types a number. `userId` is the caller (EJAR_ACCESS
+   * allowlists users); omitted, only the account switch and the kill switch count.
+   */
+  async budget(accountId: number, cfg = this.config(), userId?: number | null): Promise<EjarBudget & { enabled: boolean }> {
     const { start } = windowBounds(cfg.window);
-    const [usage, plan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
-    return computeBudget(cfg, usage, new Date(), plan);
+    const [usage, plan, mode] = await Promise.all([
+      this.store.usage(start, accountId), this.planQuota(accountId), this.store.ejarAccountMode(accountId),
+    ]);
+    return { ...computeBudget(cfg, usage, new Date(), plan), enabled: ejarDenialFor(mode, userId) == null };
   }
 
-  /** The account's plan quota and what it has used of it this period; null = uncapped. */
+  /**
+   * The account's Ejar quota for this paid period and what it has used of it;
+   * null = uncapped. The quota is the EFFECTIVE one (common/limits.ts): the
+   * plan's, replaced by an admin override, plus active Ejar packs.
+   */
   private async planQuota(accountId: number): Promise<PlanQuota | null> {
-    const win = planQuotaWindow(await this.store.planPeriod(accountId));
+    const [period, adj] = await Promise.all([this.store.planPeriod(accountId), this.store.ejarQuotaAdjustment(accountId)]);
+    const base = planQuotaWindow(period)?.limit ?? null;
+    const win = planQuotaWindow(period, new Date(), combineLimit(base, adj.override, adj.addons));
     if (!win) return null;
     const { account } = await this.store.usage(win.since, accountId);
     return { ...win, used: account };
@@ -158,10 +175,13 @@ export class EjarLookupService {
     const contractNumber = normalizeContractNumber(body?.contract_number);
     if (!contractNumber) throw new BadRequestException({ code: "bad_format", message: BAD_FORMAT_MESSAGE });
 
-    const denial = ejarAccessDenial(user.id);
-    if (denial) throw new ForbiddenException({ code: "access_denied", message: denial });
-
     const accountId = scopeId(user);
+    // EJAR_ACCESS plus the account's own switch (ejar.access.ts): a disabled
+    // account is refused with `ejar_disabled_for_account`.
+    const accountMode = await this.store.ejarAccountMode(accountId);
+    const denial = ejarDenialFor(accountMode, user.id);
+    if (denial) throw new ForbiddenException({ code: denial.code, message: denial.message });
+
     const scope = await this.store.scope(accountId);
     const cfg = this.config();
     const refresh = body?.refresh === true || body?.refresh === "true";
@@ -188,7 +208,7 @@ export class EjarLookupService {
       const logs: unknown[] = [];
       const call = async (endpoint: EjarEndpointKey, params: Record<string, string>) => {
         try {
-          const r = await this.client.request(endpoint, params, { userId: user.id });
+          const r = await this.client.request(endpoint, params, { userId: user.id, accountId, accountMode });
           logs.push(r.log);
           return { body: r.body as EjarBody | null };
         } catch (err) {
@@ -248,11 +268,17 @@ export class EjarLookupService {
 
     switch (outcome.kind) {
       case "exhausted":
+        // The account's own quota ran out (not the shared gateway budget): a
+        // `limit_reached` audit event for the admin (once per period).
+        if (outcome.budget.plan && outcome.budget.plan.remaining <= 0) signalLimitRefused(accountId, "ejar_lookups");
         throw new HttpException(
           {
             code: "budget_exhausted",
             message: "تم استهلاك رصيد الاستعلام من إيجار لهذه الفترة · The Ejar lookup budget for this period is used up.",
             budget: outcome.budget,
+            // Ejar packs are granted by the admin only — the web says "contact us".
+            addonAvailable: false,
+            contactAdmin: true,
           },
           HttpStatus.TOO_MANY_REQUESTS,
         );
@@ -261,7 +287,7 @@ export class EjarLookupService {
           code: "not_found",
           message: "لم يُعثر على العقد في إيجار — تحقق من الرقم · Ejar has no contract with this number.",
           logs: outcome.logs,
-          budget: await this.budget(accountId, cfg),
+          budget: await this.budget(accountId, cfg, user.id),
         });
       case "wrong_number_cap":
         throw new HttpException(
@@ -280,7 +306,7 @@ export class EjarLookupService {
             message:
               "لم يُرجع إيجار تفاصيل العقد ولا يسمح الرصيد بطلبها · Ejar returned no contract details, and the Details budget has no room to fetch them.",
             logs: outcome.logs,
-            budget: await this.budget(accountId, cfg),
+            budget: await this.budget(accountId, cfg, user.id),
           },
           HttpStatus.TOO_MANY_REQUESTS,
         );

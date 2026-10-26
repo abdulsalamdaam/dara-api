@@ -10,7 +10,9 @@ import { scopeId } from "../../common/scope";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
-import { packageUsage, planLimits } from "../../common/quota";
+import { packageUsage, quotaView } from "../../common/quota";
+import { effectiveLimits, type EffectiveLimit } from "../../common/limits";
+import { ejarEnabledFor } from "../ejar/ejar.access";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
 
@@ -40,7 +42,24 @@ class PackageController {
     // The capped resources in one place: `limit` null = unlimited, `canAdd`
     // false once at (or, for an account grandfathered above it, over) the cap.
     // Same numbers as plan.maxLandlords/maxUsers + usage.landlords/employees.
-    const limits = await planLimits(this.db, ownerId, owner?.packagePlan ?? null);
+    // Seats and landlords are the EFFECTIVE limits (admin override + active
+    // add-ons, common/limits.ts); `plan.max*` stays the package base.
+    // `ejarLookups` is the Ejar quota for the current paid period.
+    // Each entry: {used, limit (null = unlimited), canAdd, over} plus the
+    // breakdown {base, override, addons, effective, remaining, resetsAt}.
+    const [eff, ejarEnabled] = await Promise.all([
+      effectiveLimits(this.db, ownerId),
+      ejarEnabledFor(this.db, ownerId, user.id),
+    ]);
+    const view = (key: EffectiveLimit["key"]) => {
+      const l = eff.find((x) => x.key === key)!;
+      return {
+        ...quotaView(l.used, l.effective),
+        base: l.base, override: l.override, addons: l.addons, effective: l.effective,
+        remaining: l.remaining, resetsAt: l.resetsAt,
+      };
+    };
+    const limits = { users: view("users"), landlords: view("landlords"), ejarLookups: view("ejar_lookups") };
 
     // Settings completeness — drives the post-payment "complete your settings"
     // lock. Complete when EITHER the account company OR the account's own party
@@ -91,6 +110,9 @@ class PackageController {
       mode: plan.mode,
       usage,
       limits,
+      // Whether Ejar lookups/imports are open to this caller (EJAR_ACCESS +
+      // the account's switch, ejar/ejar.access.ts).
+      ejarEnabled,
       userType: owner?.userType ?? "individual",
       onboarded: owner?.onboardedAt != null,
       // First-run getting-started checklist completed (persisted, not local).

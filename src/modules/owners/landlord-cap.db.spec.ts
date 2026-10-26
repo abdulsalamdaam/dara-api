@@ -157,12 +157,35 @@ describe("landlord cap — every owners-writing path", { skip: fv2DbSkip }, () =
 
   it("GET /me/package exposes the cap as `limits` (and plan.maxLandlords / usage.landlords agree)", async () => {
     const p = await pkg.myPackage(userOf(EMP, BASIC));
-    assert.deepEqual(p.limits.landlords, { used: 1, limit: 1, canAdd: false });
+    assert.deepEqual(p.limits.landlords, { used: 1, limit: 1, canAdd: false, over: false, base: 1, override: null, addons: 0, effective: 1, remaining: 0, resetsAt: null });
     assert.equal(p.plan.maxLandlords, 1);
     assert.equal(p.usage.landlords, 1);
-    assert.deepEqual(p.limits.users, { used: 2, limit: 2, canAdd: false });
+    assert.deepEqual(p.limits.users, { used: 2, limit: 2, canAdd: false, over: false, base: 2, override: null, addons: 0, effective: 2, remaining: 0, resetsAt: null });
+    // basic, unknown cycle → monthly → floor(90 / 12) = 7 Ejar lookups for the period.
+    assert.deepEqual(p.limits.ejarLookups, { used: 0, limit: 7, canAdd: true, over: false, base: 7, override: null, addons: 0, effective: 7, remaining: 7, resetsAt: null });
+    assert.equal(p.ejarEnabled, true);
     const pro = await pkg.myPackage(userOf(PRO));
     assert.equal(pro.limits.landlords.limit, null);
     assert.equal(pro.limits.users.limit, 4);
+  });
+
+  it("account limits: an active landlord add-on lets basic add one more; an override down marks it over", async () => {
+    await q(`insert into account_limit_addons (account_id, limit_key, quantity, period, status, activation, source, starts_at)
+             values ($1, 'landlords', 1, 'subscription_period', 'active', 'immediate', 'admin_free', now() - interval '1 minute')`, [EMPTY]);
+    await owners.create(userOf(EMPTY), { name: "Synthetic Via Addon", isDraft: true });
+    assert.equal(await count("owners", EMPTY), 2);
+    const r = await caught(owners.create(userOf(EMPTY), { name: "Synthetic Past Addon", isDraft: true }));
+    assert.equal(r?.body?.limit, 2, "the 403 reports the effective limit");
+
+    await q(`insert into account_limit_overrides (account_id, limit_key, value, note) values ($1, 'landlords', 0, 'synthetic')`, [EMPTY]);
+    const p = await pkg.myPackage(userOf(EMPTY));
+    assert.deepEqual(p.limits.landlords, { used: 2, limit: 1, canAdd: false, over: true, base: 1, override: 0, addons: 1, effective: 1, remaining: 0, resetsAt: null }, "override 0 + add-on 1; nothing deleted");
+    assert.equal(p.plan.maxLandlords, 1, "plan.max* stays the package base");
+    assert.equal(await count("owners", EMPTY), 2);
+  });
+
+  it("an account switched off Ejar reads ejarEnabled: false", async () => {
+    await q(`insert into account_limit_overrides (account_id, limit_key, value, note) values ($1, 'ejar.enabled', 0, 'synthetic')`, [PRO]);
+    assert.equal((await pkg.myPackage(userOf(PRO))).ejarEnabled, false);
   });
 });

@@ -305,7 +305,7 @@ class AdminController {
           select distinct on (sp.user_id) sp.user_id, sp.amount, sp.billing_cycle
           from ${subscriptionPaymentsTable} sp
           join ${usersTable} u on u.id = sp.user_id
-          where sp.status = 'paid' and u.is_active = true and u.deleted_at is null
+          where sp.status = 'paid' and sp.kind = 'subscription' and u.is_active = true and u.deleted_at is null
           order by sp.user_id, sp.paid_at desc nulls last, sp.id desc
         ) latest
       `),

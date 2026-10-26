@@ -110,7 +110,9 @@ CREATE TABLE "email_otp_tokens" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"ip" text,
 	"user_agent" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"purpose" text DEFAULT 'login' NOT NULL,
+	"user_id" integer
 );
 
 CREATE TABLE "phone_otp_tokens" (
@@ -128,6 +130,8 @@ CREATE TABLE "phone_otp_tokens" (
 CREATE TABLE "login_logs" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"user_id" integer,
+	"tenant_id" integer,
+	"owner_id" integer,
 	"email" text NOT NULL,
 	"status" text NOT NULL,
 	"ip" text,
@@ -768,6 +772,9 @@ CREATE TABLE "subscription_payments" (
 	"invoice_emailed_at" timestamp with time zone,
 	"period_start" timestamp with time zone,
 	"period_end" timestamp with time zone,
+	"kind" text DEFAULT 'subscription' NOT NULL,
+	"addon_id" integer,
+	"description" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -816,6 +823,18 @@ CREATE TABLE "ejar_api_logs" (
 	"response_body" jsonb,
 	"body_truncated" boolean DEFAULT false NOT NULL,
 	"error" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE "ejar_lookups" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"account_id" integer NOT NULL,
+	"contract_number" text NOT NULL,
+	"ejar_uuid" text NOT NULL,
+	"invoices_body" jsonb,
+	"details_body" jsonb,
+	"contracts_body" jsonb,
+	"looked_up_by" integer,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -948,6 +967,100 @@ CREATE TABLE "news_sources" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 
+CREATE TABLE "rental_offers" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"user_id" integer NOT NULL,
+	"created_by" integer,
+	"number" text NOT NULL,
+	"status" text DEFAULT 'draft' NOT NULL,
+	"title" text,
+	"issue_date" date DEFAULT now() NOT NULL,
+	"valid_until" date,
+	"unit_id" integer,
+	"property_id" integer,
+	"unit_snapshot" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"landlord_name" text,
+	"client_name" text NOT NULL,
+	"client_cr" text,
+	"client_vat" text,
+	"client_contact_name" text,
+	"client_contact_title" text,
+	"client_phone" text,
+	"client_email" text,
+	"client_address" text,
+	"annual_rent" numeric(14, 2) DEFAULT '0' NOT NULL,
+	"duration_months" integer DEFAULT 12 NOT NULL,
+	"start_date" date,
+	"payment_frequency" text DEFAULT 'quarterly' NOT NULL,
+	"vat_applies" boolean DEFAULT false NOT NULL,
+	"escalation_type" text DEFAULT 'percent' NOT NULL,
+	"escalation_percent" numeric(6, 2) DEFAULT '0' NOT NULL,
+	"escalation_amount" numeric(14, 2) DEFAULT '0' NOT NULL,
+	"free_months" integer DEFAULT 0 NOT NULL,
+	"deposit_amount" numeric(14, 2) DEFAULT '0' NOT NULL,
+	"commission_type" text DEFAULT 'none' NOT NULL,
+	"commission_value" numeric(14, 2) DEFAULT '0' NOT NULL,
+	"commission_vat" boolean DEFAULT true NOT NULL,
+	"fees" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"terms" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"notes" text,
+	"language" text DEFAULT 'ar' NOT NULL,
+	"sent_at" timestamp with time zone,
+	"decided_at" timestamp with time zone,
+	"deleted_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE "account_limit_addons" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"account_id" integer NOT NULL,
+	"limit_key" text NOT NULL,
+	"quantity" integer NOT NULL,
+	"catalog_key" text,
+	"period" text DEFAULT 'subscription_period' NOT NULL,
+	"starts_at" timestamp with time zone,
+	"ends_at" timestamp with time zone,
+	"status" text DEFAULT 'pending_payment' NOT NULL,
+	"activation" text DEFAULT 'on_payment' NOT NULL,
+	"source" text NOT NULL,
+	"price_sar" numeric(12, 2),
+	"payment_id" integer,
+	"granted_by" integer,
+	"note" text,
+	"offer_expires_at" timestamp with time zone,
+	"acknowledged_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE "account_limit_events" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"account_id" integer NOT NULL,
+	"actor_user_id" integer,
+	"actor_kind" text NOT NULL,
+	"source" text NOT NULL,
+	"limit_key" text NOT NULL,
+	"old_value" integer,
+	"new_value" integer,
+	"addon_id" integer,
+	"payment_id" integer,
+	"note" text,
+	"meta" jsonb,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE "account_limit_overrides" (
+	"id" serial PRIMARY KEY NOT NULL,
+	"account_id" integer NOT NULL,
+	"limit_key" text NOT NULL,
+	"value" integer,
+	"note" text NOT NULL,
+	"set_by" integer,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+
 ALTER TABLE "login_logs" ADD CONSTRAINT "login_logs_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE set null ON UPDATE no action;
 ALTER TABLE "deeds" ADD CONSTRAINT "deeds_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "deeds" ADD CONSTRAINT "deeds_owner_id_owners_id_fk" FOREIGN KEY ("owner_id") REFERENCES "owners"("id") ON DELETE set null ON UPDATE no action;
@@ -990,8 +1103,17 @@ ALTER TABLE "invoices" ADD CONSTRAINT "invoices_payment_id_payments_id_fk" FOREI
 ALTER TABLE "invoices" ADD CONSTRAINT "invoices_owner_id_owners_id_fk" FOREIGN KEY ("owner_id") REFERENCES "owners"("id") ON DELETE set null ON UPDATE no action;
 ALTER TABLE "invoice_lines" ADD CONSTRAINT "invoice_lines_invoice_id_invoices_id_fk" FOREIGN KEY ("invoice_id") REFERENCES "invoices"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "subscription_payments" ADD CONSTRAINT "subscription_payments_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "ejar_lookups" ADD CONSTRAINT "ejar_lookups_account_id_users_id_fk" FOREIGN KEY ("account_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "news_items" ADD CONSTRAINT "news_items_source_id_news_sources_id_fk" FOREIGN KEY ("source_id") REFERENCES "news_sources"("id") ON DELETE set null ON UPDATE no action;
 ALTER TABLE "news_items" ADD CONSTRAINT "news_items_run_id_news_job_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "news_job_runs"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "rental_offers" ADD CONSTRAINT "rental_offers_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "rental_offers" ADD CONSTRAINT "rental_offers_unit_id_units_id_fk" FOREIGN KEY ("unit_id") REFERENCES "units"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "rental_offers" ADD CONSTRAINT "rental_offers_property_id_properties_id_fk" FOREIGN KEY ("property_id") REFERENCES "properties"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "account_limit_addons" ADD CONSTRAINT "account_limit_addons_account_id_users_id_fk" FOREIGN KEY ("account_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "account_limit_addons" ADD CONSTRAINT "account_limit_addons_payment_id_subscription_payments_id_fk" FOREIGN KEY ("payment_id") REFERENCES "subscription_payments"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "account_limit_events" ADD CONSTRAINT "account_limit_events_account_id_users_id_fk" FOREIGN KEY ("account_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "account_limit_overrides" ADD CONSTRAINT "account_limit_overrides_account_id_users_id_fk" FOREIGN KEY ("account_id") REFERENCES "users"("id") ON DELETE cascade ON UPDATE no action;
+CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" USING btree (lower("email"));
 CREATE INDEX "companies_vat_idx" ON "companies" USING btree ("vat_number");
 CREATE UNIQUE INDEX "roles_key_company_uniq" ON "roles" USING btree ("key","company_id");
 CREATE INDEX "email_otp_tokens_email_idx" ON "email_otp_tokens" USING btree ("email","expires_at");
@@ -1003,6 +1125,8 @@ CREATE INDEX "contract_units_contract_idx" ON "contract_units" USING btree ("con
 CREATE INDEX "contract_units_unit_idx" ON "contract_units" USING btree ("unit_id");
 CREATE INDEX "contract_rent_terms_contract_idx" ON "contract_rent_terms" USING btree ("contract_id");
 CREATE INDEX "payment_collections_payment_idx" ON "payment_collections" USING btree ("payment_id");
+CREATE INDEX "payment_collections_invoice_idx" ON "payment_collections" USING btree ("invoice_id");
+CREATE INDEX "payment_collections_user_date_idx" ON "payment_collections" USING btree ("user_id","collected_date");
 CREATE UNIQUE INDEX "zatca_credentials_user_owner_uniq" ON "zatca_credentials" USING btree ("user_id","owner_id");
 CREATE UNIQUE INDEX "invoices_user_invoice_number_uniq" ON "invoices" USING btree ("user_id","invoice_number") WHERE deleted_at is null;
 CREATE UNIQUE INDEX "invoices_user_owner_env_icv_uniq" ON "invoices" USING btree ("user_id",coalesce("owner_id", 0),"environment","icv") WHERE deleted_at is null and status in ('cleared', 'reported', 'submitted');
@@ -1011,10 +1135,12 @@ CREATE INDEX "invoices_contract_idx" ON "invoices" USING btree ("contract_id");
 CREATE INDEX "invoices_payment_idx" ON "invoices" USING btree ("payment_id");
 CREATE INDEX "invoice_lines_invoice_idx" ON "invoice_lines" USING btree ("invoice_id","line_number");
 CREATE UNIQUE INDEX "lookups_category_key_company_uniq" ON "lookups" USING btree ("category","key","company_id");
-CREATE INDEX "audit_logs_owner_idx" ON "audit_logs" USING btree ("owner_user_id");
+CREATE INDEX "audit_logs_owner_created_idx" ON "audit_logs" USING btree ("owner_user_id","created_at" DESC NULLS LAST,"id" DESC NULLS LAST);
+CREATE UNIQUE INDEX "ejar_lookups_account_contract_uniq" ON "ejar_lookups" USING btree ("account_id","contract_number");
 CREATE UNIQUE INDEX "app_settings_key_uniq" ON "app_settings" USING btree ("key");
 CREATE UNIQUE INDEX "news_items_external_id_uniq" ON "news_items" USING btree ("external_id");
 CREATE INDEX "news_items_feed_idx" ON "news_items" USING btree ("status","pinned","posted_at");
+CREATE INDEX "news_items_feed_v2_idx" ON "news_items" USING btree ("status","pinned" DESC NULLS LAST,"posted_at" DESC NULLS LAST,"id" DESC NULLS LAST);
 CREATE INDEX "news_items_category_idx" ON "news_items" USING btree ("ai_category");
 CREATE INDEX "news_items_source_idx" ON "news_items" USING btree ("source_id");
 CREATE INDEX "news_items_created_idx" ON "news_items" USING btree ("created_at","id");
@@ -1023,3 +1149,7 @@ CREATE INDEX "news_job_runs_started_idx" ON "news_job_runs" USING btree ("starte
 CREATE INDEX "news_job_runs_status_idx" ON "news_job_runs" USING btree ("status");
 CREATE UNIQUE INDEX "news_sources_handle_uniq" ON "news_sources" USING btree ("handle");
 CREATE UNIQUE INDEX "news_sources_feed_url_uniq" ON "news_sources" USING btree ("feed_url") WHERE "news_sources"."kind" = 'rss';
+CREATE UNIQUE INDEX "rental_offers_user_number_uniq" ON "rental_offers" USING btree ("user_id","number");
+CREATE INDEX "account_limit_addons_account_key_status_idx" ON "account_limit_addons" USING btree ("account_id","limit_key","status");
+CREATE INDEX "account_limit_events_account_created_idx" ON "account_limit_events" USING btree ("account_id","created_at" desc);
+CREATE UNIQUE INDEX "account_limit_overrides_account_key_uniq" ON "account_limit_overrides" USING btree ("account_id","limit_key");

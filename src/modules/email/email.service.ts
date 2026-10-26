@@ -48,6 +48,32 @@ export function buildVerifyEmailLink(token: string): string {
   return `${APP_PUBLIC_URL.replace(/\/$/, "")}/verify-email?token=${encodeURIComponent(token)}`;
 }
 
+/** Where the account holder sees limits, add-ons and their Pay buttons. */
+export const BILLING_PAGE_URL = `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard/settings?section=billing`;
+
+export interface LimitAddonItem { labelAr: string; labelEn: string; quantity: number }
+
+export interface LimitAddonOfferPayload {
+  items: LimitAddonItem[];
+  /** SAR, VAT included; null = no price to show. */
+  amountInclVat: number | null;
+  /** Defaults to the billing page. */
+  payUrl?: string | null;
+  expiresAt: Date | null;
+  note?: string | null;
+}
+
+export interface LimitsChangedPayload {
+  /** null = unlimited. */
+  changes: Array<{ labelAr: string; labelEn: string; oldValue: number | null; newValue: number | null }>;
+  note: string | null;
+}
+
+export interface LimitAddonExpiredPayload {
+  items: LimitAddonItem[];
+  endedAt: Date;
+}
+
 export interface SendEmailInput {
   to: string | string[];
   subject: string;
@@ -497,6 +523,8 @@ export class EmailService {
     payload: {
       invoiceNumber: string;
       planLabel: string;
+      /** An account-limit add-on: printed instead of the package line. */
+      itemLabel?: string | null;
       cycle: BillingCycle;
       amount: number;
       currencyLabel: string;
@@ -520,9 +548,11 @@ export class EmailService {
       ${en("We've received your Dara subscription payment. Your invoice is attached as a PDF.")}
       <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;color:#334155;">
         <tr><td style="padding:8px 0;color:#64748b;">رقم الفاتورة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${number}</td></tr>
-        <tr><td style="padding:8px 0;color:#64748b;">الباقة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${plan} — ${cycleLabel}</td></tr>
+        ${payload.itemLabel
+          ? `<tr><td style="padding:8px 0;color:#64748b;">البند · Item</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${escapeHtml(payload.itemLabel)}</td></tr>`
+          : `<tr><td style="padding:8px 0;color:#64748b;">الباقة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${plan} — ${cycleLabel}</td></tr>`}
         <tr><td style="padding:8px 0;color:#64748b;">المبلغ المدفوع</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${amount}</td></tr>
-        <tr><td style="padding:8px 0;color:#64748b;">الاشتراك ساري حتى</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${until}</td></tr>
+        <tr><td style="padding:8px 0;color:#64748b;">${payload.itemLabel ? "صالح حتى" : "الاشتراك ساري حتى"}</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${until}</td></tr>
       </table>
       <div style="margin:24px 0;text-align:center;">
         <a href="${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
@@ -539,9 +569,120 @@ export class EmailService {
       to,
       subject: `فاتورة اشتراك دارا · Dara subscription invoice ${payload.invoiceNumber}`,
       html,
-      text: `استلمنا دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.planLabel} (${cycleLabel}) — ${amount}. الفاتورة مرفقة بصيغة PDF.\n\nWe've received your Dara subscription payment (invoice ${payload.invoiceNumber}). Your invoice is attached as a PDF.`,
+      text: `استلمنا دفعة اشتراكك في دارا. رقم الفاتورة ${payload.invoiceNumber} — ${payload.itemLabel || `${payload.planLabel} (${cycleLabel})`} — ${amount}. الفاتورة مرفقة بصيغة PDF.\n\nWe've received your Dara subscription payment (invoice ${payload.invoiceNumber}). Your invoice is attached as a PDF.`,
       category: "subscription-invoice",
       attachments: [{ filename: `${payload.invoiceNumber}.pdf`, content: pdf, contentType: "application/pdf" }],
+    });
+  }
+
+  /* ── Account limits / add-ons ─────────────────────────────── */
+
+  /**
+   * An add-on (extra seats, an Ejar lookup pack) was offered or invoiced and
+   * waits for payment. The button goes to the billing page, where the limits
+   * card shows the offer with its Pay button — never straight to a checkout.
+   */
+  async sendLimitAddonOffer(to: string, name: string, payload: LimitAddonOfferPayload): Promise<boolean> {
+    if (!to) return false;
+    const safeName = escapeHtml(name || "");
+    const items = payload.items.map((i) =>
+      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)} × ${i.quantity}</td></tr>`).join("");
+    const amount = payload.amountInclVat != null ? sarAmount(payload.amountInclVat) : null;
+    const expires = payload.expiresAt ? riyadhDate(payload.expiresAt) : null;
+    const url = payload.payUrl || BILLING_PAGE_URL;
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">إضافة على باقتك بانتظار الدفع</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
+        ${greetingAr(safeName)}،<br/>
+        جهّزنا لك إضافة على حدود حسابك في <strong>دارا</strong>. تتفعّل مباشرة بعد الدفع.
+      </p>
+      ${en("We've prepared an add-on to your Dara account limits. It activates as soon as it is paid.")}
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;">${items}
+        ${amount ? `<tr><td style="padding:8px 0;color:#64748b;border-top:1px solid #f1f5f9;">المبلغ شامل الضريبة · Total incl. VAT</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;border-top:1px solid #f1f5f9;">${amount}</td></tr>` : ""}
+        ${expires ? `<tr><td style="padding:8px 0;color:#64748b;">العرض متاح حتى · Offer open until</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;" dir="ltr">${expires}</td></tr>` : ""}
+      </table>
+      ${payload.note ? `<p style="margin:0 0 12px;color:#334155;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.note)}</p>` : ""}
+      <div style="margin:24px 0;text-align:center;">
+        <a href="${escapeHtml(url)}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+          الدفع من صفحة الفوترة · Pay from billing
+        </a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار عن الفوترة راسلنا على ${SUPPORT_EMAIL}.</p>
+      ${en(`Billing questions: ${SUPPORT_EMAIL}.`, "muted")}
+    `);
+    const list = payload.items.map((i) => `${i.labelAr} × ${i.quantity}`).join("، ");
+    return this.send({
+      to,
+      subject: "إضافة على باقتك بانتظار الدفع · A Dara add-on is ready to pay",
+      html,
+      text: `${greetingAr(name)}،\nجهّزنا لك إضافة على حدود حسابك في دارا: ${list}.${amount ? `\nالمبلغ شامل الضريبة: ${amount}` : ""}${expires ? `\nالعرض متاح حتى ${expires}` : ""}\nادفع من صفحة الفوترة: ${url}\n\nAn add-on to your Dara account limits is ready to pay: ${url}`,
+      category: "limits-addon-offer",
+    });
+  }
+
+  /** An admin changed one or more of the account's limits (override, grant, cancel). */
+  async sendLimitsChanged(to: string, name: string, payload: LimitsChangedPayload): Promise<boolean> {
+    if (!to || !payload.changes.length) return false;
+    const safeName = escapeHtml(name || "");
+    const rows = payload.changes.map((c) =>
+      `<tr><td style="padding:8px 0;color:#64748b;">${escapeHtml(c.labelAr)} <span dir="ltr">· ${escapeHtml(c.labelEn)}</span></td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;" dir="ltr">${limitValue(c.oldValue)} → ${limitValue(c.newValue)}</td></tr>`).join("");
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">تحديث على حدود حسابك</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
+        ${greetingAr(safeName)}،<br/>
+        عدّلنا حدود حسابك في <strong>دارا</strong> كما يلي:
+      </p>
+      ${en("We've updated the limits of your Dara account:")}
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;">${rows}</table>
+      ${payload.note ? `<div style="margin:0 0 12px;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;color:#334155;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.note)}</div>` : ""}
+      <div style="margin:24px 0;text-align:center;">
+        <a href="${BILLING_PAGE_URL}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+          عرض الحدود · View limits
+        </a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار راسلنا على ${SUPPORT_EMAIL}.</p>
+      ${en(`Questions: ${SUPPORT_EMAIL}.`, "muted")}
+    `);
+    const lines = payload.changes.map((c) => `${c.labelAr} (${c.labelEn}): ${limitValue(c.oldValue)} → ${limitValue(c.newValue)}`).join("\n");
+    return this.send({
+      to,
+      subject: "تحديث على حدود حسابك في دارا · Your Dara limits changed",
+      html,
+      text: `${greetingAr(name)}،\nعدّلنا حدود حسابك في دارا:\n${lines}${payload.note ? `\n\n${payload.note}` : ""}\n\n${BILLING_PAGE_URL}`,
+      category: "limits-changed",
+    });
+  }
+
+  /** An add-on reached its end date and no longer counts toward the limit. */
+  async sendLimitAddonExpired(to: string, name: string, payload: LimitAddonExpiredPayload): Promise<boolean> {
+    if (!to || !payload.items.length) return false;
+    const safeName = escapeHtml(name || "");
+    const items = payload.items.map((i) =>
+      `<tr><td style="padding:8px 0;color:#010f35;font-weight:700;">${escapeHtml(i.labelAr)}</td><td style="padding:8px 0;text-align:left;color:#334155;" dir="ltr">${escapeHtml(i.labelEn)} × ${i.quantity}</td></tr>`).join("");
+    const ended = riyadhDate(payload.endedAt);
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">انتهت مدة إضافة على باقتك</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
+        ${greetingAr(safeName)}،<br/>
+        انتهت مدة الإضافة التالية في <strong>دارا</strong> بتاريخ <span dir="ltr">${ended}</span>، ورجع الحد إلى ما تسمح به باقتك. ما انحذف شيء من بياناتك.
+      </p>
+      ${en(`The add-on below ended on ${ended}; the limit is back to what your plan allows. Nothing was deleted.`)}
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;">${items}</table>
+      <div style="margin:24px 0;text-align:center;">
+        <a href="${BILLING_PAGE_URL}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+          تجديد الإضافة · Renew the add-on
+        </a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار راسلنا على ${SUPPORT_EMAIL}.</p>
+      ${en(`Questions: ${SUPPORT_EMAIL}.`, "muted")}
+    `);
+    const list = payload.items.map((i) => `${i.labelAr} × ${i.quantity}`).join("، ");
+    return this.send({
+      to,
+      subject: "انتهت مدة إضافة على باقتك · A Dara add-on ended",
+      html,
+      text: `${greetingAr(name)}،\nانتهت مدة الإضافة (${list}) بتاريخ ${ended}. ما انحذف شيء من بياناتك.\n\nThe add-on ended on ${ended}. Nothing was deleted.\n${BILLING_PAGE_URL}`,
+      category: "limits-addon-expired",
     });
   }
 
@@ -861,6 +1002,21 @@ function en(html: string, tone: "body" | "muted" | "faint" = "body"): string {
     : tone === "faint" ? "margin:4px 0 0;color:#94a3b8;font-size:12px;"
     : "margin:0 0 12px;color:#334155;line-height:1.7;";
   return `<p dir="ltr" lang="en" style="${style}text-align:left;">${html}</p>`;
+}
+
+/** `1,234.50 ر.س` */
+function sarAmount(n: number): string {
+  return `${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ر.س`;
+}
+
+/** A limit as printed; null = unlimited. */
+function limitValue(n: number | null): string {
+  return n == null ? "غير محدود · Unlimited" : String(n);
+}
+
+/** `YYYY-MM-DD` in Riyadh. */
+function riyadhDate(value: Date | string): string {
+  return riyadhTimestamp(value).slice(0, 10);
 }
 
 /** "يا هلا فلان", or just "يا هلا" when the name is blank (no dangling space). */

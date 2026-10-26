@@ -14,6 +14,7 @@ import {
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import type { EjarLookupStore } from "./ejar.lookup.store";
+import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
   BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, lookupContext, mapSaved, matchedUnitEjarIds,
 } from "./ejar.lookup.service";
@@ -140,6 +141,12 @@ export class EjarImportService {
     const contractNumber = normalizeContractNumber(body?.contract_number);
     if (!contractNumber) throw new BadRequestException({ code: "bad_format", message: BAD_FORMAT_MESSAGE });
     const accountId = scopeId(user);
+
+    // The import never calls Ejar, so EJAR_ACCESS does not apply — but an
+    // account an admin switched off Ejar for cannot import either.
+    if ((await this.store.ejarAccountMode(accountId)) === "disabled") {
+      throw new ForbiddenException({ code: "ejar_disabled_for_account", message: EJAR_DISABLED_FOR_ACCOUNT_MESSAGE });
+    }
 
     const saved = await this.store.getLookup(accountId, contractNumber);
     if (!saved) {

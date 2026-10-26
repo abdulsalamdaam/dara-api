@@ -16,6 +16,7 @@ import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType
 import { planFeatures } from "../../common/plan-features";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
+import { ejarEnabledFor } from "../ejar/ejar.access";
 
 const MAX_FAILED = 5;
 
@@ -922,6 +923,9 @@ export class AuthService {
       packagePlan,
       // Features the account owner's plan unlocks (common/plan-features.ts).
       planFeatures: planFeatures(packagePlan),
+      // Ejar lookups/imports open to this caller: EJAR_ACCESS plus the
+      // account's own switch (ejar/ejar.access.ts).
+      ejarEnabled: await ejarEnabledFor(this.db, row.ownerUserId ?? row.id, row.id),
       loginCount: row.loginCount,
       lastLoginAt: row.lastLoginAt,
       createdAt: row.createdAt,

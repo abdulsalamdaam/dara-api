@@ -11,8 +11,10 @@ import { rolesTable, usersTable, type User } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EmailService } from "../email/email.service";
 import { newEmailVerifyToken } from "../../common/email-verification";
-import { resolvePackage, UNLIMITED } from "../../common/packages";
+import { resolvePackage } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
+import { resolveLimit } from "../../common/limit-core";
+import { signalLimitRefused } from "../limits/limits-signals";
 import { assertEmailAvailable, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -267,15 +269,29 @@ export class TeamService {
     // resolvePackage(actor.packagePlan) fell back to the default plan and
     // enforced the wrong seat limit — too few or too many depending on what the
     // account actually pays for. The seat count was already owner-scoped.
+    //
+    // The cap is the EFFECTIVE seat limit (common/limits.ts): the plan's
+    // maxUsers, replaced by an admin override, plus active seat add-ons.
     const ownerId = c.scope;
     const pkg = resolvePackage(c.holder.packagePlan);
+    const seatLimit = await resolveLimit(this.db, ownerId, "users", pkg.maxUsers);
     const used = await employeeCount(this.db, ownerId);
-    if (used >= pkg.maxUsers) {
-      const limit = pkg.maxUsers >= UNLIMITED ? "∞" : String(pkg.maxUsers);
-      throw new BadRequestException(
-        `لقد بلغت الحد الأقصى لباقتك (${limit} مستخدم). لإضافة المزيد يرجى ترقية الباقة. ` +
-        `· Your ${pkg.labelEn} plan allows up to ${limit} team members.`,
-      );
+    if (seatLimit != null && used >= seatLimit) {
+      // Fire-and-forget: a `limit_reached` audit event for the admin (once per period).
+      signalLimitRefused(ownerId, "users");
+      throw new BadRequestException({
+        statusCode: 400,
+        // The web keys off `code`. Add-ons are granted by the admin only, so
+        // nothing is for sale here: the web says "contact us" next to "upgrade".
+        code: "PLAN_LIMIT_USERS",
+        limit: seatLimit,
+        used,
+        addonAvailable: false,
+        contactAdmin: true,
+        message:
+          `لقد بلغت الحد الأقصى لباقتك (${seatLimit} مستخدم). لإضافة المزيد يرجى ترقية الباقة. ` +
+          `· Your ${pkg.labelEn} plan allows up to ${seatLimit} team members.`,
+      });
     }
 
     // One email, one account (common/user-email.ts) — across every account,

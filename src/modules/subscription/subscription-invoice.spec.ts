@@ -541,3 +541,49 @@ describe("issue({ dryRun: true }) — renders, returns, and writes nothing", () 
     assert.equal((await h.svc.issue(h.db, 42, { dryRun: true, to: "abdulsalam@daam.sa" })).to, "abdulsalam@daam.sa");
   });
 });
+
+/**
+ * Account-limit add-on payments (kind='addon') ride the same SUB- invoice, but
+ * the line is the add-on's own description — never the package's.
+ */
+describe("buildData — add-on rows print their own line", () => {
+  it("uses row.description for kind='addon', the package line otherwise", () => {
+    asPlainInvoice(() => {
+      const addon = svc.buildData(paidRow({ kind: "addon", addonId: 7, description: "إضافة على الباقة: مستخدم إضافي — 3 أشهر", amount: "345.00" }), buyer());
+      assert.equal(addon.lines.length, 1);
+      assert.equal(addon.lines[0]!.description, "إضافة على الباقة: مستخدم إضافي — 3 أشهر");
+      assert.equal(addon.total, 345);
+      assert.equal(addon.invoiceNumber, "SUB-000042");
+      const sub = svc.buildData(paidRow({ kind: "subscription", description: null }), buyer());
+      assert.match(sub.lines[0]!.description, /^اشتراك باقة/);
+      // A subscription row with a stray description still prints the package.
+      const stray = svc.buildData(paidRow({ kind: "subscription", description: "x" }), buyer());
+      assert.match(stray.lines[0]!.description, /^اشتراك باقة/);
+    });
+  });
+
+  it("VAT is extracted from an add-on total exactly like a plan payment", () => {
+    asTaxInvoice(() => {
+      const d = svc.buildData(paidRow({ kind: "addon", description: "إضافة على الباقة: 50 استعلام إيجار", amount: "115.00" }), buyer());
+      assert.equal(d.total, 115);
+      assert.equal(d.subtotal, 100);
+      assert.equal(d.vat?.amount, 15);
+    });
+  });
+
+  it("the emailed invoice for an add-on names the item, not the package", async () => {
+    const sent: any[] = [];
+    const row = paidRow({ kind: "addon", addonId: 7, description: "إضافة على الباقة: مستخدم إضافي — شهر واحد", status: "paid" });
+    const db: any = {
+      select: () => ({ from: (t: any) => ({ where: async () => (t === subscriptionPaymentsTable ? [row] : t === usersTable ? [{ id: 1, name: "Synthetic", email: "abdulsalam@daam.sa", companyId: null }] : []) }) }),
+      update: () => ({ set: (v: any) => ({ where: () => Object.assign(Promise.resolve(), { returning: async () => [{ ...row, ...v }] }) }) }),
+    };
+    const email = { isConfigured: () => true, sendSubscriptionInvoice: async (to: string, _n: string, p: any) => { sent.push({ to, ...p }); return true; } };
+    const s = new SubscriptionInvoiceService({ htmlToPdf: async () => Buffer.from("%PDF") } as any, email as any, { record: () => {} } as any);
+    const r = await s.issue(db, 42, { period: { start: new Date("2026-10-01T00:00:00Z"), end: new Date("2026-12-01T00:00:00Z") } });
+    assert.equal(r.ok, true);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].itemLabel, "إضافة على الباقة: مستخدم إضافي — شهر واحد");
+    assert.equal(sent[0].to, "abdulsalam@daam.sa");
+  });
+});
