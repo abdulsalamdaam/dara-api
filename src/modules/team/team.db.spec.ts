@@ -132,4 +132,26 @@ describe("team management — privilege escalation (real Postgres)", { skip: fv2
     const all = await team.rolePresets(asHolder());
     assert.ok(all.length > 0 && all.every((p) => p.assignable));
   });
+  it("seat cap follows the EFFECTIVE limit: override down → 400 PLAN_LIMIT_USERS, add-on up → allowed", async () => {
+    const asOther = () => ({ id: otherHolder, email: "", role: "user", ownerUserId: null, ownerScopeId: null, permissions: ROLE_PRESETS.user }) as any;
+    // otherHolder (enterprise, unlimited) holds 2 seats: itself + strangerEmp.
+    await q(`insert into account_limit_overrides (account_id, limit_key, value, note) values ($1, 'users', 2, 'synthetic')`, [otherHolder]);
+    let err: any = null;
+    try { await team.createEmployee(asOther(), { name: "x", email: mail(), preset: "accountant" }); } catch (e) { err = e; }
+    assert.ok(err instanceof BadRequestException);
+    const body = err.getResponse() as any;
+    assert.equal(body.code, "PLAN_LIMIT_USERS");
+    assert.equal(body.limit, 2);
+    assert.equal(body.addonAvailable, false, "no seat price in the catalog yet");
+    assert.match(body.message, /2 مستخدم/);
+
+    await q(`insert into app_settings (key, value) values ('limit_addon_catalog', $1::jsonb)`,
+      [JSON.stringify({ items: [{ key: "seat_1", limitKey: "users", quantity: 1, priceSar: 50, period: "subscription_period", labelAr: "s", labelEn: "s" }] })]);
+    try { await team.createEmployee(asOther(), { name: "x", email: mail(), preset: "accountant" }); } catch (e) { err = e; }
+    assert.equal(err.getResponse().addonAvailable, true);
+
+    await q(`insert into account_limit_addons (account_id, limit_key, quantity, period, status, activation, source, starts_at)
+             values ($1, 'users', 1, 'subscription_period', 'active', 'immediate', 'admin_free', now() - interval '1 minute')`, [otherHolder]);
+    await team.createEmployee(asOther(), { name: "x", email: mail(), preset: "accountant" });
+  });
 });

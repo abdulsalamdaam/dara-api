@@ -1,7 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { ownersTable, usersTable } from "@dara/database";
 import type { Drizzle } from "../../database/database.module";
-import { resolvePackage, UNLIMITED } from "../../common/packages";
+import { resolvePackage } from "../../common/packages";
+import { resolveLimit } from "../../common/limit-core";
 import { landlordCount, PlanLimitLandlordsException } from "../../common/quota";
 import type { EjarPartyInfo } from "./ejar.map";
 
@@ -76,8 +77,10 @@ export async function ejarLandlordCapGate(
 ): Promise<number | null> {
   const [acct] = await db.select({ packagePlan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, scope));
   const pkg = resolvePackage(acct?.packagePlan);
-  if (pkg.maxLandlords >= UNLIMITED) return null;
-  if ((await landlordCount(db, scope)) < pkg.maxLandlords) return null;
+  // The EFFECTIVE landlord limit (override + active add-ons, common/limits.ts).
+  const cap = await resolveLimit(db, scope, "landlords", pkg.maxLandlords);
+  if (cap == null) return null;
+  if ((await landlordCount(db, scope)) < cap) return null;
 
   const rows = await db
     .select({
@@ -87,7 +90,7 @@ export async function ejarLandlordCapGate(
     .from(ownersTable)
     .where(and(eq(ownersTable.userId, scope), isNull(ownersTable.deletedAt)));
   const hit = matchCapCandidate(rows, capIdentity(lessor, name, idNumber));
-  if (!hit) throw new PlanLimitLandlordsException(pkg.maxLandlords, pkg.labelAr, "ejar_import");
+  if (!hit) throw new PlanLimitLandlordsException(cap, pkg.labelAr, "ejar_import");
   if (!norm(hit.idNumber) && idNumber) {
     await db.update(ownersTable).set({ idNumber }).where(eq(ownersTable.id, hit.id));
   }

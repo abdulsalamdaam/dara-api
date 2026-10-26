@@ -7,8 +7,9 @@ import { ForbiddenException } from "@nestjs/common";
 import { and, count, eq, isNull, or } from "drizzle-orm";
 import { usersTable, propertiesTable, unitsTable, ownersTable } from "@dara/database";
 import type { Drizzle } from "../database/database.module";
-import { resolvePackage, UNLIMITED, type PackagePlan } from "./packages";
+import { resolvePackage, type PackagePlan } from "./packages";
 import { FEATURE_REQUIRED_PLAN } from "./plan-features";
+import { combineLimit, normBase, readAdjustments, resolveLimit } from "./limit-core";
 
 export type QuotaResource = "properties" | "units" | "landlords" | "users";
 
@@ -83,15 +84,21 @@ export class PlanLimitLandlordsException extends ForbiddenException {
   }
 }
 
-/** Used / limit for one capped resource, as the client reads it. `limit` null = unlimited. */
-export interface QuotaView { used: number; limit: number | null; canAdd: boolean }
+/**
+ * Used / limit for one capped resource, as the client reads it. `limit` null =
+ * unlimited. `over` = above the limit (an admin lowered it below usage) —
+ * nothing is deleted, `canAdd` is just false.
+ */
+export interface QuotaView { used: number; limit: number | null; canAdd: boolean; over: boolean }
 
-function quotaView(used: number, limit: number): QuotaView {
-  return { used, limit: limit >= UNLIMITED ? null : limit, canAdd: used < limit };
+export function quotaView(used: number, limit: number | null): QuotaView {
+  const l = normBase(limit);
+  return { used, limit: l, canAdd: l == null || used < l, over: l != null && used > l };
 }
 
 /**
- * Landlord + seat allowance for an account, resolved from the OWNER's plan.
+ * Landlord + seat allowance for an account: the OWNER's plan, with the
+ * account's admin overrides and active add-ons applied (common/limits.ts).
  * `/me/package` returns it as `limits`, so the portal can say «مؤجر واحد» and
  * disable "add landlord" / "add user" before the API has to refuse.
  */
@@ -102,8 +109,13 @@ export async function planLimits(db: Drizzle, ownerId: number, packagePlan?: str
     plan = owner?.packagePlan ?? null;
   }
   const pkg = resolvePackage(plan);
-  const [landlords, users] = await Promise.all([landlordCount(db, ownerId), employeeCount(db, ownerId)]);
-  return { landlords: quotaView(landlords, pkg.maxLandlords), users: quotaView(users, pkg.maxUsers) };
+  const [landlords, users, adj] = await Promise.all([
+    landlordCount(db, ownerId), employeeCount(db, ownerId), readAdjustments(db, ownerId),
+  ]);
+  return {
+    landlords: quotaView(landlords, combineLimit(normBase(pkg.maxLandlords), adj.landlords.override, adj.landlords.addons)),
+    users: quotaView(users, combineLimit(normBase(pkg.maxUsers), adj.users.override, adj.users.addons)),
+  };
 }
 
 /** Current record counts for an owner account — drives the package usage UI. */
@@ -131,7 +143,8 @@ export async function packageUsage(db: Drizzle, ownerId: number) {
  * (the top-level account — `scopeId(user)`).
  *
  * `landlords` throws `PlanLimitLandlordsException` (403 `PLAN_LIMIT_LANDLORDS`,
- * see PlanLimitLandlordsBody). An account already above its cap keeps every
+ * see PlanLimitLandlordsBody). `users` and `landlords` are checked against the
+ * EFFECTIVE limit (admin override + active add-ons, common/limits.ts). An account already above its cap keeps every
  * row it has; it only cannot add one. `db` may be a transaction.
  */
 export async function assertWithinQuota(db: Drizzle, ownerId: number, resource: QuotaResource): Promise<void> {
@@ -168,14 +181,17 @@ export async function assertWithinQuota(db: Drizzle, ownerId: number, resource: 
       ));
     used = Number(r?.c ?? 0);
   } else if (resource === "users") {
-    limit = pkg.maxUsers;
+    // Seats and landlords are account limits: override + add-ons apply.
+    const eff = await resolveLimit(db, ownerId, "users", pkg.maxUsers);
+    if (eff == null) return;
+    limit = eff;
     labelAr = "مستخدم"; labelEn = "team members";
     used = await employeeCount(db, ownerId);
   } else {
-    limit = pkg.maxLandlords;
-    if (limit >= UNLIMITED) return;
+    const eff = await resolveLimit(db, ownerId, "landlords", pkg.maxLandlords);
+    if (eff == null) return;
     used = await landlordCount(db, ownerId);
-    if (used >= limit) throw new PlanLimitLandlordsException(limit, pkg.labelAr);
+    if (used >= eff) throw new PlanLimitLandlordsException(eff, pkg.labelAr);
     return;
   }
 
