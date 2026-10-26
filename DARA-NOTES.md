@@ -1050,7 +1050,11 @@ would strand everything filed in between.
   basic 90, pro 150 a year, enterprise uncapped — prorated to the paid period
   (quarterly basic = 22) and counted from `subscription_started_at`, on top of
   the gateway-wide `EJAR_LOOKUP_LIMIT`. Deliberately not shown on the landing
-  or the package pages; only the Ejar import screen shows it.
+  or the package pages; only the Ejar import screen shows it — as "attempts
+  available" alone: `GET /ejar/budget` (and the lookup's `budget`) is
+  `{enabled, available, remaining}`, where `remaining` is the enforced number
+  (period quota ± admin override/add-ons, min'd with the gateway caps).
+  Allowance and usage stay admin-only. Customers get no "limit reached" banner.
 - **Admin approval grants the package it displays.** `PATCH
   /admin/registrations/:id/approve` 400s on an unknown plan key rather than
   falling back to `basic` — it used to accept the legacy `broker` a fresh row

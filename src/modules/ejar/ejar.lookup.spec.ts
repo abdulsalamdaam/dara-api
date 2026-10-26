@@ -60,7 +60,7 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.deepEqual(res.invoices.map((i) => i.status), ["paid", "unpaid"]);
     assert.equal(res.logs.length, 2);
     assert.equal(res.alreadyImported, null);
-    assert.deepEqual(res.budget, { enabled: true, available: true }, "the customer sees no counts");
+    assert.deepEqual(res.budget, { enabled: true, available: true, remaining: 49 }, "the customer sees only what is available");
     const b = await w.svc.budget(1);
     assert.deepEqual(b.used, { invoices: 1, contracts: 0, details: 1 });
     assert.equal(b.remaining, 49);
@@ -107,7 +107,7 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(status, 404);
     assert.equal(body.code, "not_found");
     assert.equal(w.dataCalls().length, 1, "Details is never called without a UUID");
-    assert.deepEqual(body.budget, { enabled: true, available: true }, "no counts in the refusal");
+    assert.deepEqual(body.budget, { enabled: true, available: true, remaining: 50 }, "no allowance or usage in the refusal");
     const b = await w.svc.budget(1);
     assert.equal(b.used.invoices, 0, "a wrong number is not counted toward the budget");
     assert.equal(b.remaining, 50);
@@ -190,7 +190,7 @@ describe("the lookup budget", () => {
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000002" }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
-    assert.deepEqual(body.budget, { enabled: true, available: false }, "no counts: only that it is used up");
+    assert.deepEqual(body.budget, { enabled: true, available: false, remaining: 0 }, "no allowance or usage: only that it is used up");
     assert.doesNotMatch(String(body.message), /\d/, "the message states no number");
     assert.equal((await w.svc.budget(1)).remaining, 0);
     assert.equal(w.calls.length, sent, "not a single call — not even the token");
@@ -353,6 +353,57 @@ describe("the plan's Ejar lookup quota", () => {
     assert.equal(b.plan, null);
     assert.equal(b.limit, 50);
     assert.equal(b.window, "month");
+  });
+});
+
+describe("what the customer is shown: attempts available, prorated to the paid period", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const period = (plan: string, cycle: string) => ({
+    packagePlan: plan, billingCycle: cycle,
+    subscriptionStartedAt: new Date(Date.now() - DAY), subscriptionEndsAt: new Date(Date.now() + 80 * DAY),
+  });
+  // A gateway budget large enough not to mask the plan quota.
+  const env = { EJAR_LOOKUP_LIMIT: "1000" };
+
+  for (const [cycle, n] of [["quarterly", 37], ["semiannual", 75], ["yearly", 150]] as const) {
+    it(`Offices on ${cycle}: ${n} available`, async () => {
+      w = dworld({ env });
+      w.store.plans[1] = period("professional", cycle);
+      const c = await w.svc.customerBudget(1);
+      assert.deepEqual(c, { enabled: true, available: true, remaining: n });
+      assert.deepEqual(Object.keys(c).sort(), ["available", "enabled", "remaining"], "no allowance, usage or windows");
+    });
+  }
+
+  it("Aqari quarterly: floor(90 × 3/12) = 22, and a lookup takes one off", async () => {
+    w = dworld({ env });
+    w.store.plans[1] = period("basic", "quarterly");
+    assert.equal((await w.svc.customerBudget(1)).remaining, 22);
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.budget.remaining, 21);
+    assert.equal((await w.svc.customerBudget(1)).remaining, 21);
+  });
+
+  it("an admin override and an Ejar pack are part of the number", async () => {
+    w = dworld({ env });
+    w.store.plans[1] = period("professional", "quarterly");
+    w.store.quotaAdjust[1] = { override: undefined, addons: 10 };
+    assert.equal((await w.svc.customerBudget(1)).remaining, 47);
+    w.store.quotaAdjust[1] = { override: 5, addons: 0 };
+    assert.equal((await w.svc.customerBudget(1)).remaining, 5);
+  });
+
+  it("the number is what enforcement uses: the gateway cap lowers it too", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "10" } });
+    w.store.plans[1] = period("professional", "yearly");
+    assert.equal((await w.svc.customerBudget(1)).remaining, 10);
+  });
+
+  it("Ejar off for the account: 0 available", async () => {
+    w = dworld({ env });
+    w.store.plans[1] = period("professional", "yearly");
+    w.store.ejarModes[1] = "disabled";
+    assert.deepEqual(await w.svc.customerBudget(1, undefined, 1), { enabled: false, available: false, remaining: 0 });
   });
 });
 

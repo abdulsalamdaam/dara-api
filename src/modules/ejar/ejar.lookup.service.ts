@@ -160,7 +160,7 @@ export class EjarLookupService {
     return { ...computeBudget(cfg, usage, new Date(), plan), enabled: ejarDenialFor(mode, userId) == null };
   }
 
-  /** The budget as a customer may see it (`GET /ejar/budget`, lookup responses and refusals): no counts. */
+  /** The budget as a customer may see it (`GET /ejar/budget`, lookup responses and refusals): attempts available only, no allowance or usage. */
   async customerBudget(accountId: number, cfg = this.config(), userId?: number | null): Promise<CustomerEjarBudget> {
     const b = await this.budget(accountId, cfg, userId);
     return toCustomerBudget(b, b.enabled);
@@ -284,7 +284,7 @@ export class EjarLookupService {
           {
             code: "budget_exhausted",
             message: EJAR_BUDGET_EXHAUSTED_MESSAGE,
-            // No counts: a customer is never told the allowance, use or remainder.
+            // Only what is left (0 here): a customer is never told the allowance or its use.
             budget: toCustomerBudget(outcome.budget),
             // Ejar packs are granted by the admin only — the web says "contact us".
             addonAvailable: false,

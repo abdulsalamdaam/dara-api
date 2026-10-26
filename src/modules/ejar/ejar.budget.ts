@@ -175,20 +175,29 @@ export function computeBudget(cfg: LookupConfig, usage: LookupUsage, now = new D
 }
 
 /**
- * What a CUSTOMER sees of the budget: whether a lookup can run, never how
- * many the account has, used or has left (product rule — the counts are for
- * Dara's admins only). Every customer-facing response carries this shape,
- * never `EjarBudget`.
+ * What a CUSTOMER sees of the budget: whether a lookup can run and how many
+ * attempts are available right now — never the allowance, what was used, or
+ * any of the windows behind it (product rule — those are for Dara's admins
+ * only). Every customer-facing response carries this shape, never `EjarBudget`.
+ *
+ * `remaining` is the number enforcement uses (`EjarBudget.remaining`): the
+ * plan's yearly allowance prorated to the paid period (3/6/12 months, see
+ * `ejarLookupQuota`), replaced by an admin override and topped up by active
+ * Ejar packs, minus what this period used — min'd with the gateway-wide and
+ * per-account caps. 0 when Ejar is off for the account.
  */
 export interface CustomerEjarBudget {
   /** False when Ejar is switched off for the account. */
   enabled: boolean;
   /** A lookup can run now (enabled and allowance left). */
   available: boolean;
+  /** Attempts available now. */
+  remaining: number;
 }
 
 export function toCustomerBudget(b: Pick<EjarBudget, "remaining">, enabled = true): CustomerEjarBudget {
-  return { enabled, available: enabled && b.remaining > 0 };
+  const remaining = enabled ? Math.max(0, b.remaining) : 0;
+  return { enabled, available: remaining > 0, remaining };
 }
 
 /** One more call to `endpoint` fits — globally, for the account, and in its plan quota. */
