@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, BadRequestException, UseGuards } from "@nestjs/common";
+import { assertNotLocked, lockedChanges, zatcaLinks } from "../../common/zatca-lock";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, eq, isNull, or, ilike, count, asc, desc, inArray, sql } from "drizzle-orm";
 import { tenantsTable, contractsTable, simpleInvoicesTable } from "@dara/database";
@@ -317,6 +318,10 @@ class TenantsController {
     const [prior] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
     if (!prior) throw new NotFoundException("غير موجود");
+    // A tenant-package account linked to ZATCA: its own tenant row's tax identity is frozen like a landlord's (common/zatca-lock.ts).
+    if ((prior as any).isAccountHolder && (body.taxNumber !== undefined || body.nationalId !== undefined)) {
+      if ((await zatcaLinks(this.db, scopeId(user))).account) assertNotLocked(lockedChanges(prior as any, body, ["taxNumber", "nationalId"]));
+    }
 
     // Only checked when the request actually touches the identity fields.
     // Enforcing it on every PATCH would block an unrelated edit — a phone
