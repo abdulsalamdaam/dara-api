@@ -204,13 +204,16 @@ export interface PlanPeriod {
  * period (`subscription_started_at` → `subscription_ends_at`) — every payment
  * restarts it, so the quota renews with the subscription. Without a usable
  * start (legacy rows) it falls back to a rolling window of the cycle's length.
- * Returns null when the plan is uncapped.
+ * Returns null when the plan is uncapped (or `limitOverride` is null).
  */
 export function planQuotaWindow(
-  p: PlanPeriod | null, now = new Date(),
+  p: PlanPeriod | null, now = new Date(), limitOverride?: number | null,
 ): { limit: number; since: Date; resetsAt: Date | null } | null {
   const cycle = parseCycle(p?.billingCycle);
-  const limit = ejarLookupQuota(p?.packagePlan ?? null, cycle);
+  // `limitOverride` is the account's EFFECTIVE quota (common/limits.ts: admin
+  // override and active add-ons applied); undefined = the plan's own. null =
+  // unlimited, like an uncapped plan.
+  const limit = limitOverride !== undefined ? limitOverride : ejarLookupQuota(p?.packagePlan ?? null, cycle);
   if (limit == null) return null;
   const start = p?.subscriptionStartedAt ? new Date(p.subscriptionStartedAt) : null;
   const ends = p?.subscriptionEndsAt ? new Date(p.subscriptionEndsAt) : null;
