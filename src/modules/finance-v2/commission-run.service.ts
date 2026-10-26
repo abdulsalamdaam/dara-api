@@ -39,7 +39,7 @@ const bad = (error: string, message: string) => new BadRequestException({ error,
 const conflict = (error: string, message: string) => new ConflictException({ error, message });
 
 const BLOCKED_MESSAGES: Record<NonNullable<MonthPreview["blocked"]>, string> = {
-  NOT_ENABLED: "المالية v2 غير مفعلة · Finance v2 is not enabled",
+  NOT_ENABLED: "المحاسبة غير مفعلة · Accounting is not enabled",
   LEDGER_NOT_STARTED: "لم يبدأ الدفتر بعد · The ledger has not started",
   NOT_MANAGER_MODE: "العمولة تخص نموذج مدير الأملاك · Commission applies in Manager mode only",
   BASIS_BILLED: "أساس العمولة «المفوتر»؛ غيّره إلى «المحصّل» من الإعدادات المالية · The commission basis is 'billed'; switch it to 'collected' in finance settings",

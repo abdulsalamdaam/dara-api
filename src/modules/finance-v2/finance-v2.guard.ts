@@ -39,7 +39,7 @@ export class FinanceV2Guard implements CanActivate {
     try {
       state = await this.flag.stateStrict(scopeId(user));
     } catch (err) {
-      if (err instanceof FlagUnavailableError) throw new ServiceUnavailableException("Finance v2 is temporarily unavailable");
+      if (err instanceof FlagUnavailableError) throw new ServiceUnavailableException("Accounting is temporarily unavailable");
       throw err;
     }
     if (!state.on) throw new NotFoundException();

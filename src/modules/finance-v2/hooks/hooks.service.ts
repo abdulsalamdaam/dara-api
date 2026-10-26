@@ -49,8 +49,8 @@ export const FV2_ERRORS = {
   },
   FIELD_LOCKED: (fields: string[]) => ({
     error: "FINANCE_V2_FIELD_LOCKED",
-    message: `هذه الحقول تُدار عبر التحصيل والمستندات في المالية v2: ${fields.join(", ")} · `
-      + `These fields are managed through collections and documents under Finance v2: ${fields.join(", ")}`,
+    message: `هذه الحقول تُدار عبر التحصيل والمستندات في المحاسبة: ${fields.join(", ")} · `
+      + `These fields are managed through collections and documents under Accounting: ${fields.join(", ")}`,
     fields,
   }),
   INSTALLMENTS_LINKED: {

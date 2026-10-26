@@ -208,7 +208,7 @@ export class FinanceV2AdminService {
     );
     const row = r.rows[0];
     if (!row) throw new NotFoundException("Account not found");
-    if (!isCustomerAccount(row)) throw new BadRequestException("Finance v2 applies to customer accounts only");
+    if (!isCustomerAccount(row)) throw new BadRequestException("Accounting applies to customer accounts only");
     return row as { id: number; ownerUserId: number | null; roleKey: string | null; userType: string };
   }
 

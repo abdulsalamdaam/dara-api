@@ -10,7 +10,7 @@ import { FinanceV2AutoProvisionService } from "../auto-provision.service";
 /** /status nudges auto-provisioning for an entitled account that is still off, at most once per account per window. */
 const STATUS_SIGNAL_MEMO_MS = 30 * 60_000;
 
-export const BETA_LABELS = { ar: "المالية v2 (تجريبي)", en: "Finance v2 (Beta)" } as const;
+export const BETA_LABELS = { ar: "المحاسبة", en: "Accounting" } as const;
 /** The pill text as one string (DESIGN §1.3), the shape the web's `useFinanceV2Status` reads. */
 export const BETA_LABEL = `${BETA_LABELS.ar} · ${BETA_LABELS.en}`;
 

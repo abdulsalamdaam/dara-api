@@ -30,6 +30,6 @@ export function refuseV2KindOnLegacyApprove(kind: unknown): void {
   if (!isV2DocKind(kind)) return;
   throw new ConflictException({
     error: "FINANCE_V2_KIND_REQUIRES_V2",
-    message: "هذا المستند من المالية v2 ولا يُعتمد إلا عند تفعيلها · This Finance v2 document can only be approved while Finance v2 is on",
+    message: "هذا المستند من المحاسبة ولا يُعتمد إلا عند تفعيلها · This Accounting document can only be approved while Accounting is on",
   });
 }

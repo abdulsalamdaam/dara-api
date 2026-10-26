@@ -205,7 +205,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
     const mode: AccountingMode = (settings?.accounting_mode ?? req.accountingMode ?? "manager") as AccountingMode;
 
     if (!req.dryRun) {
-      if (!settings?.finance_v2_enabled) throw new ConflictException({ error: "FINANCE_V2_OFF", message: "Finance v2 is off for this account" });
+      if (!settings?.finance_v2_enabled) throw new ConflictException({ error: "FINANCE_V2_OFF", message: "Accounting is off for this account" });
       if (!settings.accounting_mode) throw new ConflictException({ error: "MODE_NOT_SET", message: "The accounting mode is not set" });
       const chart = await this.pool.query(`select 1 from accounts where user_id = $1 limit 1`, [req.userId]);
       if (!chart.rowCount) throw new ConflictException({ error: "CHART_NOT_SEEDED", message: "The chart of accounts is not seeded" });
@@ -279,7 +279,7 @@ export class BackfillService implements OnModuleInit, OnModuleDestroy {
         await settingsEvent(c, req.userId, req.actorUserId, "backfill_run", null, { runId, mode: req.mode, cutover: req.cutover ?? null }, `backfill ${req.mode}`);
       }
       const s = await loadSettings(sqlOf(c), req.userId);
-      if (!s) throw new ConflictException({ error: "FINANCE_V2_OFF", message: "Finance v2 is off for this account" });
+      if (!s) throw new ConflictException({ error: "FINANCE_V2_OFF", message: "Accounting is off for this account" });
       if (req.mode === "cutover") {
         await c.query(`update finance_settings set ledger_go_live_date = coalesce(ledger_go_live_date, $2), updated_at = now() where account_user_id = $1`,
           [req.userId, req.cutover]);
