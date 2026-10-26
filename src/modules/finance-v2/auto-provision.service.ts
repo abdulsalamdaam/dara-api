@@ -310,7 +310,7 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
            enabled_at = now(), enabled_by = null, updated_at = now()`,
         [accountUserId, mode],
       );
-      if (!cur && mode === "manager") await this.setup.startCollectedBasis(c, accountUserId, null);
+      // Commission basis: the column default, BILLED (one commission invoice per rent invoice) — see admin.service.ts.
       const why = `Automatic: the plan includes accounting (${trigger})`;
       await settingsEvent(c, accountUserId, AUTO_ACTOR, "finance_v2_enabled", cur ? cur.finance_v2_enabled === true : null, true, why);
       if (mode !== oldMode) await settingsEvent(c, accountUserId, AUTO_ACTOR, "accounting_mode", oldMode, mode, why);

@@ -84,7 +84,7 @@ describe("finance v2 auto-provisioning for plan-entitled accounts (real Postgres
     const s = await settings(A);
     assert.equal(s.finance_v2_enabled, true);
     assert.equal(s.accounting_mode, "manager");
-    assert.equal(s.commission_basis, "collected", "a new Manager-mode row starts on the collected basis, as the admin path does");
+    assert.equal(s.commission_basis, "billed", "a new Manager-mode row starts on the billed basis, as the admin path does");
     assert.equal(s.agency_collections_to_trust, true);
     assert.equal(s.enabled_by, null);
     assert.ok(s.enabled_at && s.ledger_started_at, "enabled and started");

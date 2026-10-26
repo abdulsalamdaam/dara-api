@@ -79,11 +79,8 @@ export class FinanceV2AdminService {
         [accountUserId, body.enabled, newMode, actorUserId, turningOn],
       )).rows[0];
 
-      if (!cur && newMode === "manager") {
-        // New Manager-mode accounts start on the COLLECTED commission basis (setup.service.ts, shared with auto-provisioning).
-        await this.setup.startCollectedBasis(c, accountUserId, actorUserId);
-        s.commission_basis = "collected";
-      }
+      // New Manager-mode accounts keep the column default, the BILLED commission basis: one commission invoice
+      // per rent invoice (account holder's decision, 26 Oct 2026). "collected" (the monthly run) stays an opt-in.
       await this.event(c, accountUserId, actorUserId, "finance_v2_enabled", cur ? wasOn : null, body.enabled, body.reason);
       if (newMode !== oldMode) await this.event(c, accountUserId, actorUserId, "accounting_mode", oldMode, newMode, body.reason);
 
