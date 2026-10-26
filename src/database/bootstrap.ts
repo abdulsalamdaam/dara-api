@@ -745,6 +745,16 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure rental_offers failed: ${err?.message || err}`);
     }
 
+    // 0088: account limits — overrides, add-ons, events, and the
+    // subscription_payments kind/addon_id/description columns. Idempotent.
+    try {
+      const accountLimits = findSqlFile(join("drizzle", "0088_account_limits.sql"));
+      if (accountLimits) await client.query(readFileSync(accountLimits, "utf8"));
+      else log.warn("0088_account_limits.sql not found — account limit tables not ensured");
+    } catch (err: any) {
+      log.warn(`ensure account limits failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

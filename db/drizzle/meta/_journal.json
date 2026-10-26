@@ -540,6 +540,13 @@
       "when": 1793404800000,
       "tag": "0087_rental_offers_contract_terms",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1793491200000,
+      "tag": "0088_account_limits",
+      "breakpoints": true
     }
   ]
 }

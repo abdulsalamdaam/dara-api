@@ -46,6 +46,16 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   /** The subscription window this payment bought. */
   periodStart: timestamp("period_start", { withTimezone: true }),
   periodEnd: timestamp("period_end", { withTimezone: true }),
+  /**
+   * `subscription` (a plan payment — activates/renews the window) or `addon`
+   * (an account-limit add-on — activates `addon_id`, never touches the plan).
+   * 0088_account_limits.sql.
+   */
+  kind: text("kind").$type<"subscription" | "addon">().notNull().default("subscription"),
+  /** account_limit_addons.id for kind = 'addon' (FK in 0088; not declared here to avoid an import cycle). */
+  addonId: integer("addon_id"),
+  /** Line description for an add-on invoice; null = the package line. */
+  description: text("description"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
