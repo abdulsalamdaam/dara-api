@@ -173,8 +173,9 @@ export class SubscriptionInvoiceService {
       lines: [{
         // The package and its cycle — no dates. The line is meant to read at a
         // glance, and the period it covers is already implied by the issue
-        // date and the cycle.
-        description: `اشتراك باقة «${pkg.labelAr}» — ${cycleLabel}`,
+        // date and the cycle. An account-limit add-on prints its own line
+        // (e.g. "مستخدم إضافي × 2 — 3 أشهر"), stored on the row when it was opened.
+        description: row.kind === "addon" && row.description ? row.description : `اشتراك باقة «${pkg.labelAr}» — ${cycleLabel}`,
         quantity: 1,
         unitPrice: subtotal,
         amount: subtotal,
@@ -288,6 +289,8 @@ export class SubscriptionInvoiceService {
       {
         invoiceNumber: number,
         planLabel: pkg.labelAr,
+        // An add-on invoice names its item instead of the package.
+        itemLabel: row.kind === "addon" ? (row.description || "إضافة على حدود الحساب") : null,
         cycle,
         amount: Number(row.amount) || 0,
         currencyLabel: row.currency === "SAR" ? "ر.س" : (row.currency || "ر.س"),

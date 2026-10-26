@@ -14,7 +14,7 @@ import { newEmailVerifyToken } from "../../common/email-verification";
 import { resolvePackage } from "../../common/packages";
 import { employeeCount } from "../../common/quota";
 import { resolveLimit } from "../../common/limit-core";
-import { addonAvailable } from "../../common/addon-catalog";
+import { signalLimitRefused } from "../limits/limits-signals";
 import { assertEmailAvailable, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -277,14 +277,17 @@ export class TeamService {
     const seatLimit = await resolveLimit(this.db, ownerId, "users", pkg.maxUsers);
     const used = await employeeCount(this.db, ownerId);
     if (seatLimit != null && used >= seatLimit) {
+      // Fire-and-forget: a `limit_reached` audit event for the admin (once per period).
+      signalLimitRefused(ownerId, "users");
       throw new BadRequestException({
         statusCode: 400,
-        // The web keys off `code`; `addonAvailable` says a seat add-on is for
-        // sale, so it can offer one next to "upgrade".
+        // The web keys off `code`. Add-ons are granted by the admin only, so
+        // nothing is for sale here: the web says "contact us" next to "upgrade".
         code: "PLAN_LIMIT_USERS",
         limit: seatLimit,
         used,
-        addonAvailable: await addonAvailable(this.db, "users"),
+        addonAvailable: false,
+        contactAdmin: true,
         message:
           `لقد بلغت الحد الأقصى لباقتك (${seatLimit} مستخدم). لإضافة المزيد يرجى ترقية الباقة. ` +
           `· Your ${pkg.labelEn} plan allows up to ${seatLimit} team members.`,

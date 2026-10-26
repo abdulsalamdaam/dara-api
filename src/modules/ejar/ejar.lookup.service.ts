@@ -7,6 +7,7 @@ import { scopeId } from "../../common/scope";
 import { EjarAccessError, EjarApiError, EjarClientService, EjarConfigError } from "./ejar.client.service";
 import { ejarDenialFor } from "./ejar.access";
 import { combineLimit } from "../../common/limit-core";
+import { signalLimitRefused } from "../limits/limits-signals";
 import {
   canLookup, computeBudget, hasHeadroom, lookupConfig, planQuotaWindow, windowBounds,
   type EjarBudget, type LookupConfig, type PlanQuota,
@@ -267,13 +268,17 @@ export class EjarLookupService {
 
     switch (outcome.kind) {
       case "exhausted":
+        // The account's own quota ran out (not the shared gateway budget): a
+        // `limit_reached` audit event for the admin (once per period).
+        if (outcome.budget.plan && outcome.budget.plan.remaining <= 0) signalLimitRefused(accountId, "ejar_lookups");
         throw new HttpException(
           {
             code: "budget_exhausted",
             message: "تم استهلاك رصيد الاستعلام من إيجار لهذه الفترة · The Ejar lookup budget for this period is used up.",
             budget: outcome.budget,
-            // An Ejar lookup pack is for sale — the web offers it next to "upgrade".
-            addonAvailable: await this.store.ejarAddonAvailable().catch(() => false),
+            // Ejar packs are granted by the admin only — the web says "contact us".
+            addonAvailable: false,
+            contactAdmin: true,
           },
           HttpStatus.TOO_MANY_REQUESTS,
         );

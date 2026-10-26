@@ -142,13 +142,14 @@ describe("team management — privilege escalation (real Postgres)", { skip: fv2
     const body = err.getResponse() as any;
     assert.equal(body.code, "PLAN_LIMIT_USERS");
     assert.equal(body.limit, 2);
-    assert.equal(body.addonAvailable, false, "no seat price in the catalog yet");
+    assert.equal(body.addonAvailable, false, "add-ons come from the admin only");
+    assert.equal(body.contactAdmin, true);
     assert.match(body.message, /2 مستخدم/);
 
     await q(`insert into app_settings (key, value) values ('limit_addon_catalog', $1::jsonb)`,
       [JSON.stringify({ items: [{ key: "seat_1", limitKey: "users", quantity: 1, priceSar: 50, period: "subscription_period", labelAr: "s", labelEn: "s" }] })]);
     try { await team.createEmployee(asOther(), { name: "x", email: mail(), preset: "accountant" }); } catch (e) { err = e; }
-    assert.equal(err.getResponse().addonAvailable, true);
+    assert.equal(err.getResponse().addonAvailable, false, "a catalog price does not make it self-serve");
 
     await q(`insert into account_limit_addons (account_id, limit_key, quantity, period, status, activation, source, starts_at)
              values ($1, 'users', 1, 'subscription_period', 'active', 'immediate', 'admin_free', now() - interval '1 minute')`, [otherHolder]);

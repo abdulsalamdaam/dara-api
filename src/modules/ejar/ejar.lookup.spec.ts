@@ -727,23 +727,24 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     assert.equal(b.window, "period");
   });
 
-  it("an override replaces the plan quota — down to 1, the second lookup is refused, with addonAvailable", async () => {
+  it("an override replaces the plan quota — down to 1, the second lookup is refused, pointing at the admin", async () => {
     w = dworld();
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 1, addons: 0 };
-    w.store.ejarPackForSale = true;
     w.known.add("10000000201");
     await w.svc.lookup(USER, { contract_number: CN });
     const sent = w.calls.length;
     const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201" }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
-    assert.equal(body.addonAvailable, true);
+    // Add-ons come from the admin only: nothing for sale, "contact us".
+    assert.equal(body.addonAvailable, false);
+    assert.equal(body.contactAdmin, true);
     assert.equal(body.budget.plan.limit, 1);
     assert.equal(w.calls.length, sent);
   });
 
-  it("addonAvailable is false when no pack is for sale", async () => {
+  it("addonAvailable is always false (admin-only add-ons)", async () => {
     w = dworld();
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 0, addons: 0 };

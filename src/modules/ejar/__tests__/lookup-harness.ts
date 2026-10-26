@@ -174,12 +174,10 @@ export class MemStore implements EjarLookupStore {
   /** account → Ejar switch; unset = default. */
   ejarModes: Record<number, EjarAccountMode> = {};
   /** Whether an Ejar pack is for sale. */
-  ejarPackForSale = false;
   async ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment> {
     return this.quotaAdjust[accountId] ?? { override: undefined, addons: 0 };
   }
   async ejarAccountMode(accountId: number): Promise<EjarAccountMode> { return this.ejarModes[accountId] ?? "default"; }
-  async ejarAddonAvailable(): Promise<boolean> { return this.ejarPackForSale; }
   async getLookup(accountId: number, n: string) { return this.lookups.get(`${accountId}:${n}`) ?? null; }
   async saveLookup(row: Omit<SavedLookup, "id" | "createdAt">) {
     const saved = { ...row, id: this.nextId++, createdAt: new Date() };

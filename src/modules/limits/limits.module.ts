@@ -1,24 +1,38 @@
 import { Module } from "@nestjs/common";
 import { AdminLimitsController } from "./admin-limits.controller";
+import { MeLimitsController } from "./me-limits.controller";
 import { AddonCatalogService } from "./addon-catalog.service";
 import { LimitsService } from "./limits.service";
-import { LIMITS_BILLING_PORT, LIMITS_NOTIFIER, NoopLimitsBillingPort, NoopLimitsNotifier } from "./limits-billing.port";
+import { LIMITS_BILLING_PORT, LIMITS_NOTIFIER } from "./limits-billing.port";
+import { LimitsBillingService } from "./limits-billing.service";
+import { LimitsEmailNotifier } from "./limits-notifier.service";
+import { LimitsHousekeepingService } from "./limits-housekeeping.service";
+import { LimitsReachedService } from "./limits-reached.service";
+import { SubscriptionModule } from "../subscription/subscription.module";
 
 /**
  * Account limits: admin overrides, add-ons, the per-account Ejar switch
- * (common/limits.ts holds the effective-limit math every gate reads).
+ * (common/limits.ts holds the effective-limit math every gate reads), the
+ * customer routes (/me/limits…), add-on billing through Moyasar
+ * (LimitsBillingService), the emails (LimitsEmailNotifier), the hourly
+ * housekeeping and the `limit_reached` audit event at a refusing gate.
+ * Add-ons are created by the admin only; customers pay and acknowledge them.
  *
- * The customer routes (/me/limits…), billing (LimitsBillingService for
- * LIMITS_BILLING_PORT), housekeeping and emails (LIMITS_NOTIFIER) are added
- * to this module by the billing side; until then the ports are no-ops.
+ * SubscriptionModule provides SubscriptionInvoiceService, which activation
+ * outside the webhook (pay self-heal, housekeeping) issues the invoice with.
  */
 @Module({
-  controllers: [AdminLimitsController],
+  imports: [SubscriptionModule],
+  controllers: [AdminLimitsController, MeLimitsController],
   providers: [
     LimitsService,
     AddonCatalogService,
-    { provide: LIMITS_BILLING_PORT, useClass: NoopLimitsBillingPort },
-    { provide: LIMITS_NOTIFIER, useClass: NoopLimitsNotifier },
+    LimitsBillingService,
+    LimitsEmailNotifier,
+    LimitsHousekeepingService,
+    LimitsReachedService,
+    { provide: LIMITS_BILLING_PORT, useExisting: LimitsBillingService },
+    { provide: LIMITS_NOTIFIER, useExisting: LimitsEmailNotifier },
   ],
   exports: [LimitsService, AddonCatalogService],
 })

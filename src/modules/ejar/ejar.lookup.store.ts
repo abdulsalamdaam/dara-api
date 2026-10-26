@@ -10,7 +10,6 @@ import { resolveEjarScope, type EjarScope } from "./ejar.scope";
 import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
 import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
-import { addonAvailable } from "../../common/addon-catalog";
 import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
 
 /**
@@ -80,8 +79,6 @@ export interface EjarLookupStore {
   ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment>;
   /** The account's Ejar switch (ejar.access.ts). */
   ejarAccountMode(accountId: number): Promise<EjarAccountMode>;
-  /** Whether an Ejar lookup pack is for sale (the add-on catalog). */
-  ejarAddonAvailable(): Promise<boolean>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
   findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null>;
@@ -178,10 +175,6 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   ejarAccountMode(accountId: number): Promise<EjarAccountMode> {
     return accountEjarMode(this.db, accountId);
-  }
-
-  ejarAddonAvailable(): Promise<boolean> {
-    return addonAvailable(this.db, "ejar_lookups");
   }
 
   async getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null> {

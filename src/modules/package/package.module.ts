@@ -10,8 +10,8 @@ import { scopeId } from "../../common/scope";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
-import { packageUsage, planLimits, quotaView } from "../../common/quota";
-import { effectiveLimit } from "../../common/limits";
+import { packageUsage, quotaView } from "../../common/quota";
+import { effectiveLimits, type EffectiveLimit } from "../../common/limits";
 import { ejarEnabledFor } from "../ejar/ejar.access";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
@@ -45,12 +45,21 @@ class PackageController {
     // Seats and landlords are the EFFECTIVE limits (admin override + active
     // add-ons, common/limits.ts); `plan.max*` stays the package base.
     // `ejarLookups` is the Ejar quota for the current paid period.
-    const [base, ejar, ejarEnabled] = await Promise.all([
-      planLimits(this.db, ownerId, owner?.packagePlan ?? null),
-      effectiveLimit(this.db, ownerId, "ejar_lookups"),
+    // Each entry: {used, limit (null = unlimited), canAdd, over} plus the
+    // breakdown {base, override, addons, effective, remaining, resetsAt}.
+    const [eff, ejarEnabled] = await Promise.all([
+      effectiveLimits(this.db, ownerId),
       ejarEnabledFor(this.db, ownerId, user.id),
     ]);
-    const limits = { ...base, ejarLookups: { ...quotaView(ejar.used, ejar.effective), resetsAt: ejar.resetsAt } };
+    const view = (key: EffectiveLimit["key"]) => {
+      const l = eff.find((x) => x.key === key)!;
+      return {
+        ...quotaView(l.used, l.effective),
+        base: l.base, override: l.override, addons: l.addons, effective: l.effective,
+        remaining: l.remaining, resetsAt: l.resetsAt,
+      };
+    };
+    const limits = { users: view("users"), landlords: view("landlords"), ejarLookups: view("ejar_lookups") };
 
     // Settings completeness — drives the post-payment "complete your settings"
     // lock. Complete when EITHER the account company OR the account's own party

@@ -99,9 +99,11 @@ CREATE TABLE IF NOT EXISTS account_limit_events (
 DO $$ BEGIN
   ALTER TABLE account_limit_events ADD CONSTRAINT account_limit_events_actor_kind_check CHECK (actor_kind IN ('admin', 'customer', 'system'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE account_limit_events ADD CONSTRAINT account_limit_events_source_check
-    CHECK (source IN ('admin_override', 'addon_purchase', 'addon_grant', 'addon_offer', 'addon_cancel', 'addon_expiry', 'ejar_toggle', 'offer_auto'));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Dropped and re-added (not "add if missing") so a database that already ran
+-- an earlier copy of this file picks up a new source: bootstrap re-runs it on
+-- every boot. `limit_reached`: a gate refused the account at its limit.
+ALTER TABLE account_limit_events DROP CONSTRAINT IF EXISTS account_limit_events_source_check;
+ALTER TABLE account_limit_events ADD CONSTRAINT account_limit_events_source_check
+  CHECK (source IN ('admin_override', 'addon_purchase', 'addon_grant', 'addon_offer', 'addon_cancel', 'addon_expiry', 'ejar_toggle', 'offer_auto', 'limit_reached'));
 CREATE INDEX IF NOT EXISTS account_limit_events_account_created_idx
   ON account_limit_events (account_id, created_at DESC);

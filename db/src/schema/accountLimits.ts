@@ -65,7 +65,9 @@ export const accountLimitAddonsTable = pgTable("account_limit_addons", {
 
 export type LimitEventSource =
   | "admin_override" | "addon_purchase" | "addon_grant" | "addon_offer"
-  | "addon_cancel" | "addon_expiry" | "ejar_toggle" | "offer_auto";
+  | "addon_cancel" | "addon_expiry" | "ejar_toggle" | "offer_auto"
+  /** A gate refused the account at this limit (seat gate, Ejar quota) — once per key per period. */
+  | "limit_reached";
 
 /** Audit trail: one row per change, with the EFFECTIVE value before and after. */
 export const accountLimitEventsTable = pgTable("account_limit_events", {
