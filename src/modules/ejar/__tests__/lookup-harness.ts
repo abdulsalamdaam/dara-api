@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { EjarClientService } from "../ejar.client.service";
 import { EjarLookupService } from "../ejar.lookup.service";
 import type { EjarLookupStore, LookupMatches, MatchKeys, PartyMatch, SavedLookup } from "../ejar.lookup.store";
+import type { LimitAdjustment } from "../../../common/limit-core";
+import type { EjarAccountMode } from "../ejar.access";
 import type { EjarScope } from "../ejar.scope";
 import type { LookupUsage, PlanPeriod } from "../ejar.budget";
 
@@ -167,6 +169,17 @@ export class MemStore implements EjarLookupStore {
   async planPeriod(accountId: number): Promise<PlanPeriod> {
     return this.plans[accountId] ?? { packagePlan: "enterprise", billingCycle: "yearly", subscriptionStartedAt: null, subscriptionEndsAt: null };
   }
+  /** account → Ejar quota override / active add-on total; unset = none. */
+  quotaAdjust: Record<number, LimitAdjustment> = {};
+  /** account → Ejar switch; unset = default. */
+  ejarModes: Record<number, EjarAccountMode> = {};
+  /** Whether an Ejar pack is for sale. */
+  ejarPackForSale = false;
+  async ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment> {
+    return this.quotaAdjust[accountId] ?? { override: undefined, addons: 0 };
+  }
+  async ejarAccountMode(accountId: number): Promise<EjarAccountMode> { return this.ejarModes[accountId] ?? "default"; }
+  async ejarAddonAvailable(): Promise<boolean> { return this.ejarPackForSale; }
   async getLookup(accountId: number, n: string) { return this.lookups.get(`${accountId}:${n}`) ?? null; }
   async saveLookup(row: Omit<SavedLookup, "id" | "createdAt">) {
     const saved = { ...row, id: this.nextId++, createdAt: new Date() };

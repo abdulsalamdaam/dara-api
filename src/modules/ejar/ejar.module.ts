@@ -48,7 +48,7 @@ export class EjarController {
   @Get("budget")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async budget(@CurrentUser() user: AuthUser) {
-    return this.lookups.budget(scopeId(user));
+    return this.lookups.budget(scopeId(user), undefined, user.id);
   }
 
   /**

@@ -9,6 +9,9 @@ import { resolveLookupId } from "../../common/lookups-resolve";
 import { resolveEjarScope, type EjarScope } from "./ejar.scope";
 import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
+import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
+import { addonAvailable } from "../../common/addon-catalog";
+import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
 
 /**
  * Advisory-lock key serialising budget check + Ejar calls across every API
@@ -73,6 +76,12 @@ export interface EjarLookupStore {
   scope(accountId: number): Promise<EjarScope>;
   /** The account's plan and paid period — what its Ejar lookup quota is cut from. */
   planPeriod(accountId: number): Promise<PlanPeriod | null>;
+  /** The account's override / active add-ons for its Ejar lookup quota (common/limits.ts). */
+  ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment>;
+  /** The account's Ejar switch (ejar.access.ts). */
+  ejarAccountMode(accountId: number): Promise<EjarAccountMode>;
+  /** Whether an Ejar lookup pack is for sale (the add-on catalog). */
+  ejarAddonAvailable(): Promise<boolean>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
   findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null>;
@@ -161,6 +170,18 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
       .where(eq(usersTable.id, accountId))
       .limit(1);
     return row ?? null;
+  }
+
+  async ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment> {
+    return (await readAdjustments(this.db, accountId)).ejar_lookups;
+  }
+
+  ejarAccountMode(accountId: number): Promise<EjarAccountMode> {
+    return accountEjarMode(this.db, accountId);
+  }
+
+  ejarAddonAvailable(): Promise<boolean> {
+    return addonAvailable(this.db, "ejar_lookups");
   }
 
   async getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null> {
