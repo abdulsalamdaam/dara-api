@@ -3,6 +3,7 @@ import { FinanceV2CoreModule } from "./finance-v2-core.module";
 import { ChartService } from "./chart.service";
 import { FinanceSetupService } from "./setup.service";
 import { FinanceV2AdminService } from "./admin.service";
+import { LedgerResetService } from "./ledger-reset.service";
 import { FinanceV2Guard } from "./finance-v2.guard";
 import { FinanceV2StatusController } from "./controllers/status.controller";
 import { FinanceV2SettingsController } from "./controllers/settings.controller";
@@ -84,7 +85,7 @@ import { FinanceV2AutoProvisionService } from "./auto-provision.service";
     FinanceV2InstallmentsController, // accountant #3/#6/#7: installments screen
   ],
   providers: [
-    ChartService, FinanceSetupService, FinanceV2AdminService, FinanceV2Guard,
+    ChartService, FinanceSetupService, FinanceV2AdminService, LedgerResetService, FinanceV2Guard,
     PostingEngine, PostingWorker, PostingErrorsService, LedgerStartService, RecognizerService,
     BackfillService, ManualJournalsService, TrustTransferService, JournalQueryService, PeriodCloseService, VatReturnsService,
     CoreReportsService, VatReportService, ArAgingService, StatementsService, ReconciliationService, legacyAccountingProvider,

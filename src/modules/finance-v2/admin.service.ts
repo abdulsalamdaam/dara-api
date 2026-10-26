@@ -199,7 +199,7 @@ export class FinanceV2AdminService {
     return r.rows.map((x: any) => x.id);
   }
 
-  private async loadTarget(q: Q, accountUserId: number) {
+  async loadTarget(q: Q, accountUserId: number) {
     if (!Number.isInteger(accountUserId) || accountUserId <= 0) throw new BadRequestException("Invalid account id");
     const r = await q.query(
       `select u.id, u.owner_user_id as "ownerUserId", r.key as "roleKey", u.user_type as "userType"

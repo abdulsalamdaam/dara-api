@@ -598,12 +598,27 @@ create trigger manual_journals_frozen before update or delete on manual_journals
 -- 8.8 Account purge (§2.4.5), the only delete path for ledger rows. Called
 -- after an admin hard delete of the account. `fv2.purge` is an accident guard,
 -- not a security boundary; CI confines the string to this function.
-create or replace function fv2_purge_account(p_user integer) returns void language plpgsql as $$
+--
+-- p_ledger_only (the admin "reset ledger & change mode", ledger-reset.service.ts):
+-- delete only what the backfill rebuilds from the account's records — the
+-- journal, the posting queue and the installment charge / VAT-point markers the
+-- posting writes — and keep everything else (chart, periods, bank accounts,
+-- settings and their history, every v2 record and document). The caller checks
+-- the blockers (closed periods, manual journals, vouchers …) in the same
+-- transaction. The one-argument form is dropped so the two never overload.
+drop function if exists fv2_purge_account(integer);
+create or replace function fv2_purge_account(p_user integer, p_ledger_only boolean default false) returns void language plpgsql as $$
 begin
   perform set_config('fv2.purge', 'on', true);
   delete from journal_lines where user_id = p_user;
   delete from journal_entries where user_id = p_user;
   delete from ledger_outbox where user_id = p_user;
+  if p_ledger_only then
+    delete from finance_installment_charges where user_id = p_user;
+    delete from finance_installment_vat_points where user_id = p_user;
+    perform set_config('fv2.purge', 'off', true);
+    return;
+  end if;
   delete from manual_journals where user_id = p_user;
   delete from finance_backfill_runs where user_id = p_user;
   delete from finance_collection_meta where user_id = p_user;

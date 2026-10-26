@@ -6,6 +6,7 @@ import { PostingErrorsService } from "../posting-errors.service";
 import type { Fv2Request } from "../finance-v2.guard";
 import { BackfillService } from "../backfill/backfill.service";
 import { FinanceV2AutoProvisionService } from "../auto-provision.service";
+import { LedgerResetService } from "../ledger-reset.service";
 
 /** The switch and its support views (DESIGN §1.5, §10.2). Super admin only. */
 @Controller("admin/finance-v2")
@@ -16,6 +17,7 @@ export class FinanceV2AdminController {
     private readonly postingErrors: PostingErrorsService,
     private readonly backfill: BackfillService,
     private readonly auto: FinanceV2AutoProvisionService,
+    private readonly ledgerReset: LedgerResetService,
   ) {}
 
   /**
@@ -65,6 +67,26 @@ export class FinanceV2AdminController {
   @Get(":accountUserId/posting-errors")
   accountPostingErrors(@Param("accountUserId", ParseIntPipe) id: number, @Query() q: any) {
     return this.postingErrors.list(id, q);
+  }
+
+  /**
+   * Reset ledger & change accounting mode, step 1: what the reset would delete and what blocks it.
+   * Read only. Query: mode=owner|manager (the target mode).
+   */
+  @Get(":accountUserId/reset-preview")
+  resetPreview(@Param("accountUserId", ParseIntPipe) id: number, @Query("mode") mode: string) {
+    return this.ledgerReset.preview(id, mode);
+  }
+
+  /**
+   * Reset ledger & change accounting mode, step 2 (ledger-reset.service.ts). Body: { accountingMode: owner|manager,
+   * reason: string (5–500), confirm: "<account id>" }. Deletes the derived ledger only and never runs the backfill:
+   * run it next (dry run, then real).
+   */
+  @Post(":accountUserId/reset-ledger")
+  @HttpCode(200)
+  resetLedger(@Req() req: Fv2Request, @Param("accountUserId", ParseIntPipe) id: number, @Body() body: any) {
+    return this.ledgerReset.reset(req.user!.id, id, body);
   }
 
   /** Body: { enabled: boolean, accountingMode?: 'owner'|'manager', reason: string (5–500) }. */
