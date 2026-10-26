@@ -250,6 +250,53 @@ describe("subscription: no PAID email or paid state before a verified payment (r
     assert.equal(sent.length, 1);
     assert.equal((await rowsOf()).filter((x: any) => x.status === "paid").length, 1);
   });
+
+  /**
+   * Grace is time to pay late, not free time: a verified renewal continues
+   * from the OLD end date (paid 29 Sep after the window ended 20 Sep → the
+   * quarter runs 20 Sep → 20 Dec), at the full plan price, and the invoice
+   * states that same period.
+   */
+  const setWindow = (endsAt: string, isTrial = false) =>
+    q(`update users set subscription_status = 'active', subscription_started_at = $2::timestamptz - interval '3 months',
+              subscription_ends_at = $2, subscription_is_trial = $3 where id = $1`, [U, endsAt, isTrial]);
+  const renewal = async () => {
+    const r: any = await pay.pay(user, { plan: "basic", cycle: "quarterly" });
+    const p = settle(r.invoiceId); // paid_at 2026-09-29T08:11:14.608Z
+    assert.equal((await webhookFor(r.invoiceId, p)).activated, true);
+    await drainAsync();
+    const acct = (await q(`select subscription_started_at, subscription_ends_at from users where id = $1`, [U]))[0];
+    const row = (await q(`select amount, period_start, period_end from subscription_payments where user_id = $1 and status = 'paid'`, [U]))[0];
+    return {
+      start: new Date(acct.subscription_started_at).toISOString(), end: new Date(acct.subscription_ends_at).toISOString(),
+      amount: Number(row.amount), periodStart: new Date(row.period_start).toISOString(), periodEnd: new Date(row.period_end).toISOString(),
+    };
+  };
+
+  it("renewing inside grace continues from the old end — the grace days are not given away, the amount is not waived", async () => {
+    await setWindow("2026-09-20T00:00:00Z");
+    const r = await renewal();
+    assert.equal(r.start, "2026-09-20T00:00:00.000Z");
+    assert.equal(r.end, "2026-12-20T00:00:00.000Z");
+    assert.equal(r.amount, planPrice("basic", "quarterly"));
+    assert.ok(r.amount > 0);
+    assert.equal(r.periodStart, r.start, "the invoice states the same period");
+    assert.equal(r.periodEnd, r.end);
+    assert.equal(sent.length, 1, "the renewal is invoiced");
+  });
+
+  it("renewing after grace (locked) bills the grace days used, not the locked days", async () => {
+    await setWindow("2026-08-01T00:00:00Z");
+    const r = await renewal();
+    assert.equal(r.start, "2026-09-14T08:11:14.608Z"); // paid_at − 15 days
+    assert.equal(r.amount, planPrice("basic", "quarterly"));
+  });
+
+  it("paying at the end of a free trial starts at the payment — a trial has no grace", async () => {
+    await setWindow("2026-09-20T00:00:00Z", true);
+    const r = await renewal();
+    assert.equal(r.start, "2026-09-29T08:11:14.608Z");
+  });
 });
 
 /**

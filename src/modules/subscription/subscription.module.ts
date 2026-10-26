@@ -10,7 +10,7 @@ import { scopeId } from "../../common/scope";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan, isBillingCycle, parseCycle, purchasableCycle, CYCLE_LABEL_AR, planAllowedForUserType, planUserTypeError, type BillingCycle } from "../../common/packages";
-import { deriveSubscription, nextEndDate } from "../../common/subscription";
+import { deriveSubscription, nextEndDate, renewalPeriodStart } from "../../common/subscription";
 import { planFeatures } from "../../common/plan-features";
 import { trialView } from "../../common/trial";
 import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured, type MoyasarInvoice, type MoyasarPayment } from "../../common/moyasar";
@@ -146,7 +146,21 @@ export async function activateFromPaidRow(
   // second "paid" invoice and restart the period.
   if (!claimed) return false;
   const cycle = parseCycle(row.billingCycle);
-  const now = new Date();
+  // The new window continues from the old end (grace days are billed, never
+  // given away) — see `renewalPeriodStart`. Judged at the moment of payment,
+  // so a webhook that lands late does not push the customer past grace.
+  const [acct] = await db.select({
+    subscriptionStatus: usersTable.subscriptionStatus,
+    subscriptionEndsAt: usersTable.subscriptionEndsAt,
+    subscriptionIsTrial: usersTable.subscriptionIsTrial,
+  }).from(usersTable).where(eq(usersTable.id, row.userId));
+  const start = renewalPeriodStart({
+    storedStatus: acct?.subscriptionStatus,
+    subscriptionEndsAt: acct?.subscriptionEndsAt,
+    isTrial: acct?.subscriptionIsTrial,
+    paidAt: paid.paidAt ?? new Date(),
+  });
+  const end = nextEndDate(cycle, start);
   await db.update(usersTable).set({
     packagePlan: row.plan,
     billingCycle: cycle,
@@ -154,8 +168,8 @@ export async function activateFromPaidRow(
     desiredPackagePlan: null,
     desiredBillingCycle: null,
     subscriptionStatus: "active",
-    subscriptionStartedAt: now,
-    subscriptionEndsAt: nextEndDate(cycle, now),
+    subscriptionStartedAt: start,
+    subscriptionEndsAt: end,
     // Paid — whatever free/trial window it replaces, this one is not a trial.
     // `trialConsumedAt` is deliberately NOT touched: it records that the
     // account had its one free trial, which paying does not undo.
@@ -168,7 +182,7 @@ export async function activateFromPaidRow(
   // redirect. The subscription is already active by the time this starts, and
   // every failure inside is logged and swallowed.
   if (invoices) {
-    void invoices.issueAndEmail(db, row.id, { start: now, end: nextEndDate(cycle, now) });
+    void invoices.issueAndEmail(db, row.id, { start, end });
   }
   // Finance v2 is on by default for plans that include accounting: queue the
   // automatic provisioning (webhook, pay self-heal and /sync all land here).
@@ -622,7 +636,8 @@ export class SubscriptionWebhookController {
       return { ok: true, ignored: true, reason: check.reason };
     }
 
-    // Mark paid + activate/renew (start now, end one cycle later, clear pending).
+    // Mark paid + activate/renew (window continues from the old end — see
+    // `renewalPeriodStart` — one cycle long, clear pending).
     // A second delivery, or the pay endpoint's self-heal racing this one, loses
     // the conditional update and sends nothing.
     const won = await activateFromPaidRow(

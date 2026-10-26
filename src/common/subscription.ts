@@ -88,3 +88,34 @@ export function nextEndDate(cycle: BillingCycle, from = new Date()): Date {
   d.setMonth(d.getMonth() + CYCLE_MONTHS[cycle]);
   return d;
 }
+
+/**
+ * Where the window a renewal payment buys STARTS.
+ *
+ * Grace is a courtesy to pay late, not free time. A paid window that ran out
+ * on 1 Oct and is paid on 5 Oct (inside grace) renews from 1 Oct, so the next
+ * window ends on 1 Jan for a quarter — not 5 Jan. Paying early likewise stacks
+ * on the old end instead of throwing the unused days away. The amount charged
+ * is always the full plan price; this only decides the dates.
+ *
+ * Once grace is spent the account was locked and had no use of the portal, so
+ * the locked days are not billed — but the grace days it DID use are: the new
+ * window starts GRACE_DAYS before payment. Hence
+ *   start = max(oldEnd, paidAt − GRACE_DAYS).
+ *
+ * A trial, a never-paid account (`pending_payment`) or one with no end date
+ * starts fresh at the payment — none of those had grace to give away.
+ */
+export function renewalPeriodStart(input: {
+  storedStatus: string | null | undefined;
+  subscriptionEndsAt: Date | string | null | undefined;
+  isTrial?: boolean | null;
+  paidAt: Date;
+}): Date {
+  const paidAt = new Date(input.paidAt);
+  if (input.storedStatus === "pending_payment" || input.isTrial || !input.subscriptionEndsAt) return paidAt;
+  const oldEnd = new Date(input.subscriptionEndsAt);
+  if (isNaN(oldEnd.getTime())) return paidAt;
+  const graceFloor = paidAt.getTime() - GRACE_DAYS * DAY_MS;
+  return new Date(Math.max(oldEnd.getTime(), graceFloor));
+}
