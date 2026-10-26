@@ -201,10 +201,21 @@ export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
   const number = await nextDocNumber(q, scope, "COM");
   // The buyer is the landlord (the office bills him): named on the document so the ZATCA path can file it
   // under the office's seller with this landlord as the buyer (documents-v2.ts commissionZatcaDoc).
+  // The landlord row is the source of truth; the contract's party snapshot is only a fallback (it is empty on
+  // contracts created outside the wizard, which left the document's buyer box blank).
+  const [o] = fee.ownerId ? await q.rows(
+    `select name, type, id_number, tax_number, email, phone, address from owners where id = $1 and user_id = $2`,
+    [fee.ownerId, scope],
+  ) : [];
+  const pick = (a: unknown, b: unknown) => (a != null && String(a).trim() !== "" ? a : b != null && String(b).trim() !== "" ? b : null);
+  const landlord = {
+    name: pick(o?.name, c.landlord_name), type: o?.type ?? null, idNumber: o?.id_number ?? null,
+    vatNumber: pick(o?.tax_number, c.landlord_tax_number), email: pick(o?.email, c.landlord_email),
+    phone: pick(o?.phone, c.landlord_phone), address: pick(o?.address, c.landlord_address),
+  };
   const client = {
     ...(fee.ownerId ? { kind: "landlord", ownerId: Number(fee.ownerId) } : {}),
-    ...(c.landlord_phone ? { phone: c.landlord_phone } : {}), ...(c.landlord_email ? { email: c.landlord_email } : {}),
-    ...(c.landlord_address ? { address: c.landlord_address } : {}), ...(c.landlord_tax_number ? { vatNumber: c.landlord_tax_number } : {}),
+    ...Object.fromEntries(Object.entries(landlord).filter(([, v]) => v != null)),
   };
   const netNum = Number(plan.net);
   const items = [{ description: "عمولة إدارة الأملاك", quantity: 1, unitPrice: netNum, amount: netNum, vat: plan.vatRegistered, vatCategory: plan.vatRegistered ? "S" : "O" }];
@@ -214,7 +225,7 @@ export async function createCommissionV2(q: Sql, scope: number, rentDoc: {
                                   subtotal, total, issue_date, due_date, billing_reference, notes)
      values ($1, $2, 'invoice', 'commission', 'draft', $3, null, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12)
      returning id`,
-    [scope, number, rentDoc.contractId, c.landlord_name ?? null, JSON.stringify(client), JSON.stringify(items), plan.net, plan.total,
+    [scope, number, rentDoc.contractId, landlord.name, JSON.stringify(client), JSON.stringify(items), plan.net, plan.total,
       riyadhToday(), rentDoc.dueDate ?? null, rentDoc.number,
       `عمولة إدارة بنسبة ${plan.pct}% (${src}) على المستند ${rentDoc.number}`],
   );
