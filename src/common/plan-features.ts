@@ -11,6 +11,7 @@
  *
  *  - `accounting`        Finance v2 as a whole (effective flag = stored flag && this).
  *  - `advanced_reports`  the six analysis ops reports in LOCKED_OPS_REPORTS.
+ *  - `rental_offers`     formal B2B rental offers (عروض التأجير, /rental-offers).
  *
  * The custom report builder (`custom_reports`) was withdrawn on every plan
  * (Oct 2026) — it is no longer a feature, so it is not a key here.
@@ -18,9 +19,9 @@
 import { ForbiddenException } from "@nestjs/common";
 import { LEGACY_ALIASES, PACKAGES, resolvePackage, type PackagePlan } from "./packages";
 
-export type PlanFeature = "accounting" | "advanced_reports";
+export type PlanFeature = "accounting" | "advanced_reports" | "rental_offers";
 
-export const PLAN_FEATURE_KEYS: PlanFeature[] = ["accounting", "advanced_reports"];
+export const PLAN_FEATURE_KEYS: PlanFeature[] = ["accounting", "advanced_reports", "rental_offers"];
 
 /** The plan every locked feature points the user to. */
 export const FEATURE_REQUIRED_PLAN: PackagePlan = "professional";
@@ -68,6 +69,7 @@ export function planKeysWithout(f: PlanFeature): string[] {
 const LOCK_MESSAGE_AR: Record<PlanFeature, string> = {
   accounting: "المحاسبة متاحة في باقة «المكاتب العقارية» وباقة «الشركات». قم بترقية باقتك لاستخدامها.",
   advanced_reports: "هذا التقرير التحليلي متاح في باقة «المكاتب العقارية» وباقة «الشركات». قم بترقية باقتك لعرضه.",
+  rental_offers: "عروض التأجير متاحة في باقة «المكاتب العقارية» وباقة «الشركات». قم بترقية باقتك لإصدارها.",
 };
 
 export interface PlanUpgradeRequiredBody {

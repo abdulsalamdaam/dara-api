@@ -17,7 +17,7 @@ describe("plan features (pricing table → enforcement)", () => {
   });
 
   it("professional and enterprise unlock everything", () => {
-    for (const p of ["professional", "enterprise"]) assert.deepEqual(planFeatures(p), ["accounting", "advanced_reports"]);
+    for (const p of ["professional", "enterprise"]) assert.deepEqual(planFeatures(p), ["accounting", "advanced_reports", "rental_offers"]);
   });
 
   it("null / unknown resolve to DEFAULT_PACKAGE (professional): unlocked; broker (column default) follows professional", () => {
@@ -28,7 +28,7 @@ describe("plan features (pricing table → enforcement)", () => {
   it("returns a fresh array each time", () => {
     const a = planFeatures("professional");
     a.pop();
-    assert.equal(planFeatures("professional").length, 2);
+    assert.equal(planFeatures("professional").length, 3);
   });
 
   it("custom_reports is withdrawn on every plan — never advertised", () => {

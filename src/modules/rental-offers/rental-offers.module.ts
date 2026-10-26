@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, Module, NotFoundException, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable, Module, type CanActivate, type ExecutionContext, NotFoundException, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { and, count, desc, eq, ilike, inArray, isNull, like, lt, or, sql } from "drizzle-orm";
 import { propertiesTable, rentalOffersTable, unitsTable, type RentalOffer } from "@dara/database";
@@ -11,13 +11,17 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { likeContains, listQuerySchema, wantsPagination } from "../../common/pagination";
 import { riyadhToday } from "../../common/payment-status";
+import { accountPlan } from "../../common/account-plan";
+import { PlanUpgradeRequiredException, planHasFeature } from "../../common/plan-features";
 import { assertFreeMonths, formatOfferNumber, normalizeOffer, offerPrefix, offerSeq } from "./rental-offers.normalize";
 
 /**
  * Rental offers (عروض التأجير) — the formal, non-binding offer an office sends
  * a prospective tenant (usually a company) before the Ejar contract.
  *
- * Gated with the marketing permissions, like the Offers tab that hosts it.
+ * Gated with the marketing permissions, like the Offers tab that hosts it, and
+ * by package: only «المكاتب العقارية» / «الشركات» (`rental_offers`) — every
+ * route, reads included, answers 403 PLAN_UPGRADE_REQUIRED on tenant / عقاري.
  * The server stores the offer's INPUTS; the schedule and totals are derived
  * from them by the web (lib/rental-offer.ts), which is what prints them.
  *
@@ -40,10 +44,28 @@ function statusStamps(status: unknown, prev?: RentalOffer): Record<string, unkno
   return {};
 }
 
+/** 403 PLAN_UPGRADE_REQUIRED unless the account owner's plan includes `rental_offers`. */
+@Injectable()
+export class RentalOffersPlanGuard implements CanActivate {
+  constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+
+  /** The account owner's stored plan. Overridable for the spec. */
+  protected planOf(ownerId: number): Promise<string | null> {
+    return accountPlan(this.db, ownerId);
+  }
+
+  async canActivate(ctx: ExecutionContext): Promise<boolean> {
+    const user = ctx.switchToHttp().getRequest<{ user?: AuthUser }>().user;
+    if (!user) return true; // JwtAuthGuard runs first and has already refused
+    if (!planHasFeature(await this.planOf(scopeId(user)), "rental_offers")) throw new PlanUpgradeRequiredException("rental_offers");
+    return true;
+  }
+}
+
 @ApiTags("rental-offers")
 @ApiBearerAuth("user-jwt")
 @Controller("rental-offers")
-@UseGuards(JwtAuthGuard, PermissionsGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard, RentalOffersPlanGuard)
 class RentalOffersController {
   constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
 

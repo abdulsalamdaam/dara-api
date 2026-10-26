@@ -4,7 +4,8 @@ import "reflect-metadata";
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { getTableName } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { RentalOffersModule } from "./rental-offers.module";
+import { PlanUpgradeRequiredException } from "../../common/plan-features";
+import { RentalOffersModule, RentalOffersPlanGuard } from "./rental-offers.module";
 import { assertFreeMonths, formatOfferNumber, normalizeOffer, offerSeq } from "./rental-offers.normalize";
 
 describe("normalizeOffer", () => {
@@ -206,5 +207,41 @@ describe("RentalOffersController", () => {
     assert.equal(v.sentAt, undefined);
     assert.equal(v.id, undefined);
     assert.notEqual(v.number, "RO-2026-0001");
+  });
+});
+
+describe("RentalOffersPlanGuard (package)", () => {
+  const guardFor = (plan: string | null, seen: number[] = []) => {
+    const g = new (class extends RentalOffersPlanGuard {
+      protected planOf(id: number) { seen.push(id); return Promise.resolve(plan); }
+    })({} as any);
+    return g;
+  };
+  const ctxOf = (user: unknown) => ({ switchToHttp: () => ({ getRequest: () => ({ user }) }) }) as any;
+
+  it("offices and companies pass; the plan is the ACCOUNT OWNER's", async () => {
+    for (const p of ["professional", "enterprise", "broker", null]) {
+      const seen: number[] = [];
+      assert.equal(await guardFor(p, seen).canActivate(ctxOf(employee)), true, String(p));
+      assert.deepEqual(seen, [34]);
+    }
+  });
+
+  it("tenant and عقاري get 403 PLAN_UPGRADE_REQUIRED (feature rental_offers)", async () => {
+    for (const p of ["tenant", "basic"]) {
+      await assert.rejects(guardFor(p).canActivate(ctxOf(employee)), (e: any) => {
+        assert.ok(e instanceof PlanUpgradeRequiredException);
+        const body = e.getResponse() as any;
+        assert.equal(body.code, "PLAN_UPGRADE_REQUIRED");
+        assert.equal(body.feature, "rental_offers");
+        assert.equal(body.requiredPlan, "professional");
+        return true;
+      });
+    }
+  });
+
+  it("the controller carries the guard", () => {
+    const [C] = Reflect.getMetadata("controllers", RentalOffersModule);
+    assert.ok((Reflect.getMetadata("__guards__", C) as unknown[]).includes(RentalOffersPlanGuard));
   });
 });
