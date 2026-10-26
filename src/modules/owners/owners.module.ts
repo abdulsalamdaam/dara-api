@@ -14,6 +14,7 @@ import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolv
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { accountAllowsCommission } from "../../common/account-plan";
+import { assertNoCommissionOnHolder } from "../plan-transition/owner-mode-guard";
 import { assertNotLocked, lockedChanges, ownerLockedFields, zatcaLinks } from "../../common/zatca-lock";
 import { EmailService } from "../email/email.service";
 import { sendExpoPush } from "../../common/push";
@@ -303,6 +304,8 @@ class OwnersController {
     };
     sanitizeOwnerFields(values, values.type, Boolean(values.isDraft));
     await assertFeeAllowedByPlan(this.db, scopeId(user), values.managementFeePercent, null);
+    // The account holder's own landlord record is never billed a management fee (plan transitions B5).
+    assertNoCommissionOnHolder(claimsAccountHolder, values.managementFeePercent, null);
     const [owner] = await this.db.insert(ownersTable).values(values as any).returning();
     await attachLookupLabels(this.db, [owner] as any[], NATIONALITY_SPEC);
     return owner;
@@ -354,6 +357,7 @@ class OwnersController {
     }
     if ("managementFeePercent" in updateData) {
       await assertFeeAllowedByPlan(this.db, scopeId(user), updateData.managementFeePercent, prior?.managementFeePercent ?? null);
+      assertNoCommissionOnHolder(prior?.isAccountHolder === true, updateData.managementFeePercent, prior?.managementFeePercent ?? null);
     }
 
     /* Finalising a draft re-validates the WHOLE landlord.

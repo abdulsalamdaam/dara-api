@@ -554,6 +554,13 @@
       "when": 1793577600000,
       "tag": "0089_rental_offers_grace_extends",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1793664000000,
+      "tag": "0090_plan_transitions",
+      "breakpoints": true
     }
   ]
 }

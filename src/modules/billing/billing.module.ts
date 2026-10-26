@@ -42,6 +42,7 @@ import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v
 import { isV2DocKind, refuseV2KindOnLegacyApprove, V2_KIND_ZATCA_SKIP } from "../finance-v2/v2-kinds"; // finance-v2: E8/E9 kinds, EX-4
 import { commissionCarriesVat } from "../finance-v2/account-seller"; // finance-v2: VC-2 — commission VAT iff the office is VAT-registered (R2)
 import { sqlOf } from "../finance-v2/hooks/sql"; // finance-v2: VC-2
+import { contractOnHolderProperty, keepFromCommissionStart } from "../../common/commission-start"; // finance-v2: plan transitions (B5 holder fee, D1 no retroactive commission)
 import { officeSupplyProfile } from "../finance-v2/office-supply"; // finance-v2: VC-3 — office supplies pick standard/simplified by buyer type (R3)
 import { parseEnumList } from "../../common/pagination"; // finance-v2: ?kind= filter on the documents list
 import { accountAllowsCommission, assertAccountAllowsCommission } from "../../common/account-plan"; // finance-v2: commission is Offices/Companies only (plan-features.ts planAllowsCommission)
@@ -1264,6 +1265,7 @@ class SimpleInvoicesController {
       .where(eq(contractUnitsTable.contractId, contractId)).limit(1);
     const pct = round2(Number(propRow?.pct ?? 0));
     if (!(pct > 0)) return null;
+    if (await contractOnHolderProperty(sqlOf(this.db as any), uid, contractId)) return null; // finance-v2: plan transitions B5 — never a COM- on the account holder's own property
 
     const [c] = await this.db.select({
       landlordName: contractsTable.landlordName, landlordPhone: contractsTable.landlordPhone,
@@ -1300,6 +1302,7 @@ class SimpleInvoicesController {
     const payIds: number[] = (rentDoc.paymentIds && rentDoc.paymentIds.length)
       ? rentDoc.paymentIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
       : (rentDoc.paymentId ? [Number(rentDoc.paymentId)] : []);
+    if (payIds.length) { const keep = await keepFromCommissionStart(sqlOf(this.db as any), uid, payIds); payIds.splice(0, payIds.length, ...keep); if (!keep.length) return null; } // finance-v2: plan transitions D1 — no COM- for rent due before the upgrade date
     let base = 0;
     if (payIds.length) {
       const pays = await this.db.select().from(paymentsTable)

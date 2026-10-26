@@ -19,6 +19,7 @@ import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import type { Response } from "express";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
+import { assertCustomerPlanChangeAllowed, signalPlanChanged } from "../plan-transition/plan-transition-signal";
 import { activateAddonFromPaidRow } from "./addon-activation";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
@@ -153,6 +154,7 @@ export async function activateFromPaidRow(
     subscriptionStatus: usersTable.subscriptionStatus,
     subscriptionEndsAt: usersTable.subscriptionEndsAt,
     subscriptionIsTrial: usersTable.subscriptionIsTrial,
+    packagePlan: usersTable.packagePlan,
   }).from(usersTable).where(eq(usersTable.id, row.userId));
   const start = renewalPeriodStart({
     storedStatus: acct?.subscriptionStatus,
@@ -188,6 +190,8 @@ export async function activateFromPaidRow(
   // automatic provisioning (webhook, pay self-heal and /sync all land here).
   // Fire-and-forget; it never throws and never delays this response.
   signalFv2Entitlement(row.userId, "subscription_paid");
+  // Plan transitions: record the change and run its steps (async, never throws).
+  signalPlanChanged(row.userId, { from: acct?.packagePlan ?? null, to: row.plan, source: "subscription_paid", paymentId: row.id });
   return true;
 }
 
@@ -357,6 +361,10 @@ export class SubscriptionController {
     if (!planAllowedForUserType(plan, owner.userType)) {
       throw new BadRequestException(planUserTypeError(plan));
     }
+    // A downgrade out of accounting while the office holds client money or manages other landlords' active
+    // contracts is support's call (plan transitions D2): 409 DOWNGRADE_NEEDS_SUPPORT with the preview, before
+    // anything is written — the desired plan and the pending payment rows stay as they are.
+    if (plan !== owner.packagePlan) await assertCustomerPlanChangeAllowed(ownerId, plan);
 
     if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
     const amount = planPrice(plan, cycle);

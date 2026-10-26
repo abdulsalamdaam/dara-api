@@ -1066,6 +1066,11 @@ would strand everything filed in between.
   the chosen plan outright and clear the user's `desired*` selection.
   `users.subscription_is_trial` marks a granted window as a trial and is
   cleared by any real payment.
+- **Plan changes are recorded** (`account_plan_changes`, 0090): all three
+  plan-write paths signal the plan-transition orchestrator, which never writes
+  `package_plan` itself. A downgrade out of accounting with client money or
+  third-party landlords is 409 `DOWNGRADE_NEEDS_SUPPORT` for the customer
+  (admin: `force` + `reason`). Details in §10 "Plan transitions".
 - **`tenant` is company-only** (`PackageDef.requiresUserType`). Enforced on all
   three paths that write `users.package_plan`: self-registration, admin
   approval, admin package change. Fails closed on a missing account type.
@@ -1582,6 +1587,50 @@ provisioned automatically, see "Auto-activation" below. Not on `main`.
     backfill once.
   - **Kill switch:** `FINANCE_V2_AUTO_PROVISION_DISABLED=1` (or
     `FINANCE_V2_WORKER_DISABLED=1`) — no sweep, signals are no-ops.
+- **Plan transitions (Oct 2026, staging only; `src/modules/plan-transition/`,
+  migration `0090`).** Every write of `users.package_plan` (admin approve,
+  admin package change, `activateFromPaidRow`) also calls
+  `signalPlanChanged`, which records an `account_plan_changes` row (from/to,
+  features, direction by feature set, source, actor, payment id, `steps`) and
+  runs its steps on an in-process queue. 0090 gives every existing account an
+  `initial` baseline row. An hourly sweep re-runs `pending`/`failed` changes and
+  records plans written without a signal (`source='sweep'`).
+  - **Upgrade into accounting:** no ledger → auto-provision (unchanged; the
+    step waits for its `auto_provision` event). **Owner-mode ledger** →
+    `ModeMigrationService`: blockers from `LedgerResetService.inspect(manager)`
+    → `blocked` (nothing changes, admin queue); otherwise archive the derived
+    ledger into `finance_ledger_archives`, reset to Manager (trust account),
+    full dry run, real run only when clean (`migrated_not_started` otherwise).
+    An admin OFF stays off (`skipped_admin_off`). Lateral changes (pro ⇄
+    enterprise) do no ledger work, and an account an admin deliberately keeps
+    in Owner mode is never migrated without an upgrade or the guard below.
+  - **Commission start (D1):** an upgrade stores `commission_from` (Riyadh
+    date). No COM- (legacy pairing or v2 billed) for rent DUE before it; the
+    collected run floors at its month (`src/common/commission-start.ts`).
+    Null for accounts always on Offices/Companies.
+  - **Downgrade (D2):** `pay()` and the admin package change refuse 409
+    `DOWNGRADE_NEEDS_SUPPORT` (body carries `preview`) while trust ≠ 0, the
+    landlord payable ≠ 0, or a third-party landlord has an active contract;
+    the admin passes `force: true` + `reason`. The ledger, mode and fees are
+    kept; accounting is plan-locked as before.
+  - **Guards:** 400 `COMMISSION_ON_OWN_LANDLORD` (fee > 0 being set on the
+    holder's landlord row / a holder-owned property); in Owner mode, moving a
+    property with an active contract to a third-party landlord tries the
+    migration first, else 409 `OWNER_MODE_THIRD_PARTY` + an admin-queue row
+    (`source='owner_mode_guard'`); `POST /payments/:id/collections` also runs
+    `guardTrust`.
+  - **Endpoints:** `GET /me/plan-change/preview?plan=`, `GET
+    /me/plan-change/latest` (change + checklist for 30 days); admin `GET
+    /admin/users/:id/plan-changes`, `GET /admin/plan-changes?status=`, `GET
+    /admin/users/:id/package-preview?plan=`, `POST
+    /admin/plan-changes/:id/retry {reason}`, `POST
+    /admin/plan-changes/:id/restore-ledger {reason, confirm:"<id>"}` (409
+    `RESTORE_BLOCKED` while the rebuilt ledger has blockers; entries come back
+    with their ids, `posted_at` is the restore time by the ledger's
+    same-transaction rule).
+  - **Kill switches:** `PLAN_TRANSITION_SWEEP_DISABLED=1`,
+    `PLAN_TRANSITION_AUTO_MIGRATE_DISABLED=1` (the migration step is left
+    `attention`). Billing proration is NOT part of this (open decision O3).
 - **Two switches.** The flag turns on UI, forks and enqueueing; nothing posts
   until `finance_settings.ledger_started_at` is set by the first **real**
   backfill. Until then reports show "ledger not started".

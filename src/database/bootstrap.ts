@@ -759,6 +759,17 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure account limits failed: ${err?.message || err}`);
     }
 
+    // 0090: plan transitions — account_plan_changes (history + steps of every
+    // plan change) and finance_ledger_archives (Owner-mode ledgers a Manager
+    // rebuild replaced, restorable). New tables + a one-off baseline. Idempotent.
+    try {
+      const planTransitions = findSqlFile(join("drizzle", "0090_plan_transitions.sql"));
+      if (planTransitions) await client.query(readFileSync(planTransitions, "utf8"));
+      else log.warn("0090_plan_transitions.sql not found — plan transition tables not ensured");
+    } catch (err: any) {
+      log.warn(`ensure plan transitions failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

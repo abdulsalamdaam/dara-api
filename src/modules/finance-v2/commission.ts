@@ -22,6 +22,7 @@ import { riyadhToday } from "./dates";
 import { commissionCarriesVat } from "./account-seller";
 import { propertyBasis } from "./commission-basis";
 import { assertPlanAllowsCommission, planAllowsCommission } from "../../common/plan-features";
+import { commissionFrom, ownerIsAccountHolder } from "../../common/commission-start";
 
 /** Is 0070 applied (the monthly run's counted lines)? */
 async function hasRunItemsTable(q: Sql): Promise<boolean> {
@@ -126,12 +127,16 @@ export async function planCommission(q: Sql, scope: number, doc: { contractId: n
   // The basis is the PROPERTY's own when it has one, else the account's (commission-basis.ts, finding 9).
   if ((await propertyBasis(q, scope, fee.propertyId)).basis === "collected") return null;
   if (!fee.pct || !(toHalalas(fee.pct) > 0)) return null;
+  // Plan transitions: never on the account holder's own landlord (B5), never on rent due before the upgrade (D1).
+  if (await ownerIsAccountHolder(q, scope, fee.ownerId)) return null;
+  const from = await commissionFrom(q, scope);
   // An installment a live monthly run already counted (the property was on "collected" then) is never charged again.
   const runItems = await hasRunItemsTable(q);
   const rows = await q.rows(
     `select amount::text as amount, description, vat_enabled from payments p where p.user_id = $1 and p.id = any($2::int[]) and p.deleted_at is null
+        and ($3::date is null or p.due_date is null or p.due_date >= $3::date)
         ${runItems ? `and not exists (select 1 from finance_commission_run_items i where i.user_id = p.user_id and i.payment_id = p.id and i.live)` : ""}`,
-    [scope, doc.paymentIds],
+    [scope, doc.paymentIds, from],
   );
   let base = 0;
   for (const p of rows) {

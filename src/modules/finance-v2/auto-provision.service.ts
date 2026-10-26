@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { FinanceFlagService } from "./flag.service";
 import { fv2PlanEntitledSql } from "./flag.service";
@@ -10,6 +10,7 @@ import { riyadhToday } from "./dates";
 import { toHalalas } from "./money";
 import { STAFF_ROLE_KEYS } from "../../common/permissions";
 import { setFv2EntitlementHandler } from "./auto-provision-signal";
+import { ModeMigrationService } from "./mode-migration.service";
 
 /** 02:30 Riyadh: after the recognizer (00:10), before the nightly pg_dump (03:00) and the repair sweep (03:30). */
 const SWEEP_AT_MIN = 2 * 60 + 30;
@@ -145,6 +146,7 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
     private readonly flag: FinanceFlagService,
     private readonly setup: FinanceSetupService,
     private readonly backfill: BackfillService,
+    @Optional() private readonly modeMigration?: ModeMigrationService,
   ) {}
 
   onModuleInit(): void {
@@ -268,6 +270,13 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
     if (!first) {
       // Already provisioned and started (e.g. a ledger that sat plan-locked until this upgrade): post what it missed.
       if (NO_CATCH_UP_TRIGGERS.has(trigger)) return { accountUserId, outcome: "not_eligible", provisioned: false };
+      // Plan transitions: an Owner-mode ledger that just upgraded into accounting is rebuilt in Manager mode
+      // (automatic when nothing blocks it; mode-migration.service.ts) BEFORE the catch-up posts into it. Only for an
+      // open upgrade — an account an admin deliberately keeps in Owner mode is left alone.
+      if (this.modeMigration) {
+        await this.modeMigration.maybeMigrate(accountUserId, trigger, undefined, { requirePlanChange: true })
+          .catch((err: any) => this.log.warn(`finance v2 mode migration failed for scope ${accountUserId}: ${err?.message ?? err}`));
+      }
       const c = await this.catchUp(accountUserId, trigger, { automatic: true, today: opts.today });
       const outcome: AutoOutcome = c.outcome === "caught_up" || c.outcome === "caught_up_with_errors" ? "caught_up"
         : c.outcome === "up_to_date" ? "up_to_date" : c.outcome === "busy" ? "busy" : "not_eligible";

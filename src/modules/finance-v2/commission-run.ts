@@ -39,6 +39,7 @@ import { reversalEvent } from "./hooks/facts-loader";
 import type { LedgerEvent } from "./ledger-emitter.service";
 import { accountBasis, anyCollectedProperty, collectedBasisSql, hasPropertyBasisTable } from "./commission-basis";
 import { fv2PlanEntitledSql } from "./flag.service";
+import { commissionFrom } from "../../common/commission-start";
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
 
@@ -116,6 +117,9 @@ export async function commissionSettings(q: Sql, scope: number): Promise<Commiss
       `select to_char(min(collected_from),'YYYY-MM-DD') as d from finance_property_commission where user_id = $1 and basis = 'collected'`, [scope]);
     if (p?.d) from = p.d;
   }
+  // Plan transitions (D1): nothing collected before the month the account upgraded into accounting is counted.
+  const started = await commissionFrom(q, scope);
+  if (started && `${started.slice(0, 7)}-01` > from) from = `${started.slice(0, 7)}-01`;
   return {
     enabled: r.enabled === true,
     ledgerStarted: r.started === true,

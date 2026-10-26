@@ -19,6 +19,9 @@ import { PERMISSIONS } from "../../common/permissions";
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
+import { sqlOf } from "../finance-v2/hooks/sql";
+import { ownerIsAccountHolder } from "../../common/commission-start";
+import { assertNoCommissionOnHolder, assertOwnerModeAllowsLandlord } from "../plan-transition/owner-mode-guard";
 
 /** Maps property `*_lookup_id` FKs back to the text fields clients expect. */
 const PROPERTY_LOOKUP_SPEC = [
@@ -503,6 +506,8 @@ class PropertiesController {
       isDemo: false,
     };
     sanitizePropertyFields(values, isDraft);
+    // No management fee on a property of the account holder's own landlord record (plan transitions B5).
+    assertNoCommissionOnHolder(await ownerIsAccountHolder(sqlOf(this.db as any), owner, ownerId), values.managementFeePercent, null);
     if (values.totalUnits == null) values.totalUnits = 0; // NOT NULL, default 0
     const [prop] = await this.db.insert(propertiesTable).values(values as any).returning();
 
@@ -610,6 +615,19 @@ class PropertiesController {
       updateData["deedId"] = nextDeedId;
     }
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
+    // Plan transitions. B5: no management fee SET on a property of the account holder's own landlord record
+    // (re-sending the stored value passes). B2: in Owner mode, a property with an active contract cannot move to a
+    // third-party landlord — the automatic Owner→Manager migration is tried first (409 OWNER_MODE_THIRD_PARTY).
+    {
+      const q = sqlOf(this.db as any);
+      const nextOwner = "ownerId" in updateData ? (updateData.ownerId as number | null) : priorProp.ownerId;
+      if ("managementFeePercent" in updateData) {
+        assertNoCommissionOnHolder(await ownerIsAccountHolder(q, owner, nextOwner), updateData.managementFeePercent, priorProp.managementFeePercent ?? null);
+      }
+      if ("ownerId" in updateData && nextOwner != null && nextOwner !== priorProp.ownerId) {
+        await assertOwnerModeAllowsLandlord(q, owner, nextOwner, id);
+      }
+    }
     const [prop] = await this.db.update(propertiesTable)
       .set(updateData as any)
       .where(and(eq(propertiesTable.id, id), eq(propertiesTable.userId, owner), isNull(propertiesTable.deletedAt)))

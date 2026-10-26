@@ -64,6 +64,7 @@ import { FinanceV2CommissionController } from "./controllers/commission.controll
 import { FinanceV2InstallmentsController } from "./controllers/installments.controller";
 import { InstallmentDocsService } from "./installment-docs.service";
 import { FinanceV2AutoProvisionService } from "./auto-provision.service";
+import { ModeMigrationService } from "./mode-migration.service";
 
 /**
  * Finance v2 (beta): controllers and services behind the per-account
@@ -99,9 +100,10 @@ import { FinanceV2AutoProvisionService } from "./auto-provision.service";
     CommissionRunService, commissionIssuerProvider,
     InstallmentDocsService, // accountant #3: rent receipt from the installments screen
     FinanceV2AutoProvisionService, // on by default for plan-entitled accounts (auto-provision.service.ts)
+    ModeMigrationService, // plan transitions: automatic Owner → Manager rebuild (archived, restorable)
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
-  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService],
+  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService, ModeMigrationService, LedgerResetService],
 })
 export class FinanceV2Module {}

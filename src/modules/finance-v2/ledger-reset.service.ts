@@ -137,53 +137,7 @@ export class LedgerResetService {
     const result = await this.worker.withAccountLock(accountUserId, () => withTx(this.pool, async (c) => {
       const busy = (await c.query(`select pg_try_advisory_xact_lock($1, $2) as ok`, [accountUserId, LOCK_KEYS.AUTO_PROVISION])).rows[0]?.ok !== true;
       if (busy) throw new ConflictException({ error: "LEDGER_BUSY", message: "Automatic provisioning is running for this account; try again in a minute" });
-      await c.query(`select pg_advisory_xact_lock($1, $2)`, [accountUserId, LOCK_KEYS.SETUP]);
-      const cur = (await c.query(`select * from finance_settings where account_user_id = $1 for update`, [accountUserId])).rows[0];
-
-      const pre = await this.inspect(c, accountUserId, body.accountingMode);
-      if (pre.blockers.length) {
-        throw new ConflictException({ error: "RESET_BLOCKED", message: "The ledger cannot be reset", blockers: pre.blockers });
-      }
-
-      // Derived ledger rows only (0066 fv2_purge_account, ledger-only form).
-      await c.query(`select fv2_purge_account($1, true)`, [accountUserId]);
-      let controlRuns = 0;
-      if (await tableExists(c, "finance_control_runs")) {
-        controlRuns = (await c.query(`delete from finance_control_runs where user_id = $1 and trigger in ('nightly','manual')`, [accountUserId])).rowCount ?? 0;
-      }
-
-      const oldMode: AccountingMode | null = cur.accounting_mode ?? null;
-      await c.query(
-        `update finance_settings set accounting_mode = $2, ledger_started_at = null, updated_at = now() where account_user_id = $1`,
-        [accountUserId, body.accountingMode],
-      );
-
-      // What the enable path does for the new mode (Manager: the default trust account and trust routing). Idempotent.
-      let trustBankAccountId: number | null = null;
-      if (body.accountingMode === "manager") {
-        if (cur.finance_v2_enabled) await this.setup.firstEnable(c, accountUserId, actorUserId);
-        trustBankAccountId = await this.setup.ensureTrust(c, accountUserId, actorUserId);
-      }
-
-      const deleted = { ...pre.willDelete, controlRuns };
-      await settingsEvent(c, accountUserId, actorUserId, "ledger_reset",
-        { accountingMode: oldMode, ledgerStartedAt: cur.ledger_started_at ?? null },
-        { accountingMode: body.accountingMode, deleted }, body.reason);
-      if (oldMode !== body.accountingMode) {
-        await settingsEvent(c, accountUserId, actorUserId, "accounting_mode", oldMode, body.accountingMode, body.reason);
-      }
-      // An automatically provisioned account would be re-backfilled by the auto-provisioning sweep (enabled, not
-      // started, last enable by actor 0). The reset hands it to the admin: record the enable as the admin's.
-      const lastEnable = (await c.query(
-        `select actor_user_id, new_value from finance_settings_events where account_user_id = $1 and field = 'finance_v2_enabled'
-          order by created_at desc, id desc limit 1`, [accountUserId])).rows[0];
-      if (cur.finance_v2_enabled && lastEnable && Number(lastEnable.actor_user_id) === 0) {
-        await settingsEvent(c, accountUserId, actorUserId, "finance_v2_enabled", true, true, `ledger reset: ${body.reason}`.slice(0, 500));
-      }
-      await auditRow(c, accountUserId, actorUserId, "finance_v2", accountUserId, `/admin/finance-v2/${accountUserId}/reset-ledger`);
-
-      const settings = (await c.query(`select * from finance_settings where account_user_id = $1`, [accountUserId])).rows[0];
-      return { previousMode: oldMode, deleted, trustBankAccountId, settings: toSettingsDto(settings) };
+      return this.resetInTx(c, actorUserId, accountUserId, body.accountingMode, body.reason);
     }));
 
     this.flag.invalidate(accountUserId);
@@ -197,6 +151,67 @@ export class LedgerResetService {
       settings: result.settings,
       next: { backfill: { mode: "full", dryRunFirst: true }, message: NEXT_STEP },
     };
+  }
+
+  /**
+   * The reset itself, inside the caller's transaction. The caller holds the account's posting lock
+   * (`PostingWorker.withAccountLock`) and has made sure automatic provisioning is not running for the account
+   * (the admin route: a try xact lock on LOCK_KEYS.AUTO_PROVISION; the automatic Owner→Manager migration,
+   * mode-migration.service.ts: it holds that key as a session lock itself). `beforePurge` runs after the
+   * blockers are re-checked and before anything is deleted (the migration archives the ledger there).
+   */
+  async resetInTx(
+    c: Fv2Client, actorUserId: number, accountUserId: number, mode: AccountingMode, reason: string,
+    opts: { beforePurge?: (c: Fv2Client) => Promise<void> } = {},
+  ) {
+    await c.query(`select pg_advisory_xact_lock($1, $2)`, [accountUserId, LOCK_KEYS.SETUP]);
+    const cur = (await c.query(`select * from finance_settings where account_user_id = $1 for update`, [accountUserId])).rows[0];
+
+    const pre = await this.inspect(c, accountUserId, mode);
+    if (pre.blockers.length) {
+      throw new ConflictException({ error: "RESET_BLOCKED", message: "The ledger cannot be reset", blockers: pre.blockers });
+    }
+    if (opts.beforePurge) await opts.beforePurge(c);
+
+    // Derived ledger rows only (0066 fv2_purge_account, ledger-only form).
+    await c.query(`select fv2_purge_account($1, true)`, [accountUserId]);
+    let controlRuns = 0;
+    if (await tableExists(c, "finance_control_runs")) {
+      controlRuns = (await c.query(`delete from finance_control_runs where user_id = $1 and trigger in ('nightly','manual')`, [accountUserId])).rowCount ?? 0;
+    }
+
+    const oldMode: AccountingMode | null = cur.accounting_mode ?? null;
+    await c.query(
+      `update finance_settings set accounting_mode = $2, ledger_started_at = null, updated_at = now() where account_user_id = $1`,
+      [accountUserId, mode],
+    );
+
+    // What the enable path does for the new mode (Manager: the default trust account and trust routing). Idempotent.
+    let trustBankAccountId: number | null = null;
+    if (mode === "manager") {
+      if (cur.finance_v2_enabled) await this.setup.firstEnable(c, accountUserId, actorUserId);
+      trustBankAccountId = await this.setup.ensureTrust(c, accountUserId, actorUserId);
+    }
+
+    const deleted = { ...pre.willDelete, controlRuns };
+    await settingsEvent(c, accountUserId, actorUserId, "ledger_reset",
+      { accountingMode: oldMode, ledgerStartedAt: cur.ledger_started_at ?? null },
+      { accountingMode: mode, deleted }, reason);
+    if (oldMode !== mode) {
+      await settingsEvent(c, accountUserId, actorUserId, "accounting_mode", oldMode, mode, reason);
+    }
+    // An automatically provisioned account would be re-backfilled by the auto-provisioning sweep (enabled, not
+    // started, last enable by actor 0). The reset hands it to the admin: record the enable as the admin's.
+    const lastEnable = (await c.query(
+      `select actor_user_id, new_value from finance_settings_events where account_user_id = $1 and field = 'finance_v2_enabled'
+        order by created_at desc, id desc limit 1`, [accountUserId])).rows[0];
+    if (cur.finance_v2_enabled && lastEnable && Number(lastEnable.actor_user_id) === 0 && actorUserId !== 0) {
+      await settingsEvent(c, accountUserId, actorUserId, "finance_v2_enabled", true, true, `ledger reset: ${reason}`.slice(0, 500));
+    }
+    await auditRow(c, accountUserId, actorUserId, "finance_v2", accountUserId, `/admin/finance-v2/${accountUserId}/reset-ledger`);
+
+    const settings = (await c.query(`select * from finance_settings where account_user_id = $1`, [accountUserId])).rows[0];
+    return { previousMode: oldMode, deleted, trustBankAccountId, settings: toSettingsDto(settings) };
   }
 
   /** Counts and blockers, on the pool (preview) or inside the reset's transaction (re-check). */
