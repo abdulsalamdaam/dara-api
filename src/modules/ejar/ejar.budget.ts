@@ -180,11 +180,16 @@ export function computeBudget(cfg: LookupConfig, usage: LookupUsage, now = new D
  * any of the windows behind it (product rule — those are for Dara's admins
  * only). Every customer-facing response carries this shape, never `EjarBudget`.
  *
- * `remaining` is the number enforcement uses (`EjarBudget.remaining`): the
- * plan's yearly allowance prorated to the paid period (3/6/12 months, see
+ * `remaining` is the account's own entitlement, as enforced: the plan's
+ * yearly allowance prorated to the paid period (3/6/12 months, see
  * `ejarLookupQuota`), replaced by an admin override and topped up by active
- * Ejar packs, minus what this period used — min'd with the gateway-wide and
- * per-account caps. 0 when Ejar is off for the account.
+ * Ejar packs, minus what this period used (and min'd with
+ * EJAR_LOOKUP_LIMIT_PER_ACCOUNT when set). The gateway-wide budget
+ * (EJAR_LOOKUP_LIMIT, shared by every account) is Dara's own safety valve, not
+ * the customer's allowance: it only shows as 0 once it is shut — otherwise a
+ * yearly Offices account would read "50" on a 50/month gateway instead of its
+ * 150. An uncapped account (Companies) is shown the gateway's headroom.
+ * 0 when Ejar is off for the account.
  */
 export interface CustomerEjarBudget {
   /** False when Ejar is switched off for the account. */
@@ -195,8 +200,18 @@ export interface CustomerEjarBudget {
   remaining: number;
 }
 
-export function toCustomerBudget(b: Pick<EjarBudget, "remaining">, enabled = true): CustomerEjarBudget {
-  const remaining = enabled ? Math.max(0, b.remaining) : 0;
+/** The attempts a customer is shown — see `CustomerEjarBudget.remaining`. */
+export function customerRemaining(b: Pick<EjarBudget, "remaining" | "used" | "gateway" | "plan" | "perAccount">): number {
+  const gatewayLeft = Math.max(0, b.gateway.limit - maxOf(b.used));
+  if (gatewayLeft <= 0 || b.remaining <= 0) return 0;
+  const own = [b.plan?.remaining, b.perAccount.remaining].filter((n): n is number => typeof n === "number");
+  return Math.max(0, own.length ? Math.min(...own) : gatewayLeft);
+}
+
+export function toCustomerBudget(
+  b: Pick<EjarBudget, "remaining" | "used" | "gateway" | "plan" | "perAccount">, enabled = true,
+): CustomerEjarBudget {
+  const remaining = enabled ? customerRemaining(b) : 0;
   return { enabled, available: remaining > 0, remaining };
 }
 

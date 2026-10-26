@@ -393,10 +393,25 @@ describe("what the customer is shown: attempts available, prorated to the paid p
     assert.equal((await w.svc.customerBudget(1)).remaining, 5);
   });
 
-  it("the number is what enforcement uses: the gateway cap lowers it too", async () => {
-    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "10" } });
+  it("the shared gateway budget does not mask the account's own number — only shows once it is shut", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "50" } });
     w.store.plans[1] = period("professional", "yearly");
-    assert.equal((await w.svc.customerBudget(1)).remaining, 10);
+    assert.equal((await w.svc.customerBudget(1)).remaining, 150, "not 50");
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "0" } });
+    w.store.plans[1] = period("professional", "yearly");
+    assert.deepEqual(await w.svc.customerBudget(1), { enabled: true, available: false, remaining: 0 });
+  });
+
+  it("an uncapped plan (Companies) is shown the gateway's headroom", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "50" } });
+    w.store.plans[1] = period("enterprise", "yearly");
+    assert.equal((await w.svc.customerBudget(1)).remaining, 50);
+  });
+
+  it("a per-account cap below the plan is the number shown", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_LIMIT: "1000", EJAR_LOOKUP_LIMIT_PER_ACCOUNT: "12" } });
+    w.store.plans[1] = period("professional", "quarterly");
+    assert.equal((await w.svc.customerBudget(1)).remaining, 12);
   });
 
   it("Ejar off for the account: 0 available", async () => {
