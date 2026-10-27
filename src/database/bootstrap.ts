@@ -770,6 +770,16 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure plan transitions failed: ${err?.message || err}`);
     }
 
+    // 0091: Ejar contract terms (auto-renewal, sublease, Ejar fee, broker) —
+    // nullable columns on contracts, filled by the Ejar import. Idempotent.
+    try {
+      const contractEjarTerms = findSqlFile(join("drizzle", "0091_contract_ejar_terms.sql"));
+      if (contractEjarTerms) await client.query(readFileSync(contractEjarTerms, "utf8"));
+      else log.warn("0091_contract_ejar_terms.sql not found — contract Ejar term columns not ensured");
+    } catch (err: any) {
+      log.warn(`ensure contract Ejar terms failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

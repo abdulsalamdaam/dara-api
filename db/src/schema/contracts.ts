@@ -119,6 +119,13 @@ export const contractsTable = pgTable("contracts", {
   // 'skip' = they stay in the schedule only — left out of the operational
   // reports and KPIs, and never posted to the ledger.
   externalSettlementMode: text("external_settlement_mode").$type<"count" | "skip">().notNull().default("count"),
+  // Ejar contract terms (migration 0091) — set by the Ejar import from Get
+  // Contracts; null on a manual contract (= not known).
+  autoRenewal: boolean("auto_renewal"),
+  subleaseAllowed: boolean("sublease_allowed"),
+  ejarFee: numeric("ejar_fee", { precision: 12, scale: 2 }),
+  brokerName: text("broker_name"),
+  brokerIdNumber: text("broker_id_number"),
   notes: text("notes"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,0 +1,100 @@
+{
+  "data": [
+    {
+      "type": "contracts",
+      "id": "22222222-3333-4444-8555-666666666666",
+      "attributes": {
+        "contract_id": "22222222-3333-4444-8555-666666666666",
+        "contract_number": "20000000001",
+        "contract_type": "commercial",
+        "status": "registered",
+        "start_time": "2026-11-16",
+        "end_time": "2029-11-15",
+        "created_time": "2026-07-30",
+        "auto_renewal_enabled": true,
+        "company_cr_number": "2050999003",
+        "broker_national_id": "1000000091",
+        "broker_name": "وسيط عقاري تجريبي",
+        "property_id": "22222222-3333-4444-8555-777777777777",
+        "property_type": "plaza",
+        "property_name": "مجمع النخيل التجاري",
+        "latitude": 24.93113797,
+        "longitude": 46.64426996,
+        "region": {
+          "key": "riyadh",
+          "name_ar": "الرياض",
+          "name_en": "Riyadh"
+        },
+        "unit_count": 1,
+        "units": [
+          {
+            "id": "22222222-3333-4444-8555-888888888888",
+            "unit_type": "shop",
+            "unit_number": "SH-01"
+          }
+        ],
+        "lessors": [
+          {
+            "name": "شركة المؤجر التجريبية",
+            "type": "organization",
+            "unified_number": "7009990001",
+            "organization_type": "commercial",
+            "registration_number": "1010999001"
+          },
+          {
+            "vat": 0,
+            "name": "ممثل المؤجر التجريبي",
+            "role": "lessor_representative",
+            "type": "individual",
+            "email": "lessor-rep@example.invalid",
+            "id_type": "national_id",
+            "id_number": "1000000101",
+            "phone_number": "+966500000101"
+          }
+        ],
+        "tenants": [
+          {
+            "name": "شركة المستأجر التجريبية",
+            "type": "organization",
+            "unified_number": "7009990002",
+            "organization_type": "commercial",
+            "registration_number": "1010999002"
+          },
+          {
+            "vat": 0,
+            "name": "ممثل المستأجر التجريبي",
+            "role": "tenant_representative",
+            "type": "individual",
+            "email": "tenant-rep@example.invalid",
+            "id_type": "national_id",
+            "id_number": "1000000102",
+            "phone_number": "+966500000102"
+          }
+        ],
+        "lessor_count": 2,
+        "tenant_count": 2,
+        "total_value": 238125,
+        "installment_value": null,
+        "payment_frequency": "bi-annual",
+        "security_deposit_value": 6350,
+        "contract_creation_ejar_fee": 1000,
+        "payment_history": [],
+        "installment_count": 0,
+        "sublease_allowed": false,
+        "classification": false,
+        "days_remaining": 1116,
+        "period": 1095,
+        "contract_activities": [],
+        "unified_number": "7009990003"
+      }
+    }
+  ],
+  "meta": {
+    "count": 1
+  },
+  "links": {
+    "self": "https://eservices.ejar.sa/rental-contracts?contract_ids=22222222-3333-4444-8555-666666666666",
+    "first": "https://eservices.ejar.sa/rental-contracts?contract_ids=22222222-3333-4444-8555-666666666666",
+    "last": "https://eservices.ejar.sa/rental-contracts?contract_ids=22222222-3333-4444-8555-666666666666"
+  }
+}

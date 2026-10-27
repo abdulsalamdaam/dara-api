@@ -22,6 +22,8 @@ import { mapLookup, computeRequired, normalizeContractNumber, lookupUuid } from 
 import { EjarImportService } from "./ejar.import.service";
 
 const USER = { id: 1 } as never;
+/** The fixtures' lessor CR — عقاري accounts must type it at the inquiry. */
+const LESSOR_CR = "1010000002";
 const OTHER = { id: 2 } as never;
 
 let w: ReturnType<typeof world>;
@@ -324,9 +326,9 @@ describe("the plan's Ejar lookup quota", () => {
 
     const numbers = Array.from({ length: 23 }, (_, i) => String(10000000100 + i));
     numbers.forEach((n) => w.known.add(n));
-    for (const n of numbers.slice(0, 22)) await w.svc.lookup(USER, { contract_number: n });
+    for (const n of numbers.slice(0, 22)) await w.svc.lookup(USER, { contract_number: n, landlord_cr: LESSOR_CR });
     const sent = w.calls.length;
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22] }));
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22], landlord_cr: LESSOR_CR }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
     assert.equal(body.budget.available, false);
@@ -379,7 +381,7 @@ describe("what the customer is shown: attempts available, prorated to the paid p
     w = dworld({ env });
     w.store.plans[1] = period("basic", "quarterly");
     assert.equal((await w.svc.customerBudget(1)).remaining, 22);
-    const res = await w.svc.lookup(USER, { contract_number: CN });
+    const res = await w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR });
     assert.equal(res.budget.remaining, 21);
     assert.equal((await w.svc.customerBudget(1)).remaining, 21);
   });
@@ -638,9 +640,12 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     assert.deepEqual(res.property, {
       ejarId: PROPERTY_UUID, name: "برج تجريبي", type: "building",
       region: { key: "riyadh", nameAr: "الرياض", nameEn: "Riyadh" },
-      latitude: 24.7, longitude: 46.6, mapsUrl: "https://www.google.com/maps?q=24.7,46.6",
+      latitude: 24.7, longitude: 46.6, mapsUrl: "https://www.google.com/maps?q=24.7,46.6", unitCount: 1,
     });
-    assert.deepEqual(res.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop" }]);
+    assert.deepEqual(res.units, [{
+      ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop", floor: null, area: null, rooms: null, usage: null,
+      raw: { id: UNIT_UUID, unit_type: "shop", unit_number: "S-01" },
+    }]);
     assert.equal(res.invoices.length, 2, "Invoices stay the payment schedule");
     assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 1, details: 0 });
     assert.equal((res as unknown as Record<string, unknown>).contractsResource, undefined, "internal, not in the response");
@@ -810,9 +815,9 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 1, addons: 0 };
     w.known.add("10000000201");
-    await w.svc.lookup(USER, { contract_number: CN });
+    await w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR });
     const sent = w.calls.length;
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201" }));
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201", landlord_cr: LESSOR_CR }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
     // Add-ons come from the admin only: nothing for sale, "contact us".
@@ -826,7 +831,7 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     w = dworld();
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 0, addons: 0 };
-    const { body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    const { body } = await httpError(w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR }));
     assert.equal(body.code, "budget_exhausted");
     assert.equal(body.addonAvailable, false);
   });

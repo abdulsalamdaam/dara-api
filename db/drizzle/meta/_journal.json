@@ -561,6 +561,13 @@
       "when": 1793664000000,
       "tag": "0090_plan_transitions",
       "breakpoints": true
+    },
+    {
+      "idx": 91,
+      "version": "7",
+      "when": 1793750400000,
+      "tag": "0091_contract_ejar_terms",
+      "breakpoints": true
     }
   ]
 }

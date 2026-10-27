@@ -168,9 +168,9 @@ retired: `/ejar/contracts`, the old `/ejar/preview`, `/ejar/call` and
    **Renewed contracts:** the list holds the older version's id, so the query
    by the Invoices UUID returns count 0 (verified on 10963452116). Then — and
    when no resource's contract_number matches — the lookup falls back to
-   Details (a third call). **Production:** Get Contracts answers 401 "API
-   authorization failed" (Invoices + Details work) → prod must run
-   `EJAR_LOOKUP_SECOND_CALL=details` until MOMRAH enables it.
+   Details (a third call). **Production:** Get Contracts answered 401, then
+   count 0, until 26 Oct 2026; since 27 Oct it returns the contract → prod
+   must run `EJAR_LOOKUP_SECOND_CALL=contracts` (see Import v3 below).
 3. Details — `GET /v1/ejar-services/contracts/{uuid}` (`contractDetails`): the
    `details` mode's second call and the fallback. A non-UUID makes Balady
    answer 500, so the client refuses it before sending. Its parties carry
@@ -244,6 +244,58 @@ number — checked after Details and before anything is saved or returned, and
 again on a cache hit and at import. Never add a new Ejar route without applying
 the scope. It fails closed when no CR is on file; degrading to an unscoped
 search is the thing it exists to prevent.
+
+**Ejar Import v3 — the production Get Contracts shape + the landlord CR
+(staging, 27 Oct 2026).** Production Get Contracts started answering on
+27 Oct 2026 (count 1 for `id_number=1&contract_ids=<uuid>&skip_filter_id_number=true`),
+so **production must run `EJAR_LOOKUP_SECOND_CALL=contracts`** when the import
+is promoted (Details stays the fallback for renewed contracts). The prod host
+stays blocked in `baladyConfig()` until then. What the import maps
+(`ejar.lookup.map.ts` → `ejar.import.service.ts` → the writer):
+
+| Get Contracts | Dara |
+|---|---|
+| `property_name`, `property_type`, `property_id` | `properties.name`, `type_lookup_id` (`EJAR_PROPERTY_TYPE`), `ejar_id` |
+| `latitude`, `longitude` | `properties.map_url` = `https://www.google.com/maps?q=LAT,LNG` (what LocationPicker and the Map view read — no lat/lng columns) + `ejar_raw` |
+| `region.key` | `region_lookup_id`; `city_lookup_id` when a city has that key/name |
+| `unit_count` | property `ejar_raw` |
+| `units[]` (`id`, `unit_number`, `unit_type`, and floor/area/rooms/usage if ever sent) | `units.ejar_id`, `unit_number`, `type_lookup_id`, `floor`, `area`, `bedrooms`, the entry verbatim in `ejar_raw` |
+| `lessors[]` first lessor (no `role` key = lessor) | `owners`: org → `id_number` = `registration_number`; individual → national ID; phone (canonical), email |
+| `lessors[]` `lessor_representative` | owner `original_owner_*` + contract `landlord_rep_*` |
+| `tenants[]` (same shape) | `tenants` + `original_tenant_*`, contract `company_unified` / `rep_*` |
+| extra lessors / tenants | contract `ejar_raw.otherParties` |
+| `contract_type`, `start_time`, `end_time`, `created_time`, `status` | VAT fallback (commercial 15%), `start_date`, `end_date`, `signing_date`, `status` |
+| `security_deposit_value` | `deposit_amount` |
+| `auto_renewal_enabled`, `sublease_allowed`, `contract_creation_ejar_fee`, `broker_name`, `broker_national_id` | `contracts.auto_renewal`, `sublease_allowed`, `ejar_fee`, `broker_name`, `broker_id_number` (**migration 0091**) |
+| `total_value`, `payment_frequency`, `unified_number`, `company_cr_number`, `period`, `installment_*` | contract `ejar_raw` |
+| Invoices `payments` | the rent schedule (custom), as before |
+
+`vat: 0` on a party is not a VAT number. `company_cr_number` was NOT any
+lessor's or tenant's CR on the prod sample — it looks like the brokerage
+office's CR.
+
+**Landlord CR at the inquiry** (`landlord_cr` on `POST /ejar/lookup` and
+`/ejar/import`; rule from `ejarLandlordCrRule` in `plan-features.ts`, exposed
+as `landlordCr` on `GET /ejar/budget`): عقاري (`basic`) → **required**; it must
+equal a lessor-role party's CR / unified number / national ID or the contract's
+`company_cr_number` (never a representative's or the tenant's). Checked
+locally — Balady does not filter by CR. Missing → 400 `landlord_cr_required`,
+not 10 digits → 400 `landlord_cr_invalid`, both before any call; mismatch →
+422 `landlord_cr_mismatch` after the calls (spent and counted), nothing saved;
+a cache hit and the import re-check it. Offices / Companies (and tenant,
+which `ejar.scope.ts` locks instead) → optional: the web hides the field, and
+a CR sent anyway is checked the same way. Specs: `ejar.import-v3.spec.ts`
+with the invented `lookup-contracts-prod.json` (the prod shape, key for key).
+
+**Staging replay seeds** (`ejar_api_logs`, env `replay-seed`, keyed by
+`params.contractNumber` / `params.contract_ids`), anonymized — fake names,
+IDs, CRs, phones, no IBAN: 1171/1172 Invoices/Details for the prod sample contract (its number is in
+the staging memory note, not here — this repo is public) (lessor org CR 1010999001, tenant org 1010999002, company_cr 2050999003), a
+Get Contracts row for the same contract (plaza «مجمع النخيل التجاري», shop
+SH-01, lat/long 24.93113797, 46.64426996), and an invented residential
+contract 20499000017 (Invoices + Get Contracts; individual lessor 1077700002 =
+test-aqari's own landlord, apartment A-12). Staging runs
+`EJAR_LOOKUP_SECOND_CALL=contracts` + `EJAR_REPLAY=on`.
 
 **Ejar field locks** (`ejar.locks.ts`) are **advisory only** — computed by one
 GET endpoint so the UI can render fields read-only. There is no write-side

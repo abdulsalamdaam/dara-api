@@ -63,6 +63,19 @@ export interface LookupContract {
   paymentFrequency: string | null;
   autoRenewal: boolean | null;
   broker: { name: string | null; nationalId: string | null } | null;
+  // Get Contracts only (null from Details) — the rest of the contract's terms.
+  /** Ejar's registration fee for this contract (contract_creation_ejar_fee). */
+  ejarFee: number | null;
+  subleaseAllowed: boolean | null;
+  /** The contract-level unified (700) number Ejar lists. */
+  unifiedNumber: string | null;
+  /** company_cr_number: the CR on the contract record (the brokerage office's, as seen on prod 27 Oct). */
+  companyCrNumber: string | null;
+  /** Contract length in days (Ejar's `period`). */
+  periodDays: number | null;
+  daysRemaining: number | null;
+  installmentValue: number | null;
+  installmentCount: number | null;
 }
 
 export interface LookupProperty {
@@ -73,9 +86,22 @@ export interface LookupProperty {
   latitude: number | null;
   longitude: number | null;
   mapsUrl: string | null;
+  /** Ejar's unit_count. */
+  unitCount: number | null;
 }
 
-export interface LookupUnit { ejarId: string | null; unitNumber: string | null; unitType: string | null }
+export interface LookupUnit {
+  ejarId: string | null;
+  unitNumber: string | null;
+  unitType: string | null;
+  /** Present only when Ejar sends them (prod 27 Oct sent id/type/number only). */
+  floor: number | null;
+  area: number | null;
+  rooms: number | null;
+  usage: string | null;
+  /** The verbatim units[] entry — persisted as the unit's ejar_raw. */
+  raw: Record<string, unknown>;
+}
 
 export interface LookupInvoice {
   id: string;
@@ -376,6 +402,14 @@ export function mapLookup(
         paymentFrequency: str(a.payment_frequency),
         autoRenewal: boolOf(a.auto_renewal_enabled),
         broker: brokerName || brokerId ? { name: brokerName, nationalId: brokerId } : null,
+        ejarFee: num(a.contract_creation_ejar_fee),
+        subleaseAllowed: boolOf(a.sublease_allowed),
+        unifiedNumber: digits(a.unified_number),
+        companyCrNumber: digits(a.company_cr_number),
+        periodDays: num(a.period),
+        daysRemaining: num(a.days_remaining),
+        installmentValue: num(a.installment_value),
+        installmentCount: num(a.installment_count),
       },
       parties: listParties(listed),
       financial: { ...financialBase, iban: null },
@@ -389,12 +423,18 @@ export function mapLookup(
             latitude: lat,
             longitude: lng,
             mapsUrl: mapsUrl(lat, lng),
+            unitCount: num(a.unit_count),
           }
         : null,
       units: asArray(a.units as Attrs[] | null).map((u) => ({
         ejarId: str(u.id) ?? str(u.unit_id),
         unitNumber: str(u.unit_number),
         unitType: str(u.unit_type),
+        floor: num(u.floor_number ?? u.floor),
+        area: num(u.area ?? u.unit_area),
+        rooms: num(u.rooms ?? u.rooms_count ?? u.bedrooms),
+        usage: str(u.unit_usage ?? u.usage),
+        raw: { ...u },
       })),
       contractsResource: listed,
     };
@@ -425,6 +465,14 @@ export function mapLookup(
       paymentFrequency: null,
       autoRenewal: null,
       broker: null,
+      ejarFee: null,
+      subleaseAllowed: null,
+      unifiedNumber: null,
+      companyCrNumber: null,
+      periodDays: null,
+      daysRemaining: null,
+      installmentValue: null,
+      installmentCount: null,
     },
     parties: mapLookupParties(detailsBody),
     financial: { ...financialBase, iban: str(f.iban_number) },
@@ -439,6 +487,32 @@ export function mapLookup(
 export function partyIdentifiers(p: LookupParty | null | undefined): string[] {
   if (!p) return [];
   return [p.crNumber, p.unifiedNumber, p.idNumber].filter((v): v is string => !!v);
+}
+
+/** Contract numbers, CRs and IDs: digits only, Arabic-Indic digits and spaces tolerated. */
+export function normalizeIdentifier(raw: unknown): string {
+  return String(raw ?? "")
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/[\s-]/g, "");
+}
+
+/**
+ * Everything a landlord CR typed at the inquiry may match: each LESSOR's CR,
+ * unified number or national ID (lessor-role parties only — a representative
+ * is not the landlord), plus the contract's own `company_cr_number`.
+ */
+export function lessorIdentifiers(m: Pick<MappedLookup, "parties" | "contract">): string[] {
+  const p = m.parties;
+  const lessors = [p.lessor, ...p.others].filter((x): x is LookupParty => !!x && x.role === "lessor");
+  const ids = [...lessors.flatMap((x) => partyIdentifiers(x)), m.contract.companyCrNumber];
+  return [...new Set(ids.filter((v): v is string => !!v))];
+}
+
+/** Does the typed landlord CR belong to this contract's lessor side? */
+export function landlordCrMatches(m: Pick<MappedLookup, "parties" | "contract">, cr: unknown): boolean {
+  const v = normalizeIdentifier(cr);
+  return !!v && lessorIdentifiers(m).includes(v);
 }
 
 /** All identifiers on the contract — used for the locked-account rule. */

@@ -380,7 +380,7 @@ describe("POST /ejar/import from a Get Contracts snapshot", () => {
     assert.deepEqual(prop.overrides, { usageLookupId: 2, cityLookupId: 6 }, "usage from the contract type, city from the region; ejar_source stays");
 
     const unit = (plan.unit as { ejar: any }).ejar;
-    assert.deepEqual(unit.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop" }]);
+    assert.deepEqual(unit.units, [{ ejarId: UNIT_UUID, unitNumber: "S-01", unitType: "shop", floor: null, area: null, rooms: null, unitUsage: null }]);
     assert.deepEqual(unit.raw[UNIT_UUID], { id: UNIT_UUID, unit_number: "S-01", unit_type: "shop" });
     assert.deepEqual(unit.linkIds, []);
     assert.equal(unit.overrides.status, "rented");

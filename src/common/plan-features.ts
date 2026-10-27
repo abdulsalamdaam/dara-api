@@ -130,3 +130,21 @@ export class CommissionNotInPlanException extends ForbiddenException {
 export function assertPlanAllowsCommission(plan: string | null | undefined): void {
   if (!planAllowsCommission(plan)) throw new CommissionNotInPlanException();
 }
+
+/**
+ * The landlord CR on an Ejar inquiry (`POST /ejar/lookup` `landlord_cr`).
+ *
+ *  - عقاري (`basic`) — `required`: the account manages its own property, so
+ *    it may only pull a contract whose lessor it is. The typed CR (or the
+ *    individual landlord's national ID) must match a lessor in Ejar's answer,
+ *    checked locally — Balady does not filter by CR (`cr_numbers` → 0, Oct 2026).
+ *  - المكاتب / الشركات and the rest — `optional`: an office manages many
+ *    landlords, so the contract number alone is enough (a CR sent anyway is
+ *    still checked).
+ * The `tenant` plan is scoped to its own CR by `ejar.scope.ts` instead.
+ */
+export type EjarLandlordCrRule = "required" | "optional";
+
+export function ejarLandlordCrRule(plan: string | null | undefined): EjarLandlordCrRule {
+  return resolvePackage(plan).key === "basic" ? "required" : "optional";
+}

@@ -1,0 +1,184 @@
+{
+  "data": [
+    {
+      "id": "22222222-3333-4444-8555-666666666666",
+      "type": "rental_invoices_contracts",
+      "attributes": {
+        "contract_no": "20000000001"
+      },
+      "relationships": {
+        "rental_fee": {
+          "data": {
+            "id": "900002",
+            "type": "rental_fees"
+          }
+        }
+      }
+    }
+  ],
+  "meta": {
+    "count": 1
+  },
+  "included": [
+    {
+      "id": "900002",
+      "type": "rental_fees",
+      "attributes": {
+        "contract_id": "22222222-3333-4444-8555-666666666666",
+        "payment_frequency": {
+          "ar": "دفعات متكررة",
+          "en": "Recurring payments"
+        },
+        "recurring_payment": {
+          "ar": "نصف سنوي",
+          "en": "Bi-Annual"
+        },
+        "total_rent_amount": "63500.0"
+      },
+      "relationships": {
+        "payments": {
+          "data": [
+            {
+              "id": "9000021",
+              "type": "payments"
+            },
+            {
+              "id": "9000022",
+              "type": "payments"
+            },
+            {
+              "id": "9000023",
+              "type": "payments"
+            },
+            {
+              "id": "9000024",
+              "type": "payments"
+            },
+            {
+              "id": "9000025",
+              "type": "payments"
+            },
+            {
+              "id": "9000026",
+              "type": "payments"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "9000021",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001001",
+        "payment_schedule_sequence_number": "9920000000001001",
+        "invoice_issue_date": "2026-11-26",
+        "invoice_due_date": "2026-11-26",
+        "invoice_late_date": "2026-11-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    },
+    {
+      "id": "9000022",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001002",
+        "payment_schedule_sequence_number": "9920000000001002",
+        "invoice_issue_date": "2027-05-26",
+        "invoice_due_date": "2027-05-26",
+        "invoice_late_date": "2027-05-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    },
+    {
+      "id": "9000023",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001003",
+        "payment_schedule_sequence_number": "9920000000001003",
+        "invoice_issue_date": "2027-11-26",
+        "invoice_due_date": "2027-11-26",
+        "invoice_late_date": "2027-11-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    },
+    {
+      "id": "9000024",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001004",
+        "payment_schedule_sequence_number": "9920000000001004",
+        "invoice_issue_date": "2028-05-26",
+        "invoice_due_date": "2028-05-26",
+        "invoice_late_date": "2028-05-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    },
+    {
+      "id": "9000025",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001005",
+        "payment_schedule_sequence_number": "9920000000001005",
+        "invoice_issue_date": "2028-11-26",
+        "invoice_due_date": "2028-11-26",
+        "invoice_late_date": "2028-11-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    },
+    {
+      "id": "9000026",
+      "type": "payments",
+      "attributes": {
+        "rental_fee_id": 900002,
+        "invoice_amount": "39687.0",
+        "payment_status": {
+          "ar": "غير مدفوعة",
+          "en": "Unpaid"
+        },
+        "sequence_number": "9920000000001006",
+        "payment_schedule_sequence_number": "9920000000001006",
+        "invoice_issue_date": "2029-05-26",
+        "invoice_due_date": "2029-05-26",
+        "invoice_late_date": "2029-05-26",
+        "invoice_remaining_amount": "39687.0"
+      },
+      "relationships": {}
+    }
+  ]
+}

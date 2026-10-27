@@ -660,6 +660,11 @@ export class EjarImportWriter {
         status: status as never,
         notes: c.notes,
         externalSettlementMode: c.externalSettlementMode === "skip" ? "skip" : "count", // finance-v2: 0084
+        autoRenewal: c.autoRenewal ?? null,
+        subleaseAllowed: c.subleaseAllowed ?? null,
+        ejarFee: c.ejarFee ?? null,
+        brokerName: c.brokerName ?? null,
+        brokerIdNumber: c.brokerIdNumber ?? null,
         ejarRaw: c.ejarRaw,
         additionalFees: additionalFees.length ? (additionalFees as never) : null,
       })
@@ -749,6 +754,12 @@ export interface ImportPlan {
     /** Ejar's payment frequency text; only used when there is no schedule. */
     frequencyHint: string | null;
     depositAmount: string | null;
+    /** Ejar contract terms (0091) — null when Ejar did not say (the Details path). */
+    autoRenewal?: boolean | null;
+    subleaseAllowed?: boolean | null;
+    ejarFee?: string | null;
+    brokerName?: string | null;
+    brokerIdNumber?: string | null;
     /**
      * Rent VAT when the property/unit usage cannot decide it: from Ejar's
      * contract type (commercial → 15%, residential → exempt). The usage

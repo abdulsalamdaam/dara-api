@@ -1,6 +1,8 @@
 import {
   BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException,
+  UnprocessableEntityException,
 } from "@nestjs/common";
+import { ejarLandlordCrRule } from "../../common/plan-features";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { dateOnly, email as emailOf, nationalId, partyIdentityNumber, saudiPhone, text, LIMITS } from "../../common/validation";
@@ -9,14 +11,15 @@ import { vatFromContractType } from "./ejar-rent-vat";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import {
-  allPartyIdentifiers, computeRequired, missingRequired, normalizeContractNumber,
+  allPartyIdentifiers, computeRequired, landlordCrMatches, missingRequired, normalizeContractNumber,
   type LookupParty, type MappedLookup,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
-  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, lookupContext, mapSaved, matchedUnitEjarIds,
+  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, LANDLORD_CR_MISMATCH_MESSAGE, SCOPE_MISMATCH_MESSAGE, lookupContext, mapSaved,
+  matchedUnitEjarIds, readLandlordCr,
 } from "./ejar.lookup.service";
 import { EjarImportWriter, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
@@ -168,6 +171,12 @@ export class EjarImportService {
     if (scope.locked && !allPartyIdentifiers(mapped.parties).includes(scope.idNumber!)) {
       throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
     }
+    // The landlord CR, as at the inquiry: required on عقاري and checked
+    // against the saved lookup's lessors again, so an import cannot skip it.
+    const landlordCr = readLandlordCr(ejarLandlordCrRule((await this.store.planPeriod(accountId))?.packagePlan), body?.landlord_cr);
+    if (landlordCr && !landlordCrMatches(mapped, landlordCr)) {
+      throw new UnprocessableEntityException({ code: "landlord_cr_mismatch", key: "landlord_cr", message: LANDLORD_CR_MISMATCH_MESSAGE });
+    }
 
     // ── Picked records must be the caller's own ──
     const notInAccount = (key: string) =>
@@ -307,6 +316,7 @@ export class EjarImportService {
                 property_id: lattrs.property_id ?? null, property_name: lattrs.property_name ?? null,
                 property_type: lattrs.property_type ?? null, region: lattrs.region ?? null,
                 latitude: lattrs.latitude ?? null, longitude: lattrs.longitude ?? null,
+                unit_count: lattrs.unit_count ?? null,
               },
               overrides: {
                 ...(propType ? { typeLookupId: propType.id, typeOther: null } : {}),
@@ -358,8 +368,12 @@ export class EjarImportService {
       }
       unit = {
         ejar: {
-          units: fresh.map((u) => ({ ejarId: u.ejarId, unitNumber: u.unitNumber, unitType: u.unitType })),
-          raw: Object.fromEntries(fresh.filter((u) => u.ejarId).map((u) => [u.ejarId!, { id: u.ejarId, unit_number: u.unitNumber, unit_type: u.unitType }])),
+          units: fresh.map((u) => ({
+            ejarId: u.ejarId, unitNumber: u.unitNumber, unitType: u.unitType,
+            floor: u.floor, area: u.area, rooms: u.rooms, unitUsage: u.usage,
+          })),
+          // Ejar's units[] entry verbatim — drives the unit's field locks.
+          raw: Object.fromEntries(fresh.filter((u) => u.ejarId).map((u) => [u.ejarId!, { ...u.raw, id: u.ejarId, unit_number: u.unitNumber, unit_type: u.unitType }])),
           overrides: {
             ...(unitType ? { typeLookupId: unitType.id, typeOther: null } : {}),
             ...(unitUsageLookupId != null ? { usageLookupId: unitUsageLookupId } : {}),
@@ -422,6 +436,11 @@ export class EjarImportService {
       customSchedule,
       frequencyHint: m.financial.recurringPayment?.en ?? m.contract.paymentFrequency ?? m.financial.paymentFrequency?.en ?? null,
       depositAmount: m.contract.securityDeposit != null && m.contract.securityDeposit > 0 ? String(m.contract.securityDeposit) : null,
+      autoRenewal: m.contract.autoRenewal,
+      subleaseAllowed: m.contract.subleaseAllowed,
+      ejarFee: m.contract.ejarFee != null && m.contract.ejarFee >= 0 ? String(m.contract.ejarFee) : null,
+      brokerName: m.contract.broker?.name ?? null,
+      brokerIdNumber: m.contract.broker?.nationalId ?? null,
       vatFallback,
       notes: text(notes, "الملاحظات", LIMITS.notes),
       ejarRaw: {
@@ -436,6 +455,20 @@ export class EjarImportService {
         version: m.contract.version,
         iban: m.financial.iban,
         totalRentAmount: m.financial.totalRentAmount,
+        // Get Contracts' remaining contract facts (null on the Details path).
+        totalValue: m.contract.totalValue,
+        paymentFrequency: m.contract.paymentFrequency,
+        ejarFee: m.contract.ejarFee,
+        subleaseAllowed: m.contract.subleaseAllowed,
+        unifiedNumber: m.contract.unifiedNumber,
+        companyCrNumber: m.contract.companyCrNumber,
+        periodDays: m.contract.periodDays,
+        installmentValue: m.contract.installmentValue,
+        installmentCount: m.contract.installmentCount,
+        registeredAt: m.contract.registeredAt,
+        // Every party Ejar listed beyond the first lessor/tenant (co-lessors,
+        // co-tenants), kept so nothing Ejar said is lost.
+        otherParties: m.parties.others.map((p) => ({ role: p.role, kind: p.kind, name: p.name, crNumber: p.crNumber, idNumber: p.idNumber })),
       },
     };
   }

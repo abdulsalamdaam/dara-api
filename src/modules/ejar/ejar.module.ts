@@ -46,13 +46,19 @@ export class EjarController {
 
   /**
    * Whether the account can look a contract up now and how many attempts it
-   * has available: `{ enabled, available, remaining }`. The allowance and
+   * has available: `{ enabled, available, remaining, landlordCr }`. The allowance and
    * what was used are never sent to a customer — the admin console has them.
    */
   @Get("budget")
   @RequirePermissions(PERMISSIONS.CONTRACTS_VIEW)
   async budget(@CurrentUser() user: AuthUser) {
-    return this.lookups.customerBudget(scopeId(user), undefined, user.id);
+    const accountId = scopeId(user);
+    const [budget, landlordCr] = await Promise.all([
+      this.lookups.customerBudget(accountId, undefined, user.id),
+      // Whether the inquiry needs the landlord's CR too (عقاري: required).
+      this.lookups.landlordCrRule(accountId),
+    ]);
+    return { ...budget, landlordCr };
   }
 
   /**
