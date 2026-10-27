@@ -10,6 +10,7 @@ import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "
 import { ejarRentVatVerdict } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
 import { ejarLandlordCapGate } from "./ejar.landlord-cap"; // finance-v2: n/a — plan landlord cap (CONTRACT2 §5)
 import type { EjarPartyInfo, EjarInvoiceRow } from "./ejar.map";
+import type { CoParty } from "./ejar.lookup.map";
 import { monthlyRentFrom, type RentBasis } from "./ejar.rent";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
@@ -676,6 +677,9 @@ export class EjarImportWriter {
         brokerName: c.brokerName ?? null,
         brokerIdNumber: c.brokerIdNumber ?? null,
         ejarRaw: c.ejarRaw,
+        // Co-landlords / co-tenants (0092): reference only — no owners /
+        // tenants row, no link, no invoice, no message.
+        coParties: c.coParties?.length ? (c.coParties as unknown as Array<Record<string, unknown>>) : null,
         additionalFees: additionalFees.length ? (additionalFees as never) : null,
       })
       .returning();
@@ -782,6 +786,8 @@ export interface ImportPlan {
     ejarRaw: Record<string, unknown> | null;
     /** finance-v2: 0084 — count or skip the installments Ejar reports already paid (default count). */
     externalSettlementMode?: "count" | "skip";
+    /** The principals that are not the main landlord / tenant — kept for reference only (0092). */
+    coParties?: CoParty[];
   };
   additionalFees: Array<Record<string, unknown>>;
   invoices: EjarInvoiceRow[];

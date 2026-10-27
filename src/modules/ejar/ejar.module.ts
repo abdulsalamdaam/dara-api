@@ -2,12 +2,12 @@ import {
   BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Query, UseGuards,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { propertiesTable, unitsTable, ownersTable, deedsTable, tenantsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard, type AuthUser } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
-import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
+import { PermissionsGuard, RequireAnyPermission, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { listQuerySchema, wantsPagination } from "../../common/pagination";
@@ -82,6 +82,42 @@ export class EjarController {
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async import(@CurrentUser() user: AuthUser, @Body() body: any) {
     return this.importer.import(user, body ?? {});
+  }
+
+  /**
+   * The co-landlords (`ownerId`) or co-tenants (`tenantId`) Ejar named beside
+   * this landlord / tenant on its imported contracts — FOR REFERENCE ONLY
+   * (contracts.co_parties, 0092): they are not records of the account.
+   * `[{ contractId, contractNumber, parties: CoParty[] }]`, newest first.
+   * A landlord's contracts are those on its properties, or whose landlord
+   * snapshot carries its ID number (as the contracts `ownerId` filter).
+   */
+  @Get("co-parties")
+  @RequireAnyPermission(PERMISSIONS.OWNERS_VIEW, PERMISSIONS.TENANTS_VIEW, PERMISSIONS.CONTRACTS_VIEW)
+  async coParties(@CurrentUser() user: AuthUser, @Query("ownerId") ownerId?: string, @Query("tenantId") tenantId?: string) {
+    const scope = scopeId(user);
+    const oid = Number(ownerId);
+    const tid = Number(tenantId);
+    const valid = (n: number) => Number.isInteger(n) && n > 0 && n <= 2_147_483_647;
+    if (valid(oid) === valid(tid)) throw new BadRequestException("Send exactly one of ownerId or tenantId");
+    const role = valid(oid) ? "co_landlord" : "co_tenant";
+    const whose = valid(oid)
+      ? sql`(exists (select 1 from contract_units cu join units u on u.id = cu.unit_id join properties p on p.id = u.property_id
+               where cu.contract_id = c.id and p.owner_id = ${oid})
+             or exists (select 1 from owners o where o.id = ${oid} and o.user_id = ${scope} and o.deleted_at is null
+               and coalesce(o.id_number, '') <> '' and o.id_number = c.landlord_id_number))`
+      : sql`c.tenant_id = ${tid}`;
+    const res = await this.db.execute(sql`
+      select c.id as "contractId", c.contract_number as "contractNumber",
+             (select coalesce(jsonb_agg(x), '[]'::jsonb) from jsonb_array_elements(c.co_parties) x where x ->> 'role' = ${role}) as parties
+        from contracts c
+       where c.user_id = ${scope} and c.deleted_at is null
+         and jsonb_typeof(c.co_parties) = 'array'
+         and exists (select 1 from jsonb_array_elements(c.co_parties) x where x ->> 'role' = ${role})
+         and ${whose}
+       order by c.id desc
+       limit 100`);
+    return ((res as { rows?: unknown[] }).rows ?? (res as unknown as unknown[])) as Array<{ contractId: number; contractNumber: string; parties: unknown[] }>;
   }
 
   /**

@@ -318,6 +318,7 @@ CREATE TABLE "contracts" (
 	"ejar_fee" numeric(12, 2),
 	"broker_name" text,
 	"broker_id_number" text,
+	"co_parties" jsonb,
 	"notes" text,
 	"deleted_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

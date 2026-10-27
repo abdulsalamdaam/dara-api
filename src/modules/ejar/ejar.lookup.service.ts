@@ -15,9 +15,9 @@ import {
   type CustomerEjarBudget, type EjarBudget, type LookupConfig, type PlanQuota,
 } from "./ejar.budget";
 import {
-  allPartyIdentifiers, computePrefill, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyMatches,
-  partyIdentifiers, pickContractsResource,
-  type LookupPrefill, type MappedLookup, type RequiredContext, type RequiredEntry,
+  allPartyIdentifiers, computePrefill, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyContact, partyMatches,
+  partyIdentifiers, pickContractsResource, principalIndexFor, principalsOf, withMain,
+  type LookupPrefill, type MainChoice, type MainSide, type MappedLookup, type PartyContact, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
 import type { EjarLookupStore, ImportedContract, LinkedParty, LookupMatches, PartyKey, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
 import { rentBasis, rentFigures, type RentFigures } from "./ejar.rent";
@@ -113,7 +113,44 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
   prefill: LookupPrefill;
   /** Whose stored identity the inquiry was pinned to, and that it matched (null role: unpinned). */
   partyCheck: { role: EjarPartyRole | null; idNumber: string | null; matched: boolean | null };
+  /**
+   * Ejar's PRINCIPAL lessors / tenants and which one is the main one. The
+   * top-level `parties`, `required`, `prefill` and `linkedParties` describe
+   * `defaultIndex`; each option carries what changes when the user picks it.
+   * `lockedIndex` (عقاري: the landlord side; tenant plan: the tenant side) is
+   * the account's own record — the main one, not to be changed.
+   */
+  principals: Record<MainSide, PrincipalSide>;
   logs: unknown[];
+}
+
+export interface PrincipalOption {
+  index: number;
+  party: LookupParty;
+  /** That section's required[] entries when this one is the main one. */
+  required: RequiredEntry[];
+  prefill: PartyContact;
+  linked: LinkedParty | null;
+}
+export interface PrincipalSide {
+  defaultIndex: number;
+  /** Set: the main one is fixed (a pinned account's own record). */
+  lockedIndex: number | null;
+  options: PrincipalOption[];
+}
+
+/**
+ * The principal a pinned account must import as the main one: عقاري → the
+ * lessor carrying the account landlord's ID; the tenant plan → the tenant
+ * carrying the account's CR / ID. Offices / Companies: none (a free choice).
+ */
+export function lockedMain(
+  parties: MappedLookup["parties"], check: { role: EjarPartyRole | null; idNumber: string | null },
+): Record<MainSide, number | null> {
+  return {
+    landlord: check.role === "landlord" ? principalIndexFor(parties, "landlord", check.idNumber) : null,
+    tenant: check.role === "tenant" ? principalIndexFor(parties, "tenant", check.idNumber) : null,
+  };
 }
 
 /** The saved lookup, mapped. */
@@ -458,17 +495,38 @@ export class EjarLookupService {
     accountId: number, saved: SavedLookup, source: "ejar" | "cache", logs: unknown[], cfg: LookupConfig,
     partyCheck: LookupResponse["partyCheck"],
   ): Promise<LookupResponse> {
-    const { contractsResource: _internal, ...mapped } = mapSaved(saved);
+    const full = mapSaved(saved);
+    // The main lessor / tenant: a pinned account's own record, else Ejar's first.
+    const lock = lockedMain(full.parties, partyCheck);
+    const main: MainChoice = { landlord: lock.landlord ?? 0, tenant: lock.tenant ?? 0 };
+    const chosen = withMain(full, main);
+    const { contractsResource: _internal, ...mapped } = chosen;
     const [ctx, alreadyImported, budget] = await Promise.all([
-      lookupContext(this.store, accountId, { ...mapped, contractsResource: _internal }),
+      lookupContext(this.store, accountId, chosen),
       this.store.findImported(accountId, saved.contractNumber),
       this.customerBudget(accountId, cfg),
     ]);
     const { matches, resolved } = ctx;
-    const [cityLabel, linkedLandlord, linkedTenant] = await Promise.all([
+    const reqCtx: RequiredContext = { resolved, matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) } };
+    const side = async (s: MainSide): Promise<PrincipalSide> => ({
+      defaultIndex: main[s],
+      lockedIndex: lock[s],
+      options: await Promise.all(principalsOf(full.parties, s).map(async (party, index) => {
+        const m = withMain(full, { ...main, [s]: index });
+        return {
+          index, party,
+          required: computeRequired(m, reqCtx).filter((r) => r.section === s),
+          prefill: partyContact(m.parties, s),
+          linked: await this.store.existingParty(accountId, s, partyKey(party)),
+        };
+      })),
+    });
+    const [cityLabel, linkedLandlord, linkedTenant, pLandlord, pTenant] = await Promise.all([
       resolved.cityId != null ? this.store.lookupRow(resolved.cityId).then((r) => r?.labelAr ?? null) : Promise.resolve(null),
       this.store.existingParty(accountId, "landlord", partyKey(mapped.parties.lessor)),
       this.store.existingParty(accountId, "tenant", partyKey(mapped.parties.tenant)),
+      side("landlord"),
+      side("tenant"),
     ]);
     return {
       source,
@@ -477,14 +535,12 @@ export class EjarLookupService {
       alreadyImported,
       ...mapped,
       matches: { ...matches, landlord: null, tenant: null, unit: matches.units[0] ?? null },
-      required: computeRequired({ ...mapped, contractsResource: _internal }, {
-        resolved,
-        matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) },
-      }),
+      required: computeRequired(chosen, reqCtx),
       prefill: computePrefill(mapped, resolved, cityLabel),
       linkedParties: { landlord: linkedLandlord, tenant: linkedTenant },
       rent: rentFigures(rentBasis(mapped), vatFromContractType(mapped.contract.contractType)),
       partyCheck,
+      principals: { landlord: pLandlord, tenant: pTenant },
       logs,
     };
   }

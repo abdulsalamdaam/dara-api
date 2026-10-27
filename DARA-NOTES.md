@@ -297,6 +297,40 @@ written with `ejar_source = null`, so nothing freezes it.
   `brokerName`, `brokerIdNumber`, `ejarCycle` (Ejar's frequency; the contract
   stays `custom`) and `ejarPeriodDays`.
 
+**Several principal lessors / tenants (27 Oct 2026).** Ejar can name two or
+more PRINCIPAL lessors (co-owners — e.g. two individuals) or tenants (e.g. a
+company and an individual) on one contract; representatives
+(`lessor_representative` / `tenant_representative`) are never principals.
+Dara links one landlord and one tenant, so:
+- The lookup returns `parties.lessors[]` / `parties.tenants[]` (principals, in
+  Ejar's order) and `principals.{landlord,tenant} = {defaultIndex, lockedIndex,
+  options[{index, party, required, prefill, linked}]}`; the top-level
+  `parties` / `required` / `prefill` / `linkedParties` describe `defaultIndex`
+  and the web swaps in the option the user picks (`viewForMain`).
+- `POST /ejar/import` takes `landlord.mainIndex` / `tenant.mainIndex` (blank →
+  the locked one, else 0; not a principal's index → 400 `invalid_field`). The
+  main one is linked / created exactly as before (`withMain` puts it in the
+  slot everything reads). The others go to **`contracts.co_parties`** (jsonb,
+  migration 0092) as `{role: co_landlord|co_tenant, kind, name, idType,
+  idNumber, crNumber, unifiedNumber, vatNumber, nationality ("saudi" for a
+  national ID), phone, email, share, source: "ejar", referenceOnly: true}` —
+  never an owners / tenants row, never in the landlord cap, nothing invoices,
+  reports or messages them. Shown on the contract (under the landlord /
+  tenant blocks) and, via `GET /ejar/co-parties?ownerId=|tenantId=`, on the
+  landlord / tenant details, always labelled "for reference only".
+- **Locks:** عقاري → the lessor carrying the account landlord's ID is the main
+  one (preselected, `lockedIndex`); the tenant plan → the tenant carrying the
+  account's CR / ID. Choosing another → 400 `main_party_locked`. Offices /
+  Companies choose freely. (A عقاري lookup that matched only through
+  `company_cr_number` has no principal to lock — free choice, and the landlord
+  cap still decides.) Import-once and `contract_exists` are unchanged.
+- Specs: `ejar.multiparty.spec.ts`, `ejar.multiparty.db.spec.ts` (invented
+  `lookup-contracts-multiparty.json`). Staging replay seed: invented contract
+  **20499000025** — lessors: an invented individual, then test-aqari's
+  landlord 1077700002 (second, to prove the lock) + a representative;
+  tenants: an invented individual, then test-tenant's company 1010777001
+  (second) + a representative.
+
 **Scoping:** tenant-package accounts are locked to their own CR
 (`ejar.scope.ts`). Since Import v2 that means: a locked account may only look
 up (and import) a contract whose Details parties include its own CR / unified
@@ -323,7 +357,7 @@ stays blocked in `baladyConfig()` until then. What the import maps
 | `lessors[]` first lessor (no `role` key = lessor) | `owners`: org → `id_number` = `registration_number`; individual → national ID; phone (canonical), email |
 | `lessors[]` `lessor_representative` | owner `original_owner_*` + contract `landlord_rep_*` |
 | `tenants[]` (same shape) | `tenants` + `original_tenant_*`, contract `company_unified` / `rep_*` |
-| extra lessors / tenants | contract `ejar_raw.otherParties` |
+| extra **principal** lessors / tenants | the user picks the main one; the others → `contracts.co_parties` (reference only, **0092**) + `ejar_raw.otherParties` |
 | `contract_type`, `start_time`, `end_time`, `created_time`, `status` | VAT fallback (commercial 15%), `start_date`, `end_date`, `signing_date`, `status` |
 | `security_deposit_value` | `deposit_amount` |
 | `auto_renewal_enabled`, `sublease_allowed`, `contract_creation_ejar_fee`, `broker_name`, `broker_national_id` | `contracts.auto_renewal`, `sublease_allowed`, `ejar_fee`, `broker_name`, `broker_id_number` (**migration 0091**) |

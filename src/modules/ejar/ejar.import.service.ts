@@ -9,15 +9,15 @@ import { vatFromContractType } from "./ejar-rent-vat";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import {
-  allPartyIdentifiers, computeRequired, missingRequired, normalizeContractNumber, partyContact,
-  type LookupParty, type MappedLookup, type PartyContact,
+  allPartyIdentifiers, coPartiesOf, computeRequired, missingRequired, normalizeContractNumber, partyContact, principalsOf, withMain,
+  type CoParty, type LookupParty, type MainChoice, type MainSide, type MappedLookup, type PartyContact,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import { monthlyRentFrom, rentBasis } from "./ejar.rent";
 import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
-  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lookupContext, mapSaved,
+  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lockedMain, lookupContext, mapSaved,
   matchedUnitEjarIds, partyCheckPasses, partyMismatch,
 } from "./ejar.lookup.service";
 import { EjarImportWriter, ejarCycle, lockImport, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
@@ -166,6 +166,43 @@ function partyInfo(
   };
 }
 
+const SIDE_LABEL: Record<MainSide, string> = { landlord: "المؤجر", tenant: "المستأجر" };
+
+/**
+ * The main lessor / tenant the body chose (`landlord.mainIndex`,
+ * `tenant.mainIndex`, into Ejar's principals), validated: blank → the locked
+ * one, else Ejar's first; not an index of a principal → 400; a pinned
+ * account (عقاري landlord / tenant plan) choosing other than its own record → 400
+ * `main_party_locked`.
+ */
+export function chooseMain(
+  parties: MappedLookup["parties"], body: Record<string, any>, lock: Record<MainSide, number | null>,
+): MainChoice {
+  const pick = (side: MainSide): number => {
+    const raw = body?.[side]?.mainIndex;
+    const count = principalsOf(parties, side).length;
+    const locked = lock[side];
+    if (blank(raw)) return locked ?? 0;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 0 || n >= Math.max(count, 1)) {
+      throw new BadRequestException({
+        code: "invalid_field", key: `${side}.mainIndex`,
+        message: `اختيار ${SIDE_LABEL[side]} الرئيسي غير صالح · ${side}.mainIndex is not one of the contract's ${side === "landlord" ? "lessors" : "tenants"}.`,
+      });
+    }
+    if (locked != null && n !== locked) {
+      throw new BadRequestException({
+        code: "main_party_locked", key: `${side}.mainIndex`, lockedIndex: locked,
+        message: side === "landlord"
+          ? "المؤجر الرئيسي في باقتك هو المؤجر المسجّل في حسابك ولا يمكن تغييره · On your plan the main landlord is your account's own landlord."
+          : "المستأجر الرئيسي في باقتك هو حسابك ولا يمكن تغييره · On your plan the main tenant is your own account.",
+      });
+    }
+    return n;
+  };
+  return { landlord: pick("landlord"), tenant: pick("tenant") };
+}
+
 function repInfo(p: LookupParty | null, group: "tenant" | "lessor"): EjarPartyInfo | null {
   if (!p) return null;
   return { ...partyInfo(p, group, {})!, isRepresentative: true };
@@ -203,17 +240,24 @@ export class EjarImportService {
     const imported = await this.store.findImported(accountId, contractNumber);
     if (imported) throw alreadyImported(contractNumber, imported.contractId);
 
-    const mapped = mapSaved(saved);
+    const full = mapSaved(saved);
     const scope = await this.store.scope(accountId);
     // The pin, as at the inquiry (عقاري: the account's landlord; tenant plan:
     // the account itself), re-checked against the stored record — the
     // landlord may have been edited since the lookup was saved.
     const check = await this.store.partyCheck(accountId);
     assertPartyIdOnFile(check);
-    if (!partyCheckPasses(check, mapped)) throw partyMismatch(check);
-    if (scope.locked && !allPartyIdentifiers(mapped.parties).includes(scope.idNumber!)) {
+    if (!partyCheckPasses(check, full)) throw partyMismatch(check);
+    if (scope.locked && !allPartyIdentifiers(full.parties).includes(scope.idNumber!)) {
       throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
     }
+
+    // Several principal lessors / tenants: the chosen main one is linked or
+    // created as before; the others are kept on the contract as a reference
+    // list only (co_parties) — never a landlord / tenant row.
+    const main = chooseMain(full.parties, body, lockedMain(full.parties, check));
+    const mapped = withMain(full, main);
+    const coParties = coPartiesOf(full.parties, main);
 
     // ── Picked records must be the caller's own ──
     const notInAccount = (key: string) =>
@@ -462,6 +506,7 @@ export class EjarImportService {
       landlord, tenant, property, unit,
       contract: {
         ...this.contractFields(mapped, startDate, endDate, status, vatFallback, body?.contract?.notes),
+        coParties,
         externalSettlementMode: externalSettlementMode(body?.externalSettlementMode), // finance-v2: 0084 — the user's choice for Ejar-paid installments
       },
       additionalFees: Array.isArray(body?.additionalFees) ? body.additionalFees : [],

@@ -126,6 +126,10 @@ export const contractsTable = pgTable("contracts", {
   ejarFee: numeric("ejar_fee", { precision: 12, scale: 2 }),
   brokerName: text("broker_name"),
   brokerIdNumber: text("broker_id_number"),
+  // Co-landlords / co-tenants Ejar names beside the main ones (migration
+  // 0092) — a reference list only: never a landlord / tenant row, never
+  // invoiced or messaged. Null on a manual contract.
+  coParties: jsonb("co_parties").$type<Array<Record<string, unknown>>>(),
   notes: text("notes"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

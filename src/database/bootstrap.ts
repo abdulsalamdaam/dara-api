@@ -780,6 +780,16 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure contract Ejar terms failed: ${err?.message || err}`);
     }
 
+    // 0092: co-landlords / co-tenants of an Ejar contract — a reference-only
+    // JSON list on contracts (never a landlord / tenant row). Idempotent.
+    try {
+      const coParties = findSqlFile(join("drizzle", "0092_contract_co_parties.sql"));
+      if (coParties) await client.query(readFileSync(coParties, "utf8"));
+      else log.warn("0092_contract_co_parties.sql not found — contracts.co_parties not ensured");
+    } catch (err: any) {
+      log.warn(`ensure contract co-parties failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

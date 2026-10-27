@@ -486,6 +486,8 @@ class ContractsController {
       brokerIdNumber: contractsTable.brokerIdNumber,
       ejarCycle: sql<string | null>`coalesce(${contractsTable.ejarRaw} ->> 'cycle', ${contractsTable.ejarRaw} ->> 'paymentFrequency')`,
       ejarPeriodDays: sql<number | null>`case when (${contractsTable.ejarRaw} ->> 'periodDays') ~ '^[0-9]+$' then (${contractsTable.ejarRaw} ->> 'periodDays')::int end`,
+      // Co-landlords / co-tenants from Ejar (0092) — for reference only.
+      coParties: contractsTable.coParties,
     };
   }
 

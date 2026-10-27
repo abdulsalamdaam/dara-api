@@ -32,14 +32,28 @@ export interface LookupParty {
   email: string | null;
   /** A 15-digit VAT number, when Get Contracts sends one. */
   vatNumber: string | null;
+  /** Ejar's nationality, when it sends one (Get Contracts has not so far). */
+  nationality?: string | null;
+  /** The party's share (e.g. of the ownership), when Ejar sends one. */
+  share?: number | null;
 }
 
 export interface LookupParties {
+  /** The MAIN lessor / tenant: the first principal unless the user chose another (`withMain`). */
   lessor: LookupParty | null;
   tenant: LookupParty | null;
   lessorRepresentative: LookupParty | null;
   tenantRepresentative: LookupParty | null;
+  /** Every party not in a slot above: further principals (co-lessors / co-tenants) and any extra representative. */
   others: LookupParty[];
+  /**
+   * Every PRINCIPAL lessor / tenant, in Ejar's order (representatives never).
+   * A contract may name several — co-owners, or two tenants — while Dara links
+   * one landlord and one tenant: the user picks the main one, the rest are
+   * kept on the contract for reference only (`coPartiesOf`).
+   */
+  lessors: LookupParty[];
+  tenants: LookupParty[];
 }
 
 export interface LookupContract {
@@ -256,6 +270,8 @@ function mapParty(details: EjarBody | null | undefined, cp: JsonApiResource): Lo
     phone: null,
     email: null,
     vatNumber: null,
+    nationality: null,
+    share: null,
   };
 }
 
@@ -267,13 +283,19 @@ export function mapLookupParties(details: EjarBody | null | undefined): LookupPa
   const resources = refs.length
     ? refs.map((r) => find(details, r)).filter((r): r is JsonApiResource => !!r)
     : byType(details, "contract_parties");
-  const out: LookupParties = { lessor: null, tenant: null, lessorRepresentative: null, tenantRepresentative: null, others: [] };
-  const slot: Record<string, keyof Omit<LookupParties, "others">> = {
+  return slotParties(resources.map((r) => mapParty(details, r)));
+}
+
+/** Put parties in their slots: the first of each role, the rest in `others`; principals listed in order. */
+function slotParties(all: LookupParty[]): LookupParties {
+  const out: LookupParties = { lessor: null, tenant: null, lessorRepresentative: null, tenantRepresentative: null, others: [], lessors: [], tenants: [] };
+  const slot: Record<string, "lessor" | "tenant" | "lessorRepresentative" | "tenantRepresentative"> = {
     lessor: "lessor", tenant: "tenant",
     lessor_representative: "lessorRepresentative", tenant_representative: "tenantRepresentative",
   };
-  for (const r of resources) {
-    const p = mapParty(details, r);
+  for (const p of all) {
+    if (p.role === "lessor") out.lessors.push(p);
+    if (p.role === "tenant") out.tenants.push(p);
     const k = slot[p.role];
     if (k && !out[k]) out[k] = p;
     else out.others.push(p);
@@ -313,26 +335,17 @@ function mapListParty(p: Attrs, fallbackRole: string): LookupParty {
     phone: str(p.phone_number) ?? str(p.phone),
     email: str(p.email),
     vatNumber: vat && vat.length === 15 ? vat : null,
+    nationality: str(p.nationality),
+    share: num(p.share ?? p.ownership_share ?? p.share_percentage ?? p.ownership_percentage ?? p.percentage),
   };
 }
 
 function listParties(r: JsonApiResource): LookupParties {
   const a = r.attributes || {};
-  const out: LookupParties = { lessor: null, tenant: null, lessorRepresentative: null, tenantRepresentative: null, others: [] };
-  const slot: Record<string, keyof Omit<LookupParties, "others">> = {
-    lessor: "lessor", tenant: "tenant",
-    lessor_representative: "lessorRepresentative", tenant_representative: "tenantRepresentative",
-  };
-  const all = [
+  return slotParties([
     ...asArray(a.lessors as Attrs[] | null).map((p) => mapListParty(p, "lessor")),
     ...asArray(a.tenants as Attrs[] | null).map((p) => mapListParty(p, "tenant")),
-  ];
-  for (const p of all) {
-    const k = slot[p.role];
-    if (k && !out[k]) out[k] = p;
-    else out.others.push(p);
-  }
-  return out;
+  ]);
 }
 
 /**
@@ -777,4 +790,108 @@ export function missingRequired(required: RequiredEntry[], body: Record<string, 
     if (blank(holder?.[field])) missing.push(r.key);
   }
   return missing;
+}
+
+/* ── Several principal lessors / tenants: the main one and the rest ──────
+ *
+ * Ejar can name two or more PRINCIPAL lessors (co-owners) or tenants on one
+ * contract. Dara links one landlord and one tenant, so the user picks the main
+ * one of each (default: Ejar's first). The main one is linked or created as
+ * before; the others are kept on the contract as a reference list only
+ * (`contracts.co_parties`, 0092) — never a landlord / tenant row, never
+ * counted against the landlord cap, never invoiced, never messaged.
+ * Representatives are not principals and are never offered as the main one.
+ */
+
+export type MainSide = "landlord" | "tenant";
+/** Index of the main principal on each side, into `parties.lessors` / `parties.tenants`. */
+export interface MainChoice { landlord: number; tenant: number }
+
+/** The principals of one side (lessors for the landlord, tenants for the tenant). */
+export function principalsOf(parties: LookupParties, side: MainSide): LookupParty[] {
+  const list = side === "landlord" ? parties.lessors : parties.tenants;
+  if (list?.length) return list;
+  const first = side === "landlord" ? parties.lessor : parties.tenant;
+  return first ? [first] : [];
+}
+
+/**
+ * The index of the principal carrying `id` (CR, unified number or national
+ * ID) — the one a pinned account (عقاري: its landlord; tenant plan: itself)
+ * must import as the main one. Null when none does, or no ID is pinned.
+ */
+export function principalIndexFor(parties: LookupParties, side: MainSide, id: unknown): number | null {
+  const v = normalizeIdentifier(id);
+  if (!v) return null;
+  const i = principalsOf(parties, side).findIndex((p) => partyIdentifiers(p).includes(v));
+  return i >= 0 ? i : null;
+}
+
+/**
+ * The mapping with the chosen principals in the `lessor` / `tenant` slots and
+ * every other party (the other principals, extra representatives) in
+ * `others`. Everything downstream (required[], contact, the writer's party)
+ * reads the slots, so it follows the choice. An out-of-range index keeps Ejar's
+ * first — callers validate before this.
+ */
+export function withMain<T extends Pick<MappedLookup, "parties">>(m: T, main: Partial<MainChoice>): T {
+  const p = m.parties;
+  const lessors = principalsOf(p, "landlord");
+  const tenants = principalsOf(p, "tenant");
+  const lessor = lessors[main.landlord ?? 0] ?? p.lessor;
+  const tenant = tenants[main.tenant ?? 0] ?? p.tenant;
+  const all = [p.lessor, p.tenant, p.lessorRepresentative, p.tenantRepresentative, ...p.others]
+    .filter((x): x is LookupParty => !!x);
+  const slotted = new Set([lessor, tenant, p.lessorRepresentative, p.tenantRepresentative]);
+  return { ...m, parties: { ...p, lessor, tenant, others: all.filter((x) => !slotted.has(x)) } };
+}
+
+/** A co-landlord / co-tenant as kept on the contract — for reference only. */
+export interface CoParty {
+  /** co_landlord: a principal lessor that is not the main landlord; co_tenant likewise. */
+  role: "co_landlord" | "co_tenant";
+  kind: "organization" | "individual";
+  name: string | null;
+  idType: string | null;
+  idNumber: string | null;
+  crNumber: string | null;
+  unifiedNumber: string | null;
+  vatNumber: string | null;
+  /** Ejar's nationality; "saudi" when it sends none and the ID is a national ID. */
+  nationality: string | null;
+  phone: string | null;
+  email: string | null;
+  share: number | null;
+  source: "ejar";
+  referenceOnly: true;
+}
+
+function toCoParty(p: LookupParty, role: CoParty["role"]): CoParty {
+  const isOrg = p.kind === "organization";
+  return {
+    role,
+    kind: p.kind,
+    name: p.name,
+    idType: p.idType,
+    idNumber: isOrg ? null : p.idNumber,
+    crNumber: isOrg ? p.crNumber : null,
+    unifiedNumber: isOrg ? p.unifiedNumber : null,
+    vatNumber: p.vatNumber,
+    nationality: p.nationality ?? (!isOrg && (p.idType ?? "").toLowerCase() === "national_id" ? "saudi" : null),
+    phone: bareSaudiMobile(p.phone),
+    email: p.email ? p.email.toLowerCase() : null,
+    share: p.share ?? null,
+    source: "ejar",
+    referenceOnly: true,
+  };
+}
+
+/** Every principal that is NOT the main one, as reference-only co-parties (lessors first, Ejar's order). */
+export function coPartiesOf(parties: LookupParties, main: Partial<MainChoice>): CoParty[] {
+  const li = main.landlord ?? 0;
+  const ti = main.tenant ?? 0;
+  return [
+    ...principalsOf(parties, "landlord").flatMap((p, i) => (i === li ? [] : [toCoParty(p, "co_landlord")])),
+    ...principalsOf(parties, "tenant").flatMap((p, i) => (i === ti ? [] : [toCoParty(p, "co_tenant")])),
+  ];
 }

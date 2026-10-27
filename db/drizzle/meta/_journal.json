@@ -568,6 +568,13 @@
       "when": 1793750400000,
       "tag": "0091_contract_ejar_terms",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1793836800000,
+      "tag": "0092_contract_co_parties",
+      "breakpoints": true
     }
   ]
 }
