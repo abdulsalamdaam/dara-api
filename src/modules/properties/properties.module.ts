@@ -425,12 +425,12 @@ class PropertiesController {
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const isDraft = Boolean(body.isDraft ?? false);
     const name = body.name;
-    // Draft properties only need a name; type/city are optional and fall back
-    // to the schema default / empty string so the row can still be inserted.
+    // Draft properties only need a name. City is optional on every property:
+    // the location step is now the map pin, not typed address fields.
     const type = body.type || "residential";
     const city = body.city || "";
-    if (!name || (!isDraft && (!body.type || !body.city))) {
-      throw new BadRequestException("الاسم والنوع والمدينة مطلوبة · Name, type, and city are required");
+    if (!name || (!isDraft && !body.type)) {
+      throw new BadRequestException("الاسم والنوع مطلوبان · Name and type are required");
     }
 
     const owner = scopeId(user);
