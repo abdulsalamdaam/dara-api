@@ -18,7 +18,7 @@ const BASE_BACKOFF_MS = 400;
 // NHC's gateway sits behind Cloudflare; the default undici UA ("node") can trip
 // its bot filter with a 403. Present as a normal client. Balady is behind
 // Cloudflare too.
-const USER_AGENT = "Mozilla/5.0 (compatible; DaraEjarClient/1.0; +https://dara-sa.net)";
+const USER_AGENT = "Mozilla/5.0 (compatible; DaraEjarClient/1.0; +https://dara-sa.com)";
 // Refresh a Balady token this long before it expires (they last 17,999 s).
 const TOKEN_SKEW_MS = 5 * 60_000;
 
@@ -96,6 +96,11 @@ const trimUrl = (u: string) => u.replace(/\/+$/, "");
  * every call via EjarLogService. Credentials come from the environment and
  * never leave this service.
  */
+/** EJAR_BALADY_PROD=1 — the production Balady gateway is allowed (set on production only). */
+export function baladyProdAllowed(env = process.env): boolean {
+  return (env.EJAR_BALADY_PROD ?? "").trim() === "1";
+}
+
 @Injectable()
 export class EjarClientService {
   private readonly logger = new Logger("Ejar");
@@ -126,9 +131,12 @@ export class EjarClientService {
     const clientId = process.env.EJAR_BALADY_CLIENT_ID?.trim();
     const clientSecret = process.env.EJAR_BALADY_CLIENT_SECRET?.trim();
     if (!baseUrl || !clientId || !clientSecret) return null;
-    if (/\/\/apiservices\.balady\.gov\.sa/i.test(baseUrl)) {
+    // The production gateway needs a second, explicit switch, so a staging box
+    // can never reach it by a mistyped base URL alone: production sets both
+    // EJAR_BALADY_BASE_URL and EJAR_BALADY_PROD=1 with its own credentials.
+    if (/\/\/apiservices\.balady\.gov\.sa/i.test(baseUrl) && !baladyProdAllowed()) {
       throw new EjarConfigError(
-        "EJAR_BALADY_BASE_URL points at the production Balady gateway. Prod needs separate credentials and is blocked here.",
+        "EJAR_BALADY_BASE_URL points at the production Balady gateway, which needs EJAR_BALADY_PROD=1 (production only, with its own credentials).",
       );
     }
     return { baseUrl: trimUrl(baseUrl), clientId, clientSecret };

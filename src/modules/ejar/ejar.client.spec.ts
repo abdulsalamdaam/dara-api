@@ -15,7 +15,7 @@ const tokenOk = (token = "tok-1") => json(200, { access_token: token, expires_in
 const ENV_KEYS = [
   "EJAR_BASE_URL", "EJAR_CLIENT_ID", "EJAR_CLIENT_SECRET",
   "EJAR_BALADY_BASE_URL", "EJAR_BALADY_CLIENT_ID", "EJAR_BALADY_CLIENT_SECRET",
-  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS", "EJAR_REPLAY",
+  "EJAR_ACCESS", "EJAR_ALLOWED_USER_IDS", "EJAR_REPLAY", "EJAR_BALADY_PROD",
 ];
 
 describe("EjarClientService gateways", () => {
@@ -160,7 +160,20 @@ describe("EjarClientService gateways", () => {
     await assert.rejects(client().request("rentalContractInvoices", { contractNumber: "10000000001" }), EjarConfigError);
     await assert.rejects(client().request("contractDetails", { uuid: "11111111-2222-4333-8444-555555555555" }), EjarConfigError);
     await assert.rejects(client().checkToken(), EjarConfigError);
+    process.env.EJAR_BALADY_PROD = "true";
+    await assert.rejects(client().checkToken(), EjarConfigError, "only the exact value 1 opens it");
     assert.equal(calls.length, 0);
+  });
+
+  it("reaches the production Balady gateway only with EJAR_BALADY_PROD=1, logged as balady-prod and never replayed", async () => {
+    setBalady("https://apiservices.balady.gov.sa/");
+    process.env.EJAR_BALADY_PROD = "1";
+    process.env.EJAR_REPLAY = "on";
+    replies.push(tokenOk(), baladyOk());
+    const { log } = await client().request("rentalContractInvoices", { contractNumber: "10000000001" });
+    assert.equal((log as { env: string }).env, "balady-prod");
+    assert.equal(calls[1].url, "https://apiservices.balady.gov.sa/v1/ejar-services/contracts/10000000001/invoices");
+    assert.match(String((calls[1].init.headers as Record<string, string>)["User-Agent"]), /dara-sa\.com/);
   });
 });
 
