@@ -637,7 +637,9 @@ export class EjarImportWriter {
         tenantPhone: str(tenant?.phone),
         tenantEmail: str(tenant?.email),
         tenantTaxNumber: str(tenant?.taxNumber),
-        companyUnified: str(tenantParty?.unifiedNumber),
+        // The tenant organization's unified (700) number as Ejar sent it; the
+        // party's `unifiedNumber` is its VAT number (it feeds tax_number).
+        companyUnified: str(tenantParty?.raw?.unified_number_ejar) || str(tenantParty?.unifiedNumber),
         companyOrgType: str(tenantParty?.organizationType),
         repName: str(tenantRep?.name),
         repIdNumber: str(tenantRep?.idNumber),
