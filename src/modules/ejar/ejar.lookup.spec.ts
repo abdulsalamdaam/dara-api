@@ -519,16 +519,38 @@ describe("access, scope and gateway guards", () => {
 });
 
 describe("matches, alreadyImported and required[]", () => {
-  it("never offers existing landlords/tenants, and flags an existing contract", async () => {
+  it("never offers existing landlords/tenants", async () => {
     w = dworld();
     w.store.owners.push({ id: 11, accountId: 1, name: "مؤجر محلي", idNumber: "1010000002" });
     w.store.tenants.push({ id: 21, accountId: 1, name: "مستأجر محلي", nationalId: "1010000001" });
     w.store.tenants.push({ id: 22, accountId: 2, name: "حساب آخر", nationalId: "1010000001" });
-    w.store.imported.set(`1:${CN}`, 99);
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.equal(res.matches.landlord, null, "existing landlords are never offered for linking");
     assert.equal(res.matches.tenant, null, "existing tenants are never offered for linking");
-    assert.deepEqual(res.alreadyImported, { contractId: 99 });
+    assert.equal(res.alreadyImported, null);
+  });
+
+  it("a contract already in the account (imported, or a manual one with this Ejar number) is refused before any Ejar call", async () => {
+    w = dworld();
+    w.store.imported.set(`1:${CN}`, 99);
+    const usedBefore = (await w.svc.customerBudget(1)).remaining;
+    await assert.rejects(w.svc.lookup(USER, { contract_number: CN }), (e: any) => {
+      assert.equal(e.getStatus(), 409);
+      const body = e.getResponse();
+      assert.equal(body.code, "contract_exists");
+      assert.equal(body.contractId, 99);
+      assert.match(body.message, /مسجّل مسبقاً برقم إيجار/);
+      assert.match(body.message, /already in your account/);
+      return true;
+    });
+    assert.equal(w.calls.length, 0, "nothing sent — not even a token request");
+    assert.equal(w.store.logs.length, 0, "no call logged, so nothing counts against the quota");
+    assert.equal((await w.svc.customerBudget(1)).remaining, usedBefore);
+    // Another account with the same number is not affected.
+    w.store.imported.clear();
+    w.store.imported.set(`2:${CN}`, 7);
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.equal(res.source, "ejar");
   });
 });
 
@@ -661,8 +683,10 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     for (const k of ["property.name", "property.propertyTypeId", "property.usageId", "property.city", "unit.unitNumber", "unit.unitTypeId", "unit.usageId"]) {
       assert.ok(!res.required.some((r) => r.key === k), k);
     }
-    assert.deepEqual(res.required.filter((r) => r.section === "property").map((r) => r.key),
-      ["property.district", "property.address", "property.deedNumber", "property.deedType"]);
+    // No district / address / deed in the import (owner's note, 27 Oct 2026).
+    assert.deepEqual(res.required.filter((r) => r.section === "property").map((r) => r.key), []);
+    // The unit's area is always offered with the property & unit, optional.
+    assert.deepEqual(res.required.filter((r) => r.section === "unit").map((r) => [r.key, r.required]), [["unit.area", false]]);
     assert.ok(!res.required.some((r) => r.key === "landlord.idNumber" || r.key === "tenant.idNumber"));
     assert.ok(!res.required.some((r) => r.key === "tenant.phone"), "Ejar gave the phone");
     // …and handed back as the inputs hold them.

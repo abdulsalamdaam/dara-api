@@ -174,6 +174,7 @@ import {
 import { rentVatFromUsage } from "../../common/usage-vat";
 import { bodyUnitIds, parseUnitIdsQuery, rentVatForUnits } from "../../common/landlord-vat"; // finance-v2: VC-1 — rent VAT needs taxable usage AND a VAT-registered landlord (R1)
 import { nextReceiptVoucherNumber } from "../../common/receipt-number";
+import { ejarNumberDuplicateMessage, ejarNumberKey, findContractByEjarNumber } from "../../common/ejar-contract-number";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -253,6 +254,28 @@ class ContractsController {
    * Drafts are unrestricted, on both sides: a draft occupies no unit and
    * generates no installments until it is finalised.
    */
+  /**
+   * The optional Ejar contract number may sit on one contract per account:
+   * a second manual contract — or an Ejar import, which refuses the number
+   * before calling Ejar — would duplicate a contract the account already has.
+   * Compared normalised (digits, no spaces / leading zeros); soft-deleted
+   * contracts do not count. An edit that keeps the contract's own number is
+   * not re-checked, so a duplicate stored before this rule never blocks it.
+   */
+  private async assertEjarNumberFree(ownerId: number, raw: unknown, excludeId: number | null, current?: string | null): Promise<void> {
+    const key = ejarNumberKey(raw);
+    if (!key || (current !== undefined && ejarNumberKey(current) === key)) return;
+    const clash = await findContractByEjarNumber(this.db, ownerId, key, { excludeId });
+    if (clash) {
+      throw new ConflictException({
+        code: "ejar_number_taken",
+        contractId: clash.contractId,
+        contractNumber: clash.contractNumber,
+        message: ejarNumberDuplicateMessage(String(raw).trim(), clash.contractNumber),
+      });
+    }
+  }
+
   private async assertNoOverlappingContract(
     db: any,
     unitIds: number[],
@@ -1103,6 +1126,7 @@ class ContractsController {
   @RequirePermissions(PERMISSIONS.CONTRACTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     const p = await this.prepareContract(user, body);
+    await this.assertEjarNumberFree(p.ownerId, p.values.ejarContractNumber, null);
     const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: resolved before the transaction (§1.2)
     const ownerId = p.ownerId;
 
@@ -1356,7 +1380,7 @@ class ContractsController {
     // Cheap refusals first, so a draft or an ended contract gets its own reason
     // instead of a validation error from a rule set that does not apply to it.
     const [head] = await this.db
-      .select({ id: contractsTable.id, isDraft: contractsTable.isDraft, status: contractsTable.status })
+      .select({ id: contractsTable.id, isDraft: contractsTable.isDraft, status: contractsTable.status, ejarContractNumber: contractsTable.ejarContractNumber })
       .from(contractsTable)
       .where(and(eq(contractsTable.id, id), eq(contractsTable.userId, ownerId), isNull(contractsTable.deletedAt)));
     if (!head) throw new NotFoundException("Contract not found");
@@ -1375,6 +1399,7 @@ class ContractsController {
     // never a draft — a draft is exempt from the identity formats, the period
     // check and the rent check, none of which a live contract may skip.
     const p = await this.prepareContract(user, { ...body, isDraft: false });
+    await this.assertEjarNumberFree(ownerId, p.values.ejarContractNumber, id, head.ejarContractNumber);
     if (p.values.externalSettlementMode === "skip") await this.fv2h?.guardExternalSkip(ownerId, id); // finance-v2: 0084 — refused when already in the ledger
 
     return this.db.transaction(async (tx) => {
@@ -1632,6 +1657,7 @@ class ContractsController {
     // `tenantId` is an integer FK; the sanitiser coerces and range-checks it
     // (and `null` still clears it) — `Number("abc")` used to reach the driver.
     sanitizeContractFields(updateData, willBeDraft, escalationType);
+    if (updateData.ejarContractNumber !== undefined) await this.assertEjarNumberFree(ownerId, updateData.ejarContractNumber, id, prior.ejarContractNumber);
     // finance-v2: VC-1 (R1) — a sent vatEnabled is re-derived from the contract's units, never trusted; an Ejar-imported contract keeps Ejar's verdict (its amounts are VAT-inclusive)
     if (updateData.vatEnabled !== undefined && !(prior as any).ejarSource) { // finance-v2: VC-1
       const vatUnitIds = (await this.db.select({ unitId: contractUnitsTable.unitId }).from(contractUnitsTable).where(eq(contractUnitsTable.contractId, id))).map((r) => r.unitId); // finance-v2: VC-1

@@ -19,12 +19,13 @@ import {
   partyIdentifiers, pickContractsResource,
   type LookupPrefill, type MappedLookup, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
-import type { EjarLookupStore, LinkedParty, LookupMatches, PartyKey, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
+import type { EjarLookupStore, ImportedContract, LinkedParty, LookupMatches, PartyKey, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
 import { rentBasis, rentFigures, type RentFigures } from "./ejar.rent";
 import { vatFromContractType } from "./ejar-rent-vat";
 import type { EjarBody, EjarEndpointKey } from "./ejar.types";
 import type { LookupParty } from "./ejar.lookup.map";
 import { EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, mapEjarValue } from "./ejar.import";
+import { ejarNumberTakenMessage } from "../../common/ejar-contract-number";
 
 export const EJAR_LOOKUP_STORE = Symbol("EJAR_LOOKUP_STORE");
 
@@ -47,6 +48,20 @@ export const PARTY_MISMATCH_MESSAGE: Record<EjarPartyRole, string> = {
   tenant:
     "هذا العقد لا يخصك — رقم السجل التجاري / الهوية في حسابك لا يطابق المستأجر في عقد إيجار · You are not the tenant on this Ejar contract.",
 };
+
+/**
+ * 409 `contract_exists`: the account already holds a contract with this Ejar
+ * number (imported, or typed on a manual contract). Sent before any Ejar call.
+ */
+export function contractExists(contractNumber: string, existing: ImportedContract) {
+  return new ConflictException({
+    code: "contract_exists",
+    contractId: existing.deleted ? null : existing.contractId,
+    contractNumber: existing.contractNumber ?? null,
+    ejarNumber: contractNumber,
+    message: ejarNumberTakenMessage(contractNumber, existing.contractNumber ?? null),
+  });
+}
 
 /** 409 `party_id_missing` when the account is pinned (عقاري / tenant) but its record carries no ID. */
 export function assertPartyIdOnFile(check: EjarPartyCheck): void {
@@ -266,6 +281,12 @@ export class EjarLookupService {
     const accountMode = await this.store.ejarAccountMode(accountId);
     const denial = ejarDenialFor(accountMode, user.id);
     if (denial) throw new ForbiddenException({ code: denial.code, message: denial.message });
+
+    // Already in the account — imported before, or a manual contract whose
+    // optional Ejar number is this one: refused here, before the cache, the
+    // budget lock and any Ejar call, so it costs nothing against the quota.
+    const existing = await this.store.findImported(accountId, contractNumber);
+    if (existing) throw contractExists(contractNumber, existing);
 
     // عقاري / tenant plan: pinned to the account's own stored landlord /
     // tenant ID (never a typed value). No ID on file → refused before any call.

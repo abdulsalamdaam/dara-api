@@ -111,9 +111,9 @@ describe("required[] asks only for what Ejar never sends", () => {
     const m = mapLookup(fixture("lookup-invoices-prod"), null, fixture("lookup-contracts-prod"), A);
     const req = computeRequired(m, { resolved });
     assert.deepEqual(req.filter((r) => r.required), []);
-    assert.deepEqual(req.filter((r) => r.section === "property").map((r) => r.key),
-      ["property.district", "property.address", "property.deedNumber", "property.deedType"]);
-    assert.deepEqual(req.filter((r) => r.section === "unit"), []);
+    // No district / address / deed; the unit's area is offered (optional).
+    assert.deepEqual(req.filter((r) => r.section === "property").map((r) => r.key), []);
+    assert.deepEqual(req.filter((r) => r.section === "unit").map((r) => [r.key, r.required]), [["unit.area", false]]);
     const phone = req.find((r) => r.key === "landlord.phone");
     assert.equal(phone?.required, false);
     assert.match(phone!.reason, /representative/);
@@ -211,5 +211,24 @@ describe("the lookup response carries the prefill; the import fills every record
     assert.equal(prop.overrides.cityLookupId, 6);
     assert.equal((plan.unit as { ejar: any }).ejar.overrides.usageLookupId, 7);
     assert.equal(plan.contract.vatFallback, false, "residential: exempt");
+  });
+  it("the unit area typed in the review lands on Ejar's unit; no address or deed is needed", async () => {
+    w = twoContractWorld();
+    await w.svc.lookup(USER, { contract_number: A });
+    const runner = new RecordingRunner();
+    await new EjarImportService(w.store, runner).import(USER, {
+      contract_number: A,
+      unit: { new: { area: "125.5" } },
+    });
+    const plan = runner.plans[0];
+    const unit = (plan.unit as { ejar: any }).ejar;
+    assert.deepEqual(unit.units.map((u: any) => [u.unitNumber, u.area]), [["SH-01", 125.5]]);
+    const prop = (plan.property as { create: any }).create;
+    assert.equal(prop.deed, null);
+    assert.equal(prop.p.street ?? null, null);
+    await assert.rejects(
+      new EjarImportService(w.store, new RecordingRunner()).import(USER, { contract_number: A, unit: { new: { area: "-3" } } }),
+      (e: any) => e.getResponse().key === "unit.area",
+    );
   });
 });

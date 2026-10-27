@@ -13,6 +13,10 @@ import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
 import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
 import { resolvePartyCheck, type EjarPartyCheck } from "./ejar.party-check";
 import { ejarLandlordCapPeek, type CapIdentity } from "./ejar.landlord-cap";
+import { findContractByEjarNumber } from "../../common/ejar-contract-number";
+
+/** An existing contract with the looked-up Ejar number (`contractNumber`: Dara's own number for it). */
+export interface ImportedContract { contractId: number; contractNumber?: string | null; deleted?: boolean }
 
 /**
  * Advisory-lock key serialising budget check + Ejar calls across every API
@@ -103,7 +107,11 @@ export interface EjarLookupStore {
   ejarAccountMode(accountId: number): Promise<EjarAccountMode>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
-  findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null>;
+  /**
+   * The account's contract already carrying this Ejar number — imported, or
+   * a manual contract whose optional Ejar number matches (normalised).
+   */
+  findImported(accountId: number, contractNumber: string): Promise<ImportedContract | null>;
   findMatches(accountId: number, keys: MatchKeys): Promise<LookupMatches>;
   landlord(accountId: number, id: number): Promise<PartyMatch | null>;
   tenant(accountId: number, id: number): Promise<PartyMatch | null>;
@@ -244,18 +252,12 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
     return saved as SavedLookup;
   }
 
-  async findImported(accountId: number, contractNumber: string): Promise<{ contractId: number } | null> {
-    // No deleted_at filter: (user_id, contract_number) is unique across
-    // soft-deleted rows too, so a deleted contract still blocks the insert.
-    const [row] = await this.db
-      .select({ id: contractsTable.id })
-      .from(contractsTable)
-      .where(and(
-        eq(contractsTable.userId, accountId),
-        or(eq(contractsTable.contractNumber, contractNumber), eq(contractsTable.ejarContractNumber, contractNumber)),
-      ))
-      .limit(1);
-    return row ? { contractId: row.id } : null;
+  async findImported(accountId: number, contractNumber: string): Promise<ImportedContract | null> {
+    // Soft-deleted rows included: (user_id, contract_number) is unique across
+    // them too, so a deleted contract still blocks the insert. A manual
+    // contract's typed Ejar number is compared normalised (ejar-contract-number.ts).
+    const row = await findContractByEjarNumber(this.db, accountId, contractNumber, { includeDeleted: true });
+    return row ? { contractId: row.contractId, contractNumber: row.contractNumber, deleted: row.deleted } : null;
   }
 
   async findMatches(accountId: number, keys: MatchKeys): Promise<LookupMatches> {

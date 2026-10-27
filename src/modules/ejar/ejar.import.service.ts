@@ -99,6 +99,16 @@ const idOf = (v: unknown): number | null => {
   return Number.isInteger(n) && n > 0 && n <= 2_147_483_647 ? n : null;
 };
 
+/** The unit area (m²) typed in the review: blank → null; otherwise a positive number that fits `units.area` (numeric 10,2). */
+export function areaOf(v: unknown): number | null {
+  if (blank(v)) return null;
+  const n = Number(String(v).trim().replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)));
+  if (!Number.isFinite(n) || n <= 0 || n >= 100_000_000) {
+    throw new BadRequestException({ code: "invalid_field", key: "unit.area", message: "مساحة الوحدة غير صالحة · unit.area must be a positive number" });
+  }
+  return Math.round(n * 100) / 100;
+}
+
 /** A phone in the canonical bare form the manual forms store, or as Ejar sent it. */
 function canonicalPhone(v: string | null): string | null {
   if (!v) return null;
@@ -405,11 +415,13 @@ export class EjarImportService {
         if (taken) linkIds.push(taken);
         else fresh.push(u);
       }
+      // The area typed in the review (one Ejar unit only) wins over Ejar's.
+      const typedArea = ejarUnits.length === 1 ? areaOf(uNew?.area) : null;
       unit = {
         ejar: {
           units: fresh.map((u) => ({
             ejarId: u.ejarId, unitNumber: u.unitNumber, unitType: u.unitType,
-            floor: u.floor, area: u.area, rooms: u.rooms, unitUsage: u.usage,
+            floor: u.floor, area: typedArea ?? u.area, rooms: u.rooms, unitUsage: u.usage,
           })),
           // Ejar's units[] entry verbatim — drives the unit's field locks.
           raw: Object.fromEntries(fresh.filter((u) => u.ejarId).map((u) => [u.ejarId!, { ...u.raw, id: u.ejarId, unit_number: u.unitNumber, unit_type: u.unitType }])),
@@ -424,7 +436,7 @@ export class EjarImportService {
     } else {
       unit = {
         create: {
-          u: { unitNumber: text(uNew!.unitNumber, "رقم الوحدة", LIMITS.code), floor: uNew!.floor, area: uNew!.area },
+          u: { unitNumber: text(uNew!.unitNumber, "رقم الوحدة", LIMITS.code), floor: uNew!.floor, area: areaOf(uNew!.area) },
           overrides: {
             typeLookupId: unitType?.id ?? null,
             typeOther: null,

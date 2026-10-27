@@ -721,9 +721,9 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
     need("property.propertyTypeId", !!(ejarProp && r?.propertyTypeId), `A property needs a type (as when added manually) — ${noProp}`);
     need("property.usageId", !!r?.usageId, "Usage decides whether rent carries VAT");
     need("property.city", !!r?.cityId, "A property needs a city (as when added manually)");
-    for (const k of ["district", "address", "deedNumber", "deedType"]) {
-      out.push({ key: `property.${k}`, section: "property", required: false, reason: "Ejar does not return it." });
-    }
+    // No district / address / deed: the account holder dropped them from the
+    // import (27 Oct 2026). The property is saved without them (a deed is
+    // only created when a number is sent) and can be completed later.
   }
   const ejarUnits = mapped.units.filter((u) => u.unitNumber);
   const matchedUnits = new Set(ctx.matches?.unitEjarIds ?? []);
@@ -742,7 +742,16 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
     if (!ejarUnits.length) {
       out.push({ key: "unit.usageId", section: "unit", required: false, reason: "Required only when the property's usage is mixed (سكني - تجاري)." });
       out.push({ key: "unit.floor", section: "unit", required: false, reason: "Ejar does not return it." });
-      out.push({ key: "unit.area", section: "unit", required: false, reason: "Ejar does not return it." });
+    }
+    // The unit's area (m²) is always offered with the property & unit — prefilled
+    // with Ejar's when it sent one. With several Ejar units there is no single
+    // unit to put it on, so it is not asked.
+    if (ejarUnits.length <= 1) {
+      const ejarArea = ejarUnits[0]?.area;
+      out.push({
+        key: "unit.area", section: "unit", required: false,
+        reason: ejarArea != null ? "From Ejar; a value here overrides it." : "Ejar does not return it.",
+      });
     }
   }
   // No contract.* keys: dates, schedule and deposit are Ejar's, and rent VAT

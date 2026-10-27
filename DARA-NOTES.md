@@ -222,9 +222,22 @@ The lookup response carries `prefill` — property name / type id / usage id /
 city id + Arabic label, the first unit's number / type / usage (Ejar's unit
 usage, else the property's) / floor / area / rooms, and each party's contact —
 and the web starts the draft from it, sending back only values the user
-changed. With Get Contracts the review asks only district, address and deed
-number/type (Ejar never sends them), a party's missing phone/email, and
-anything that did not resolve to an option. An **organization** party has no
+changed. With Get Contracts the review asks only a party's missing
+phone/email, anything that did not resolve to an option, and the unit's
+area (optional, prefilled from Ejar's when sent; one Ejar unit only — a typed
+value wins). **District, address and deed are not asked (owner, 27 Oct
+2026)**: the property is saved without them and no deed row is created
+unless a number is sent.
+**Already in the account → refused before Ejar (27 Oct 2026).** `POST
+/ejar/lookup` first checks the account's contracts (soft-deleted included,
+like the unique index) for this number — an imported one, or a manual
+contract whose optional `ejar_contract_number` matches after normalising
+(`common/ejar-contract-number.ts`: Latin digits, no spaces/dashes, no leading
+zeros) — and answers 409 `contract_exists` (`contractId`, `contractNumber`)
+before the cache, the budget lock and any call, so nothing is counted. The
+manual contract create / PATCH / rebuild refuses an Ejar number already on
+another live contract with 409 `ejar_number_taken` (an edit keeping its own
+number is not re-checked); the wizard warns as the number is typed. An **organization** party has no
 phone/email in `lessors[]`/`tenants[]`; its contact is its representative's
 (`partyContact`), offered prefilled and saved on the landlord/tenant record.
 The imported unit's `usage_lookup_id` is Ejar's unit usage, else the
