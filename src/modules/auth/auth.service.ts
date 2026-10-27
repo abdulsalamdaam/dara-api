@@ -1054,8 +1054,18 @@ export class AuthService {
    * filtered `deleted_at` here.
    */
   private async findTenantByLoginPhone(raw: string) {
+    const variants = phoneVariants(raw);
+    // The tenant's own phone, or — when the tenant has a representative
+    // (وكيل) — the representative's phone (`originalTenantPhone`): both may
+    // sign in to the app as this tenant.
     const [tenant] = await this.db.select().from(tenantsTable)
-      .where(and(inArray(tenantsTable.phone, phoneVariants(raw)), isNull(tenantsTable.deletedAt)))
+      .where(and(
+        or(
+          inArray(tenantsTable.phone, variants),
+          and(eq(tenantsTable.isRepresentative, true), inArray(tenantsTable.originalTenantPhone, variants)),
+        ),
+        isNull(tenantsTable.deletedAt),
+      ))
       .orderBy(desc(sql`${tenantsTable.status} = 'active'`), asc(tenantsTable.id))
       .limit(1);
     return tenant;
@@ -1139,18 +1149,20 @@ export class AuthService {
    * USER JWT (kind "user"), so landlords use the same phone+OTP experience.
    * Uses the same real-SMS path as the tenant flow (TWILIO_DEV_BYPASS aside). */
   /**
-   * Find an active owner (landlord, added via the web) whose EFFECTIVE login
-   * phone matches the given raw number. The effective login phone is:
-   *   isRepresentative === false → owners.phone
-   *   isRepresentative === true  → owners.originalOwnerPhone (the actual owner;
-   *                                the main phone then belongs to the agent/وكيل)
-   * Returns the single deterministically-chosen match, or undefined.
+   * Find an active owner (landlord, added via the web) one of whose login
+   * phones matches the given raw number:
+   *   owners.phone              — the landlord's own phone, always;
+   *   owners.originalOwnerPhone — the representative's (وكيل) phone, when
+   *                               isRepresentative is set.
+   * Both the landlord and the representative may sign in (owner note, Oct
+   * 2026; it used to be the representative only). Returns the single
+   * deterministically-chosen match, or undefined.
    */
   private async findOwnerByLoginPhone(raw: string) {
     const variants = phoneVariants(raw);
     const [owner] = await this.db.select().from(ownersTable).where(and(
       or(
-        and(eq(ownersTable.isRepresentative, false), inArray(ownersTable.phone, variants)),
+        inArray(ownersTable.phone, variants),
         and(eq(ownersTable.isRepresentative, true), inArray(ownersTable.originalOwnerPhone, variants)),
       ),
       eq(ownersTable.status, "active"),
@@ -1235,8 +1247,11 @@ export class AuthService {
           throw new UnauthorizedException("رمز التحقق غير صحيح");
         }
         await this.recordLogin(null, phone, "success", ctx.ip, ctx.ua, { ownerId: owner.id });
-        const effectiveEmail = owner.isRepresentative ? owner.originalOwnerEmail : owner.email;
-        const effectivePhone = owner.isRepresentative ? owner.originalOwnerPhone : owner.phone;
+        // Report the contact of whoever signed in: the representative when the
+        // number is theirs, else the landlord.
+        const viaRep = !!owner.isRepresentative && phoneVariants(raw).includes(owner.originalOwnerPhone ?? "");
+        const effectiveEmail = viaRep ? owner.originalOwnerEmail : owner.email;
+        const effectivePhone = viaRep ? owner.originalOwnerPhone : owner.phone;
         const token = this.signOwnerToken({ ownerId: owner.id, accountUserId: owner.userId });
         return { token, user: { id: owner.id, name: owner.name, email: effectiveEmail, phone: effectivePhone, role: "owner" } };
       }

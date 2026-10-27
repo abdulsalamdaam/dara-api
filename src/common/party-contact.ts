@@ -19,10 +19,10 @@
  * party's name when the representative has none on file).
  *
  * Push is NOT routed here. A push goes to the device token of whoever signed
- * in to the app as that party (`fcm_token` on the row) — for a landlord with a
- * representative that is already the representative, because the landlord
- * phone login matches `originalOwnerPhone`; a tenant signs in with the row's
- * own phone. A representative has no app identity of their own to push to.
+ * in to the app as that party (`fcm_token` on the row). Both the party and the
+ * representative can sign in with their own phone (auth.service
+ * findOwnerByLoginPhone / findTenantByLoginPhone), so the push reaches
+ * whichever of them last signed in on a device.
  */
 
 export interface PartyContactInput {
