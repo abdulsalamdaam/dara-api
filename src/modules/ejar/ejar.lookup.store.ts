@@ -9,6 +9,7 @@ import { resolveLookupId } from "../../common/lookups-resolve";
 import { resolveEjarScope, type EjarScope } from "./ejar.scope";
 import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
+import { readPool, type EjarPool } from "./ejar.pool";
 import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
 import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
 import { resolvePartyCheck, type EjarPartyCheck } from "./ejar.party-check";
@@ -94,6 +95,8 @@ export interface EjarLookupStore {
   withBudgetLock<T>(fn: () => Promise<T>): Promise<T>;
   /** Calls actually sent in the window (null = all time), and this account's share. */
   usage(since: Date | null, accountId: number): Promise<LookupUsage>;
+  /** The admin-set gateway call pool (ejar.pool.ts); null when none is configured. */
+  callPool(): Promise<EjarPool | null>;
   /** Invoices calls Ejar answered "no such contract" for this account since `since`. */
   wrongNumbers(since: Date, accountId: number): Promise<number>;
   scope(accountId: number): Promise<EjarScope>;
@@ -193,6 +196,10 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   usage(since: Date | null, accountId: number): Promise<LookupUsage> {
     return ejarLookupUsage(this.db, since, accountId);
+  }
+
+  callPool(): Promise<EjarPool | null> {
+    return readPool(this.db);
   }
 
   scope(accountId: number): Promise<EjarScope> {

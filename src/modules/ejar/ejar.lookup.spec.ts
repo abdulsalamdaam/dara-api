@@ -167,7 +167,7 @@ describe("POST /ejar/lookup — the two calls", () => {
     assert.equal(w.dataCalls().length, 1);
   });
 
-  it("the single token-refresh retry on 401 is counted in attempts", async () => {
+  it("the single token-refresh retry on 401 is logged in attempts but deducted once (success only)", async () => {
     w = dworld();
     let first = true;
     w.setRespond((url) => {
@@ -176,8 +176,41 @@ describe("POST /ejar/lookup — the two calls", () => {
     });
     const res = await w.svc.lookup(USER, { contract_number: CN });
     const inv = w.store.logs.find((l) => l.endpoint === "rentalContractInvoices")!;
-    assert.equal(inv.attempts, 2, "both sent requests are counted");
-    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 2, contracts: 0, details: 1 });
+    assert.equal(inv.attempts, 2, "both sent requests are logged");
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 0, details: 1 });
+  });
+
+  it("errors are never deducted: a 5xx leaves the allowance untouched", async () => {
+    w = dworld();
+    w.setRespond((url) => (url.endsWith("/invoices") ? fixtureOk() : baladyErr(500, "E500", "boom")));
+    await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(w.dataCalls().length, 2);
+    assert.deepEqual((await w.svc.budget(1)).used, { invoices: 1, contracts: 0, details: 0 }, "only the 200 counts");
+  });
+});
+
+describe("the admin call pool", () => {
+  it("an empty pool refuses the lookup before anything is sent", async () => {
+    w = dworld();
+    w.store.pool = { limit: 1 };
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 429);
+    assert.equal(body.code, "budget_exhausted");
+    assert.equal(w.dataCalls().length, 0);
+  });
+
+  it("only successful calls spend the pool", async () => {
+    w = dworld();
+    w.store.pool = { limit: 2 };
+    w.setRespond(() => baladyErr(503, "E503", "unavailable"));
+    await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.deepEqual(await w.store.callPool(), { limit: 2, used: 0 });
+    w.setRespond((url) => (url.endsWith("/invoices") ? fixtureOk() : detailsOk()));
+    await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(await w.store.callPool(), { limit: 2, used: 2 });
+    const before = w.dataCalls().length;
+    assert.equal((await httpError(w.svc.lookup(USER, { contract_number: CN, refresh: true }))).status, 429);
+    assert.equal(w.dataCalls().length, before, "spent pool: nothing sent");
   });
 });
 

@@ -18,6 +18,7 @@ import { computeEjarLocks, isLockEntity, type EjarLockEntity } from "./ejar.lock
 import { DrizzleEjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_LOOKUP_STORE, EjarLookupService } from "./ejar.lookup.service";
 import { EJAR_IMPORT_RUNNER, EjarImportRunner, EjarImportService } from "./ejar.import.service";
+import { AdminEjarUsageController } from "./ejar.admin-usage.controller";
 
 /**
  * Ejar integration — the credential-holding backend. Everything is READ-ONLY
@@ -253,7 +254,7 @@ export class EjarController {
 }
 
 @Module({
-  controllers: [EjarController],
+  controllers: [EjarController, AdminEjarUsageController],
   providers: [
     EjarClientService, EjarLogService, EjarPolicyService,
     { provide: EJAR_LOOKUP_STORE, useClass: DrizzleEjarLookupStore },

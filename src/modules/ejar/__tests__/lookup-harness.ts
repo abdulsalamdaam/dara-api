@@ -95,6 +95,10 @@ const isWrongNumber = (l: { endpoint: string; status: number | null; responseBod
   return l.status === 200 && Array.isArray(data) && data.length === 0;
 };
 
+/** Mirrors SUCCESS_SQL. */
+const isSuccess = (l: { endpoint: string; status: number | null; responseBody?: unknown }) =>
+  l.status != null && l.status >= 200 && l.status <= 299 && !isWrongNumber(l);
+
 export interface LogRow {
   id: number; userId: number | null; env: string; endpoint: string; attempts: number;
   status: number | null; createdAt: Date; [k: string]: unknown;
@@ -142,6 +146,16 @@ export class MemStore implements EjarLookupStore {
     return next;
   }
 
+  /** The admin-set gateway pool; null = none. Spent = successful Balady calls. */
+  pool: { limit: number; since?: Date } | null = null;
+
+  async callPool(): Promise<{ limit: number; used: number } | null> {
+    if (!this.pool) return null;
+    const since = this.pool.since;
+    const used = this.logs.filter((l) => l.env.startsWith("balady") && isSuccess(l) && (!since || l.createdAt >= since)).length;
+    return { limit: this.pool.limit, used };
+  }
+
   async wrongNumbers(since: Date, accountId: number): Promise<number> {
     return this.logs
       .filter((l) => l.env.startsWith("balady") && isWrongNumber(l) && l.createdAt >= since
@@ -150,10 +164,10 @@ export class MemStore implements EjarLookupStore {
   }
 
   async usage(since: Date | null, accountId: number): Promise<LookupUsage> {
-    const rows = this.logs.filter((l) => l.env.startsWith("balady") && !isWrongNumber(l) && (!since || l.createdAt >= since));
+    // Mirrors SUCCESS_SQL: only a 2xx that is not a wrong number is deducted, one per row.
+    const rows = this.logs.filter((l) => l.env.startsWith("balady") && isSuccess(l) && (!since || l.createdAt >= since));
     const sum = (endpoint: string, acct?: number) =>
-      rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct))
-        .reduce((s, l) => s + l.attempts, 0);
+      rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct)).length;
     return {
       invoices: sum("rentalContractInvoices"),
       contracts: sum("getRentalContracts"),

@@ -182,13 +182,21 @@ endpoint**: `EJAR_LOOKUP_LIMIT=50` (per `EJAR_LOOKUP_WINDOW` `day|month|total`,
 default month, Riyadh boundaries) means at most 50 Invoices + 50 Get Contracts
 + 50 Details calls; `remaining = limit − max(the three)`, min'd with the
 account's. Counted from what actually left the server — `ejar_api_logs` rows
-for those endpoints with a `balady*` env, summing `attempts` (blocked rows
-don't count). **Wrong numbers are free:** an Invoices call Ejar answered
+for those endpoints with a `balady*` env. **Only successful calls are deducted
+(28 Oct 2026, `SUCCESS_SQL`):** a 2xx that is not a wrong number, one per row —
+4xx/5xx, gateway 429s, network failures and the 401 a token refresh resends are
+free (logged, shown in Admin › Ejar usage, never taken off any allowance).
+**Call pool:** `app_settings.ejar_call_pool` `{ total, since }` = the calls Dara
+bought from the gateway (e.g. 500), set in Admin › Ejar usage (`PUT
+/admin/ejar-usage/pool`). Spent = successful Balady calls since `since`, any
+endpoint/account; under 2 left no lookup starts (429 `budget_exhausted`), the
+Details fallback needs 1. `total: null` = no pool. The 360 view is `GET
+/admin/ejar-usage` (+ `/calls`, `/calls/:id`), super-admin only. **Wrong numbers are free:** an Invoices call Ejar answered
 400/404 ("no such contract") is left out of the budget and counted only against
 `EJAR_LOOKUP_WRONG_NUMBERS_PER_DAY` (default 20 per account per Riyadh day;
 `off` removes it) — at the cap every lookup is refused for the day with 429
 `too_many_wrong_numbers` and nothing sent. A call with no HTTP status (network
-failure) stays counted (`coalesce(status, 0)`). A lookup starts only with a call of headroom on Invoices AND on
+failure) is not a wrong number (`coalesce(status, 0)`), but as an error it is free. A lookup starts only with a call of headroom on Invoices AND on
 the second call it will make (and under `EJAR_LOOKUP_LIMIT_PER_ACCOUNT`,
 optional; the account is the scope owner, so employees share it); otherwise
 429 `{code:"budget_exhausted"}` and nothing is sent. The Details fallback needs

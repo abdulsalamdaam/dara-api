@@ -6,6 +6,7 @@
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { isNull } from "drizzle-orm";
 import { db, getPool, usersTable, ejarApiLogsTable, propertiesTable, unitsTable } from "@dara/database";
 import { closeEjarLookupLockPool, DrizzleEjarLookupStore } from "./ejar.lookup.store";
 import { CN, UUID, PROPERTY_UUID, UNIT_UUID, invoicesFor, contractsFor } from "./__tests__/lookup-harness";
@@ -25,22 +26,23 @@ async function inRollback<T>(fn: (tx: typeof db) => Promise<T>): Promise<T> {
 describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "DATABASE_URL not set" }, () => {
   let userId = 0;
   before(async () => {
-    const [u] = await db.select({ id: usersTable.id }).from(usersTable).limit(1);
+    // An account owner: usage is counted per account (coalesce(owner_user_id, id)).
+    const [u] = await db.select({ id: usersTable.id }).from(usersTable).where(isNull(usersTable.ownerUserId)).limit(1);
     userId = u?.id ?? 0;
   });
   after(async () => { await closeEjarLookupLockPool(); await getPool().end(); });
 
-  it("counts attempts per endpoint on Balady envs only, and the account's share", async () => {
+  it("counts successful calls per endpoint on Balady envs only, and the account's share", async () => {
     const out = await inRollback(async (tx) => {
       const store = new DrizzleEjarLookupStore(tx as never);
       const row = (endpoint: string, env: string, attempts: number, uid: number | null = userId) =>
-        ({ userId: uid, env, endpoint, method: "GET", url: "x", attempts });
+        ({ userId: uid, env, endpoint, method: "GET", url: "x", attempts, status: 200 });
       await tx.insert(ejarApiLogsTable).values([
         row("rentalContractInvoices", "balady-stg", 1),
-        row("rentalContractInvoices", "balady-stg", 2, null),
+        row("rentalContractInvoices", "balady-stg", 2, null), // a 401 resend: still one deducted call
         row("getRentalContracts", "balady-stg", 1),
         row("contractDetails", "balady-stg", 1),
-        row("contractDetails", "blocked", 0),
+        { ...row("contractDetails", "blocked", 0), status: 403 },
         row("rentalContractInvoices", "uat", 5),
         row("getProperties", "balady-stg", 9),
         { ...row("rentalContractInvoices", "balady-stg", 1), status: 400 }, // a wrong number: free
@@ -50,6 +52,10 @@ describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "D
           responseBody: { statusDetails: { code: 200 }, data: { result: { data: [], meta: { count: 0 }, included: [] } } } },
         // a truncated body is stored as a string: it stays counted
         { ...row("rentalContractInvoices", "balady-stg", 1), status: 200, responseBody: "{\"data\": …[truncated]" },
+        // errors are free: a 5xx, a gateway 429 and a network failure (no status)
+        { ...row("rentalContractInvoices", "balady-stg", 1), status: 503 },
+        { ...row("getRentalContracts", "balady-stg", 1), status: 429 },
+        { ...row("contractDetails", "balady-stg", 1), status: null },
       ]);
       return {
         now: await store.usage(new Date(Date.now() - 60_000), userId),
@@ -58,7 +64,7 @@ describe("DrizzleEjarLookupStore (database, rolled back)", { skip: !HAS_DB && "D
       };
     });
     assert.equal(out.wrong, 3, "400, 404 and the empty 200 count against the daily cap only");
-    assert.equal(out.now.invoices, 4, "a system (null user) call and the truncated-body call count globally");
+    assert.equal(out.now.invoices, 3, "a system (null user) call and the truncated-body call count globally");
     assert.equal(out.now.contracts, 1);
     assert.equal(out.now.details, 1);
     assert.deepEqual(out.now.account, { invoices: 2, contracts: 1, details: 1 });

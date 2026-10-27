@@ -16,20 +16,29 @@ export const WRONG_NUMBER_SQL = sql`(l.endpoint = 'rentalContractInvoices' and (
   or (l.status = 200 and coalesce(l.response_body #> '{data,result,data}' = '[]'::jsonb, false))))`;
 
 /**
- * Ejar lookup calls actually sent since `since` (null = all time), per
- * endpoint, and this account's share — the count both the lookup budget and
+ * A call that is DEDUCTED: Ejar answered it with a 2xx and it was not a wrong
+ * number. Errors — 4xx, 5xx, gateway 429s, network failures (no status) and
+ * the 401 that a token refresh resends — are free: logged and shown to the
+ * admin (Admin › Ejar usage) but never taken off any allowance. One row = one
+ * deducted call; `attempts` (the 401 resend) is deliberately not summed.
+ */
+export const SUCCESS_SQL = sql`(l.status between 200 and 299 and not ${WRONG_NUMBER_SQL})`;
+
+/**
+ * Successful Ejar lookup calls since `since` (null = all time), per endpoint,
+ * and this account's share (SUCCESS_SQL — errors are never deducted) — the count both the lookup budget and
  * the account limits (common/limits.ts) read. `db` may be a transaction.
  */
 export async function ejarLookupUsage(db: Drizzle, since: Date | null, accountId: number): Promise<LookupUsage> {
   const res: any = await db.execute(sql`
     select l.endpoint,
-           coalesce(sum(l.attempts), 0)::int as total,
-           coalesce(sum(l.attempts) filter (where coalesce(u.owner_user_id, u.id) = ${accountId}), 0)::int as account
+           count(*)::int as total,
+           (count(*) filter (where coalesce(u.owner_user_id, u.id) = ${accountId}))::int as account
       from ejar_api_logs l
       left join users u on u.id = l.user_id
      where l.endpoint in (${sql.join(LOOKUP_ENDPOINTS.map((e) => sql`${e}`), sql`, `)})
        and l.env like 'balady%'
-       and not ${WRONG_NUMBER_SQL}
+       and ${SUCCESS_SQL}
        and (${since ? since.toISOString() : null}::timestamptz is null or l.created_at >= ${since ? since.toISOString() : null}::timestamptz)
      group by l.endpoint`);
   const rows: Array<{ endpoint: string; total: number; account: number }> = Array.isArray(res) ? res : res?.rows ?? [];

@@ -21,6 +21,7 @@ import {
 } from "./ejar.lookup.map";
 import type { EjarLookupStore, ImportedContract, LinkedParty, LookupMatches, PartyKey, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
 import { rentBasis, rentFigures, type RentFigures } from "./ejar.rent";
+import { poolLeft } from "./ejar.pool";
 import { vatFromContractType } from "./ejar-rent-vat";
 import type { EjarBody, EjarEndpointKey } from "./ejar.types";
 import type { LookupParty } from "./ejar.lookup.map";
@@ -236,6 +237,7 @@ type Outcome =
   | { kind: "exhausted"; budget: EjarBudget }
   | { kind: "not_found"; logs: unknown[] }
   | { kind: "details_unavailable"; logs: unknown[] }
+  | { kind: "pool_exhausted" }
   | { kind: "wrong_number_cap" }
   | { kind: "scope_mismatch"; logs: unknown[] }
   | { kind: "party_mismatch"; logs: unknown[] }
@@ -348,8 +350,11 @@ export class EjarLookupService {
 
     const { start } = windowBounds(cfg.window);
     const outcome = await this.store.withBudgetLock<Outcome>(async () => {
-      const [usage, plan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
+      const [usage, plan, pool] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId), this.store.callPool()]);
       if (!canLookup(cfg, usage, plan)) return { kind: "exhausted", budget: computeBudget(cfg, usage, new Date(), plan) };
+      // Dara's purchased gateway calls (Admin › Ejar usage): room for
+      // Invoices + the second call, or nothing is sent.
+      if (poolLeft(pool) < 2) return { kind: "pool_exhausted" };
       if (cfg.wrongNumbersPerDay != null) {
         const { start: today } = windowBounds("day");
         if ((await this.store.wrongNumbers(today!, accountId)) >= cfg.wrongNumbersPerDay) return { kind: "wrong_number_cap" };
@@ -389,8 +394,8 @@ export class EjarLookupService {
           // Not in the list (a renewed contract's entry carries the older
           // version's id). Fall back to Details — a third call, so it needs
           // its own headroom; without it, stop rather than overspend.
-          const [now, nowPlan] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId)]);
-          if (!hasHeadroom(cfg, now, "details", nowPlan)) return { kind: "details_unavailable", logs };
+          const [now, nowPlan, nowPool] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId), this.store.callPool()]);
+          if (!hasHeadroom(cfg, now, "details", nowPlan) || poolLeft(nowPool) < 1) return { kind: "details_unavailable", logs };
           needDetails = true;
         }
       }
@@ -446,6 +451,19 @@ export class EjarLookupService {
             // Only what is left (0 here): a customer is never told the allowance or its use.
             budget: toCustomerBudget(outcome.budget),
             // Ejar packs are granted by the admin only — the web says "contact us".
+            addonAvailable: false,
+            contactAdmin: true,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      case "pool_exhausted":
+        // Dara's own gateway pool is empty — not the customer's allowance, so
+        // no limit_reached event; the admin sees it in Ejar usage.
+        throw new HttpException(
+          {
+            code: "budget_exhausted",
+            message: EJAR_BUDGET_EXHAUSTED_MESSAGE,
+            budget: { enabled: true, available: false, remaining: 0 },
             addonAvailable: false,
             contactAdmin: true,
           },
