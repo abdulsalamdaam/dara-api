@@ -247,10 +247,10 @@ export class EjarLookupService {
     if (!refresh) {
       const saved = await this.store.getLookup(accountId, contractNumber);
       if (saved && Date.now() - new Date(saved.createdAt).getTime() < cfg.cacheHours * 3_600_000) {
+        if (!partyCheckPasses(check, mapSaved(saved))) throw partyMismatch(check);
         if (scope.locked && !allPartyIdentifiers(mapSaved(saved).parties).includes(scope.idNumber!)) {
           throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
         }
-        if (!partyCheckPasses(check, mapSaved(saved))) throw partyMismatch(check);
         return this.respond(accountId, saved, "cache", [], cfg, crInfo);
       }
     }
@@ -312,13 +312,14 @@ export class EjarLookupService {
       // A locked (tenant-package) account may only see a contract it is a
       // party to. Checked before anything is saved or returned.
       const fresh = mapLookup(inv.body, detailsBody, contractsBody, contractNumber);
+      // The account's own landlord / tenant ID must be on that side of the
+      // contract. The calls are spent (and counted) either way; a mismatch
+      // saves nothing. (First, so a tenant account gets the tenant-side
+      // answer; the broader scope rule below still stands behind it.)
+      if (!partyCheckPasses(check, fresh)) return { kind: "party_mismatch", logs };
       if (scope.locked && !allPartyIdentifiers(fresh.parties).includes(scope.idNumber!)) {
         return { kind: "scope_mismatch", logs };
       }
-      // The account's own landlord / tenant ID must be on that side of the
-      // contract. The calls are spent (and counted) either way; a mismatch
-      // saves nothing.
-      if (!partyCheckPasses(check, fresh)) return { kind: "party_mismatch", logs };
 
       const saved = await this.store.saveLookup({
         accountId, contractNumber, ejarUuid: uuid,

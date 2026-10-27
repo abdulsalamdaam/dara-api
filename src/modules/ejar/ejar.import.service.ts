@@ -166,15 +166,15 @@ export class EjarImportService {
 
     const mapped = mapSaved(saved);
     const scope = await this.store.scope(accountId);
-    if (scope.locked && !allPartyIdentifiers(mapped.parties).includes(scope.idNumber!)) {
-      throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
-    }
     // The pin, as at the inquiry (عقاري: the account's landlord; tenant plan:
     // the account itself), re-checked against the stored record — the
     // landlord may have been edited since the lookup was saved.
     const check = await this.store.partyCheck(accountId);
     assertPartyIdOnFile(check);
     if (!partyCheckPasses(check, mapped)) throw partyMismatch(check);
+    if (scope.locked && !allPartyIdentifiers(mapped.parties).includes(scope.idNumber!)) {
+      throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
+    }
 
     // ── Picked records must be the caller's own ──
     const notInAccount = (key: string) =>
