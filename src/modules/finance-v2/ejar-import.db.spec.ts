@@ -2,7 +2,8 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "./__tests__/with-db";
 import { enableV2, legacyEnv, seedAccount, userOf, type LegacyEnv, type Seed } from "./__tests__/legacy-env";
-import { EjarController } from "../ejar/ejar.module";
+import { EjarImportRunner } from "../ejar/ejar.import.service";
+import type { ImportPlan } from "../ejar/ejar.import.writer";
 import { paymentsListV2 } from "./overrides/payments-list";
 import { contractSummaryV2, dashboardV2 } from "./overrides/reads";
 import { ArAgingService } from "./reports/aging.service";
@@ -19,8 +20,9 @@ import { withTx } from "./db";
 /**
  * The Ejar import, end to end, on the REAL legacy controllers (FINANCE-V2-FIX-LIST
  * items 1, 2, 3; test plan FR-2 and §8 issues 11a, 11b, 11c, 11f, 11g, 11h, 11i).
- * `POST /ejar/import` never calls Ejar: it takes the already-mapped preview
- * from the body, so these bodies are fully synthetic (public repo).
+ * Since Ejar import v2 (11bb45d) `POST /ejar/import` builds its plan from a
+ * saved lookup; these tests hand the REAL runner + writer (the finance-v2
+ * attach) a fully synthetic plan instead (public repo).
  *
  *  - ON:  Finance v2 on (manager mode, ledger started), recognizer + worker run
  *         as of 2026-09-30;
@@ -29,30 +31,32 @@ import { withTx } from "./db";
 const U_ON = 5301;
 const U_OFF = 5302;
 const TODAY = "2026-09-30";
-const refuse = new Proxy({}, { get: () => () => { throw new Error("ejar spec: NHC must not be reached"); } });
 
 const months = ["2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01", "2026-12-01",
   "2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01", "2027-05-01", "2027-06-01"];
 
 function body(num: string, o: {
   lessorId: string; usage: string; invoices: Array<Record<string, unknown>>; fees?: Array<Record<string, unknown>>; deposit?: string;
-}) {
+}): ImportPlan {
+  const tenantId = `19${num.replace(/\D/g, "").padStart(8, "0")}`;
+  const party = (group: "lessor" | "tenant", name: string, idNumber: string) => ({
+    group, role: group, isRepresentative: false, name, partyType: "individual", idType: "national_id", idNumber,
+    phone: group === "tenant" ? "500000000" : null, email: group === "tenant" ? "ejar-tenant@example.test" : null,
+    unifiedNumber: null, registrationNumber: null, organizationType: null, vat: null, nationality: null, raw: { role: group, name },
+  });
   return {
+    contractNumber: num,
+    landlord: { party: party("lessor", "Synthetic Ejar Lessor", o.lessorId), rep: null },
+    tenant: { party: party("tenant", "Synthetic Ejar Tenant", tenantId), rep: null },
+    property: { create: { p: { ejarId: `prop-${num}`, name: `Synthetic Ejar Property ${num}`, propertyUsage: o.usage }, overrides: {}, deed: null } },
+    unit: { ejar: { units: [{ ejarId: `unit-${num}`, unitNumber: "EJ-1", unitUsage: o.usage }], raw: {}, overrides: { status: "rented" }, linkIds: [] } },
     contract: {
-      ejarContractNumber: num, status: "active", startDate: "2026-07-01", endDate: "2027-06-30", paymentFrequency: "monthly", monthlyRent: "3000",
-      tenantType: "individual", tenantName: "Synthetic Ejar Tenant", tenantIdNumber: `19${num.replace(/\D/g, "").padStart(8, "0")}`,
-      tenantPhone: "500000000", tenantEmail: "ejar-tenant@example.test",
-      landlordName: "Synthetic Ejar Lessor", landlordIdNumber: o.lessorId, depositAmount: o.deposit ?? "3000",
-      customSchedule: months.map((d) => ({ dueDate: d, amount: "3000" })),
+      startDate: "2026-07-01", endDate: "2027-06-30", status: "active", signingDate: null, monthlyRent: "3000",
+      customSchedule: months.map((d) => ({ dueDate: d, amount: "3000" })), frequencyHint: "monthly",
+      depositAmount: o.deposit ?? "3000", vatFallback: false, notes: null, ejarRaw: null,
     },
-    property: { ejarId: `prop-${num}`, name: `Synthetic Ejar Property ${num}`, propertyUsage: o.usage },
-    units: [{ ejarId: `unit-${num}`, unitNumber: "EJ-1" }],
-    parties: {
-      lessors: [{ name: "Synthetic Ejar Lessor", idNumber: o.lessorId, isRepresentative: false }],
-      tenants: [{ name: "Synthetic Ejar Tenant", idNumber: `19${num.replace(/\D/g, "").padStart(8, "0")}`, isRepresentative: false }],
-    },
-    invoices: o.invoices,
     additionalFees: o.fees ?? [],
+    invoices: o.invoices as never,
   };
 }
 
@@ -60,7 +64,7 @@ const inv = (number: string | null, dueDate: string, status: string, remaining: 
   ({ id: `${number ?? "x"}-${dueDate}`, number, dueDate, issueDate: dueDate.replace(/-01$/, "-25").replace(/^(\d{4})-(\d{2})/, (_, y, m) => {
     const mm = Number(m) === 1 ? 12 : Number(m) - 1;
     return `${Number(m) === 1 ? Number(y) - 1 : y}-${String(mm).padStart(2, "0")}`;
-  }), lateDate: null, amount, remaining, status });
+  }), lateDate: null, amount, remaining, status, scheduleNumber: null });
 
 async function setup(env: LegacyEnv, user: number): Promise<{ seed: Seed; ejar: any }> {
   const seed = await seedAccount(env, user);
@@ -68,8 +72,10 @@ async function setup(env: LegacyEnv, user: number): Promise<{ seed: Seed; ejar: 
     const [x] = await env.q(`select 1 from lookups where category = 'property_usage' and key = $1`, [key]);
     if (!x) await env.q(`insert into lookups (category, key, label_ar, label_en) values ('property_usage', $1, $2, $1)`, [key, ar]);
   }
-  const ejar = new (EjarController as any)(env.db, refuse, refuse, refuse);
-  ejar.fv2h = env.hooks;
+  const runner = new EjarImportRunner(env.db as never);
+  (runner as any).fv2h = env.hooks;
+  // The runner returns `contractId`; the assertions below read `id`.
+  const ejar = { import: async (u: { id: number }, plan: ImportPlan) => ({ id: (await runner.run(u.id, plan)).contractId }) };
   return { seed, ejar };
 }
 

@@ -159,14 +159,16 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const acc: any = await on.reports.accounting(user);
     const arrears = acc.tenantOverdue.reduce((a: number, r: any) => a + r.amount, 0);
     assert.equal(Math.round(arrears * 100), Math.round(all.stats.overdue * 100), "list-stats overdue = arrears report total");
-    const dash: any = await on.dashboard.summary(user);
+    // The dashboard's money needs payments.view since 3f5546a (RBAC, 18 Oct 2026); `user` has no permissions.
+    const dash: any = await on.dashboard.summary(approver);
     assert.equal(Math.round(dash.overdueAmount * 100), Math.round(all.stats.overdue * 100), "dashboard = list");
   });
 
   // ── E2 ───────────────────────────────────────────────────────────────────
   it("E2: the v2 dashboard counts collections this Riyadh month (legacy counts only rows stored paid)", async () => {
-    const legacy: any = await bare.dashboard.summary(user);
-    const v2: any = await on.dashboard.summary(user);
+    // The dashboard's money needs payments.view since 3f5546a (RBAC, 18 Oct 2026); `user` has no permissions.
+    const legacy: any = await bare.dashboard.summary(approver);
+    const v2: any = await on.dashboard.summary(approver);
     const [thisMonth] = await on.q(
       `select coalesce(sum(pc.amount), 0)::numeric as s from payment_collections pc left join payments p on p.id = pc.payment_id
         where pc.user_id = $1 and to_char(pc.collected_date,'YYYY-MM') = $2 and (p.id is null or coalesce(p.description,'') <> 'تأمين (وديعة)')`,
@@ -221,8 +223,13 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     const held: any = await attempt(() => on.billing.approve(user, String(v2.commission.id), {}));
     assert.equal(held.status, 409, "the commission tax invoice is held until the office is linked");
     // E36 only needs a confirmed COM: the draft is made a non-tax document by hand (what a non-registered office drafts).
+    // Since 70e7e01 (accountant round 4) a registered office may not approve a VAT-less commission, so the office is
+    // unregistered for that approval (as backfill.db.spec, 0f5b99b) and registered again afterwards.
+    const [holder] = await on.q(`select id, tax_number from owners where user_id = $1 and is_account_holder`, [U]);
+    await on.q(`update owners set tax_number = null where id = $1`, [holder.id]);
     await on.q(`update simple_invoices set total = subtotal, items = jsonb_build_array(items->0 || '{"vat":false,"vatCategory":"O"}'::jsonb) where id = $1`, [v2.commission.id]);
     await on.billing.approve(user, String(v2.commission.id), {});
+    await on.q(`update owners set tax_number = $2 where id = $1`, [holder.id, holder.tax_number]);
     const crn: any = await on.billing.create(user, {
       type: "credit", billingReference: v2.number, issueDate: today,
       items: [{ description: "خصم", quantity: 1, unitPrice: 1000, amount: 1000, vat: true }], total: 1150,
@@ -305,7 +312,11 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
   });
 
   // ── E8 ───────────────────────────────────────────────────────────────────
-  it("E8: a contract with an agency fee gets one AGF draft of 2,500 (not a tax invoice: the account is not ZATCA-linked) under v2; approving posts Dr 1121 2,500 / Cr 4220 2,500", async () => {
+  it("E8: a contract with an agency fee gets one AGF draft of 2,500 (not a tax invoice: the office is not VAT-registered) under v2; approving posts Dr 1121 2,500 / Cr 4220 2,500", async () => {
+    // R4 (0b8a097, 26 Oct 2026): the agency fee carries 15% iff the office is VAT-registered, held while unlinked.
+    // The no-VAT path below runs with the office unregistered; the registered (held) path is checked at the end.
+    const [holder] = await on.q(`select id, tax_number from owners where user_id = $1 and is_account_holder`, [U]);
+    await on.q(`update owners set tax_number = null where id = $1`, [holder.id]);
     const mk = async (env: LegacyEnv, f: Fx) => {
       await env.q(`insert into units (property_id, unit_number) values ($1, 'A9')`, [f.s.propA]);
       const [u] = await env.q(`select id from units where unit_number = 'A9' and property_id = $1`, [f.s.propA]);
@@ -350,6 +361,18 @@ describe("fv2 §9 bug decisions on the real legacy routes (real Postgres)", { sk
     assert.equal((await on.q(`select count(*)::int as n from audit_logs where owner_user_id = $1 and entity = 'finance_v2_agency_fee' and entity_id = $2`, [U, String(fresh.id)]))[0].n, 1);
     await on.q(`update simple_invoices set deleted_at = now() where id = $1`, [fresh.id]);
     await on.q(`update simple_invoices set deleted_at = null where id = $1`, [docs[0].id]);
+
+    // R4, registered office not linked to ZATCA: a 15% AGF draft (2,500 + 375) whose approval is held.
+    await on.q(`update owners set tax_number = $2 where id = $1`, [holder.id, holder.tax_number]);
+    const [u2] = await on.q(`insert into units (property_id, unit_number) values ($1, 'A10') returning id`, [fOn.s.propA]);
+    const c2: any = await on.contracts.create(user, {
+      unitIds: [u2.id], tenantId: fOn.s.tenant, tenantName: "Synthetic Tenant", startDate: firstOf(1), endDate: lastOf(12),
+      monthlyRent: "1000", paymentFrequency: "monthly", vatEnabled: false, agencyFee: "2500",
+    });
+    const [reg] = await on.q(`select id, status::text as status, subtotal::text as subtotal, total::text as total from simple_invoices where contract_id = $1 and kind = 'agency_fee'`, [c2.id]);
+    assert.deepEqual([reg.status, reg.subtotal, reg.total], ["draft", "2500.00", "2875.00"]);
+    const held: any = await attempt(() => on.billing.approve(user, String(reg.id), {}));
+    assert.deepEqual([held.status, held.body?.code], [409, "OFFICE_NOT_LINKED"]);
   });
 
   // ── E7 ───────────────────────────────────────────────────────────────────
