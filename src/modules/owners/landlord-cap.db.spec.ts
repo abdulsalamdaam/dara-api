@@ -161,8 +161,8 @@ describe("landlord cap — every owners-writing path", { skip: fv2DbSkip }, () =
     assert.equal(p.plan.maxLandlords, 1);
     assert.equal(p.usage.landlords, 1);
     assert.deepEqual(p.limits.users, { used: 2, limit: 2, canAdd: false, over: false, base: 2, override: null, addons: 0, effective: 2, remaining: 0, resetsAt: null });
-    // basic, unknown cycle → monthly → floor(90 / 12) = 7 Ejar lookups for the period.
-    assert.deepEqual(p.limits.ejarLookups, { used: 0, limit: 7, canAdd: true, over: false, base: 7, override: null, addons: 0, effective: 7, remaining: 7, resetsAt: null });
+    // 013d0fb: customers never see Ejar lookup counts — /me/package carries { available } only.
+    assert.deepEqual(p.limits.ejarLookups, { available: true });
     assert.equal(p.ejarEnabled, true);
     const pro = await pkg.myPackage(userOf(PRO));
     assert.equal(pro.limits.landlords.limit, null);
