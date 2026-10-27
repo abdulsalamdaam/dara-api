@@ -33,18 +33,22 @@ export function assertNationalAddress(body: any): void {
 }
 
 /**
- * Tenant variant (business-owner note #7). The full address is required only
- * where ZATCA needs a buyer address — a company tenant or a VAT-registered one
- * (`taxNumber` set): their invoices are STANDARD (B2B). An individual without
- * VAT gets a simplified invoice that carries no buyer address, so the address
- * is optional there: empty or partial is accepted, but a postal code that is
- * given must still be 5 digits. Mirrors the web's `validateNationalAddress`
- * with `required: company || vatRegistered`. Landlords keep the full rule.
+ * The rule the landlord and tenant forms enforce (owner test note, Oct 2026:
+ * "address based on VAT"). The full address is required only when the party
+ * has a VAT number (`taxNumber`): that is what makes its invoices STANDARD
+ * (B2B), and ZATCA needs a full buyer/seller address on those. Without a VAT
+ * number the address is optional: empty or partial is accepted, but a postal
+ * code that is given must still be 5 digits. Drafts are exempt.
+ *
+ * This only governs saving the record. Issuing an invoice is still gated by
+ * `invoice-readiness.ts`, which asks for whatever that document needs (e.g. a
+ * company buyer must carry a VAT number and a full address) at that point.
+ * Mirrors the web's `validateNationalAddress` with `required: vatRegistered`.
  */
-export function assertTenantNationalAddress(body: any): void {
+export function assertPartyNationalAddress(body: any): void {
   if (body?.isDraft) return;
   const hasVat = body?.taxNumber != null && String(body.taxNumber).trim() !== "";
-  if (body?.type === "company" || hasVat) {
+  if (hasVat) {
     assertNationalAddress(body);
     return;
   }
@@ -52,4 +56,22 @@ export function assertTenantNationalAddress(body: any): void {
   if (pc && !/^\d{5}$/.test(pc)) {
     throw new BadRequestException("الرمز البريدي يجب أن يكون 5 أرقام · Postal code must be 5 digits");
   }
+}
+
+/** The keys whose change on a finalized record re-runs `assertPartyNationalAddress`. */
+export const PARTY_ADDRESS_KEYS = [
+  "taxNumber", "buildingNumber", "nationalAddressStreet", "nationalAddressDistrict",
+  "nationalAddressCity", "postalCode", "additionalNumber",
+] as const;
+
+/**
+ * A PATCH to an already-finalized landlord/tenant that touches the VAT number
+ * or the address is checked against the merged row — so adding a VAT number
+ * to a record without an address (or clearing the address of a VAT-registered
+ * one) is refused, while an unrelated edit (a phone change) on a legacy row is
+ * not. Draft rows and draft→final transitions are handled by the callers.
+ */
+export function assertPartyNationalAddressOnPatch(prior: Record<string, any>, updateData: Record<string, unknown>): void {
+  if (!PARTY_ADDRESS_KEYS.some((k) => k in updateData)) return;
+  assertPartyNationalAddress({ ...prior, ...updateData, isDraft: false });
 }
