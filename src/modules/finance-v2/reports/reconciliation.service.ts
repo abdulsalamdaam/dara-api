@@ -406,6 +406,7 @@ export class ReconciliationService {
               exists (select 1 from finance_deposit_refunds r where r.user_id = v.user_id and v.id = any(r.voucher_ids)) as v2_refund,
               coalesce(dm.bank_account_id, (select l.bank_account_id from journal_entries e join journal_lines l on l.entry_id = e.id and l.user_id = e.user_id
                  where e.user_id = v.user_id and e.source_type = 'simple_invoice' and e.source_id = v.id and e.status = 'posted'
+                   and e.payload->>'rule' = 'E09' -- the receipt, not the later E10 refund off the same voucher (which may use another account)
                    and e.origin <> 'reversal' and l.bank_account_id is not null order by e.id desc limit 1)) as bank_account_id -- as for collections above
          from simple_invoices v left join contracts c on c.id = v.contract_id and c.user_id = v.user_id
          left join finance_document_meta dm on dm.document_id = v.id and dm.user_id = v.user_id

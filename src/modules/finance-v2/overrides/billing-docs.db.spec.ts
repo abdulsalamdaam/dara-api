@@ -239,7 +239,7 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
     assert.ok(e.lines.every((l: any) => l.owner_id === sM.agent), "on the landlord's sub-ledger");
   });
 
-  it("linked account: a VAT-bearing agency fee is refused (pinned); unlinked account: the AGF prints without VAT and approves with no 2151", async () => {
+  it("linked account: a VAT-bearing agency fee approves and books its 2151; registered but unlinked account: the 15% AGF is held as a draft", async () => {
     const mk = async (u: number, s: Seed, unit: number) => {
       const c: any = await env.contracts.create(userFor(u), {
         unitIds: [unit], tenantId: s.tenant, tenantName: "Synthetic Tenant", startDate: firstOf(1), endDate: lastOf(12),
@@ -250,18 +250,24 @@ describe("fv2 billing documents: seller, revenue account and VAT category (real 
     };
     const linked = await mk(M, sM, sM.unitA2);
     assert.deepEqual([linked.subtotal, linked.total], ["2500.00", "2875.00"]);
-    const r: any = await attempt(() => env.billing.approve(userFor(M), String(linked.id), {}));
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error, "FINANCE_V2_TAX_DOC_NOT_REPORTABLE");
+    // 0b8a097 (R4): a registered + linked office's VAT-bearing AGF approves and is reported under the office seller.
+    const r: any = await env.billing.approve(userFor(M), String(linked.id), {});
+    assert.equal(r.status, "confirmed");
+    await drain(env, M);
+    const el = await entry(env, M, "simple_invoice", linked.id, "confirmed");
+    assert.deepEqual(codes(el.lines), [["1121", "2875.00", "0.00"], ["4220", "0.00", "2500.00"], ["2151", "0.00", "375.00"]]);
 
+    // 0b8a097 (R4): VAT follows the office's registration, linked or not — N's office is registered, so its AGF is 15% and held until linked.
     const unlinked = await mk(N, sN, sN.unitA2);
-    assert.deepEqual([unlinked.subtotal, unlinked.total, unlinked.items[0].vatCategory], ["2500.00", "2500.00", "O"], "not a tax invoice: no VAT");
-    const ok: any = await env.billing.approve(userFor(N), String(unlinked.id), {});
-    assert.equal(ok.status, "confirmed");
+    assert.deepEqual([unlinked.subtotal, unlinked.total, unlinked.items[0].vatCategory], ["2500.00", "2875.00", "S"]);
+    const held: any = await attempt(() => env.billing.approve(userFor(N), String(unlinked.id), {}));
+    assert.equal(held.status, 409);
+    assert.deepEqual([held.body.error, held.body.code, held.body.linked], ["FINANCE_V2_TAX_DOC_NOT_REPORTABLE", "OFFICE_NOT_LINKED", false]);
+    const [st] = await env.q(`select status::text as status from simple_invoices where id = $1`, [unlinked.id]);
+    assert.equal(st.status, "draft");
     await drain(env, N);
     const e = await entry(env, N, "simple_invoice", unlinked.id, "confirmed");
-    assert.deepEqual(codes(e.lines), [["1121", "2500.00", "0.00"], ["4220", "0.00", "2500.00"]]);
-    assert.equal(e.lines[1].vat_category, "O");
+    assert.equal(e.lines.length, 0, "nothing booked while held");
   });
 
   it("unlinked account: an AGF drafted with VAT (before this rule) is refused, naming the missing link", async () => {
