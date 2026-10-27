@@ -9,7 +9,8 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { assertTenantNationalAddress } from "../../common/national-address";
+import { assertPartyNationalAddress, assertPartyNationalAddressOnPatch } from "../../common/national-address";
+import { resolveTenantContact } from "../../common/party-contact";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
@@ -244,7 +245,7 @@ class TenantsController {
   @RequirePermissions(PERMISSIONS.TENANTS_WRITE)
   async create(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
-    assertTenantNationalAddress(body); // full address only for a company / VAT-registered tenant
+    assertPartyNationalAddress(body); // full address only when a VAT number is given
     assertCompanyCommercialReg(body);
     // "This tenant is my own account" — claimable once, on create only, while
     // the account has no such record. See owners.create for the reasoning.
@@ -288,14 +289,16 @@ class TenantsController {
     const [tenant] = await this.db.insert(tenantsTable).values(values as any).returning();
     // Optional welcome email (opt-in via the add-tenant checkbox). Best-effort
     // and fire-and-forget so it never blocks or fails tenant creation.
-    if (body.sendWelcomeEmail && tenant?.email) {
-      void this.email.sendTenantWelcome(tenant.email, tenant.name);
+    // To the representative (وكيل) when there is one with an email (common/party-contact).
+    const welcomeTo = tenant ? resolveTenantContact(tenant).email : null;
+    if (body.sendWelcomeEmail && welcomeTo?.to) {
+      void this.email.sendTenantWelcome(welcomeTo.to, welcomeTo.name);
     }
     await attachTenantNationality(this.db, [tenant] as any[]);
     return tenant;
   }
 
-  /** Email the tenant a nudge to download the mobile app. */
+  /** Email the tenant (or their representative) a nudge to download the mobile app. */
   @Post(":id/app-reminder")
   @RequirePermissions(PERMISSIONS.TENANTS_WRITE)
   async appReminder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
@@ -303,8 +306,10 @@ class TenantsController {
     const [tenant] = await this.db.select().from(tenantsTable)
       .where(and(eq(tenantsTable.id, tid), eq(tenantsTable.userId, scopeId(user)), isNull(tenantsTable.deletedAt)));
     if (!tenant) throw new NotFoundException("غير موجود");
-    if (!tenant.email) throw new BadRequestException("لا يوجد بريد إلكتروني لهذا المستأجر · This tenant has no email on file");
-    const sent = await this.email.sendAppDownloadReminder(tenant.email, tenant.name);
+    // To the representative (وكيل) when there is one with an email (common/party-contact).
+    const { email } = resolveTenantContact(tenant);
+    if (!email.to) throw new BadRequestException("لا يوجد بريد إلكتروني لهذا المستأجر · This tenant has no email on file");
+    const sent = await this.email.sendAppDownloadReminder(email.to, email.name);
     return { sent };
   }
 
@@ -341,6 +346,8 @@ class TenantsController {
     // The edit path enforces exactly what create does — it used to write every
     // value through untouched.
     sanitizeTenantFields(updateData, body.type ?? prior.type ?? null, willBeDraft);
+    // A finalized record: a VAT number needs the full national address (common/national-address.ts).
+    if (!prior.isDraft && !willBeDraft) assertPartyNationalAddressOnPatch(prior as Record<string, any>, updateData);
 
     /* Finalising a draft re-validates the WHOLE tenant.
      *
@@ -359,7 +366,7 @@ class TenantsController {
       const mergedType = body.type ?? prior.type ?? null;
       sanitizeTenantFields(merged, mergedType, false);
       assertCompanyCommercialReg({ type: mergedType, nationalId: merged.nationalId as string | null, isDraft: false });
-      assertTenantNationalAddress({ ...merged, type: mergedType, isDraft: false });
+      assertPartyNationalAddress({ ...merged, type: mergedType, isDraft: false });
       for (const f of FIELDS) {
         if (f in updateData) continue;
         if (!(f in merged)) continue;
@@ -390,8 +397,10 @@ class TenantsController {
     }
 
     // Fire-and-forget welcome email on the draft → finalized transition.
-    if (body.sendWelcomeEmail && prior.isDraft && !tenant.isDraft && tenant.email) {
-      void this.email.sendTenantWelcome(tenant.email, tenant.name);
+    // To the representative (وكيل) when there is one with an email (common/party-contact).
+    const welcomeTo = resolveTenantContact(tenant).email;
+    if (body.sendWelcomeEmail && prior.isDraft && !tenant.isDraft && welcomeTo.to) {
+      void this.email.sendTenantWelcome(welcomeTo.to, welcomeTo.name);
     }
     await attachTenantNationality(this.db, [tenant] as any[]);
     return tenant;

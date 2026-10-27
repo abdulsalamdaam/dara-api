@@ -5,6 +5,7 @@ import { isoDate } from "../audit";
 import { fromHalalas, toHalalas } from "../money";
 import { riyadhToday } from "../dates";
 import { DEPOSIT_DESC } from "../hooks/classify";
+import { resolveTenantContact } from "../../../common/party-contact";
 import { envGateOn, REMINDER_SENDER, type ReminderChannel, type ReminderSender } from "./reminder-sender";
 
 const CHANNELS: readonly ReminderChannel[] = ["sms", "push"];
@@ -141,8 +142,12 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
         paymentId: r.paymentId, contractId: r.contractId, contractNumber: r.contractNumber, tenantId: r.tenantId, tenantName: r.tenantName,
         dueDate: r.dueDate, offsetDays: r.offsetDays, remaining: r.remaining,
         channels: s.channels.filter((c) => (c === "sms" ? !!r.phone : !!r.pushToken)),
-        phoneMasked: r.phone ? maskPhone(r.phone) : null, hasPushToken: !!r.pushToken,
-        message: { ar: render(s.templateAr ?? DEFAULT_AR, r), en: render(s.templateEn ?? DEFAULT_EN, r) },
+        phoneMasked: r.phone ? maskPhone(r.phone) : null, hasPushToken: !!r.pushToken, viaRepresentative: r.viaRepresentative,
+        // Rendered as the SMS reads (greeting its recipient) when SMS is on.
+        message: {
+          ar: render(s.templateAr ?? DEFAULT_AR, r, s.channels.includes("sms") ? r.recipientName : r.tenantName),
+          en: render(s.templateEn ?? DEFAULT_EN, r, s.channels.includes("sms") ? r.recipientName : r.tenantName),
+        },
       })),
     };
   }
@@ -202,7 +207,7 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
         attempts++;
         const res = await this.sender.send(this.pool, {
           userId: scope, paymentId: r.paymentId, offsetDays: r.offsetDays, channel, recipient,
-          body: render((s.templateAr ?? DEFAULT_AR), r),
+          body: render((s.templateAr ?? DEFAULT_AR), r, channel === "sms" ? r.recipientName : r.tenantName),
         });
         if (res.logged) logged++;
       }
@@ -216,7 +221,8 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
     const r = await this.pool.query(
       `select p.id, p.contract_id, to_char(p.due_date,'YYYY-MM-DD') as due, p.amount::text as amount,
               (select coalesce(sum(pc.amount), 0)::text from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id) as collected,
-              c.contract_number, c.tenant_id, t.name as tenant_name, t.phone, t.fcm_token
+              c.contract_number, c.tenant_id, t.name as tenant_name, t.phone, t.fcm_token,
+              t.is_representative, t.original_tenant_name, t.original_tenant_phone
          from payments p join contracts c on c.id = p.contract_id and c.user_id = p.user_id
          left join tenants t on t.id = c.tenant_id and t.user_id = c.user_id
         where p.user_id = $1 and p.deleted_at is null and c.deleted_at is null and c.status::text = 'active'
@@ -229,12 +235,20 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
     for (const x of r.rows) {
       const remaining = toHalalas(x.amount) - toHalalas(x.collected);
       if (remaining <= 0) continue;
+      // The SMS goes to the tenant's representative (وكيل) when there is one
+      // with a phone, greeting them by name (common/party-contact). Push stays
+      // on the token of whoever signed in to the app as this tenant.
+      const sms = resolveTenantContact({
+        name: x.tenant_name, phone: x.phone, isRepresentative: x.is_representative === true,
+        originalTenantName: x.original_tenant_name, originalTenantPhone: x.original_tenant_phone,
+      }).phone;
       for (const o of offsets) {
         if (addDays(date, -o) !== x.due) continue;
         out.push({
           paymentId: Number(x.id), contractId: Number(x.contract_id), contractNumber: x.contract_number ?? null, tenantId: x.tenant_id ?? null,
           tenantName: x.tenant_name ?? null, dueDate: x.due, offsetDays: o, remaining: fromHalalas(remaining),
-          phone: x.phone ? String(x.phone) : null, pushToken: x.fcm_token ? String(x.fcm_token) : null,
+          phone: sms.to, recipientName: sms.name || null, viaRepresentative: sms.viaRepresentative,
+          pushToken: x.fcm_token ? String(x.fcm_token) : null,
         });
       }
     }
@@ -255,8 +269,9 @@ export class RemindersService implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function render(tpl: string, r: { tenantName: string | null; remaining: string; dueDate: string; contractNumber: string | null }): string {
-  return tpl.replace(/\{tenant\}/g, r.tenantName ?? "").replace(/\{amount\}/g, r.remaining).replace(/\{dueDate\}/g, r.dueDate).replace(/\{contract\}/g, r.contractNumber ?? "");
+/** `{tenant}` greets `name` — the SMS recipient, i.e. the representative when the SMS goes to them. */
+function render(tpl: string, r: { remaining: string; dueDate: string; contractNumber: string | null }, name: string | null): string {
+  return tpl.replace(/\{tenant\}/g, name ?? "").replace(/\{amount\}/g, r.remaining).replace(/\{dueDate\}/g, r.dueDate).replace(/\{contract\}/g, r.contractNumber ?? "");
 }
 
 function maskPhone(p: string): string {

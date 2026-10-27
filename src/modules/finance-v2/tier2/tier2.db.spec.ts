@@ -248,6 +248,29 @@ describe("fv2 tier 2: rent reminders are built disabled — nothing is ever sent
     assert.equal(fetches, 0, "no network call (Expo push, email, SMS)");
   });
 
+  it("a tenant with a representative: the SMS goes to the representative and greets them; push stays on the tenant's token", async () => {
+    const date = addDays(today, 1);
+    await env.q(`update tenants set is_representative = true, original_tenant_name = 'Synthetic Rep', original_tenant_phone = '0500000099' where user_id = $1`, [U]);
+    try {
+      const pv: any = await svc.preview(U, date);
+      assert.equal(pv.rows.length, 1);
+      assert.equal(pv.rows[0].viaRepresentative, true);
+      assert.ok(String(pv.rows[0].phoneMasked).endsWith("099"), "the representative's phone");
+      assert.equal(pv.rows[0].hasPushToken, true);
+      assert.ok(pv.rows[0].message.ar.includes("Synthetic Rep"), "greets the representative");
+      // A representative without a phone falls back to the tenant's own number.
+      await env.q(`update tenants set original_tenant_phone = null where user_id = $1`, [U]);
+      const pv2: any = await svc.preview(U, date);
+      assert.equal(pv2.rows[0].viaRepresentative, false);
+      assert.ok(!String(pv2.rows[0].phoneMasked).endsWith("099"));
+      assert.ok(!pv2.rows[0].message.ar.includes("Synthetic Rep"));
+    } finally {
+      await env.q(`update tenants set is_representative = false, original_tenant_name = null, original_tenant_phone = null where user_id = $1`, [U]);
+    }
+    assert.equal(sends, 0, "Taqnyat never called");
+    assert.equal(fetches, 0, "no network call");
+  });
+
   it("all three gates on: the tick still only dry-runs; an account with the flag off is skipped (gate 3)", async () => {
     process.env.FINANCE_REMINDERS_ENABLED = "1";
     try {

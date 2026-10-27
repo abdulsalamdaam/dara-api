@@ -6,6 +6,8 @@ import {
   idListSentEmpty, likeContains, listQuerySchema, parseDateBound, parseEnumList, parseIdList, wantsPagination,
 } from "../../common/pagination";
 import { notifyTenant } from "../../common/notify";
+import { resolveTenantContact } from "../../common/party-contact";
+import { TENANT_CONTACT_COLUMNS } from "../../common/party-contact.columns";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 
 const MAINTENANCE_STATUS_AR: Record<string, string> = {
@@ -229,12 +231,15 @@ class MaintenanceController {
       let propertyName: string | null = null;
       if (row.tenantId) {
         const [t] = await this.db
-          .select({ name: tenantsTable.name, phone: tenantsTable.phone, email: tenantsTable.email })
+          .select(TENANT_CONTACT_COLUMNS)
           .from(tenantsTable)
           .where(eq(tenantsTable.id, row.tenantId));
         tenantName = t?.name ?? null;
         tenantPhone = t?.phone ?? null;
-        tenantEmail = t?.email ?? null;
+        // The acknowledgment goes to the representative (وكيل) when there is
+        // one with an email (common/party-contact); the admin email keeps the
+        // tenant's own name and phone.
+        tenantEmail = t ? resolveTenantContact(t).email.to : null;
       }
       if (row.contractId) {
         const [p] = await this.db
@@ -325,11 +330,13 @@ class MaintenanceController {
       });
       // Email (best-effort).
       const [tenant] = await this.db
-        .select({ name: tenantsTable.name, email: tenantsTable.email })
+        .select(TENANT_CONTACT_COLUMNS)
         .from(tenantsTable)
         .where(eq(tenantsTable.id, row.tenantId));
-      if (tenant?.email) {
-        await this.email.sendMaintenanceStatusChanged(tenant.email, {
+      // To the representative (وكيل) when there is one with an email (common/party-contact).
+      const to = tenant ? resolveTenantContact(tenant).email.to : null;
+      if (tenant && to) {
+        await this.email.sendMaintenanceStatusChanged(to, {
           id: row.id,
           unitLabel: row.unitLabel,
           description: row.description,

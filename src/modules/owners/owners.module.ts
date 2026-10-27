@@ -8,7 +8,8 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
-import { assertNationalAddress } from "../../common/national-address";
+import { assertPartyNationalAddress, assertPartyNationalAddressOnPatch } from "../../common/national-address";
+import { resolveOwnerContact } from "../../common/party-contact";
 import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
@@ -25,16 +26,6 @@ import {
   applyPercent, applyPhone, applyPostalCode, applyRequiredText, applyText, applyVatNumber,
   applyWith, partyIdentityNumber, requiredForeignKeyId, applyDraftPhone,
 } from "../../common/validation";
-
-/** An owner's effective contact applies the representative (وكيل) precedence:
- *  when isRepresentative is true the original-owner fields hold the real
- *  contact, so messaging must use those. */
-function effectiveOwnerContact(o: { isRepresentative: boolean; email: string | null; phone: string | null; originalOwnerEmail: string | null; originalOwnerPhone: string | null; }) {
-  return {
-    email: o.isRepresentative ? o.originalOwnerEmail : o.email,
-    phone: o.isRepresentative ? o.originalOwnerPhone : o.phone,
-  };
-}
 
 const FIELDS = [
   "name", "shortName", "type", "status", "idNumber", "phone", "email", "iban",
@@ -250,7 +241,7 @@ class OwnersController {
     // it is asked to fix the form.
     await assertWithinQuota(this.db, scopeId(user), "landlords");
     if (!body.name) throw new BadRequestException("الاسم مطلوب");
-    assertNationalAddress(body);
+    assertPartyNationalAddress(body); // full address only when a VAT number is given
     // Enforce the subscription package's landlord quota (عقاري = 1; 403 PLAN_LIMIT_LANDLORDS).
     await assertWithinQuota(this.db, scopeId(user), "landlords");
     const wantsDefault = Boolean(body.isDefault ?? false);
@@ -311,8 +302,8 @@ class OwnersController {
     return owner;
   }
 
-  /** Email the landlord a nudge to download the mobile app. Uses the
-   *  representative-aware effective email. */
+  /** Email the landlord a nudge to download the mobile app — to the
+   *  representative (وكيل) when there is one with an email (common/party-contact). */
   @Post(":id/app-reminder")
   @RequirePermissions(PERMISSIONS.OWNERS_WRITE)
   async appReminder(@CurrentUser() user: AuthUser, @Param("id") id: string) {
@@ -320,9 +311,9 @@ class OwnersController {
     const [owner] = await this.db.select().from(ownersTable)
       .where(and(eq(ownersTable.id, oid), eq(ownersTable.userId, scopeId(user)), isNull(ownersTable.deletedAt)));
     if (!owner) throw new NotFoundException("غير موجود");
-    const { email } = effectiveOwnerContact(owner);
-    if (!email) throw new BadRequestException("لا يوجد بريد إلكتروني لهذا المؤجر · This landlord has no email on file");
-    const sent = await this.email.sendAppDownloadReminder(email, owner.name);
+    const { email } = resolveOwnerContact(owner);
+    if (!email.to) throw new BadRequestException("لا يوجد بريد إلكتروني لهذا المؤجر · This landlord has no email on file");
+    const sent = await this.email.sendAppDownloadReminder(email.to, email.name);
     return { sent };
   }
 
@@ -350,6 +341,8 @@ class OwnersController {
     // body into the numeric columns verbatim — hence the 500s on "abc" and on
     // 999999999999, and the silently-stored -50 management fee.
     sanitizeOwnerFields(updateData, body.type ?? prior?.type ?? null, willBeDraft);
+    // A finalized record: a VAT number needs the full national address (common/national-address.ts).
+    if (prior && !prior.isDraft && !willBeDraft) assertPartyNationalAddressOnPatch(prior as Record<string, any>, updateData);
     // A ZATCA-linked landlord's tax identity is frozen: 409 on a CHANGE, an identical value passes.
     if (prior && (updateData.taxNumber !== undefined || updateData.idNumber !== undefined)) {
       const locked = ownerLockedFields(await zatcaLinks(this.db, scopeId(user)), prior);
@@ -374,7 +367,7 @@ class OwnersController {
       const merged: Record<string, unknown> = {};
       for (const f of FIELDS) merged[f] = f in updateData ? updateData[f] : (prior as Record<string, any>)[f];
       sanitizeOwnerFields(merged, body.type ?? prior.type ?? null, false);
-      assertNationalAddress({ ...merged, isDraft: false });
+      assertPartyNationalAddress({ ...merged, isDraft: false });
       for (const f of FIELDS) {
         if (f in updateData) continue;
         if (!(f in merged)) continue;
