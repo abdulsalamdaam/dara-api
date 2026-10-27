@@ -17,7 +17,6 @@ import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { assertWithinQuota } from "../../common/quota";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
-import { unitAreaViolates } from "../../common/unit-area";
 
 /** Maps unit `*_lookup_id` FKs back to the text fields the clients expect. */
 const UNIT_LOOKUP_SPEC = [
@@ -109,9 +108,6 @@ async function isMixedProperty(db: any, propertyUsageLookupId: number | null): P
     .where(eq(lookupsTable.id, propertyUsageLookupId));
   return row?.key === "mixed";
 }
-
-/** Raised when a live unit is created, or edited, without a positive area. */
-const AREA_REQUIRED_MSG = "مساحة الوحدة مطلوبة (م²) · Unit area is required";
 
 /** Raised when a mixed-use property's unit arrives without its own usage. */
 const USAGE_REQUIRED_MSG =
@@ -502,12 +498,7 @@ class UnitsController {
     if (!isDraft && values.usageLookupId == null && (await isMixedProperty(this.db, prop.usageLookupId))) {
       throw new BadRequestException(USAGE_REQUIRED_MSG);
     }
-    // Area is required on a live unit (business rule). Drafts are exempt, like
-    // `type`. Ejar imports write through their own writer, not this endpoint,
-    // so an Ejar unit that arrives without an area is not blocked.
-    if (!isDraft && !(Number(values.area) > 0)) {
-      throw new BadRequestException(AREA_REQUIRED_MSG);
-    }
+    // Area and floor are optional (owner decision, 2026-10-27).
 
     const [unit] = await this.db.insert(unitsTable).values(values as any).returning();
     return overlayUnitTypeOther(await attachLookupLabels(this.db, [unit!], UNIT_LOOKUP_SPEC))[0];
@@ -524,8 +515,6 @@ class UnitsController {
         // Needed to spot the draft → live transition, and to know what the
         // unit's usage already is when the request does not send one.
         isDraft: unitsTable.isDraft, usageLookupId: unitsTable.usageLookupId,
-        // Area + Ejar provenance: finalising a draft re-checks the stored area.
-        area: unitsTable.area, ejarId: unitsTable.ejarId,
         propertyUsageLookupId: propertiesTable.usageLookupId,
       })
       .from(unitsTable)
@@ -575,18 +564,6 @@ class UnitsController {
       if (nextUsage == null && (await isMixedProperty(this.db, unit0.propertyUsageLookupId ?? null))) {
         throw new BadRequestException(USAGE_REQUIRED_MSG);
       }
-    }
-    // An edit may not clear a live unit's area, and a draft may not go live
-    // without one (a bare `{ isDraft: false }` used to skip the check). Absent
-    // `area` on an already-live unit is left alone, so older units that never
-    // had one stay editable; Ejar units are exempt from the finalise check.
-    if (unitAreaViolates({
-      wasDraft: Boolean(unit0.isDraft), willBeDraft,
-      areaSent: updateData.area !== undefined,
-      nextArea: updateData.area !== undefined ? updateData.area : unit0.area,
-      isEjar: unit0.ejarId != null,
-    })) {
-      throw new BadRequestException(AREA_REQUIRED_MSG);
     }
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
     const [unit] = await this.db.update(unitsTable).set(updateData).where(eq(unitsTable.id, id)).returning();
