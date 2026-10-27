@@ -13,6 +13,8 @@ import { assertPartyNationalAddress, assertPartyNationalAddressOnPatch } from ".
 import { resolveTenantContact } from "../../common/party-contact";
 import { assertCompanyCommercialReg } from "../../common/commercial-reg";
 import { scopeId } from "../../common/scope";
+import { accountPlan } from "../../common/account-plan";
+import { assertPinnedPartyId, isPinnedRow, pinnedIdentityAfter } from "../../common/pinned-identity";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, wantsPagination } from "../../common/pagination";
 import { EmailService } from "../email/email.service";
@@ -286,6 +288,10 @@ class TenantsController {
       isDemo: "false",
     };
     sanitizeTenantFields(values, values.type, Boolean(values.isDraft));
+    // Tenant plan: the account's own CR / national ID is what Ejar lookups are pinned to — required (common/pinned-identity.ts).
+    if (claimsAccountHolder && isPinnedRow(await accountPlan(this.db, scopeId(user)), "tenant", true)) {
+      assertPinnedPartyId("tenant", pinnedIdentityAfter(null, values, "nationalId"), "nationalId");
+    }
     const [tenant] = await this.db.insert(tenantsTable).values(values as any).returning();
     // Optional welcome email (opt-in via the add-tenant checkbox). Best-effort
     // and fire-and-forget so it never blocks or fails tenant creation.
@@ -346,6 +352,18 @@ class TenantsController {
     // The edit path enforces exactly what create does — it used to write every
     // value through untouched.
     sanitizeTenantFields(updateData, body.type ?? prior.type ?? null, willBeDraft);
+    // Tenant plan, the account's own row: the CR / national ID is required once
+    // this save touches identity or finalises a draft — same "only when touched"
+    // rule as the CR check above (common/pinned-identity.ts).
+    if ((prior as any).isAccountHolder) {
+      const identity = pinnedIdentityAfter(prior as Record<string, any>, { ...updateData, isDraft: willBeDraft }, "nationalId");
+      if (identity && isPinnedRow(await accountPlan(this.db, scopeId(user)), "tenant", true)) {
+        // A ZATCA-frozen ID left as it is stays out of it (see owners.update).
+        const frozen = lockedChanges(prior as any, updateData, ["nationalId"]).length === 0
+          && (await zatcaLinks(this.db, scopeId(user))).account;
+        if (!frozen) assertPinnedPartyId("tenant", identity, "nationalId");
+      }
+    }
     // A finalized record: a VAT number needs the full national address (common/national-address.ts).
     if (!prior.isDraft && !willBeDraft) assertPartyNationalAddressOnPatch(prior as Record<string, any>, updateData);
 

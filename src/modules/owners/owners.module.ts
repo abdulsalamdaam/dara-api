@@ -14,7 +14,8 @@ import { scopeId } from "../../common/scope";
 import { resolveLookupId, attachLookupLabels } from "../../common/lookups-resolve";
 import { enumListSentEmpty, likeContains, listQuerySchema, parseEnumList, parseIdList, wantsPagination } from "../../common/pagination";
 import { assertWithinQuota } from "../../common/quota";
-import { accountAllowsCommission } from "../../common/account-plan";
+import { accountAllowsCommission, accountPlan } from "../../common/account-plan";
+import { assertPinnedPartyId, isPinnedRow, pinnedIdentityAfter } from "../../common/pinned-identity";
 import { assertNoCommissionOnHolder } from "../plan-transition/owner-mode-guard";
 import { assertNotLocked, lockedChanges, ownerLockedFields, zatcaLinks } from "../../common/zatca-lock";
 import { EmailService } from "../email/email.service";
@@ -294,6 +295,10 @@ class OwnersController {
       isDemo: "false",
     };
     sanitizeOwnerFields(values, values.type, Boolean(values.isDraft));
+    // عقاري: the landlord's ID / CR is what Ejar lookups are pinned to — required (common/pinned-identity.ts).
+    if (isPinnedRow(await accountPlan(this.db, scopeId(user)), "landlord", claimsAccountHolder)) {
+      assertPinnedPartyId("landlord", pinnedIdentityAfter(null, values, "idNumber"), "idNumber");
+    }
     await assertFeeAllowedByPlan(this.db, scopeId(user), values.managementFeePercent, null);
     // The account holder's own landlord record is never billed a management fee (plan transitions B5).
     assertNoCommissionOnHolder(claimsAccountHolder, values.managementFeePercent, null);
@@ -343,6 +348,19 @@ class OwnersController {
     sanitizeOwnerFields(updateData, body.type ?? prior?.type ?? null, willBeDraft);
     // A finalized record: a VAT number needs the full national address (common/national-address.ts).
     if (prior && !prior.isDraft && !willBeDraft) assertPartyNationalAddressOnPatch(prior as Record<string, any>, updateData);
+    // عقاري: the ID / CR is required once this save touches identity or finalises
+    // a draft; an unrelated edit on a legacy row without one still passes
+    // (common/pinned-identity.ts — the dashboard banner asks for it instead).
+    // A ZATCA-frozen ID that this request leaves as it is stays out of it: the
+    // user cannot change it here, so demanding it would block every save.
+    if (prior) {
+      const identity = pinnedIdentityAfter(prior as Record<string, any>, { ...updateData, isDraft: willBeDraft }, "idNumber");
+      if (identity && isPinnedRow(await accountPlan(this.db, scopeId(user)), "landlord", prior.isAccountHolder === true)) {
+        const frozen = ownerLockedFields(await zatcaLinks(this.db, scopeId(user)), prior).includes("idNumber")
+          && lockedChanges(prior as any, updateData, ["idNumber"]).length === 0;
+        if (!frozen) assertPinnedPartyId("landlord", identity, "idNumber");
+      }
+    }
     // A ZATCA-linked landlord's tax identity is frozen: 409 on a CHANGE, an identical value passes.
     if (prior && (updateData.taxNumber !== undefined || updateData.idNumber !== undefined)) {
       const locked = ownerLockedFields(await zatcaLinks(this.db, scopeId(user)), prior);

@@ -16,6 +16,7 @@ import { ejarEnabledFor } from "../ejar/ejar.access";
 import { ejarAvailableFor } from "../ejar/ejar.usage";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
+import { assertPinnedPartyId, isPinnedRow, pinnedIdentityStatus } from "../../common/pinned-identity";
 
 /** The caller's subscription package — its limits, mode and current usage. */
 @ApiTags("package")
@@ -125,6 +126,10 @@ class PackageController {
       setupCompleted: owner?.setupCompletedAt != null,
       // Required-settings completeness — the dashboard locks to Settings until true.
       settingsComplete,
+      // عقاري / tenant plan: whether the ID / CR Ejar lookups are pinned to is
+      // on file — drives the "complete your ID" banner. Never a lock: legacy
+      // accounts keep working, only the Ejar lookup waits for it.
+      identity: await pinnedIdentityStatus(this.db, ownerId),
       subscriptionStartedAt: owner?.subscriptionStartedAt ?? null,
       subscriptionEndsAt: endsAt,
       daysRemaining,
@@ -181,6 +186,27 @@ class PackageController {
     // onboarding-mode wizard previously clobbered a managing account's name +
     // phone with the new landlord's, and could rewrite its company/landlord.
     if (owner?.onboardedAt != null) return { success: true, onboarded: true };
+
+    // عقاري / tenant plan: the record onboarding creates is the identity Ejar
+    // lookups are pinned to, so its ID / CR is required — checked before any
+    // write (common/pinned-identity.ts). For a company it falls back to the CR
+    // registration already stored, exactly as the inserts below do.
+    {
+      const [co] = owner?.companyId
+        ? await this.db.select({ commercialReg: companiesTable.commercialReg }).from(companiesTable).where(eq(companiesTable.id, owner.companyId))
+        : [];
+      if (mode === "landlord" && body?.selfLandlord && isPinnedRow(owner?.packagePlan, "landlord", true)) {
+        const type = body?.userType === "company" ? "company" : "individual";
+        const l = body?.landlord ?? {};
+        const idNumber = type === "company" ? (l.idNumber || body?.company?.commercialReg || co?.commercialReg) : l.idNumber;
+        assertPinnedPartyId("landlord", { type, idNumber, isDraft: false }, "idNumber");
+      } else if (mode !== "landlord" && isPinnedRow(owner?.packagePlan, "tenant", true)) {
+        const tn = body?.tenant ?? {};
+        const type = owner?.userType === "company" ? "company" : (tn.type === "company" ? "company" : "individual");
+        const nationalId = owner?.userType === "company" ? (tn.nationalId || co?.commercialReg) : tn.nationalId;
+        assertPinnedPartyId("tenant", { type, idNumber: nationalId, isDraft: false }, "nationalId");
+      }
+    }
 
     const userPatch: any = { onboardedAt: new Date() };
     if (body?.name) userPatch.name = String(body.name).trim();
