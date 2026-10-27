@@ -230,7 +230,7 @@ export class MemStore implements EjarLookupStore {
   }
   async lookupRow(id: number) {
     const r = this.lookupRows.find((x) => x.id === id);
-    return r ? { id: r.id, category: r.category, key: r.key } : null;
+    return r ? { id: r.id, category: r.category, key: r.key, labelAr: r.labelAr ?? null } : null;
   }
   async resolveLookup(category: string, value: string) {
     return this.lookupRows.find((x) => x.category === category && (x.key === value || x.labelAr === value))?.id ?? null;

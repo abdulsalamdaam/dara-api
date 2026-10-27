@@ -215,6 +215,20 @@ name/type and unit number/type come from Get Contracts (types through
 `EJAR_PROPERTY_TYPE`/`EJAR_UNIT_TYPE`), usage from the contract type
 (residential/commercial), city from the region when a city option has that
 key/name; a property/unit matched by Ejar UUID needs nothing. Unmet keys → 400 `{code:"missing_fields", missing}`.
+**"Import all things" (27 Oct 2026).** A value Ejar supplied that resolves is
+**not listed in `required[]` at all** (it used to be listed as optional, so the
+review rendered it as an empty input and users retyped what Ejar had sent).
+The lookup response carries `prefill` — property name / type id / usage id /
+city id + Arabic label, the first unit's number / type / usage (Ejar's unit
+usage, else the property's) / floor / area / rooms, and each party's contact —
+and the web starts the draft from it, sending back only values the user
+changed. With Get Contracts the review asks only district, address and deed
+number/type (Ejar never sends them), a party's missing phone/email, and
+anything that did not resolve to an option. An **organization** party has no
+phone/email in `lessors[]`/`tenants[]`; its contact is its representative's
+(`partyContact`), offered prefilled and saved on the landlord/tenant record.
+The imported unit's `usage_lookup_id` is Ejar's unit usage, else the
+property's (a mixed-use property still needs the unit's own).
 **Account holder's rules (12 Oct 2026).** (1) Parties are never linked to an
 existing landlord/tenant: `landlord.existingId` / `tenant.existingId` → 400
 `invalid_field`, and the lookup's `matches.landlord` / `matches.tenant` are

@@ -91,7 +91,7 @@ export interface EjarLookupStore {
   property(accountId: number, id: number): Promise<{ id: number; ownerId: number | null; usageLookupId: number | null } | null>;
   unit(accountId: number, id: number): Promise<{ id: number; propertyId: number; usageLookupId: number | null } | null>;
   unitNumberTaken(propertyId: number, unitNumber: string): Promise<number | null>;
-  lookupRow(id: number): Promise<{ id: number; category: string; key: string } | null>;
+  lookupRow(id: number): Promise<{ id: number; category: string; key: string; labelAr?: string | null } | null>;
   /** A global lookup option by key or Arabic label. */
   resolveLookup(category: string, value: string): Promise<number | null>;
 }
@@ -318,7 +318,7 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   async lookupRow(id: number) {
     const [row] = await this.db
-      .select({ id: lookupsTable.id, category: lookupsTable.category, key: lookupsTable.key })
+      .select({ id: lookupsTable.id, category: lookupsTable.category, key: lookupsTable.key, labelAr: lookupsTable.labelAr })
       .from(lookupsTable)
       .where(eq(lookupsTable.id, id))
       .limit(1);

@@ -15,9 +15,9 @@ import {
   type CustomerEjarBudget, type EjarBudget, type LookupConfig, type PlanQuota,
 } from "./ejar.budget";
 import {
-  allPartyIdentifiers, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyMatches,
+  allPartyIdentifiers, computePrefill, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyMatches,
   partyIdentifiers, pickContractsResource,
-  type MappedLookup, type RequiredContext, type RequiredEntry,
+  type LookupPrefill, type MappedLookup, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
 import type { EjarLookupStore, LookupMatches, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
 import type { EjarBody, EjarEndpointKey } from "./ejar.types";
@@ -80,6 +80,8 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
     units: UnitMatch[];
   };
   required: RequiredEntry[];
+  /** Every value the import takes from Ejar, as the review's inputs hold them (ids, the city label). */
+  prefill: LookupPrefill;
   /** Whose stored identity the inquiry was pinned to, and that it matched (null role: unpinned). */
   partyCheck: { role: EjarPartyRole | null; idNumber: string | null; matched: boolean | null };
   logs: unknown[];
@@ -106,7 +108,7 @@ export async function lookupContext(
     return null;
   };
   const p = mapped.property;
-  const [matches, propertyTypeId, usageId, cityId, unitTypeIds] = await Promise.all([
+  const [matches, propertyTypeId, usageId, cityId, unitTypeIds, unitUsageIds] = await Promise.all([
     // No landlord/tenant matching is offered: parties always come from Ejar
     // as new records (the writer dedupes by ID/CR on its own). Only the
     // property and units are matched, by Ejar UUID.
@@ -122,8 +124,9 @@ export async function lookupContext(
     // City from the region, when one of our city options carries that key/name.
     res("city", p?.region?.key, p?.region?.nameAr),
     Promise.all(mapped.units.map((u) => res("unit_type", mapEjarValue(EJAR_UNIT_TYPE, u.unitType)))),
+    Promise.all(mapped.units.map((u) => res("property_usage", mapEjarValue(EJAR_USAGE, u.usage)))),
   ]);
-  return { matches, resolved: { propertyTypeId, usageId, cityId, unitTypeIds } };
+  return { matches, resolved: { propertyTypeId, usageId, cityId, unitTypeIds, unitUsageIds } };
 }
 
 /** Ejar client errors → HTTP, surfacing the real upstream status. */
@@ -398,6 +401,7 @@ export class EjarLookupService {
       this.customerBudget(accountId, cfg),
     ]);
     const { matches, resolved } = ctx;
+    const cityLabel = resolved.cityId != null ? (await this.store.lookupRow(resolved.cityId))?.labelAr ?? null : null;
     return {
       source,
       lookedUpAt: new Date(saved.createdAt).toISOString(),
@@ -409,6 +413,7 @@ export class EjarLookupService {
         resolved,
         matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) },
       }),
+      prefill: computePrefill(mapped, resolved, cityLabel),
       partyCheck,
       logs,
     };

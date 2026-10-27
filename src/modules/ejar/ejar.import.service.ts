@@ -9,8 +9,8 @@ import { vatFromContractType } from "./ejar-rent-vat";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import {
-  allPartyIdentifiers, computeRequired, missingRequired, normalizeContractNumber,
-  type LookupParty, type MappedLookup,
+  allPartyIdentifiers, computeRequired, missingRequired, normalizeContractNumber, partyContact,
+  type LookupParty, type MappedLookup, type PartyContact,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import type { EjarLookupStore } from "./ejar.lookup.store";
@@ -75,6 +75,8 @@ function canonicalPhone(v: string | null): string | null {
  */
 function partyInfo(
   p: LookupParty | null, group: "tenant" | "lessor", typed: { idNumber?: string | null; phone?: string | null; email?: string | null; name?: string | null },
+  /** The contact Ejar gives for the party — its own, else (an organization) its representative's. */
+  contact: PartyContact | null = null,
 ): EjarPartyInfo | null {
   const name = p?.name ?? typed.name ?? null;
   if (!p && !name) return null;
@@ -103,8 +105,9 @@ function partyInfo(
     partyType: isOrg ? "organization" : "individual",
     idType: p?.idType ?? null,
     idNumber: isOrg ? null : (p?.idNumber ?? typed.idNumber ?? null),
-    phone: canonicalPhone(p?.phone ?? null) ?? typed.phone ?? null,
-    email: p?.email?.toLowerCase() ?? typed.email ?? null,
+    // Ejar's own value wins; then what the user typed; then the representative's.
+    phone: canonicalPhone(p?.phone ?? null) ?? typed.phone ?? canonicalPhone(contact?.phone ?? null),
+    email: p?.email?.toLowerCase() ?? typed.email ?? contact?.email ?? null,
     // The upserts write this into tax_number, a VAT number: only ever a real
     // 15-digit VAT number from Ejar, never a CR / unified number.
     unifiedNumber: p?.vatNumber ?? null,
@@ -240,7 +243,9 @@ export class EjarImportService {
     // wins; otherwise Ejar's contract type (residential / commercial).
     const propUsageId = propertyRow ? propertyRow.usageLookupId : propUsage?.id ?? resolved.usageId;
     const propUsageKey = propertyRow ? await keyOf(propertyRow.usageLookupId) : propUsage?.key ?? (await keyOf(resolved.usageId));
-    if (propUsageKey === MIXED_USAGE_KEY && !unitRow && !unitUsage) missing.add("unit.usageId");
+    // The unit's usage: typed, else Ejar's own for the unit (first one that maps).
+    const ejarUnitUsageId = resolved.unitUsageIds?.find((x): x is number => x != null) ?? null;
+    if (propUsageKey === MIXED_USAGE_KEY && !unitRow && !unitUsage && ejarUnitUsageId == null) missing.add("unit.usageId");
     // Rent VAT is never the user's choice (a client-sent vatEnabled is
     // ignored): the writer applies the usage rule on the final property/unit,
     // and where usage cannot decide, Ejar's contract type.
@@ -267,8 +272,14 @@ export class EjarImportService {
         email: emailOf(s.email, `بريد ${label} الإلكتروني`),
       };
     };
-    const landlord: PartyChoice = { party: partyInfo(mapped.parties.lessor, "lessor", typedParty("landlord", mapped.parties.lessor)), rep: repInfo(mapped.parties.lessorRepresentative, "lessor") };
-    const tenant: PartyChoice = { party: partyInfo(mapped.parties.tenant, "tenant", typedParty("tenant", mapped.parties.tenant)), rep: repInfo(mapped.parties.tenantRepresentative, "tenant") };
+    const landlord: PartyChoice = {
+      party: partyInfo(mapped.parties.lessor, "lessor", typedParty("landlord", mapped.parties.lessor), partyContact(mapped.parties, "landlord")),
+      rep: repInfo(mapped.parties.lessorRepresentative, "lessor"),
+    };
+    const tenant: PartyChoice = {
+      party: partyInfo(mapped.parties.tenant, "tenant", typedParty("tenant", mapped.parties.tenant), partyContact(mapped.parties, "tenant")),
+      rep: repInfo(mapped.parties.tenantRepresentative, "tenant"),
+    };
 
     // City: a lookup id, or a lookup key / Arabic label; else Ejar's region if it resolved.
     let cityLookupId: number | null = null;
@@ -346,7 +357,11 @@ export class EjarImportService {
     }
     const status = normalizeStatus(c.state);
     const unitStatus = status === "active" || status === "pending" ? "rented" as const : "available" as const;
-    const unitUsageLookupId = propUsageKey === MIXED_USAGE_KEY ? unitUsage?.id ?? null : null;
+    // A mixed-use property needs the unit's own usage; otherwise the unit
+    // carries Ejar's unit usage, else the property's (as a manual unit would).
+    const unitUsageLookupId = propUsageKey === MIXED_USAGE_KEY
+      ? unitUsage?.id ?? ejarUnitUsageId
+      : unitUsage?.id ?? ejarUnitUsageId ?? propUsageId ?? null;
     // The property the units will sit on, when it already exists.
     const knownPropertyId = propertyRow?.id ?? matches.property?.id ?? null;
 

@@ -657,11 +657,20 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     w = world();
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.deepEqual(res.required.filter((r) => r.required).map((r) => r.key), []);
-    for (const k of ["property.name", "property.propertyTypeId", "property.usageId", "property.city", "unit.unitNumber", "unit.unitTypeId"]) {
-      assert.equal(res.required.find((r) => r.key === k)?.required, false, k);
+    // What Ejar supplied and resolves is not asked at all — only what Ejar never sends.
+    for (const k of ["property.name", "property.propertyTypeId", "property.usageId", "property.city", "unit.unitNumber", "unit.unitTypeId", "unit.usageId"]) {
+      assert.ok(!res.required.some((r) => r.key === k), k);
     }
+    assert.deepEqual(res.required.filter((r) => r.section === "property").map((r) => r.key),
+      ["property.district", "property.address", "property.deedNumber", "property.deedType"]);
     assert.ok(!res.required.some((r) => r.key === "landlord.idNumber" || r.key === "tenant.idNumber"));
     assert.ok(!res.required.some((r) => r.key === "tenant.phone"), "Ejar gave the phone");
+    // …and handed back as the inputs hold them.
+    assert.deepEqual(res.prefill.property, { name: "برج تجريبي", propertyTypeId: 1, usageId: 2, cityId: 6, city: "الرياض" });
+    assert.deepEqual(res.prefill.unit, { unitNumber: "S-01", unitTypeId: 5, usageId: 2, floor: null, area: null, rooms: null });
+    assert.equal(res.prefill.landlord.phone, "500000001");
+    assert.equal(res.prefill.tenant.phone, "500000004");
+    assert.equal(res.prefill.tenant.email, "tenant@example.invalid");
   });
 
   it("what does not resolve stays required", async () => {

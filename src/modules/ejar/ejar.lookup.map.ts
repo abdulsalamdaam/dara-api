@@ -529,6 +529,105 @@ export function allPartyIdentifiers(parties: LookupParties): string[] {
     .flatMap((p) => partyIdentifiers(p));
 }
 
+/** A Saudi mobile in the bare 9-digit form the forms store (5XXXXXXXX), else as Ejar sent it. */
+export function bareSaudiMobile(v: string | null | undefined): string | null {
+  const s = str(v);
+  if (!s) return null;
+  let d = normalizeIdentifier(s).replace(/\D/g, "");
+  if (d.startsWith("00966")) d = d.slice(5);
+  else if (d.startsWith("966")) d = d.slice(3);
+  if (d.startsWith("0")) d = d.slice(1);
+  return /^5\d{8}$/.test(d) ? d : s;
+}
+
+export interface PartyContact {
+  phone: string | null;
+  email: string | null;
+  /** Where each came from: the party itself, or (an organization) its representative. */
+  from: { phone: "party" | "representative" | null; email: "party" | "representative" | null };
+}
+
+/**
+ * The contact a landlord / tenant record is saved with: the party's own phone
+ * and email, else — for an organization, which Ejar lists without either —
+ * its representative's (the person who acts for it on Ejar).
+ */
+export function partyContact(parties: LookupParties, side: "landlord" | "tenant"): PartyContact {
+  const p = side === "landlord" ? parties.lessor : parties.tenant;
+  const rep = side === "landlord" ? parties.lessorRepresentative : parties.tenantRepresentative;
+  const useRep = p?.kind === "organization" && !!rep;
+  const pick = (f: "phone" | "email") => {
+    if (p?.[f]) return { v: p[f], from: "party" as const };
+    if (useRep && rep?.[f]) return { v: rep[f], from: "representative" as const };
+    return { v: null, from: null };
+  };
+  const ph = pick("phone");
+  const em = pick("email");
+  return {
+    phone: bareSaudiMobile(ph.v),
+    email: em.v ? em.v.toLowerCase() : null,
+    from: { phone: ph.from, email: em.from },
+  };
+}
+
+/**
+ * Every value the import will take from Ejar, in the shape of the review's
+ * inputs (lookup option ids, the city's Arabic label) — so the web can show
+ * them and prefill any input it still renders, instead of a blank form.
+ */
+export interface LookupPrefill {
+  landlord: PartyContact;
+  tenant: PartyContact;
+  property: {
+    name: string | null;
+    propertyTypeId: number | null;
+    usageId: number | null;
+    cityId: number | null;
+    /** The city option's Arabic label (the property form's city value). */
+    city: string | null;
+  };
+  /** The first Ejar unit (null: Ejar sent none). */
+  unit: {
+    unitNumber: string | null;
+    unitTypeId: number | null;
+    usageId: number | null;
+    floor: number | null;
+    area: number | null;
+    rooms: number | null;
+  } | null;
+}
+
+export function computePrefill(
+  m: Pick<MappedLookup, "parties" | "property" | "units">,
+  resolved: NonNullable<RequiredContext["resolved"]>,
+  cityLabel: string | null = null,
+): LookupPrefill {
+  const u = m.units.find((x) => x.unitNumber) ?? null;
+  const i = u ? m.units.indexOf(u) : -1;
+  return {
+    landlord: partyContact(m.parties, "landlord"),
+    tenant: partyContact(m.parties, "tenant"),
+    property: {
+      name: m.property?.name ?? null,
+      propertyTypeId: m.property ? resolved.propertyTypeId : null,
+      usageId: resolved.usageId,
+      cityId: resolved.cityId,
+      city: resolved.cityId != null ? cityLabel : null,
+    },
+    unit: u
+      ? {
+          unitNumber: u.unitNumber,
+          unitTypeId: resolved.unitTypeIds[i] ?? null,
+          // The unit's own usage from Ejar, else the property's.
+          usageId: resolved.unitUsageIds?.[i] ?? resolved.usageId,
+          floor: u.floor,
+          area: u.area,
+          rooms: u.rooms,
+        }
+      : null,
+  };
+}
+
 const PICK = "pick an existing record instead to skip this";
 
 /** What the server could already resolve from Ejar's values (lookup ids) and the account (matches). */
@@ -539,6 +638,8 @@ export interface RequiredContext {
     cityId: number | null;
     /** One per Ejar unit, in order. */
     unitTypeIds: Array<number | null>;
+    /** One per Ejar unit, in order: Ejar's own unit usage, when it sends one and it maps. */
+    unitUsageIds?: Array<number | null>;
   };
   matches?: {
     landlord: unknown | null;
@@ -571,6 +672,8 @@ export interface RequiredContext {
  *  - landlord/tenant are never linked to existing records: a matched party
  *    in ctx is ignored for that reason by the callers (they pass none).
  * Phone/email are never required — no manual path requires them either.
+ * A value Ejar supplied that resolves is not listed at all: the import takes
+ * it from the saved lookup, and the web shows it from `prefill`.
  */
 export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredContext = {}): RequiredEntry[] {
   // Back-compat: a bare parties object means a Details lookup with no context.
@@ -587,8 +690,18 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
     } else if (p.kind === "individual" && !p.idNumber) {
       out.push({ key: `${section}.idNumber`, section, required: true, reason: `Ejar did not return this ${who}'s ID number; type it, or ${PICK}.` });
     }
-    if (!p?.phone) out.push({ key: `${section}.phone`, section, required: false, reason: "Ejar did not return a phone number." });
-    if (!p?.email) out.push({ key: `${section}.email`, section, required: false, reason: "Ejar did not return an email." });
+    // Contact: the party's own, else (an organization) its representative's —
+    // offered prefilled so the user sees it and may change it.
+    const c = partyContact(parties, section);
+    for (const f of ["phone", "email"] as const) {
+      if (c[f] && c.from[f] === "party") continue; // Ejar's own value; nothing to ask
+      out.push({
+        key: `${section}.${f}`, section, required: false,
+        reason: c[f]
+          ? "From Ejar (the representative's); a value here overrides it."
+          : f === "phone" ? "Ejar did not return a phone number." : "Ejar did not return an email.",
+      });
+    }
   };
   partyEntries("landlord", parties.lessor, !!ctx.matches?.landlord);
   partyEntries("tenant", parties.tenant, !!ctx.matches?.tenant);
@@ -597,8 +710,13 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
   const ejarProp = mapped.property?.ejarId || mapped.property?.name ? mapped.property : null;
   if (!ctx.matches?.property) {
     const noProp = ejarProp ? "Ejar's value could not be matched to an option" : "Ejar did not return the property";
-    const need = (key: string, have: boolean, why: string) =>
+    // What Ejar supplied (and resolves to an option) is not asked at all — the
+    // import takes it from the saved lookup. Without Ejar's property (Details)
+    // a resolved value is still listed, optional and prefilled.
+    const need = (key: string, have: boolean, why: string) => {
+      if (have && ejarProp) return;
       out.push({ key, section: "property", required: !have, reason: have ? "From Ejar; a value here overrides it." : `${why}; ${PICK}.` });
+    };
     need("property.name", !!ejarProp?.name, ejarProp ? "Ejar returned no property name" : noProp);
     need("property.propertyTypeId", !!(ejarProp && r?.propertyTypeId), `A property needs a type (as when added manually) — ${noProp}`);
     need("property.usageId", !!r?.usageId, "Usage decides whether rent carries VAT");
@@ -612,16 +730,17 @@ export function computeRequired(m: MappedLookup | LookupParties, ctx: RequiredCo
   const allUnitsMatched = ejarUnits.length > 0 && ejarUnits.every((u) => u.ejarId && matchedUnits.has(u.ejarId));
   if (!allUnitsMatched) {
     const typesKnown = ejarUnits.length > 0 && mapped.units.every((u, i) => (u.ejarId && matchedUnits.has(u.ejarId)) || r?.unitTypeIds?.[i]);
-    out.push({
-      key: "unit.unitNumber", section: "unit", required: ejarUnits.length === 0,
-      reason: ejarUnits.length ? "From Ejar." : `Ejar did not return the unit; ${PICK}.`,
-    });
-    out.push({
-      key: "unit.unitTypeId", section: "unit", required: !typesKnown,
-      reason: typesKnown ? "From Ejar; a value here overrides it." : `A unit needs a type (as when added manually); ${PICK}.`,
-    });
-    out.push({ key: "unit.usageId", section: "unit", required: false, reason: "Required only when the property's usage is mixed (سكني - تجاري)." });
+    // Ejar's units: number, type and usage come from Ejar (usage: the unit's
+    // own, else the property's), so only an unmatched type is asked. A
+    // mixed-use property still needs the unit's usage — checked at import.
     if (!ejarUnits.length) {
+      out.push({ key: "unit.unitNumber", section: "unit", required: true, reason: `Ejar did not return the unit; ${PICK}.` });
+    }
+    if (!typesKnown) {
+      out.push({ key: "unit.unitTypeId", section: "unit", required: true, reason: `A unit needs a type (as when added manually); ${PICK}.` });
+    }
+    if (!ejarUnits.length) {
+      out.push({ key: "unit.usageId", section: "unit", required: false, reason: "Required only when the property's usage is mixed (سكني - تجاري)." });
       out.push({ key: "unit.floor", section: "unit", required: false, reason: "Ejar does not return it." });
       out.push({ key: "unit.area", section: "unit", required: false, reason: "Ejar does not return it." });
     }
