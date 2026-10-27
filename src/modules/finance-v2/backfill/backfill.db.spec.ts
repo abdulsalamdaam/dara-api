@@ -28,6 +28,9 @@ async function history(env: LegacyEnv, s: Seed, U: number) {
   const pay = async (contractId: number, due: string) =>
     Number((await env.q(`select id from payments where contract_id = $1 and due_date = $2 and deleted_at is null order by id limit 1`, [contractId, due]))[0]?.id);
   const ids: Record<string, number> = {};
+  // The office itself is not VAT-registered here: the history approves a no-VAT commission (below), which a
+  // registered office may no longer do (commission VAT follows the office's registration, 26 Oct 2026).
+  await env.q(`update owners set tax_number = null where user_id = $1 and is_account_holder`, [U]);
   const c1: any = await env.contracts.create(user, {
     unitIds: [s.unitA1], tenantId: s.tenant, tenantName: "Synthetic Tenant", startDate: "2026-01-01", endDate: "2026-12-31",
     monthlyRent: "1000", paymentFrequency: "monthly", vatEnabled: true, prepaidRent: "2300", prepaidMethod: "bank_transfer",
@@ -54,7 +57,8 @@ async function history(env: LegacyEnv, s: Seed, U: number) {
   // approves a VAT-bearing one. Both histories approve the same no-VAT document, so live and backfill compare.
   await env.q(`update simple_invoices set total = subtotal, items = jsonb_set(items, '{0,vat}', 'false') where id = $1`, [ids.com]);
   await env.billing.approve(user, String(ids.com), {});
-  await env.billing.collect(user, String(ids.com), { paidDate: "2026-03-30" });
+  // No collection of the commission: under v2 an approved commission is settled from the landlord's dues (R4-3),
+  // and "collect" refuses it — so neither history collects it.
   const crn: any = await env.billing.create(user, {
     type: "credit", billingReference: inv.number, issueDate: "2026-03-28",
     items: [{ description: "خصم", quantity: 1, unitPrice: 100, amount: 100, vat: true }], total: 115,

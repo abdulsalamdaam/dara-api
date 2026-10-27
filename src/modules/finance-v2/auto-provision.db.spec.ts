@@ -92,7 +92,8 @@ describe("finance v2 auto-provisioning for plan-entitled accounts (real Postgres
     assert.equal(await count(`select count(*) n from fiscal_periods where user_id = $1`, [A]), 24, "previous + current fiscal year");
     const banks = await q(`select kind, is_trust, is_default from bank_accounts where user_id = $1 order by id`, [A]);
     assert.deepEqual(banks.map((b: any) => [b.kind, b.is_trust]), [["cash", false], ["bank", false], ["bank", true]]);
-    assert.equal(await count(`select count(*) n from finance_commission_settings where account_user_id = $1`, [A]), 1);
+    // Billed basis (26 Oct 2026): no collected-basis cutover is recorded, so no commission-settings row yet.
+    assert.equal(await count(`select count(*) n from finance_commission_settings where account_user_id = $1`, [A]), 0);
 
     const runs = await q(`select dry_run, status, actor_user_id from finance_backfill_runs where user_id = $1 order by id`, [A]);
     assert.deepEqual(runs.map((x: any) => [x.dry_run, x.status, x.actor_user_id]), [[true, "done", 0], [false, "done", 0]]);
