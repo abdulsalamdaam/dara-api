@@ -2,7 +2,7 @@ import { Inject, Injectable, ServiceUnavailableException } from "@nestjs/common"
 import type pg from "pg";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
-  createAuxPool, contractsTable, ejarLookupsTable, lookupsTable, ownersTable, propertiesTable, tenantsTable, unitsTable, usersTable,
+  createAuxPool, contractsTable, ejarApiLogsTable, ejarLookupsTable, lookupsTable, ownersTable, propertiesTable, tenantsTable, unitsTable, usersTable,
 } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { resolveLookupId } from "../../common/lookups-resolve";
@@ -12,6 +12,7 @@ import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
 import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
 import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
 import { resolvePartyCheck, type EjarPartyCheck } from "./ejar.party-check";
+import { ejarLandlordCapPeek, type CapIdentity } from "./ejar.landlord-cap";
 
 /**
  * Advisory-lock key serialising budget check + Ejar calls across every API
@@ -63,6 +64,24 @@ export interface LookupMatches {
   /** The account's units already carrying these Ejar unit UUIDs. */
   units: UnitMatch[];
 }
+/** An existing landlord / tenant record the import will link instead of creating one. */
+export interface LinkedParty {
+  id: number;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  /** The account's own record (is_account_holder). */
+  isAccountHolder: boolean;
+}
+
+/** Who Ejar names, as the writer matches it: the ID (or an organization's CR), else the name. */
+export interface PartyKey {
+  idNumber: string | null;
+  name: string | null;
+  /** Every identifier Ejar gave (for the landlord cap's looser match). */
+  ids: string[];
+}
+
 export interface MatchKeys { landlord: string[]; tenant: string[]; propertyEjarId: string | null; unitEjarIds: string[] }
 
 /** Everything the lookup and import need from the database, behind one seam so tests can fake it. */
@@ -94,6 +113,18 @@ export interface EjarLookupStore {
   lookupRow(id: number): Promise<{ id: number; category: string; key: string; labelAr?: string | null } | null>;
   /** A global lookup option by key or Arabic label. */
   resolveLookup(category: string, value: string): Promise<number | null>;
+  /**
+   * The record the import's writer will reuse for this party (same match:
+   * ID / CR number, else name; the landlord cap's looser match at the cap) —
+   * null when it will create a new one.
+   */
+  existingParty(accountId: number, role: "landlord" | "tenant", key: PartyKey): Promise<LinkedParty | null>;
+  /**
+   * Replace the response bodies of these call-log rows with a marker: the
+   * account received a contract it was not verified for, and its call log
+   * must not hand it back. Marked truncated, so EJAR_REPLAY never serves them.
+   */
+  withholdLogBodies(ids: number[], reason: string): Promise<void>;
 }
 
 @Injectable()
@@ -314,6 +345,46 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   resolveLookup(category: string, value: string) {
     return resolveLookupId(this.db, category, value);
+  }
+
+  async existingParty(accountId: number, role: "landlord" | "tenant", key: PartyKey): Promise<LinkedParty | null> {
+    if (!key.idNumber && !key.name) return null;
+    if (role === "landlord") {
+      const cols = {
+        id: ownersTable.id, name: ownersTable.name, phone: ownersTable.phone, email: ownersTable.email,
+        isAccountHolder: ownersTable.isAccountHolder,
+      };
+      const where = key.idNumber
+        ? and(eq(ownersTable.userId, accountId), eq(ownersTable.idNumber, key.idNumber), isNull(ownersTable.deletedAt))
+        : and(eq(ownersTable.userId, accountId), eq(ownersTable.name, key.name!), isNull(ownersTable.deletedAt));
+      let [row] = await this.db.select(cols).from(ownersTable).where(where).limit(1);
+      if (!row) {
+        const who: CapIdentity = { name: key.name?.replace(/\s+/g, " ").trim() || null, ids: key.ids };
+        const capped = await ejarLandlordCapPeek(this.db, accountId, who);
+        if (capped != null) [row] = await this.db.select(cols).from(ownersTable).where(eq(ownersTable.id, capped)).limit(1);
+      }
+      return row ? { ...row, isAccountHolder: !!row.isAccountHolder } : null;
+    }
+    const where = key.idNumber
+      ? and(eq(tenantsTable.userId, accountId), eq(tenantsTable.nationalId, key.idNumber), isNull(tenantsTable.deletedAt))
+      : and(eq(tenantsTable.userId, accountId), eq(tenantsTable.name, key.name!), isNull(tenantsTable.deletedAt));
+    const [row] = await this.db
+      .select({
+        id: tenantsTable.id, name: tenantsTable.name, phone: tenantsTable.phone, email: tenantsTable.email,
+        isAccountHolder: tenantsTable.isAccountHolder,
+      })
+      .from(tenantsTable)
+      .where(where)
+      .limit(1);
+    return row ? { ...row, isAccountHolder: !!row.isAccountHolder } : null;
+  }
+
+  async withholdLogBodies(ids: number[], reason: string): Promise<void> {
+    if (!ids.length) return;
+    await this.db
+      .update(ejarApiLogsTable)
+      .set({ responseBody: { withheld: reason } as never, bodyTruncated: true })
+      .where(inArray(ejarApiLogsTable.id, ids));
   }
 
   async lookupRow(id: number) {

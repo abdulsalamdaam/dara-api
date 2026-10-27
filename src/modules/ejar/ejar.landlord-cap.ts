@@ -69,6 +69,27 @@ export function matchCapCandidate(rows: CapCandidate[], who: CapIdentity): CapCa
 }
 
 /**
+ * What the gate would answer, without writing or throwing: the account's
+ * landlord the import would reuse at the cap, else null (under the cap, or no
+ * match — the import inserts a new landlord or is refused). For the review's
+ * "will be linked to your existing landlord" note.
+ */
+export async function ejarLandlordCapPeek(db: Drizzle, scope: number, who: CapIdentity): Promise<number | null> {
+  const [acct] = await db.select({ packagePlan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, scope));
+  const pkg = resolvePackage(acct?.packagePlan);
+  const cap = await resolveLimit(db, scope, "landlords", pkg.maxLandlords);
+  if (cap == null || (await landlordCount(db, scope)) < cap) return null;
+  const rows = await db
+    .select({
+      id: ownersTable.id, name: ownersTable.name, idNumber: ownersTable.idNumber,
+      taxNumber: ownersTable.taxNumber, isAccountHolder: ownersTable.isAccountHolder,
+    })
+    .from(ownersTable)
+    .where(and(eq(ownersTable.userId, scope), isNull(ownersTable.deletedAt)));
+  return matchCapCandidate(rows, who)?.id ?? null;
+}
+
+/**
  * null → go ahead and insert. A number → reuse that landlord. Throws
  * PlanLimitLandlordsException (context "ejar_import") for a new landlord at the cap.
  */

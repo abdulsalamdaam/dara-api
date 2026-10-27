@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   contractsTable, paymentsTable, propertiesTable, unitsTable, contractUnitsTable,
   ownersTable, deedsTable, tenantsTable,
@@ -10,6 +10,7 @@ import { ejarInvoiceDescription, mapEjarStatusLegacy, matchEjarInvoices } from "
 import { ejarRentVatVerdict } from "./ejar-rent-vat"; // finance-v2: 11g — rent VAT by usage, as the manual wizard
 import { ejarLandlordCapGate } from "./ejar.landlord-cap"; // finance-v2: n/a — plan landlord cap (CONTRACT2 §5)
 import type { EjarPartyInfo, EjarInvoiceRow } from "./ejar.map";
+import { monthlyRentFrom, type RentBasis } from "./ejar.rent";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
   EJAR_FURNISHING, EJAR_DEED_TYPE, EJAR_UNIT_STATUS, mapEjarValue, lookupOrOther, partyKind, asBool,
@@ -164,7 +165,10 @@ export class EjarImportWriter {
       : and(eq(ownersTable.userId, scope), eq(ownersTable.name, name!), isNull(ownersTable.deletedAt));
     const [found] = await this.db.select().from(ownersTable).where(where).limit(1);
     if (found) {
-      const fill: Record<string, unknown> = { ...repFields };
+      // The account's own record is only ever gap-filled: no representative,
+      // Ejar snapshot or lock is written onto it behind the user's back.
+      const own = !!found.isAccountHolder;
+      const fill: Record<string, unknown> = own ? {} : { ...repFields };
       if (!found.phone && (lessor?.phone || src.landlordPhone)) fill.phone = str(lessor?.phone) || str(src.landlordPhone);
       if (!found.email && (lessor?.email || src.landlordEmail)) fill.email = str(lessor?.email) || str(src.landlordEmail);
       if (!found.idNumber && idNumber) fill.idNumber = idNumber;
@@ -172,7 +176,7 @@ export class EjarImportWriter {
       if (!found.nationalityLookupId && lessor?.nationality) {
         fill.nationalityLookupId = await resolveLookupId(this.db, "nationality", lessor.nationality);
       }
-      if (lessor?.raw) { fill.ejarRaw = lessor.raw; fill.ejarSource = "ejar"; }
+      if (lessor?.raw && !own) { fill.ejarRaw = lessor.raw; fill.ejarSource = "ejar"; }
       if (Object.keys(fill).length) await this.db.update(ownersTable).set(onlyPresent(fill)).where(eq(ownersTable.id, found.id));
       linked.push("landlord");
       return found.id;
@@ -506,7 +510,8 @@ export class EjarImportWriter {
       : and(eq(tenantsTable.userId, scope), eq(tenantsTable.name, name!), isNull(tenantsTable.deletedAt));
     const [found] = await this.db.select().from(tenantsTable).where(where).limit(1);
     if (found) {
-      const fill: Record<string, unknown> = { ...repFields };
+      const own = !!found.isAccountHolder;
+      const fill: Record<string, unknown> = own ? {} : { ...repFields };
       if (!found.phone && (party?.phone || src.tenantPhone)) fill.phone = str(party?.phone) || str(src.tenantPhone);
       if (!found.email && (party?.email || src.tenantEmail)) fill.email = str(party?.email) || str(src.tenantEmail);
       if (!found.nationalId && nationalId) fill.nationalId = nationalId;
@@ -515,7 +520,7 @@ export class EjarImportWriter {
         fill.nationality = party.nationality;
         fill.nationalityLookupId = await resolveLookupId(this.db, "nationality", party.nationality);
       }
-      if (party?.raw) { fill.ejarRaw = party.raw; fill.ejarSource = "ejar"; }
+      if (party?.raw && !own) { fill.ejarRaw = party.raw; fill.ejarSource = "ejar"; }
       if (Object.keys(fill).length) await this.db.update(tenantsTable).set(onlyPresent(fill)).where(eq(tenantsTable.id, found.id));
       linked.push("tenant");
       return found.id;
@@ -605,6 +610,9 @@ export class EjarImportWriter {
     // finance-v2: 11g — rent VAT follows the property/unit usage (DARA-NOTES §4), as a manual contract; Ejar's amounts stay VAT-inclusive
     // Never the client's choice: usage first, then Ejar's contract type.
     const rentVat = (await ejarRentVatVerdict(this.db, propertyId, unitIds)) ?? c.vatFallback;
+    // The monthly rent before VAT, from what Ejar bills, under that verdict
+    // (ejar.rent.ts) — so the header agrees with the VAT-inclusive installments.
+    const monthlyRent = c.rentBasis ? String(monthlyRentFrom(c.rentBasis, rentVat)) : c.monthlyRent;
 
     // The contract's party columns are a snapshot of the records, exactly as
     // the manual wizard copies them from the picked tenant and landlord.
@@ -653,7 +661,7 @@ export class EjarImportWriter {
         signingDate: c.signingDate,
         startDate: c.startDate,
         endDate: c.endDate,
-        monthlyRent: c.monthlyRent,
+        monthlyRent,
         paymentFrequency: freq as never,
         customSchedule: c.customSchedule.length ? c.customSchedule : null,
         depositAmount: c.depositAmount,
@@ -752,6 +760,8 @@ export interface ImportPlan {
     signingDate: string | null;
     /** Numeric string, ex-VAT, as the manual wizard stores it. */
     monthlyRent: string;
+    /** What the rent is derived from; the writer recomputes monthlyRent under the final VAT verdict. */
+    rentBasis?: RentBasis | null;
     customSchedule: Array<{ dueDate: string; amount: string }>;
     /** Ejar's payment frequency text; only used when there is no schedule. */
     frequencyHint: string | null;
@@ -787,6 +797,42 @@ export interface ImportResult {
   installmentsCreated: number;
   created: string[];
   linked: string[];
+}
+
+/**
+ * Serialise imports of one contract into one account, then re-check inside
+ * the transaction: a double-clicked Import sends two requests that both pass
+ * the service's "already imported?" check before either has written. The
+ * second waits here for the first to commit and then sees its contract.
+ * Returns the existing contract's id, or null when the import may go ahead.
+ */
+export const EJAR_IMPORT_LOCK_NS = 730_127;
+export async function lockImport(db: Drizzle, ownerId: number, contractNumber: string): Promise<number | null> {
+  await db.execute(sql`select pg_advisory_xact_lock(${EJAR_IMPORT_LOCK_NS}::int, hashtext(${`${ownerId}:${contractNumber}`}))`);
+  const [row] = await db
+    .select({ id: contractsTable.id })
+    .from(contractsTable)
+    .where(and(
+      eq(contractsTable.userId, ownerId),
+      or(eq(contractsTable.contractNumber, contractNumber), eq(contractsTable.ejarContractNumber, contractNumber)),
+    ))
+    .limit(1);
+  return row?.id ?? null;
+}
+
+/** Ejar's payment frequency (Get Contracts `payment_frequency`, else Invoices `recurring_payment`) as Dara's cycle, or null. */
+export function ejarCycle(m: {
+  contract: { paymentFrequency: string | null };
+  financial: { recurringPayment?: { en: string | null; ar: string | null } | null };
+}): string | null {
+  const raw = m.contract.paymentFrequency ?? m.financial.recurringPayment?.en ?? m.financial.recurringPayment?.ar ?? null;
+  if (!raw || !String(raw).trim()) return null;
+  const f = String(raw).toLowerCase();
+  return /semi|bi-?annual|half|نصف/.test(f) ? "semi_annual"
+    : /quarter|ربع/.test(f) ? "quarterly"
+    : /month|شهري/.test(f) ? "monthly"
+    : /annual|year|سنوي/.test(f) ? "annual"
+    : null;
 }
 
 const PAYMENT_FREQ = new Set(["monthly", "quarterly", "semi_annual", "annual", "custom"]);

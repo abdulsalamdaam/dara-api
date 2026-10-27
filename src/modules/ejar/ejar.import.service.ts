@@ -13,13 +13,14 @@ import {
   type LookupParty, type MappedLookup, type PartyContact,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
+import { monthlyRentFrom, rentBasis } from "./ejar.rent";
 import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
   BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lookupContext, mapSaved,
   matchedUnitEjarIds, partyCheckPasses, partyMismatch,
 } from "./ejar.lookup.service";
-import { EjarImportWriter, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
+import { EjarImportWriter, ejarCycle, lockImport, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
 import { externalSettlementMode } from "../../common/external-settlement"; // finance-v2: 0084
 
@@ -43,7 +44,22 @@ export class EjarImportRunner implements EjarImportRunnerLike {
 
   async run(ownerId: number, plan: ImportPlan): Promise<ImportResult> {
     const fv2 = (await this.fv2h?.resolve(ownerId)) === true; // finance-v2: E26
-    const { result, installments } = await this.db.transaction((tx) => new EjarImportWriter(tx as never).persist(ownerId, plan));
+    let written: Awaited<ReturnType<EjarImportWriter["persist"]>>;
+    try {
+      written = await this.db.transaction(async (tx) => {
+        // One import of a contract per account at a time; a second (a double
+        // click) waits, then finds the first one's contract → 409.
+        const existing = await lockImport(tx as never, ownerId, plan.contractNumber);
+        if (existing != null) throw alreadyImported(plan.contractNumber, existing);
+        return new EjarImportWriter(tx as never).persist(ownerId, plan);
+      });
+    } catch (err) {
+      // Belt and braces: the (user_id, contract_number) unique index caught a
+      // duplicate the lock did not (another code path) — still a 409, never a 500.
+      if (isUniqueViolation(err)) throw alreadyImported(plan.contractNumber, await existingContractId(this.db, ownerId, plan.contractNumber));
+      throw err;
+    }
+    const { result, installments } = written;
     if (installments.length && plan.invoices.length) {
       try {
         if (fv2) await this.fv2h!.ejarAttachV2({ fv2, userId: ownerId }, installments, plan.invoices as any[]); // finance-v2: v2 replaces the attach step (E7)
@@ -53,6 +69,27 @@ export class EjarImportRunner implements EjarImportRunnerLike {
       }
     }
     return result;
+  }
+}
+
+/** 409 `already_imported` — the same answer whether the service or the runner noticed. */
+export function alreadyImported(contractNumber: string, contractId: number | null) {
+  return new ConflictException({
+    code: "already_imported", contractId,
+    message: `العقد ${contractNumber} مستورد مسبقًا${contractId ? ` (#${contractId})` : ""} · Already imported.`,
+  });
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } } | null;
+  return e?.code === "23505" || e?.cause?.code === "23505";
+}
+
+async function existingContractId(db: Drizzle, ownerId: number, contractNumber: string): Promise<number | null> {
+  try {
+    return await db.transaction((tx) => lockImport(tx as never, ownerId, contractNumber));
+  } catch {
+    return null;
   }
 }
 
@@ -124,12 +161,6 @@ function repInfo(p: LookupParty | null, group: "tenant" | "lessor"): EjarPartyIn
   return { ...partyInfo(p, group, {})!, isRepresentative: true };
 }
 
-/** Months covered by [start, end], at least 1 — monthly rent is total / months, as the wizard stores it. */
-function contractMonths(start: string, end: string): number {
-  const days = (Date.parse(end) - Date.parse(start)) / 86_400_000 + 1;
-  return Math.max(1, Math.round(days / (365.25 / 12)));
-}
-
 /**
  * Ejar Import v2 — turn a saved lookup plus what the user completed into a
  * full local record. Never calls Ejar.
@@ -160,12 +191,7 @@ export class EjarImportService {
       });
     }
     const imported = await this.store.findImported(accountId, contractNumber);
-    if (imported) {
-      throw new ConflictException({
-        code: "already_imported", contractId: imported.contractId,
-        message: `العقد ${contractNumber} مستورد مسبقًا (#${imported.contractId}) · Already imported.`,
-      });
-    }
+    if (imported) throw alreadyImported(contractNumber, imported.contractId);
 
     const mapped = mapSaved(saved);
     const scope = await this.store.scope(accountId);
@@ -438,14 +464,16 @@ export class EjarImportService {
     const customSchedule = m.invoices
       .filter((i) => i.dueDate && (i.amount ?? 0) > 0)
       .map((i) => ({ dueDate: i.dueDate!, amount: String(i.amount) }));
-    const scheduleTotal = customSchedule.reduce((s, e) => s + Number(e.amount), 0);
-    // Ejar's total rent is the whole contract, ex-VAT; invoices may carry VAT.
-    const total = m.financial.totalRentAmount ?? m.contract.totalValue ?? scheduleTotal;
-    const monthly = total > 0 ? total / contractMonths(startDate, endDate) : 0;
+    // The rent comes from what Ejar bills (the invoices), not from
+    // total_rent_amount — that is the rent per contract year before VAT, not
+    // the total (ejar.rent.ts). The writer re-derives the monthly rent under
+    // the final VAT verdict; this is the contract-type estimate.
+    const basis = rentBasis({ ...m, contract: { ...m.contract, startDate, endDate } });
     return {
       startDate, endDate, status,
       signingDate: m.contract.registeredAt?.slice(0, 10) ?? null,
-      monthlyRent: String(Math.round(monthly * 1e6) / 1e6),
+      monthlyRent: String(monthlyRentFrom(basis, vatFallback)),
+      rentBasis: basis,
       customSchedule,
       frequencyHint: m.financial.recurringPayment?.en ?? m.contract.paymentFrequency ?? m.financial.paymentFrequency?.en ?? null,
       depositAmount: m.contract.securityDeposit != null && m.contract.securityDeposit > 0 ? String(m.contract.securityDeposit) : null,
@@ -471,6 +499,10 @@ export class EjarImportService {
         // Get Contracts' remaining contract facts (null on the Details path).
         totalValue: m.contract.totalValue,
         paymentFrequency: m.contract.paymentFrequency,
+        // Ejar's payment cycle as Dara's value (monthly / quarterly / semi_annual /
+        // annual). The contract itself stays `custom`: its installments are Ejar's
+        // invoices, amounts and dates as billed.
+        cycle: ejarCycle(m),
         ejarFee: m.contract.ejarFee,
         subleaseAllowed: m.contract.subleaseAllowed,
         unifiedNumber: m.contract.unifiedNumber,

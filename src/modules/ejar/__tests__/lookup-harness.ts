@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EjarClientService } from "../ejar.client.service";
 import { EjarLookupService } from "../ejar.lookup.service";
-import type { EjarLookupStore, LookupMatches, MatchKeys, PartyMatch, SavedLookup } from "../ejar.lookup.store";
+import type { EjarLookupStore, LinkedParty, LookupMatches, MatchKeys, PartyKey, PartyMatch, SavedLookup } from "../ejar.lookup.store";
 import type { LimitAdjustment } from "../../../common/limit-core";
 import type { EjarAccountMode } from "../ejar.access";
 import type { EjarScope } from "../ejar.scope";
@@ -110,8 +110,8 @@ export class MemStore implements EjarLookupStore {
   scopes: Record<number, EjarScope> = {};
   /** account → plan/period; unset = Enterprise (no plan quota), so the gateway budget alone applies. */
   plans: Record<number, PlanPeriod> = {};
-  owners: Array<{ id: number; accountId: number; name: string; idNumber: string | null }> = [];
-  tenants: Array<{ id: number; accountId: number; name: string; nationalId: string | null }> = [];
+  owners: Array<{ id: number; accountId: number; name: string; idNumber: string | null; phone?: string | null; email?: string | null; isAccountHolder?: boolean }> = [];
+  tenants: Array<{ id: number; accountId: number; name: string; nationalId: string | null; phone?: string | null; email?: string | null; isAccountHolder?: boolean }> = [];
   properties: Array<{ id: number; accountId: number; ownerId: number | null; usageLookupId: number | null; ejarId?: string | null; name?: string }> = [];
   units: Array<{ id: number; propertyId: number; unitNumber: string; usageLookupId: number | null; ejarId?: string | null }> = [];
   lookupRows: Array<{ id: number; category: string; key: string; labelAr?: string }> = [
@@ -231,6 +231,23 @@ export class MemStore implements EjarLookupStore {
   async lookupRow(id: number) {
     const r = this.lookupRows.find((x) => x.id === id);
     return r ? { id: r.id, category: r.category, key: r.key, labelAr: r.labelAr ?? null } : null;
+  }
+  /** Mirrors the writer's match (ID / CR, else name); no landlord cap in memory. */
+  async existingParty(accountId: number, role: "landlord" | "tenant", key: PartyKey): Promise<LinkedParty | null> {
+    const rows = role === "landlord"
+      ? this.owners.map((o) => ({ ...o, idKey: o.idNumber }))
+      : this.tenants.map((t) => ({ ...t, idKey: t.nationalId }));
+    const r = rows.find((x) => x.accountId === accountId && (key.idNumber ? x.idKey === key.idNumber : !!key.name && x.name === key.name));
+    return r ? { id: r.id, name: r.name, phone: r.phone ?? null, email: r.email ?? null, isAccountHolder: !!r.isAccountHolder } : null;
+  }
+  /** Log row id → the reason its body was withheld. */
+  withheld = new Map<number, string>();
+  async withholdLogBodies(ids: number[], reason: string): Promise<void> {
+    for (const id of ids) {
+      const row = this.logs.find((l) => l.id === id);
+      if (row) { row.responseBody = { withheld: reason }; row.bodyTruncated = true; }
+      this.withheld.set(id, reason);
+    }
   }
   async resolveLookup(category: string, value: string) {
     return this.lookupRows.find((x) => x.category === category && (x.key === value || x.labelAr === value))?.id ?? null;

@@ -453,6 +453,16 @@ class ContractsController {
       externalSettlementMode: contractsTable.externalSettlementMode, // finance-v2: 0084
       isDraft: contractsTable.isDraft,
       createdAt: contractsTable.createdAt,
+      // Ejar contract terms (0091) and two Ejar facts the contract page shows:
+      // the payment cycle Ejar states (the contract itself is `custom`, its
+      // installments being Ejar's invoices) and the length in days (`period`).
+      autoRenewal: contractsTable.autoRenewal,
+      subleaseAllowed: contractsTable.subleaseAllowed,
+      ejarFee: contractsTable.ejarFee,
+      brokerName: contractsTable.brokerName,
+      brokerIdNumber: contractsTable.brokerIdNumber,
+      ejarCycle: sql<string | null>`coalesce(${contractsTable.ejarRaw} ->> 'cycle', ${contractsTable.ejarRaw} ->> 'paymentFrequency')`,
+      ejarPeriodDays: sql<number | null>`case when (${contractsTable.ejarRaw} ->> 'periodDays') ~ '^[0-9]+$' then (${contractsTable.ejarRaw} ->> 'periodDays')::int end`,
     };
   }
 

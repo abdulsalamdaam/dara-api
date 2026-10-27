@@ -251,6 +251,39 @@ Ejar's invoices (custom schedule), the deposit is Ejar's, rent VAT is derived
 from usage as on a manual contract, else from Ejar's contract type. A property/unit/deed the user typed in is
 written with `ejar_source = null`, so nothing freezes it.
 
+**Import v3 QA fixes (27 Oct 2026).**
+- *A refused lookup carries no contract.* `party_mismatch` (422) is
+  `{code, role, message, budget}` only; `scope_mismatch` (403) likewise. When a
+  pinned (عقاري / tenant plan) or locked account receives a contract it was not
+  verified for — refused, or a call failed before the check — the lookup's
+  `ejar_api_logs` rows get `response_body = {withheld: <reason>}` and
+  `body_truncated = true` (so `GET /ejar/logs/:id` has nothing to return and
+  EJAR_REPLAY never serves them). Refusals echo call logs without bodies.
+- *Import is once per account + contract.* The runner takes
+  `pg_advisory_xact_lock(730127, hashtext('<account>:<contract>'))` inside the
+  import transaction and re-checks; a second request (double click) gets 409
+  `already_imported` with the first one's `contractId`, and a 23505 from
+  `contracts_user_contract_number_uq` maps to the same 409. The web also
+  guards Import with a synchronous ref.
+- *Rent comes from the invoices.* `rental_fees.total_rent_amount` is the rent
+  **per contract year before VAT**, not the total (20498373268: 63,500/yr, while
+  the six invoices and `total_value` are 238,125 = 63,500 × 3 × 1.25; Ejar does
+  not itemise the 25% beyond 15% VAT). Dara stores
+  `monthly = Σ invoices ÷ (1.15 if rent VAT) ÷ months` (months from Ejar's
+  `period`), 2 decimals, so annual × 1.15 × years = the VAT-inclusive
+  installments (5,751.81 / 69,021.72 / VAT 10,353.26 a year, 31,059.78 total).
+  `ejar.rent.ts`; the writer re-derives it under the final VAT verdict. Open
+  question: if the extra 10% is a service charge, the installments' extracted
+  VAT overstates it — the API cannot tell.
+- *Linked parties.* The lookup returns `linkedParties.{landlord,tenant}` — the
+  existing record the writer will reuse (same ID/CR, else name; the landlord
+  cap's looser match at the cap). The review shows its stored contact
+  read-only; the import keeps it (only blank fields are filled). An
+  `is_account_holder` row is never given Ejar's raw/lock/representative.
+- Contract GET now returns `autoRenewal`, `subleaseAllowed`, `ejarFee`,
+  `brokerName`, `brokerIdNumber`, `ejarCycle` (Ejar's frequency; the contract
+  stays `custom`) and `ejarPeriodDays`.
+
 **Scoping:** tenant-package accounts are locked to their own CR
 (`ejar.scope.ts`). Since Import v2 that means: a locked account may only look
 up (and import) a contract whose Details parties include its own CR / unified

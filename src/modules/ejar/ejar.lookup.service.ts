@@ -19,8 +19,11 @@ import {
   partyIdentifiers, pickContractsResource,
   type LookupPrefill, type MappedLookup, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
-import type { EjarLookupStore, LookupMatches, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
+import type { EjarLookupStore, LinkedParty, LookupMatches, PartyKey, PartyMatch, SavedLookup, UnitMatch } from "./ejar.lookup.store";
+import { rentBasis, rentFigures, type RentFigures } from "./ejar.rent";
+import { vatFromContractType } from "./ejar-rent-vat";
 import type { EjarBody, EjarEndpointKey } from "./ejar.types";
+import type { LookupParty } from "./ejar.lookup.map";
 import { EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, mapEjarValue } from "./ejar.import";
 
 export const EJAR_LOOKUP_STORE = Symbol("EJAR_LOOKUP_STORE");
@@ -80,6 +83,17 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
     units: UnitMatch[];
   };
   required: RequiredEntry[];
+  /**
+   * The existing landlord / tenant the import will link instead of creating
+   * a record (same ID / CR, or the account's own landlord at the plan's cap).
+   * Its stored contact is what the contract keeps — the review shows it read-only.
+   */
+  linkedParties: { landlord: LinkedParty | null; tenant: LinkedParty | null };
+  /**
+   * The rent as Dara will store it (ejar.rent.ts), under the contract type's
+   * VAT verdict — the import applies the final one (usage) the same way.
+   */
+  rent: RentFigures;
   /** Every value the import takes from Ejar, as the review's inputs hold them (ids, the city label). */
   prefill: LookupPrefill;
   /** Whose stored identity the inquiry was pinned to, and that it matched (null role: unpinned). */
@@ -129,11 +143,27 @@ export async function lookupContext(
   return { matches, resolved: { propertyTypeId, usageId, cityId, unitTypeIds, unitUsageIds } };
 }
 
+/** The ids of the call-log rows a lookup wrote. */
+export function logIds(logs: unknown[]): number[] {
+  return logs.map((l) => Number((l as { id?: unknown } | null)?.id)).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** Call-log rows without their response bodies — what a refusal may echo back. */
+export function withoutBodies(logs: unknown[]): unknown[] {
+  return logs.map((l) => {
+    if (!l || typeof l !== "object") return l;
+    const { responseBody: _body, ...rest } = l as Record<string, unknown>;
+    return rest;
+  });
+}
+
 /** Ejar client errors → HTTP, surfacing the real upstream status. */
-export function toEjarHttp(err: unknown): unknown {
+export function toEjarHttp(err: unknown, opts: { withBody?: boolean } = {}): unknown {
+  const withBody = opts.withBody !== false;
   if (err instanceof HttpException) return err;
   if (err instanceof EjarConfigError) return new ServiceUnavailableException(err.message);
-  if (err instanceof EjarAccessError) return new ForbiddenException({ code: "access_denied", message: err.message, log: err.log ?? null });
+  const log = err instanceof EjarApiError && err.log ? (withBody ? err.log : withoutBodies([err.log])[0]) : null;
+  if (err instanceof EjarAccessError) return new ForbiddenException({ code: "access_denied", message: err.message, log });
   if (err instanceof EjarApiError) {
     // Whatever the gateway answered is OUR upstream failing, never the
     // caller's: a passed-through 401 reads as "your session expired" to the
@@ -142,7 +172,7 @@ export function toEjarHttp(err: unknown): unknown {
     const upstream = err.status;
     const code = 502;
     return new HttpException(
-      { message: err.message, status: upstream, transactionId: err.transactionId, log: err.log ?? null },
+      { message: err.message, status: upstream, transactionId: err.transactionId, log },
       code,
     );
   }
@@ -334,6 +364,18 @@ export class EjarLookupService {
       return { kind: "ok", saved, logs };
     });
 
+    // A pinned (عقاري / tenant plan) or locked account received a contract it
+    // was not verified for — refused, or never checked because a call failed.
+    // Its raw Ejar answers (names, IDs, representatives' phones and emails)
+    // must not stay readable through the account's call log (GET
+    // /ejar/logs/:id), and the refusal carries none of them.
+    const unverified = outcome.kind === "party_mismatch" || outcome.kind === "scope_mismatch"
+      || ((check.role != null || scope.locked) && outcome.kind !== "ok" && "logs" in outcome);
+    if (unverified && "logs" in outcome) {
+      await this.store.withholdLogBodies(logIds(outcome.logs), outcome.kind);
+    }
+    const publicLogs = (logs: unknown[]) => (unverified ? [] : withoutBodies(logs));
+
     switch (outcome.kind) {
       case "exhausted":
         // The account's own quota ran out (not the shared gateway budget): a
@@ -355,7 +397,7 @@ export class EjarLookupService {
         throw new NotFoundException({
           code: "not_found",
           message: "لم يُعثر على العقد في إيجار — تحقق من الرقم · Ejar has no contract with this number.",
-          logs: outcome.logs,
+          logs: publicLogs(outcome.logs),
           budget: await this.customerBudget(accountId, cfg, user.id),
         });
       case "wrong_number_cap":
@@ -374,7 +416,7 @@ export class EjarLookupService {
             code: "details_unavailable",
             message:
               "لم يُرجع إيجار تفاصيل العقد ولا يسمح الرصيد بطلبها · Ejar returned no contract details, and the Details budget has no room to fetch them.",
-            logs: outcome.logs,
+            logs: publicLogs(outcome.logs),
             budget: await this.customerBudget(accountId, cfg, user.id),
           },
           HttpStatus.TOO_MANY_REQUESTS,
@@ -382,9 +424,10 @@ export class EjarLookupService {
       case "scope_mismatch":
         throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
       case "party_mismatch":
-        throw partyMismatch(check, { logs: outcome.logs, budget: await this.customerBudget(accountId, cfg, user.id) });
+        // The code and the message only — never the contract that did not match.
+        throw partyMismatch(check, { budget: await this.customerBudget(accountId, cfg, user.id) });
       case "error":
-        throw toEjarHttp(outcome.err);
+        throw toEjarHttp(outcome.err, { withBody: !unverified });
       case "ok":
         return this.respond(accountId, outcome.saved, "ejar", outcome.logs, cfg, crInfo);
     }
@@ -401,7 +444,11 @@ export class EjarLookupService {
       this.customerBudget(accountId, cfg),
     ]);
     const { matches, resolved } = ctx;
-    const cityLabel = resolved.cityId != null ? (await this.store.lookupRow(resolved.cityId))?.labelAr ?? null : null;
+    const [cityLabel, linkedLandlord, linkedTenant] = await Promise.all([
+      resolved.cityId != null ? this.store.lookupRow(resolved.cityId).then((r) => r?.labelAr ?? null) : Promise.resolve(null),
+      this.store.existingParty(accountId, "landlord", partyKey(mapped.parties.lessor)),
+      this.store.existingParty(accountId, "tenant", partyKey(mapped.parties.tenant)),
+    ]);
     return {
       source,
       lookedUpAt: new Date(saved.createdAt).toISOString(),
@@ -414,10 +461,21 @@ export class EjarLookupService {
         matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) },
       }),
       prefill: computePrefill(mapped, resolved, cityLabel),
+      linkedParties: { landlord: linkedLandlord, tenant: linkedTenant },
+      rent: rentFigures(rentBasis(mapped), vatFromContractType(mapped.contract.contractType)),
       partyCheck,
       logs,
     };
   }
+}
+
+/** How the import's writer will look this party up: its ID (an organization: its CR), else its name. */
+export function partyKey(p: LookupParty | null): PartyKey {
+  if (!p) return { idNumber: null, name: null, ids: [] };
+  const isOrg = p.kind === "organization";
+  const idNumber = (isOrg ? p.crNumber : p.idNumber) ?? null;
+  const ids = [...new Set([idNumber, p.idNumber, p.crNumber, p.unifiedNumber, p.vatNumber].filter((v): v is string => !!v && !!v.trim()))];
+  return { idNumber, name: p.name ?? null, ids };
 }
 
 /** The contract's Ejar unit UUIDs that the account already holds. */
