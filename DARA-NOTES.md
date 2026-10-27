@@ -274,27 +274,37 @@ stays blocked in `baladyConfig()` until then. What the import maps
 lessor's or tenant's CR on the prod sample — it looks like the brokerage
 office's CR.
 
-**Landlord CR at the inquiry** (`landlord_cr` on `POST /ejar/lookup` and
-`/ejar/import`; rule from `ejarLandlordCrRule` in `plan-features.ts`, exposed
-as `landlordCr` on `GET /ejar/budget`): عقاري (`basic`) → **required**; it must
-equal a lessor-role party's CR / unified number / national ID or the contract's
-`company_cr_number` (never a representative's or the tenant's). Checked
-locally — Balady does not filter by CR. Missing → 400 `landlord_cr_required`,
-not 10 digits → 400 `landlord_cr_invalid`, both before any call; mismatch →
-422 `landlord_cr_mismatch` after the calls (spent and counted), nothing saved;
-a cache hit and the import re-check it. Offices / Companies (and tenant,
-which `ejar.scope.ts` locks instead) → optional: the web hides the field, and
-a CR sent anyway is checked the same way. Specs: `ejar.import-v3.spec.ts`
-with the invented `lookup-contracts-prod.json` (the prod shape, key for key).
+**The inquiry is pinned to the account's own record** (`ejarPartyRole` in
+`plan-features.ts`, `ejar.party-check.ts`): عقاري (`basic`) → the contract's
+LESSOR must be the account's landlord (the account-holder owner row, else the
+only owner row; its `id_number` = CR or national ID); the `tenant` plan → the
+contract's TENANT must be the account (company `commercial_reg`, else the
+account-holder tenant row's `national_id`). Offices / Companies → unpinned,
+contract number only. The ID is NEVER typed: the server reads it from the
+stored record (a client-sent `landlord_cr` is ignored) and `GET /ejar/budget`
+returns it as `partyCheck {role, idNumber}` so the web shows it read-only.
+Matching is local (Balady does not filter by CR): lessor side = lessor-role
+parties' CR / unified / national ID or `company_cr_number`; tenant side =
+tenant-role parties' CR / unified / national ID — never a representative. No
+ID on file → 409 `party_id_missing` before any call (the web sends the user to
+complete the landlord / account record); mismatch → 422 `party_mismatch`
+(`role`) after the calls (spent, counted), nothing saved; a cache hit and the
+import re-check against the record as it is now. The tenant scope
+(`ejar.scope.ts`) also falls back to the account-holder tenant's national ID
+when the company has no CR. Specs: `ejar.import-v3.spec.ts`,
+`ejar.party-check.spec.ts`, with the invented `lookup-contracts-prod.json`.
 
 **Staging replay seeds** (`ejar_api_logs`, env `replay-seed`, keyed by
 `params.contractNumber` / `params.contract_ids`), anonymized — fake names,
-IDs, CRs, phones, no IBAN: 1171/1172 Invoices/Details for the prod sample contract (its number is in
-the staging memory note, not here — this repo is public) (lessor org CR 1010999001, tenant org 1010999002, company_cr 2050999003), a
-Get Contracts row for the same contract (plaza «مجمع النخيل التجاري», shop
-SH-01, lat/long 24.93113797, 46.64426996), and an invented residential
-contract 20499000017 (Invoices + Get Contracts; individual lessor 1077700002 =
-test-aqari's own landlord, apartment A-12). Staging runs
+IDs, CRs, phones, no IBAN: 1171/1172 Invoices/Details for the prod sample
+contract (its number is in the staging memory note, not here — this repo is
+public) and a Get Contracts row for it (lessor org CR 1010999001, tenant org
+1010999002, company_cr 2050999003; plaza «مجمع النخيل التجاري», shop SH-01,
+lat/long 24.93113797, 46.64426996) — the MISMATCH contract for test-aqari and
+test-tenant, the plain one for test-office; and an invented residential
+contract 20499000017 (Invoices + Get Contracts) whose lessor is test-aqari's
+own landlord (1077700002) and whose tenant is test-tenant's company
+(1010777001) — the MATCH contract for both. Staging runs
 `EJAR_LOOKUP_SECOND_CALL=contracts` + `EJAR_REPLAY=on`.
 
 **Ejar field locks** (`ejar.locks.ts`) are **advisory only** — computed by one

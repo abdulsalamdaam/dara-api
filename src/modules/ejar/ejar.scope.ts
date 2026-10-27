@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException } from "@nestjs/common";
-import { and, eq } from "drizzle-orm";
-import { companiesTable, usersTable } from "@dara/database";
+import { and, eq, isNull } from "drizzle-orm";
+import { companiesTable, tenantsTable, usersTable } from "@dara/database";
 
 import { packageMode } from "../../common/packages";
 
@@ -52,7 +52,17 @@ export async function resolveEjarScope(db: any, ownerId: number): Promise<EjarSc
 
   if (packageMode(row?.packagePlan) !== "tenant") return { locked: false, idNumber: null };
 
-  const cr = String(row?.commercialReg ?? "").trim();
+  // The company's CR; an individual tenant account has none, so its own
+  // account-holder tenant record's national ID stands in.
+  let cr = String(row?.commercialReg ?? "").trim();
+  if (!cr) {
+    const [self] = await db
+      .select({ nationalId: tenantsTable.nationalId })
+      .from(tenantsTable)
+      .where(and(eq(tenantsTable.userId, ownerId), eq(tenantsTable.isAccountHolder, true), isNull(tenantsTable.deletedAt)))
+      .limit(1);
+    cr = String(self?.nationalId ?? "").trim();
+  }
   // Fail closed. An unset CR must not degrade to "search anything" — that is
   // precisely the scope this exists to prevent.
   if (!cr) throw new BadRequestException(NO_CR_MESSAGE);

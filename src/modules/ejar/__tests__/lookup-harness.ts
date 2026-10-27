@@ -13,6 +13,7 @@ import type { EjarLookupStore, LookupMatches, MatchKeys, PartyMatch, SavedLookup
 import type { LimitAdjustment } from "../../../common/limit-core";
 import type { EjarAccountMode } from "../ejar.access";
 import type { EjarScope } from "../ejar.scope";
+import type { EjarPartyCheck } from "../ejar.party-check";
 import type { LookupUsage, PlanPeriod } from "../ejar.budget";
 
 export const CN = "10000000001";
@@ -166,6 +167,9 @@ export class MemStore implements EjarLookupStore {
   }
 
   async scope(accountId: number): Promise<EjarScope> { return this.scopes[accountId] ?? { locked: false, idNumber: null }; }
+  /** account → the stored identity its inquiries are pinned to; unset = unpinned (Offices / Companies). */
+  partyChecks: Record<number, EjarPartyCheck> = {};
+  async partyCheck(accountId: number): Promise<EjarPartyCheck> { return this.partyChecks[accountId] ?? { role: null, idNumber: null }; }
   async planPeriod(accountId: number): Promise<PlanPeriod> {
     return this.plans[accountId] ?? { packagePlan: "enterprise", billingCycle: "yearly", subscriptionStartedAt: null, subscriptionEndsAt: null };
   }

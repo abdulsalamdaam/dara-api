@@ -4,8 +4,14 @@ import assert from "node:assert/strict";
 import { scopedIdNumber, assertScopeSafeParams, resolveEjarScope, NO_CR_MESSAGE } from "./ejar.scope";
 
 /** Minimal stand-in for the drizzle chain resolveEjarScope walks. */
-const dbReturning = (row: any) => ({
-  select: () => ({ from: () => ({ leftJoin: () => ({ where: async () => (row ? [row] : []) }) }) }),
+const dbReturning = (row: any, self: { nationalId: string | null } | null = null) => ({
+  select: () => ({
+    from: () => ({
+      leftJoin: () => ({ where: async () => (row ? [row] : []) }),
+      // The account-holder tenant row (an individual tenant has no company CR).
+      where: () => ({ limit: async () => (self ? [self] : []) }),
+    }),
+  }),
 });
 
 describe("resolveEjarScope", () => {
@@ -19,6 +25,11 @@ describe("resolveEjarScope", () => {
       const scope = await resolveEjarScope(dbReturning({ packagePlan: plan, commercialReg: "7030955236" }), 1);
       assert.equal(scope.locked, false, plan);
     }
+  });
+
+  it("an individual tenant account (no company CR) is locked to its own national ID", async () => {
+    const scope = await resolveEjarScope(dbReturning({ packagePlan: "tenant", commercialReg: null }, { nationalId: "1000000201" }), 1);
+    assert.deepEqual(scope, { locked: true, idNumber: "1000000201" });
   });
 
   it("fails closed when a tenant account has no CR on file", async () => {

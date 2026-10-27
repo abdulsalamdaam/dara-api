@@ -21,10 +21,10 @@ import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { STG, world, httpError, baladyOk, baladyErr, fixture } from "./__tests__/lookup-harness";
-import { mapLookup, landlordCrMatches, lessorIdentifiers } from "./ejar.lookup.map";
+import { mapLookup, partyMatches, lessorIdentifiers, tenantIdentifiers } from "./ejar.lookup.map";
 import { EjarImportService, type EjarImportRunnerLike } from "./ejar.import.service";
 import type { ImportPlan, ImportResult } from "./ejar.import.writer";
-import { ejarLandlordCrRule } from "../../common/plan-features";
+import { ejarPartyRole } from "../../common/plan-features";
 
 const N = "20000000001";
 const U = "22222222-3333-4444-8555-666666666666";
@@ -35,14 +35,9 @@ const LESSOR_UNIFIED = "7009990001";
 const COMPANY_CR = "2050999003";
 const TENANT_CR = "1010999002";
 const LESSOR_REP_ID = "1000000101";
-const WRONG_CR = "1010999999";
+const TENANT_REP_ID = "1000000102";
 
 const USER = { id: 1 } as never;
-const DAY = 86_400_000;
-const period = (packagePlan: string) => ({
-  packagePlan, billingCycle: "yearly",
-  subscriptionStartedAt: new Date(Date.now() - DAY), subscriptionEndsAt: new Date(Date.now() + 300 * DAY),
-});
 
 /** A Balady staging world that knows contract N in the production shape. */
 function prodWorld() {
@@ -151,14 +146,21 @@ describe("mapping the production Get Contracts shape", () => {
   });
 
   it("lessor identifiers: lessor CR, unified number and company_cr_number — never a representative or the tenant", () => {
-    const ids = lessorIdentifiers(m());
-    assert.deepEqual([...ids].sort(), [LESSOR_CR, COMPANY_CR, LESSOR_UNIFIED].sort());
-    assert.equal(landlordCrMatches(m(), LESSOR_CR), true);
-    assert.equal(landlordCrMatches(m(), "١٠١٠٩٩٩٠٠١"), true, "Arabic-Indic digits");
-    assert.equal(landlordCrMatches(m(), COMPANY_CR), true);
-    assert.equal(landlordCrMatches(m(), LESSOR_REP_ID), false);
-    assert.equal(landlordCrMatches(m(), TENANT_CR), false);
-    assert.equal(landlordCrMatches(m(), ""), false);
+    assert.deepEqual([...lessorIdentifiers(m())].sort(), [LESSOR_CR, COMPANY_CR, LESSOR_UNIFIED].sort());
+    assert.equal(partyMatches(m(), "landlord", LESSOR_CR), true);
+    assert.equal(partyMatches(m(), "landlord", "١٠١٠٩٩٩٠٠١"), true, "Arabic-Indic digits");
+    assert.equal(partyMatches(m(), "landlord", COMPANY_CR), true);
+    assert.equal(partyMatches(m(), "landlord", LESSOR_REP_ID), false);
+    assert.equal(partyMatches(m(), "landlord", TENANT_CR), false);
+    assert.equal(partyMatches(m(), "landlord", ""), false);
+  });
+
+  it("tenant identifiers: the tenant's CR and unified number — never its representative, the lessor or company_cr_number", () => {
+    assert.deepEqual([...tenantIdentifiers(m())].sort(), [TENANT_CR, "7009990002"].sort());
+    assert.equal(partyMatches(m(), "tenant", TENANT_CR), true);
+    assert.equal(partyMatches(m(), "tenant", TENANT_REP_ID), false);
+    assert.equal(partyMatches(m(), "tenant", LESSOR_CR), false);
+    assert.equal(partyMatches(m(), "tenant", COMPANY_CR), false);
   });
 
   it("an individual lessor matches on the national ID", () => {
@@ -166,8 +168,8 @@ describe("mapping the production Get Contracts shape", () => {
     list.data[0].attributes.lessors = [{ vat: 0, name: "فرد تجريبي", role: "lessor", type: "individual", id_type: "national_id", id_number: "1077700002" }];
     list.data[0].attributes.company_cr_number = null;
     const mm = mapLookup(fixture("lookup-invoices-prod"), null, list, N);
-    assert.equal(landlordCrMatches(mm, "1077700002"), true);
-    assert.equal(landlordCrMatches(mm, LESSOR_CR), false);
+    assert.equal(partyMatches(mm, "landlord", "1077700002"), true);
+    assert.equal(partyMatches(mm, "landlord", LESSOR_CR), false);
   });
 });
 
@@ -223,117 +225,133 @@ describe("the import from the production shape", () => {
   });
 });
 
-describe("the landlord CR at the inquiry", () => {
-  it("the plan rule: عقاري requires it, Offices / Companies (and unknown → Offices) do not", () => {
-    assert.equal(ejarLandlordCrRule("basic"), "required");
-    assert.equal(ejarLandlordCrRule("professional"), "optional");
-    assert.equal(ejarLandlordCrRule("enterprise"), "optional");
-    assert.equal(ejarLandlordCrRule("broker"), "optional");
-    assert.equal(ejarLandlordCrRule(null), "optional");
+describe("the inquiry is pinned to the account's own stored ID (عقاري: its landlord; tenant plan: itself)", () => {
+  const pin = (role: "landlord" | "tenant", idNumber: string | null) => { w.store.partyChecks[1] = { role, idNumber }; };
+
+  it("the plan rule: عقاري → landlord, tenant → tenant, Offices / Companies (and unknown → Offices) → none", () => {
+    assert.equal(ejarPartyRole("basic"), "landlord");
+    assert.equal(ejarPartyRole("tenant"), "tenant");
+    assert.equal(ejarPartyRole("professional"), null);
+    assert.equal(ejarPartyRole("enterprise"), null);
+    assert.equal(ejarPartyRole("broker"), null);
+    assert.equal(ejarPartyRole(null), null);
   });
 
-  it("عقاري without a CR: 400 landlord_cr_required, nothing sent, nothing spent", async () => {
-    w = prodWorld();
-    w.store.plans[1] = period("basic");
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N }));
-    assert.equal(status, 400);
-    assert.equal(body.code, "landlord_cr_required");
-    assert.match(body.message, /السجل التجاري/);
-    assert.equal(w.calls.length, 0);
-  });
+  for (const role of ["landlord", "tenant"] as const) {
+    it(`${role}: no ID on the account's record → 409 party_id_missing in Arabic, nothing sent`, async () => {
+      w = prodWorld();
+      pin(role, null);
+      const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N }));
+      assert.equal(status, 409);
+      assert.equal(body.code, "party_id_missing");
+      assert.equal(body.role, role);
+      assert.match(body.message, /أكمل بيانات/);
+      assert.equal(w.calls.length, 0);
+    });
+  }
 
-  it("عقاري with a malformed CR: 400 landlord_cr_invalid, nothing sent", async () => {
+  it("landlord: the stored lessor CR matches — the lookup goes through and is saved", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("basic");
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N, landlord_cr: "12345" }));
-    assert.equal(status, 400);
-    assert.equal(body.code, "landlord_cr_invalid");
-    assert.equal(w.calls.length, 0);
-  });
-
-  it("عقاري with the lessor's CR: the lookup goes through and is saved", async () => {
-    w = prodWorld();
-    w.store.plans[1] = period("basic");
-    const res = await w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_CR });
-    assert.deepEqual(res.landlordCr, { rule: "required", matched: true });
+    pin("landlord", LESSOR_CR);
+    const res = await w.svc.lookup(USER, { contract_number: N });
+    assert.deepEqual(res.partyCheck, { role: "landlord", idNumber: LESSOR_CR, matched: true });
     assert.equal(res.property?.latitude, 24.93113797);
     assert.equal(w.store.lookups.size, 1);
   });
 
-  it("عقاري with company_cr_number also matches", async () => {
+  it("landlord: company_cr_number also matches", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("basic");
-    const res = await w.svc.lookup(USER, { contract_number: N, landlord_cr: COMPANY_CR });
-    assert.equal(res.landlordCr.matched, true);
+    pin("landlord", COMPANY_CR);
+    assert.equal((await w.svc.lookup(USER, { contract_number: N })).partyCheck.matched, true);
   });
 
-  it("عقاري with a CR that is not the lessor's: 422 in Arabic, the calls count, nothing saved", async () => {
+  it("a client-sent CR is ignored: only the stored record counts", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("basic");
+    pin("landlord", TENANT_CR);
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_CR } as never));
+    assert.equal(status, 422);
+    assert.equal(body.code, "party_mismatch");
+  });
+
+  it("landlord: not the lessor → 422 in Arabic, the calls count, nothing saved", async () => {
+    w = prodWorld();
+    w.store.plans[1] = { packagePlan: "basic", billingCycle: "yearly", subscriptionStartedAt: new Date(Date.now() - 86_400_000), subscriptionEndsAt: new Date(Date.now() + 300 * 86_400_000) };
     const before = (await w.svc.customerBudget(1)).remaining!;
-    for (const cr of [WRONG_CR, TENANT_CR, LESSOR_REP_ID]) {
-      const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N, landlord_cr: cr }));
-      assert.equal(status, 422, cr);
-      assert.equal(body.code, "landlord_cr_mismatch");
-      assert.match(body.message, /لا يطابق المؤجر/);
+    for (const id of [TENANT_CR, LESSOR_REP_ID, "1010999999"]) {
+      pin("landlord", id);
+      const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N }));
+      assert.equal(status, 422, id);
+      assert.equal(body.code, "party_mismatch");
+      assert.equal(body.role, "landlord");
+      assert.match(body.message, /لا يخص المؤجر/);
     }
     assert.equal(w.dataCalls().length, 6, "two calls per attempt were sent");
     assert.equal(w.store.lookups.size, 0, "nothing is saved on a mismatch");
     assert.equal((await w.svc.customerBudget(1)).remaining, before - 3, "each spent lookup counts");
   });
 
-  it("a saved lookup (cache) still checks the CR, without a call", async () => {
+  it("tenant: the stored CR is the contract's tenant → through", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("basic");
-    await w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_CR });
-    const sent = w.calls.length;
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N, landlord_cr: WRONG_CR }));
-    assert.equal(status, 422);
-    assert.equal(body.code, "landlord_cr_mismatch");
-    const missing = await httpError(w.svc.lookup(USER, { contract_number: N }));
-    assert.equal(missing.status, 400);
-    const ok = await w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_CR });
-    assert.equal(ok.source, "cache");
-    assert.equal(w.calls.length, sent, "no call for any of them");
-  });
-
-  it("Offices: the contract number alone is enough", async () => {
-    w = prodWorld();
-    w.store.plans[1] = period("professional");
+    pin("tenant", TENANT_CR);
     const res = await w.svc.lookup(USER, { contract_number: N });
-    assert.deepEqual(res.landlordCr, { rule: "optional", matched: null });
-    assert.equal(res.parties.lessor?.crNumber, LESSOR_CR);
+    assert.deepEqual(res.partyCheck, { role: "tenant", idNumber: TENANT_CR, matched: true });
   });
 
-  it("Offices / Companies: a CR sent anyway is still checked", async () => {
+  it("tenant: the lessor's CR, or the tenant's representative, is not the tenant → 422, nothing saved", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("enterprise");
-    const { status } = await httpError(w.svc.lookup(USER, { contract_number: N, landlord_cr: WRONG_CR }));
+    for (const id of [LESSOR_CR, TENANT_REP_ID]) {
+      pin("tenant", id);
+      const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: N }));
+      assert.equal(status, 422);
+      assert.equal(body.code, "party_mismatch");
+      assert.equal(body.role, "tenant");
+      assert.match(body.message, /لا يخصك/);
+    }
+    assert.equal(w.store.lookups.size, 0);
+  });
+
+  it("a saved lookup (cache) is re-checked against the record as it is now, without a call", async () => {
+    w = prodWorld();
+    pin("landlord", LESSOR_CR);
+    await w.svc.lookup(USER, { contract_number: N });
+    const sent = w.calls.length;
+    pin("landlord", TENANT_CR); // the landlord record was edited
+    const { status } = await httpError(w.svc.lookup(USER, { contract_number: N }));
     assert.equal(status, 422);
-    const res = await w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_UNIFIED });
-    assert.equal(res.landlordCr.matched, true);
+    pin("landlord", LESSOR_CR);
+    assert.equal((await w.svc.lookup(USER, { contract_number: N })).source, "cache");
+    assert.equal(w.calls.length, sent, "no call for either");
   });
 
-  it("the import re-checks it on عقاري: missing 400, wrong 422, right imports", async () => {
+  it("Offices / Companies: unpinned — the contract number alone", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("basic");
-    await w.svc.lookup(USER, { contract_number: N, landlord_cr: LESSOR_CR });
+    const res = await w.svc.lookup(USER, { contract_number: N });
+    assert.deepEqual(res.partyCheck, { role: null, idNumber: null, matched: null });
+  });
+
+  it("the import re-checks the stored record: missing 409, changed 422, right imports", async () => {
+    w = prodWorld();
+    pin("landlord", LESSOR_CR);
+    await w.svc.lookup(USER, { contract_number: N });
     const runner = new RecordingRunner();
     const svc = new EjarImportService(w.store, runner);
     const sent = w.calls.length;
-    assert.equal((await httpError(svc.import(USER, { contract_number: N }))).body.code, "landlord_cr_required");
-    const wrong = await httpError(svc.import(USER, { contract_number: N, landlord_cr: WRONG_CR }));
+    pin("landlord", null);
+    assert.equal((await httpError(svc.import(USER, { contract_number: N }))).body.code, "party_id_missing");
+    pin("landlord", TENANT_CR);
+    const wrong = await httpError(svc.import(USER, { contract_number: N }));
     assert.equal(wrong.status, 422);
-    assert.equal(wrong.body.code, "landlord_cr_mismatch");
+    assert.equal(wrong.body.code, "party_mismatch");
     assert.equal(runner.plans.length, 0, "nothing written");
-    await svc.import(USER, { contract_number: N, landlord_cr: LESSOR_CR });
+    pin("landlord", LESSOR_CR);
+    await svc.import(USER, { contract_number: N });
     assert.equal(runner.plans.length, 1);
     assert.equal(w.calls.length, sent, "the import never calls Ejar");
   });
 
-  it("the import on Offices needs no CR", async () => {
+  it("the import on a tenant account checks the tenant side", async () => {
     w = prodWorld();
-    w.store.plans[1] = period("professional");
+    pin("tenant", TENANT_CR);
     await w.svc.lookup(USER, { contract_number: N });
     const runner = new RecordingRunner();
     await new EjarImportService(w.store, runner).import(USER, { contract_number: N });

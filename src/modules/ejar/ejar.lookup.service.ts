@@ -1,8 +1,9 @@
 import {
   BadRequestException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException,
-  ServiceUnavailableException, UnprocessableEntityException,
+  ConflictException, ServiceUnavailableException, UnprocessableEntityException,
 } from "@nestjs/common";
-import { ejarLandlordCrRule, type EjarLandlordCrRule } from "../../common/plan-features";
+import type { EjarPartyRole } from "../../common/plan-features";
+import type { EjarPartyCheck } from "./ejar.party-check";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { EjarAccessError, EjarApiError, EjarClientService, EjarConfigError } from "./ejar.client.service";
@@ -14,7 +15,7 @@ import {
   type CustomerEjarBudget, type EjarBudget, type LookupConfig, type PlanQuota,
 } from "./ejar.budget";
 import {
-  allPartyIdentifiers, computeRequired, landlordCrMatches, lookupUuid, mapLookup, normalizeContractNumber, normalizeIdentifier,
+  allPartyIdentifiers, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyMatches,
   partyIdentifiers, pickContractsResource,
   type MappedLookup, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
@@ -29,27 +30,37 @@ export const SCOPE_MISMATCH_MESSAGE =
 export const EJAR_BUDGET_EXHAUSTED_MESSAGE =
   "تم استهلاك رصيد عمليات إيجار المتاح لحسابك — تواصل مع دعم دارا · Your account's Ejar lookups are used up — contact Dara support.";
 export const BAD_FORMAT_MESSAGE = "رقم عقد إيجار غير صالح — أرقام فقط · Invalid Ejar contract number (digits only).";
-export const LANDLORD_CR_REQUIRED_MESSAGE =
-  "أدخل السجل التجاري للمؤجر (أو رقم هويته) مع رقم العقد · Enter the landlord's CR (or national ID) with the contract number.";
-export const LANDLORD_CR_INVALID_MESSAGE =
-  "السجل التجاري للمؤجر (أو رقم الهوية) يتكون من 10 أرقام · The landlord's CR (or national ID) is 10 digits.";
-export const LANDLORD_CR_MISMATCH_MESSAGE =
-  "السجل التجاري المُدخل لا يطابق المؤجر في عقد إيجار هذا — تحقق من رقم السجل أو رقم العقد · The CR you entered does not match the landlord on this Ejar contract.";
+/** The account's own record has no identifier to pin the inquiry to. */
+export const PARTY_ID_MISSING_MESSAGE: Record<EjarPartyRole, string> = {
+  landlord:
+    "أكمل بيانات المؤجر في حسابك أولاً (السجل التجاري أو رقم الهوية) — يُستخدم للتحقق من أن عقد إيجار يخصك · Complete your landlord record (CR or national ID) first — it is how we check the Ejar contract is yours.",
+  tenant:
+    "أكمل بيانات حسابك أولاً (السجل التجاري أو رقم الهوية) — يُستخدم للتحقق من أنك المستأجر في عقد إيجار · Add your CR or national ID to your account first — it is how we check you are the tenant on the Ejar contract.",
+};
+/** Ejar's answer does not name the account's own record on that side of the contract. */
+export const PARTY_MISMATCH_MESSAGE: Record<EjarPartyRole, string> = {
+  landlord:
+    "هذا العقد لا يخص المؤجر المسجّل في حسابك — السجل التجاري / الهوية لا يطابق المؤجر في عقد إيجار · This Ejar contract's landlord is not your account's landlord.",
+  tenant:
+    "هذا العقد لا يخصك — رقم السجل التجاري / الهوية في حسابك لا يطابق المستأجر في عقد إيجار · You are not the tenant on this Ejar contract.",
+};
 
-/**
- * The landlord CR typed at the inquiry, checked against the account's plan
- * rule before anything is sent: 400 `landlord_cr_required` when the plan
- * needs one and none came, 400 `landlord_cr_invalid` when it is not 10
- * digits. Returns the normalized CR, or null when none was sent.
- */
-export function readLandlordCr(rule: EjarLandlordCrRule, raw: unknown): string | null {
-  const cr = normalizeIdentifier(raw) || null;
-  if (!cr) {
-    if (rule === "required") throw new BadRequestException({ code: "landlord_cr_required", key: "landlord_cr", message: LANDLORD_CR_REQUIRED_MESSAGE });
-    return null;
+/** 409 `party_id_missing` when the account is pinned (عقاري / tenant) but its record carries no ID. */
+export function assertPartyIdOnFile(check: EjarPartyCheck): void {
+  if (check.role && !check.idNumber) {
+    throw new ConflictException({ code: "party_id_missing", role: check.role, message: PARTY_ID_MISSING_MESSAGE[check.role] });
   }
-  if (!/^\d{10}$/.test(cr)) throw new BadRequestException({ code: "landlord_cr_invalid", key: "landlord_cr", message: LANDLORD_CR_INVALID_MESSAGE });
-  return cr;
+}
+
+/** True when the inquiry is unpinned, or the pinned identity is on the right side of the contract. */
+export function partyCheckPasses(check: EjarPartyCheck, m: Pick<MappedLookup, "parties" | "contract">): boolean {
+  return !check.role || partyMatches(m, check.role, check.idNumber);
+}
+
+export function partyMismatch(check: EjarPartyCheck, extra: Record<string, unknown> = {}) {
+  return new UnprocessableEntityException({
+    code: "party_mismatch", role: check.role, message: PARTY_MISMATCH_MESSAGE[check.role!], ...extra,
+  });
 }
 
 export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> {
@@ -69,8 +80,8 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
     units: UnitMatch[];
   };
   required: RequiredEntry[];
-  /** The account's landlord-CR rule, and whether a typed CR matched (null: none typed). */
-  landlordCr: { rule: EjarLandlordCrRule; matched: boolean | null };
+  /** Whose stored identity the inquiry was pinned to, and that it matched (null role: unpinned). */
+  partyCheck: { role: EjarPartyRole | null; idNumber: string | null; matched: boolean | null };
   logs: unknown[];
 }
 
@@ -142,7 +153,7 @@ type Outcome =
   | { kind: "details_unavailable"; logs: unknown[] }
   | { kind: "wrong_number_cap" }
   | { kind: "scope_mismatch"; logs: unknown[] }
-  | { kind: "landlord_cr_mismatch"; logs: unknown[] }
+  | { kind: "party_mismatch"; logs: unknown[] }
   | { kind: "error"; err: unknown; logs: unknown[] };
 
 /** The upstream answered "no such contract" (staging: 400 "رقم العقد غير صحيح"). */
@@ -187,9 +198,9 @@ export class EjarLookupService {
     return { ...computeBudget(cfg, usage, new Date(), plan), enabled: ejarDenialFor(mode, userId) == null };
   }
 
-  /** Whether this account must type the landlord's CR at the inquiry (plan-features.ts). */
-  async landlordCrRule(accountId: number): Promise<EjarLandlordCrRule> {
-    return ejarLandlordCrRule((await this.store.planPeriod(accountId))?.packagePlan);
+  /** The stored identity this account's inquiries are pinned to (ejar.party-check.ts). */
+  partyCheck(accountId: number): Promise<EjarPartyCheck> {
+    return this.store.partyCheck(accountId);
   }
 
   /** The budget as a customer may see it (`GET /ejar/budget`, lookup responses and refusals): attempts available only, no allowance or usage. */
@@ -212,7 +223,7 @@ export class EjarLookupService {
     return { ...win, used: account };
   }
 
-  async lookup(user: AuthUser, body: { contract_number?: unknown; refresh?: unknown; landlord_cr?: unknown }): Promise<LookupResponse> {
+  async lookup(user: AuthUser, body: { contract_number?: unknown; refresh?: unknown }): Promise<LookupResponse> {
     const contractNumber = normalizeContractNumber(body?.contract_number);
     if (!contractNumber) throw new BadRequestException({ code: "bad_format", message: BAD_FORMAT_MESSAGE });
 
@@ -223,11 +234,11 @@ export class EjarLookupService {
     const denial = ejarDenialFor(accountMode, user.id);
     if (denial) throw new ForbiddenException({ code: denial.code, message: denial.message });
 
-    // The landlord CR: required on عقاري, optional elsewhere — refused here,
-    // before any call, when missing or malformed.
-    const crRule = await this.landlordCrRule(accountId);
-    const landlordCr = readLandlordCr(crRule, body?.landlord_cr);
-    const crInfo = { rule: crRule, matched: landlordCr ? true : null };
+    // عقاري / tenant plan: pinned to the account's own stored landlord /
+    // tenant ID (never a typed value). No ID on file → refused before any call.
+    const check = await this.store.partyCheck(accountId);
+    assertPartyIdOnFile(check);
+    const crInfo = { role: check.role, idNumber: check.idNumber, matched: check.role ? true : null };
 
     const scope = await this.store.scope(accountId);
     const cfg = this.config();
@@ -239,9 +250,7 @@ export class EjarLookupService {
         if (scope.locked && !allPartyIdentifiers(mapSaved(saved).parties).includes(scope.idNumber!)) {
           throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
         }
-        if (landlordCr && !landlordCrMatches(mapSaved(saved), landlordCr)) {
-          throw new UnprocessableEntityException({ code: "landlord_cr_mismatch", key: "landlord_cr", message: LANDLORD_CR_MISMATCH_MESSAGE });
-        }
+        if (!partyCheckPasses(check, mapSaved(saved))) throw partyMismatch(check);
         return this.respond(accountId, saved, "cache", [], cfg, crInfo);
       }
     }
@@ -306,9 +315,10 @@ export class EjarLookupService {
       if (scope.locked && !allPartyIdentifiers(fresh.parties).includes(scope.idNumber!)) {
         return { kind: "scope_mismatch", logs };
       }
-      // The typed landlord CR must be one of the lessor's identifiers. The
-      // calls are spent (and counted) either way; a mismatch saves nothing.
-      if (landlordCr && !landlordCrMatches(fresh, landlordCr)) return { kind: "landlord_cr_mismatch", logs };
+      // The account's own landlord / tenant ID must be on that side of the
+      // contract. The calls are spent (and counted) either way; a mismatch
+      // saves nothing.
+      if (!partyCheckPasses(check, fresh)) return { kind: "party_mismatch", logs };
 
       const saved = await this.store.saveLookup({
         accountId, contractNumber, ejarUuid: uuid,
@@ -367,11 +377,8 @@ export class EjarLookupService {
         );
       case "scope_mismatch":
         throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
-      case "landlord_cr_mismatch":
-        throw new UnprocessableEntityException({
-          code: "landlord_cr_mismatch", key: "landlord_cr", message: LANDLORD_CR_MISMATCH_MESSAGE,
-          logs: outcome.logs, budget: await this.customerBudget(accountId, cfg, user.id),
-        });
+      case "party_mismatch":
+        throw partyMismatch(check, { logs: outcome.logs, budget: await this.customerBudget(accountId, cfg, user.id) });
       case "error":
         throw toEjarHttp(outcome.err);
       case "ok":
@@ -381,7 +388,7 @@ export class EjarLookupService {
 
   private async respond(
     accountId: number, saved: SavedLookup, source: "ejar" | "cache", logs: unknown[], cfg: LookupConfig,
-    landlordCr: LookupResponse["landlordCr"],
+    partyCheck: LookupResponse["partyCheck"],
   ): Promise<LookupResponse> {
     const { contractsResource: _internal, ...mapped } = mapSaved(saved);
     const [ctx, alreadyImported, budget] = await Promise.all([
@@ -401,7 +408,7 @@ export class EjarLookupService {
         resolved,
         matches: { ...matches, unitEjarIds: matchedUnitEjarIds(mapped, matches.units) },
       }),
-      landlordCr,
+      partyCheck,
       logs,
     };
   }

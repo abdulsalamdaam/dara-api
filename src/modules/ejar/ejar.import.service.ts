@@ -1,8 +1,6 @@
 import {
   BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException,
-  UnprocessableEntityException,
 } from "@nestjs/common";
-import { ejarLandlordCrRule } from "../../common/plan-features";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { scopeId } from "../../common/scope";
 import { dateOnly, email as emailOf, nationalId, partyIdentityNumber, saudiPhone, text, LIMITS } from "../../common/validation";
@@ -11,15 +9,15 @@ import { vatFromContractType } from "./ejar-rent-vat";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: E26 — Ejar-paid becomes settled_external (DESIGN §9 E7)
 import {
-  allPartyIdentifiers, computeRequired, landlordCrMatches, missingRequired, normalizeContractNumber,
+  allPartyIdentifiers, computeRequired, missingRequired, normalizeContractNumber,
   type LookupParty, type MappedLookup,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
-  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, LANDLORD_CR_MISMATCH_MESSAGE, SCOPE_MISMATCH_MESSAGE, lookupContext, mapSaved,
-  matchedUnitEjarIds, readLandlordCr,
+  BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lookupContext, mapSaved,
+  matchedUnitEjarIds, partyCheckPasses, partyMismatch,
 } from "./ejar.lookup.service";
 import { EjarImportWriter, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
@@ -171,12 +169,12 @@ export class EjarImportService {
     if (scope.locked && !allPartyIdentifiers(mapped.parties).includes(scope.idNumber!)) {
       throw new ForbiddenException({ code: "scope_mismatch", message: SCOPE_MISMATCH_MESSAGE });
     }
-    // The landlord CR, as at the inquiry: required on عقاري and checked
-    // against the saved lookup's lessors again, so an import cannot skip it.
-    const landlordCr = readLandlordCr(ejarLandlordCrRule((await this.store.planPeriod(accountId))?.packagePlan), body?.landlord_cr);
-    if (landlordCr && !landlordCrMatches(mapped, landlordCr)) {
-      throw new UnprocessableEntityException({ code: "landlord_cr_mismatch", key: "landlord_cr", message: LANDLORD_CR_MISMATCH_MESSAGE });
-    }
+    // The pin, as at the inquiry (عقاري: the account's landlord; tenant plan:
+    // the account itself), re-checked against the stored record — the
+    // landlord may have been edited since the lookup was saved.
+    const check = await this.store.partyCheck(accountId);
+    assertPartyIdOnFile(check);
+    if (!partyCheckPasses(check, mapped)) throw partyMismatch(check);
 
     // ── Picked records must be the caller's own ──
     const notInAccount = (key: string) =>

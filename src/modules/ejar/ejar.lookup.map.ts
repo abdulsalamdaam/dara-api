@@ -509,10 +509,18 @@ export function lessorIdentifiers(m: Pick<MappedLookup, "parties" | "contract">)
   return [...new Set(ids.filter((v): v is string => !!v))];
 }
 
-/** Does the typed landlord CR belong to this contract's lessor side? */
-export function landlordCrMatches(m: Pick<MappedLookup, "parties" | "contract">, cr: unknown): boolean {
-  const v = normalizeIdentifier(cr);
-  return !!v && lessorIdentifiers(m).includes(v);
+/** Every identifier of the contract's tenant side (tenant-role parties; never a representative). */
+export function tenantIdentifiers(m: Pick<MappedLookup, "parties">): string[] {
+  const p = m.parties;
+  const tenants = [p.tenant, ...p.others].filter((x): x is LookupParty => !!x && x.role === "tenant");
+  return [...new Set(tenants.flatMap((x) => partyIdentifiers(x)))];
+}
+
+/** Is `id` one of this contract's lessors (landlord) or tenants (tenant)? */
+export function partyMatches(m: Pick<MappedLookup, "parties" | "contract">, role: "landlord" | "tenant", id: unknown): boolean {
+  const v = normalizeIdentifier(id);
+  if (!v) return false;
+  return (role === "landlord" ? lessorIdentifiers(m) : tenantIdentifiers(m)).includes(v);
 }
 
 /** All identifiers on the contract — used for the locked-account rule. */

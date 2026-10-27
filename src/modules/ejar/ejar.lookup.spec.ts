@@ -22,8 +22,6 @@ import { mapLookup, computeRequired, normalizeContractNumber, lookupUuid } from 
 import { EjarImportService } from "./ejar.import.service";
 
 const USER = { id: 1 } as never;
-/** The fixtures' lessor CR — عقاري accounts must type it at the inquiry. */
-const LESSOR_CR = "1010000002";
 const OTHER = { id: 2 } as never;
 
 let w: ReturnType<typeof world>;
@@ -326,9 +324,9 @@ describe("the plan's Ejar lookup quota", () => {
 
     const numbers = Array.from({ length: 23 }, (_, i) => String(10000000100 + i));
     numbers.forEach((n) => w.known.add(n));
-    for (const n of numbers.slice(0, 22)) await w.svc.lookup(USER, { contract_number: n, landlord_cr: LESSOR_CR });
+    for (const n of numbers.slice(0, 22)) await w.svc.lookup(USER, { contract_number: n });
     const sent = w.calls.length;
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22], landlord_cr: LESSOR_CR }));
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: numbers[22] }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
     assert.equal(body.budget.available, false);
@@ -381,7 +379,7 @@ describe("what the customer is shown: attempts available, prorated to the paid p
     w = dworld({ env });
     w.store.plans[1] = period("basic", "quarterly");
     assert.equal((await w.svc.customerBudget(1)).remaining, 22);
-    const res = await w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR });
+    const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.equal(res.budget.remaining, 21);
     assert.equal((await w.svc.customerBudget(1)).remaining, 21);
   });
@@ -815,9 +813,9 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 1, addons: 0 };
     w.known.add("10000000201");
-    await w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR });
+    await w.svc.lookup(USER, { contract_number: CN });
     const sent = w.calls.length;
-    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201", landlord_cr: LESSOR_CR }));
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: "10000000201" }));
     assert.equal(status, 429);
     assert.equal(body.code, "budget_exhausted");
     // Add-ons come from the admin only: nothing for sale, "contact us".
@@ -831,7 +829,7 @@ describe("account limits on the Ejar quota (override / add-ons)", () => {
     w = dworld();
     w.store.plans[1] = period("basic", "quarterly");
     w.store.quotaAdjust[1] = { override: 0, addons: 0 };
-    const { body } = await httpError(w.svc.lookup(USER, { contract_number: CN, landlord_cr: LESSOR_CR }));
+    const { body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
     assert.equal(body.code, "budget_exhausted");
     assert.equal(body.addonAvailable, false);
   });

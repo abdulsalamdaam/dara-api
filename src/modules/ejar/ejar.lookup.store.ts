@@ -11,6 +11,7 @@ import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
 import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
 import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
+import { resolvePartyCheck, type EjarPartyCheck } from "./ejar.party-check";
 
 /**
  * Advisory-lock key serialising budget check + Ejar calls across every API
@@ -73,6 +74,8 @@ export interface EjarLookupStore {
   /** Invoices calls Ejar answered "no such contract" for this account since `since`. */
   wrongNumbers(since: Date, accountId: number): Promise<number>;
   scope(accountId: number): Promise<EjarScope>;
+  /** The stored identity an inquiry is pinned to (عقاري: its landlord; tenant plan: itself). */
+  partyCheck(accountId: number): Promise<EjarPartyCheck>;
   /** The account's plan and paid period — what its Ejar lookup quota is cut from. */
   planPeriod(accountId: number): Promise<PlanPeriod | null>;
   /** The account's override / active add-ons for its Ejar lookup quota (common/limits.ts). */
@@ -155,6 +158,10 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
 
   scope(accountId: number): Promise<EjarScope> {
     return resolveEjarScope(this.db, accountId);
+  }
+
+  partyCheck(accountId: number): Promise<EjarPartyCheck> {
+    return resolvePartyCheck(this.db, accountId);
   }
 
   async planPeriod(accountId: number): Promise<PlanPeriod | null> {

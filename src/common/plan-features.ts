@@ -132,19 +132,20 @@ export function assertPlanAllowsCommission(plan: string | null | undefined): voi
 }
 
 /**
- * The landlord CR on an Ejar inquiry (`POST /ejar/lookup` `landlord_cr`).
+ * Whose identity an Ejar inquiry is pinned to (`ejar.party-check.ts`).
  *
- *  - عقاري (`basic`) — `required`: the account manages its own property, so
- *    it may only pull a contract whose lessor it is. The typed CR (or the
- *    individual landlord's national ID) must match a lessor in Ejar's answer,
- *    checked locally — Balady does not filter by CR (`cr_numbers` → 0, Oct 2026).
- *  - المكاتب / الشركات and the rest — `optional`: an office manages many
- *    landlords, so the contract number alone is enough (a CR sent anyway is
- *    still checked).
- * The `tenant` plan is scoped to its own CR by `ejar.scope.ts` instead.
+ *  - عقاري (`basic`) → `landlord`: the account manages its own property, so it
+ *    may only pull a contract whose LESSOR is the account's own landlord record.
+ *  - المستأجرين (`tenant`) → `tenant`: only a contract whose TENANT is the
+ *    account itself.
+ *  - المكاتب / الشركات → null: an office manages many landlords; contract
+ *    number only.
+ * The identifier is never typed: it is read from the account's own record and
+ * checked locally against Ejar's answer (Balady does not filter by CR).
  */
-export type EjarLandlordCrRule = "required" | "optional";
+export type EjarPartyRole = "landlord" | "tenant";
 
-export function ejarLandlordCrRule(plan: string | null | undefined): EjarLandlordCrRule {
-  return resolvePackage(plan).key === "basic" ? "required" : "optional";
+export function ejarPartyRole(plan: string | null | undefined): EjarPartyRole | null {
+  const key = resolvePackage(plan).key;
+  return key === "basic" ? "landlord" : key === "tenant" ? "tenant" : null;
 }
