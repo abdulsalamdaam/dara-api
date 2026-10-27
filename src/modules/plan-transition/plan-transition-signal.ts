@@ -29,7 +29,7 @@ export interface PlanChangeSignal {
 
 export type PlanChangeHandler = (accountUserId: number, c: PlanChangeSignal) => void;
 export type PlanGuardHandler = (accountUserId: number, toPlan: string, viewer: "customer" | "admin", opts: { force?: boolean; reason?: string | null }) => Promise<void>;
-export type ModeMigrationHandler = (accountUserId: number, trigger: string) => Promise<{ outcome: string; blockers?: Array<{ code: string }> }>;
+export type ModeMigrationHandler = (accountUserId: number, trigger: string) => Promise<{ outcome: string; blockers?: Array<{ code: string }>; archiveId?: number }>;
 export type OwnerModeConflictHandler = (accountUserId: number, detail: Record<string, unknown>) => Promise<void>;
 
 let changeHandler: PlanChangeHandler | null = null;
@@ -74,7 +74,7 @@ export async function assertAdminPlanChangeAllowed(accountUserId: number, toPlan
 }
 
 /** Ask for the automatic Owner→Manager migration; null when nothing is registered. Never throws. */
-export async function requestModeMigration(accountUserId: number, trigger: string): Promise<{ outcome: string; blockers?: Array<{ code: string }> } | null> {
+export async function requestModeMigration(accountUserId: number, trigger: string): Promise<{ outcome: string; blockers?: Array<{ code: string }>; archiveId?: number } | null> {
   if (!migrationHandler) return null;
   try {
     return await migrationHandler(accountUserId, trigger);
@@ -83,7 +83,7 @@ export async function requestModeMigration(accountUserId: number, trigger: strin
   }
 }
 
-/** Put an Owner-mode third-party conflict in the admin queue. Never throws. */
+/** Record what the Owner-mode third-party guard did (a refusal, or the migration it ran) for the admin. Never throws. */
 export async function reportOwnerModeConflict(accountUserId: number, detail: Record<string, unknown>): Promise<void> {
   if (!conflictHandler) return;
   try {

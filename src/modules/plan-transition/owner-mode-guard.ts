@@ -121,7 +121,12 @@ export async function assertOwnerModeAllowsLandlord(q: Sql, scope: number, owner
   if (!(await propertyHasActiveContract(q, scope, propertyId))) return;
 
   const m = await requestModeMigration(scope, "third_party_landlord");
-  if (m && (m.outcome === "migrated" || m.outcome === "migrated_not_started")) return;
+  if (m && (m.outcome === "migrated" || m.outcome === "migrated_not_started")) {
+    // Recorded like a plan change so the admin sees it in Plan history (and the queue, when the ledger did not
+    // start) and can restore the archived Owner ledger from there; nothing else links the archive to a change.
+    await reportOwnerModeConflict(scope, { ownerId, propertyId, outcome: m.outcome, archiveId: m.archiveId ?? null, blockers: [] });
+    return;
+  }
   if ((await accountingMode(q, scope)) !== "owner") return; // migrated by someone else meanwhile
 
   await reportOwnerModeConflict(scope, {

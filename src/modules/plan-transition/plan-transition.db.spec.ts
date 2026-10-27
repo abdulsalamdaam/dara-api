@@ -265,6 +265,15 @@ describe("plan transitions (real Postgres)", { skip: fv2DbSkip }, () => {
     assert.equal(latest.checklist.find((x) => x.key === "accounting_ready")?.status, "blocked");
     const again = await svc.retry(rec.id, ADMIN, { reason: "Checked with the accountant" });
     assert.equal(again.status, "blocked", "a retry inspects again");
+    assert.equal(again.steps.find((x) => x.key === "client_money_check")?.status, "skipped");
+    // Support reopens the period and retries: it migrates, and the client-money check runs this time.
+    await env.q(`update fiscal_periods set status = 'open' where user_id = $1 and fiscal_year = 2026 and period_no = 1`, [T4]);
+    const fixed = await svc.retry(rec.id, ADMIN, { reason: "Period reopened by support" });
+    assert.equal(fixed.status, "done", JSON.stringify(fixed.steps));
+    assert.equal(fixed.steps.find((x) => x.key === "mode_migration")?.status, "done");
+    assert.equal(fixed.steps.find((x) => x.key === "client_money_check")?.status, "done", "R16 checked after the migration");
+    assert.ok(fixed.archive?.id);
+    assert.equal((await settingsOf(env, T4)).accounting_mode, "manager");
     const p = await svc.preview(T4, "enterprise", "admin");
     assert.equal(p.direction, "lateral");
   });
@@ -399,6 +408,13 @@ describe("plan transitions (real Postgres)", { skip: fv2DbSkip }, () => {
     const out = await props.update(userOf(T12), String(s.propH), { ownerId: s.agent });
     assert.equal(out.ownerId, s.agent);
     assert.equal((await settingsOf(env, T12)).accounting_mode, "manager", "migrated, then allowed");
+    // The migration the guard ran is on record, with its archive (Plan history → Restore), and not in the queue.
+    const hist = (await svc.list(T12)).data.filter((x) => x.source === "owner_mode_guard");
+    assert.equal(hist.length, 1);
+    assert.equal(hist[0].status, "done");
+    assert.ok(hist[0].archive?.id, "archive linked to the guard row");
+    assert.equal(await n(env, `select count(*)::int n from finance_ledger_archives where account_user_id = $1 and plan_change_id is null`, [T12]), 0);
+    assert.ok(!(await svc.queue("attention,blocked")).data.some((x) => x.accountUserId === T12));
 
     const b = seeds.get(T12B)!;
     await setPlan(env, T12B, "professional");
@@ -417,6 +433,16 @@ describe("plan transitions (real Postgres)", { skip: fv2DbSkip }, () => {
     assert.ok(q.data.some((x) => x.accountUserId === T12B && x.source === "owner_mode_guard"));
     // A property with no active contract, or the holder itself, is never refused.
     await props.update(userOf(T12B), String(b.propA), { ownerId: b.holder });
+    // Support upgrades the account and retries the queue item: it migrates, and the item leaves the queue.
+    const item = q.data.find((x) => x.accountUserId === T12B && x.source === "owner_mode_guard")!;
+    await setPlan(env, T12B, "professional");
+    const retried = await svc.retry(item.id, ADMIN, { reason: "Upgraded; rebuild the ledger" });
+    assert.equal(retried.status, "done", JSON.stringify(retried.steps));
+    assert.ok(retried.archive?.id, "the retry's archive is linked to the item");
+    assert.equal((await settingsOf(env, T12B)).accounting_mode, "manager");
+    assert.ok(!(await svc.queue("attention,blocked")).data.some((x) => x.id === item.id));
+    const moved = await props.update(userOf(T12B), String(b.propH), { ownerId: b.agent });
+    assert.equal(moved.ownerId, b.agent, "the customer can link the landlord now");
   });
 
   it("T18: two migrations at once → one migration, one archive", async () => {

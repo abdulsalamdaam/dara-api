@@ -539,25 +539,46 @@ export class PlanTransitionService implements OnModuleInit, OnModuleDestroy {
 
   // ─── Owner-mode guard queue item ────────────────────────────────────────
 
+  /**
+   * What the Owner-mode third-party guard did, as an `owner_mode_guard` row: a refusal (`attention`, or `blocked`
+   * with the blockers) for the admin queue, or the migration it ran (`done`; `attention` when the rebuilt ledger did
+   * not start). A migration's archive is linked to the row, so Plan history shows it and the admin can restore it.
+   * A refusal re-uses the account's open row of the last 24 hours; a migration resolves that row.
+   */
   async ownerModeConflict(acct: number, detail: Record<string, unknown>): Promise<void> {
     const [u] = (await this.pool.query(`select package_plan from users where id = $1`, [acct])).rows;
     const plan = u?.package_plan ?? "broker";
-    const status: StepStatus = Array.isArray(detail.blockers) && (detail.blockers as unknown[]).length ? "blocked" : "attention";
+    const outcome = String(detail.outcome ?? "");
+    const migrated = outcome === "migrated" || outcome === "migrated_not_started";
+    const status: StepStatus = outcome === "migrated" ? "done"
+      : Array.isArray(detail.blockers) && (detail.blockers as unknown[]).length ? "blocked" : "attention";
     const step: Step = { key: "owner_mode_guard", status, at: new Date().toISOString(), detail };
     const [open] = (await this.pool.query(
       `select id from account_plan_changes where account_user_id = $1 and source = 'owner_mode_guard'
           and status in ('attention','blocked') and created_at > now() - interval '24 hours' order by id desc limit 1`, [acct])).rows;
+    let id: number;
     if (open) {
+      id = Number(open.id);
       await this.pool.query(`update account_plan_changes set steps = $2::jsonb, status = $3, updated_at = now() where id = $1`,
-        [open.id, JSON.stringify([step]), status]);
-      return;
+        [id, JSON.stringify([step]), status]);
+    } else {
+      const features = JSON.stringify(planFeatures(plan));
+      const [row] = (await this.pool.query(
+        `insert into account_plan_changes (account_user_id, from_plan, to_plan, from_features, to_features, direction, source, status, steps, reason)
+         values ($1, $2, $2, $3::jsonb, $3::jsonb, 'lateral', 'owner_mode_guard', $4, $5::jsonb, $6)
+         returning id`,
+        [acct, plan, features, status, JSON.stringify([step]), migrated
+          ? "A third-party landlord was linked to a property with an active contract; the Owner-mode ledger was rebuilt in Manager mode"
+          : "A third-party landlord was linked to a property with an active contract while the ledger is in Owner mode"],
+      )).rows;
+      id = Number(row.id);
     }
-    const features = JSON.stringify(planFeatures(plan));
-    await this.pool.query(
-      `insert into account_plan_changes (account_user_id, from_plan, to_plan, from_features, to_features, direction, source, status, steps, reason)
-       values ($1, $2, $2, $3::jsonb, $3::jsonb, 'lateral', 'owner_mode_guard', $4, $5::jsonb, $6)`,
-      [acct, plan, features, status, JSON.stringify([step]), "A third-party landlord was linked to a property with an active contract while the ledger is in Owner mode"],
-    );
+    const archiveId = Number(detail.archiveId);
+    if (migrated && Number.isInteger(archiveId) && archiveId > 0) {
+      await this.pool.query(
+        `update finance_ledger_archives set plan_change_id = $2 where id = $1 and account_user_id = $3 and plan_change_id is null`,
+        [archiveId, id, acct]);
+    }
   }
 
   // ─── Reads ──────────────────────────────────────────────────────────────
@@ -655,14 +676,27 @@ export class PlanTransitionService implements OnModuleInit, OnModuleDestroy {
   async retry(changeId: number, actorUserId: number, body: any): Promise<PlanChangeDto> {
     const reason = requireReason(body);
     const ch = await this.get(changeId);
-    const keep = ch.steps.filter((s) => FINAL.includes(s.status) || s.key === "owner_mode_guard" || s.key === "ledger_restore");
+    // Only steps that finished are kept: a step skipped because an earlier one had not run yet (the R16 check
+    // while the migration was blocked) runs again.
+    const keep = ch.steps.filter((s) => s.status === "done" || s.key === "owner_mode_guard" || s.key === "ledger_restore"
+      || (s.status === "skipped" && s.detail?.supersededBy != null));
     await this.pool.query(`update account_plan_changes set steps = $2::jsonb, status = 'pending', updated_at = now() where id = $1`,
       [changeId, JSON.stringify(keep)]);
     if (ch.source === "owner_mode_guard") {
       const r = await this.migration.maybeMigrate(ch.accountUserId, "admin_retry");
-      const status: StepStatus = r.outcome === "migrated" || r.outcome === "not_needed" ? "done" : r.outcome === "blocked" ? "blocked" : "attention";
+      const { fs } = await this.settings(ch.accountUserId);
+      // Resolved once the ledger is out of Owner mode (migrated now, or by someone else meanwhile): the customer can
+      // link the landlord again, so the refusal leaves the queue.
+      const resolved = r.outcome === "migrated" || (fs != null && fs.accounting_mode !== "owner");
+      const status: StepStatus = resolved ? "done" : r.outcome === "blocked" ? "blocked" : "attention";
       const step: Step = { key: "mode_migration", status, at: new Date().toISOString(), detail: { outcome: r.outcome, archiveId: r.archiveId ?? null, blockers: (r.blockers ?? []).map((b) => b.code) } };
-      const steps = [...keep, step];
+      if (r.archiveId) {
+        await this.pool.query(`update finance_ledger_archives set plan_change_id = $2 where id = $1 and plan_change_id is null`, [r.archiveId, changeId]);
+      }
+      const guard = keep.map((s) => (s.key === "owner_mode_guard" && resolved
+        ? { ...s, status: "done" as StepStatus, at: new Date().toISOString(), detail: { ...(s.detail ?? {}), resolvedBy: "admin_retry" } }
+        : s));
+      const steps = [...guard, step];
       await this.pool.query(`update account_plan_changes set steps = $2::jsonb, status = $3, updated_at = now() where id = $1`,
         [changeId, JSON.stringify(steps), changeStatus(steps)]);
     } else {
