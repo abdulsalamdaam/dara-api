@@ -318,7 +318,9 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
 
   it("a team member reads the account holder's scope; without reports.view the guard refuses", async () => {
     const ctl = new OpsReportsController(db);
-    const member = { id: 99999, ownerUserId: A, permissions: ["reports.view"] } as any;
+    // adf19c0: a report also needs the view key of every module it reads (OPS_REPORT_PERMS).
+    const member = { id: 99999, ownerUserId: A, permissions: ["reports.view", "tenants.view", "payments.view"] } as any;
+    assert.throws(() => ctl.one({ ...member, permissions: ["reports.view"] }, "tenant_balances", {}), (e: any) => e.getStatus() === 403);
     const r = await ctl.one(member, "tenant_balances", {});
     assert.deepEqual(r.totals, { activeContracts: 2, billed: 9300, collected: 5700, outstanding: 3600, overdue: 3600 });
     await assert.rejects(ctl.one(member, "nope", {}), (e: any) => e.getStatus() === 404);

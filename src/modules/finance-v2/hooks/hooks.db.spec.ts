@@ -266,9 +266,10 @@ describe("finance v2 hooks on the real legacy routes (real Postgres)", { skip: f
     assert.equal(p.facts.groups[0].vat, "15.00");
   });
 
-  it("commission collect: E16 (deduction by default, skipped at post); commission credit note: E36", () => {
-    assert.deepEqual(keys("collect_commission"), ["payment_collection,collected,E16"]);
-    assert.equal(ev("collect_commission")[0].payload.facts.cls, "commission_deduction");
+  it("commission collect: refused, nothing enqueued (settled from dues at approval); commission credit note: E36", () => {
+    // 70e7e01 (R4-3): under v2 an approved commission is settled from the landlord's dues by E15, so collect is refused.
+    assert.equal(outOf(rOn, "collect_commission")?.status, 400);
+    assert.deepEqual(keys("collect_commission"), []);
     assert.deepEqual(keys("approve_commission_credit"), ["simple_invoice,confirmed,E36"]);
   });
 

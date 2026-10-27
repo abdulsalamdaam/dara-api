@@ -475,7 +475,8 @@ describe("news retention (real Postgres)", { skip }, () => {
     assert.equal(big.pageSize, 100, "pageSize is clamped to 100");
 
     const counts: any = await admin.itemCounts({ status: "rejected" });
-    assert.deepEqual(counts, { published: 19, rejected: 8, hidden: 0, pinned: 5, total: 27 }, "counts ignore status");
+    // e150f8d: `pinned` counts published items only (pinned p-0 and p-15 are rejected).
+    assert.deepEqual(counts, { published: 19, rejected: 8, hidden: 0, pinned: 3, total: 27 }, "counts ignore status");
     const bare = await admin.runs({ limit: "5" });
     assert.ok(Array.isArray(bare) && bare.length === 5, "runs without page/pageSize stay a bare array");
   });
