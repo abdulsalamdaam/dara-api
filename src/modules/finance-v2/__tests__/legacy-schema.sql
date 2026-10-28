@@ -39,6 +39,8 @@ CREATE TABLE "users" (
 	"last_login_at" timestamp with time zone,
 	"failed_login_attempts" integer DEFAULT 0 NOT NULL,
 	"token_version" integer DEFAULT 0 NOT NULL,
+	"mobile_token_version" integer DEFAULT 0 NOT NULL,
+	"mobile_last_login_at" timestamp with time zone,
 	"email_verified" boolean DEFAULT false NOT NULL,
 	"email_verified_at" timestamp with time zone,
 	"email_verify_token_hash" text,

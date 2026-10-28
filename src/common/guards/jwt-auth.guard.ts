@@ -29,6 +29,8 @@ export type AuthUser = {
   tv?: number;
   /** ms epoch of the login that minted the token — see common/session.ts. */
   loginAt?: number;
+  /** "mobile" when minted by the app's phone-OTP login — see common/session.ts. */
+  ch?: "mobile";
   permissions?: string[] | null;
   ownerUserId?: number | null;
   companyId?: number | null;
@@ -110,6 +112,7 @@ export class JwtAuthGuard implements CanActivate {
       .select({
         id: usersTable.id,
         tokenVersion: usersTable.tokenVersion,
+        mobileTokenVersion: usersTable.mobileTokenVersion,
         lastLoginAt: usersTable.lastLoginAt,
         isActive: usersTable.isActive,
         ownerUserId: usersTable.ownerUserId,
@@ -131,9 +134,11 @@ export class JwtAuthGuard implements CanActivate {
     if (row.ownerUserId != null && (row.holderId == null || !row.holderActive)) {
       throw new UnauthorizedException("Account disabled");
     }
-    // Single session per account: every login bumps tokenVersion, so a stale
-    // tv is either a later login elsewhere (SESSION_REPLACED) or a deliberate
-    // revoke — logout, force-logout, password reset (SESSION_REVOKED).
+    // Single session per account: every web login bumps tokenVersion, so a
+    // stale tv is either a later login elsewhere (SESSION_REPLACED) or a
+    // deliberate revoke — logout, force-logout, password reset
+    // (SESSION_REVOKED). A mobile-app token (ch "mobile") is checked against
+    // mobileTokenVersion instead, which only revocations move.
     if (!sessionIsCurrent(decoded, row)) throw staleSessionException(decoded, row);
     // A platform-staff role key is only real on the SYSTEM role row held by a
     // top-level account. A company-scoped role may carry any key string, and

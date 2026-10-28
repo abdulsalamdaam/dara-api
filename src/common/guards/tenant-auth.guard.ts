@@ -43,9 +43,11 @@ export class TenantAuthGuard implements CanActivate {
     if (!tenant) throw new UnauthorizedException("Tenant not found");
     if (tenant.deletedAt) throw new UnauthorizedException("الحساب محذوف");
     if (tenant.status !== "active") throw new UnauthorizedException("Tenant inactive");
-    // Single session per tenant, same rule as JwtAuthGuard: each tenant login
-    // bumps tokenVersion, so the previous device's token goes stale.
-    if (!sessionIsCurrent(decoded, tenant)) throw staleSessionException(decoded, tenant);
+    // Tenants sign in on the mobile app only, which is not counted toward the
+    // single session: a login no longer bumps tokenVersion, so a stale tv is
+    // always a deliberate revoke (logout, force-logout, deletion) — never
+    // SESSION_REPLACED, whatever last_login_at says.
+    if (!sessionIsCurrent(decoded, tenant)) throw staleSessionException({ ...decoded, ch: "mobile" }, tenant);
     req.tenant = decoded;
     return true;
   }

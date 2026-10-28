@@ -77,24 +77,36 @@ const USER = {
 };
 
 describe("login bumps tokenVersion — single active session", () => {
-  it("phone OTP: one UPDATE bumps token_version + stamps last_login_at, and the token carries the NEW version", async () => {
+  it("phone OTP (the mobile app): bumps nothing — signs a mobile token with the current mobile_token_version", async () => {
     const { db, ops } = fakeDb({
       "select:users": [[USER]],
-      "update:users": [[{ tokenVersion: 4 }]],
+      "update:users": [[{ mobileTokenVersion: 2 }]],
     });
     const res = await service(db).userPhoneVerifyOtp({ phone: "0502907100", code: "1234" }, ctx);
 
     const updates = ops.filter((o) => o.kind === "update" && o.table === "users");
     assert.equal(updates.length, 1, "exactly one users UPDATE for the login");
     const set = setOf(updates[0]!);
-    assert.ok(isIncrement(set.tokenVersion), "tokenVersion is bumped in SQL, not computed client-side");
-    assert.ok(set.lastLoginAt instanceof Date);
-    assert.ok(updates[0]!.calls.some(([m]) => m === "returning"), "the new version comes back from the same statement");
+    assert.equal(set.tokenVersion, undefined, "the web session is left alone");
+    assert.equal(set.mobileTokenVersion, undefined, "other phones are left alone");
+    assert.equal(set.lastLoginAt, undefined, "a phone login is not a web login");
+    assert.ok(set.mobileLastLoginAt instanceof Date);
 
     const claims = jwt.verify<any>(res.token);
-    assert.equal(claims.tv, 4);
+    assert.equal(claims.tv, 2);
+    assert.equal(claims.ch, "mobile");
     assert.equal(claims.kind, "user");
-    assert.equal(claims.loginAt, (set.lastLoginAt as Date).getTime());
+    assert.equal(claims.loginAt, (set.mobileLastLoginAt as Date).getTime());
+  });
+
+  it("logout ends only the channel signed out of", async () => {
+    for (const [ch, key, other] of [["mobile", "mobileTokenVersion", "tokenVersion"], [undefined, "tokenVersion", "mobileTokenVersion"]] as const) {
+      const { db, ops } = fakeDb();
+      await service(db).logoutUser(7, ch);
+      const set = setOf(ops.find((o) => o.kind === "update" && o.table === "users")!);
+      assert.ok(isIncrement(set[key]));
+      assert.equal(set[other], undefined);
+    }
   });
 
   it("email OTP: same bump, plus login_count", async () => {
@@ -138,14 +150,15 @@ describe("login bumps tokenVersion — single active session", () => {
     assert.equal(ops.filter((o) => o.kind === "update" && o.table === "users").length, 0);
   });
 
-  it("tenant OTP: bumps tenants.token_version the same way", async () => {
+  it("tenant OTP (mobile only): stamps the login, bumps nothing, signs the current version", async () => {
     const { db, ops } = fakeDb({
-      "select:tenants": [[{ id: 3, phone: "501111111", status: "active", tokenVersion: 0, name: "T" }]],
+      "select:tenants": [[{ id: 3, phone: "501111111", status: "active", tokenVersion: 1, name: "T" }]],
       "update:tenants": [[{ tokenVersion: 1 }]],
     });
     const res = await service(db).tenantVerifyOtp({ phone: "0501111111", code: "1234" }, ctx);
     const set = setOf(ops.find((o) => o.kind === "update" && o.table === "tenants")!);
-    assert.ok(isIncrement(set.tokenVersion));
+    assert.equal(set.tokenVersion, undefined, "a second phone (or the representative) does not sign the first out");
+    assert.ok(set.lastLoginAt instanceof Date);
     const claims = jwt.verify<any>(res.token);
     assert.equal(claims.tv, 1);
     assert.equal(claims.kind, "tenant");
@@ -204,13 +217,57 @@ describe("the guard tells 'signed in elsewhere' from 'revoked'", () => {
     assert.equal((staleSessionException({ tv: 1, iat }, { tokenVersion: 2, lastLoginAt: secondLogin }).getResponse() as any).code, SESSION_REPLACED_CODE);
   });
 
-  it("tenant guard: the same distinction", async () => {
+  it("tenant guard: a stale tenant token is always a revoke — logins no longer displace", async () => {
     const t = jwt.sign({ id: 3, phone: "501111111", kind: "tenant", tv: 1, loginAt: firstLogin.getTime() });
     const { db } = fakeDb({ "select:tenants": [[{ id: 3, tokenVersion: 2, lastLoginAt: secondLogin, status: "active", deletedAt: null }]] });
     await assert.rejects(new TenantAuthGuard(jwt, db).canActivate(guardCtx(t).ctx), (e: unknown) => {
-      assert.equal(((e as UnauthorizedException).getResponse() as any).code, SESSION_REPLACED_CODE);
+      assert.equal(((e as UnauthorizedException).getResponse() as any).code, SESSION_REVOKED_CODE);
       return true;
     });
+  });
+
+  it("tenant guard: two phones on the same version both pass", async () => {
+    const a = jwt.sign({ id: 3, phone: "501111111", kind: "tenant", tv: 1, loginAt: firstLogin.getTime() });
+    const b = jwt.sign({ id: 3, phone: "501111111", kind: "tenant", tv: 1, loginAt: secondLogin.getTime() });
+    for (const t of [a, b]) {
+      const { db } = fakeDb({ "select:tenants": [[{ id: 3, tokenVersion: 1, lastLoginAt: secondLogin, status: "active", deletedAt: null }]] });
+      assert.equal(await new TenantAuthGuard(jwt, db).canActivate(guardCtx(t).ctx), true);
+    }
+  });
+});
+
+describe("the mobile app is not counted toward the single session", () => {
+  const webLogin = new Date("2026-10-28T08:00:00.000Z");
+  const laterWebLogin = new Date("2026-10-28T10:00:00.000Z");
+  const phone = jwt.sign({ id: 7, email: USER.email, role: "user", kind: "user", tv: 0, ch: "mobile", loginAt: webLogin.getTime() - 1000 });
+  const web = jwt.sign({ id: 7, email: USER.email, role: "user", kind: "user", tv: 5, loginAt: webLogin.getTime() });
+  const row = (tokenVersion: number, mobileTokenVersion: number, lastLoginAt: Date) => ({
+    id: 7, tokenVersion, mobileTokenVersion, lastLoginAt, isActive: true, ownerUserId: null, companyId: null, roleId: 1, roleKey: "user", rolePermissions: [],
+  });
+
+  it("web and app tokens are both valid at once", async () => {
+    for (const t of [phone, web]) {
+      const { db } = fakeDb({ "select:users": [[row(5, 0, webLogin)]] });
+      assert.equal(await new JwtAuthGuard(jwt, db).canActivate(guardCtx(t).ctx), true);
+    }
+  });
+
+  it("a later web login does not sign the app out", async () => {
+    const { db } = fakeDb({ "select:users": [[row(6, 0, laterWebLogin)]] });
+    assert.equal(await new JwtAuthGuard(jwt, db).canActivate(guardCtx(phone).ctx), true);
+  });
+
+  it("a revoked app token is SESSION_REVOKED, never REPLACED", async () => {
+    const { db } = fakeDb({ "select:users": [[row(6, 1, laterWebLogin)]] });
+    await assert.rejects(new JwtAuthGuard(jwt, db).canActivate(guardCtx(phone).ctx), (e: unknown) => {
+      assert.equal(((e as UnauthorizedException).getResponse() as any).code, SESSION_REVOKED_CODE);
+      return true;
+    });
+  });
+
+  it("a revoked app token does not touch the web token", async () => {
+    const { db } = fakeDb({ "select:users": [[row(5, 1, webLogin)]] });
+    assert.equal(await new JwtAuthGuard(jwt, db).canActivate(guardCtx(web).ctx), true);
   });
 });
 

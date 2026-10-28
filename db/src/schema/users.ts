@@ -28,6 +28,13 @@ export const usersTable = pgTable("users", {
   failedLoginAttempts: integer("failed_login_attempts").notNull().default(0),
   tokenVersion: integer("token_version").notNull().default(0),
   /**
+   * The mobile app's own session counter (0093). Phone-OTP logins sign with it
+   * and never bump it, so the app does not count toward the web's single
+   * session; revocations bump it alongside tokenVersion.
+   */
+  mobileTokenVersion: integer("mobile_token_version").notNull().default(0),
+  mobileLastLoginAt: timestamp("mobile_last_login_at", { withTimezone: true }),
+  /**
    * Email verification. The user/employee clicks a link sent to their inbox
    * to set this true. Employees can't log in until verified; for new account
    * registrations the admin sees the verification status before approving.

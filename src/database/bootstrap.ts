@@ -790,6 +790,18 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure contract co-parties failed: ${err?.message || err}`);
     }
 
+    // 0093: the mobile app's own session slot (users.mobile_token_version +
+    // mobile_last_login_at) so web and app logins stop signing each other out.
+    // JwtAuthGuard selects these columns on every request — if this fails,
+    // every signed-in call 500s, so it is logged as an error, not a warning.
+    try {
+      const mobileSession = findSqlFile(join("drizzle", "0093_users_mobile_session.sql"));
+      if (mobileSession) await client.query(readFileSync(mobileSession, "utf8"));
+      else log.error("0093_users_mobile_session.sql not found — users.mobile_token_version missing; every authenticated request will fail");
+    } catch (err: any) {
+      log.error(`ensure users mobile session failed — every authenticated request will fail: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

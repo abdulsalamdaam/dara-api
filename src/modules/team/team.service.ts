@@ -33,7 +33,7 @@ type TeamCtx = { actor: AuthUser; scope: number; holder: User; ceiling: Set<stri
  */
 type Public = Omit<
   User,
-  "passwordHash" | "emailVerifyTokenHash" | "emailVerifyExpiresAt" | "tokenVersion"
+  "passwordHash" | "emailVerifyTokenHash" | "emailVerifyExpiresAt" | "tokenVersion" | "mobileTokenVersion"
 >;
 
 function strip(u: User): Public {
@@ -42,6 +42,7 @@ function strip(u: User): Public {
     emailVerifyTokenHash: _evth,
     emailVerifyExpiresAt: _eve,
     tokenVersion: _tv,
+    mobileTokenVersion: _mtv,
     ...rest
   } = u;
   return rest;
@@ -368,7 +369,10 @@ export class TeamService {
       updates.isActive = patch.isActive;
       // Deactivation ends live sessions now, not at the next request's
       // isActive check alone — so a re-activation cannot revive an old token.
-      if (patch.isActive === false && emp.isActive) updates.tokenVersion = (emp.tokenVersion ?? 0) + 1;
+      if (patch.isActive === false && emp.isActive) {
+        updates.tokenVersion = (emp.tokenVersion ?? 0) + 1;
+        updates.mobileTokenVersion = (emp.mobileTokenVersion ?? 0) + 1; // the app's session too (0093)
+      }
     }
     if (patch.preset !== undefined) {
       updates.roleId = await this.resolvePresetRoleId(c, patch.preset);
@@ -440,7 +444,7 @@ export class TeamService {
     // be forced to log in again with the new password.
     await this.db
       .update(usersTable)
-      .set({ passwordHash, tokenVersion: (emp.tokenVersion ?? 0) + 1, failedLoginAttempts: 0 })
+      .set({ passwordHash, tokenVersion: (emp.tokenVersion ?? 0) + 1, mobileTokenVersion: (emp.mobileTokenVersion ?? 0) + 1, failedLoginAttempts: 0 })
       .where(eq(usersTable.id, employeeId));
     return { ok: true };
   }
@@ -451,7 +455,7 @@ export class TeamService {
 
     // Soft delete and bump tokenVersion to invalidate any active session.
     await this.db.update(usersTable)
-      .set({ deletedAt: new Date(), isActive: false, tokenVersion: (emp.tokenVersion ?? 0) + 1 })
+      .set({ deletedAt: new Date(), isActive: false, tokenVersion: (emp.tokenVersion ?? 0) + 1, mobileTokenVersion: (emp.mobileTokenVersion ?? 0) + 1 })
       .where(eq(usersTable.id, employeeId));
     return { ok: true };
   }

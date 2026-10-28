@@ -122,11 +122,12 @@ export class AuthService {
   }
 
   /* ── User token ── */
-  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number; loginAt?: number }): string {
+  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number; loginAt?: number; ch?: "mobile" }): string {
     return this.jwt.sign(
       {
         id: payload.id, email: payload.email, role: payload.role, kind: "user", tv: payload.tokenVersion,
         ...(payload.loginAt != null ? { loginAt: payload.loginAt } : {}),
+        ...(payload.ch ? { ch: payload.ch } : {}),
       },
     );
   }
@@ -138,9 +139,9 @@ export class AuthService {
    * One UPDATE bumps `token_version`, stamps `last_login_at` and returns the
    * new version, which the caller signs into the token. Every token minted
    * before this login carries an older `tv` and the guard now refuses it with
-   * SESSION_REPLACED, so a second device signing in signs the first one out
-   * — web and the landlord mobile app included, since both log in as the same
-   * row. Two simultaneous logins each get a distinct version; the later one
+   * SESSION_REPLACED, so a second browser signing in signs the first one out.
+   * The landlord mobile app is NOT counted: it logs in through
+   * `beginMobileSession`, which leaves token_version alone. Two simultaneous logins each get a distinct version; the later one
    * wins. Only for an interactive login that has already passed its OTP check:
    * there is no refresh token and no impersonation path, and registration
    * does not sign anyone in.
@@ -157,6 +158,24 @@ export class AuthService {
       .returning({ tokenVersion: usersTable.tokenVersion });
     if (!row) throw new UnauthorizedException("الحساب غير موجود");
     return row.tokenVersion;
+  }
+
+  /**
+   * The mobile app's session for a users row (0093) — not counted toward the
+   * single session. Nothing is bumped: the token is signed with the current
+   * mobile_token_version, so neither a web login nor another phone signs it
+   * out; only a revocation (logout from the app, force-logout, password
+   * reset, deactivation) does. Stamps mobile_last_login_at, not
+   * last_login_at, so a phone login is never mistaken for the later web login
+   * that displaced a browser session.
+   */
+  private async beginMobileSession(userId: number, now: Date): Promise<number> {
+    const [row] = await this.db.update(usersTable)
+      .set({ mobileLastLoginAt: now, failedLoginAttempts: 0 })
+      .where(eq(usersTable.id, userId))
+      .returning({ mobileTokenVersion: usersTable.mobileTokenVersion });
+    if (!row) throw new UnauthorizedException("الحساب غير موجود");
+    return row.mobileTokenVersion ?? 0;
   }
 
   /* ── Owner token ──
@@ -932,12 +951,17 @@ export class AuthService {
     };
   }
 
-  /* ── User: logout (revokes all current sessions for this user) ── */
-  async logoutUser(userId: number) {
+  /* ── User: logout ──
+   * Ends the sessions of the channel the caller signed out of: the web
+   * session (token_version) or the app's (mobile_token_version). Web and app
+   * are independent, so signing out of one leaves the other signed in. */
+  async logoutUser(userId: number, ch?: "mobile") {
     await this.db.update(usersTable)
-      .set({ tokenVersion: sql`${usersTable.tokenVersion} + 1` })
+      .set(ch === "mobile"
+        ? { mobileTokenVersion: sql`${usersTable.mobileTokenVersion} + 1` }
+        : { tokenVersion: sql`${usersTable.tokenVersion} + 1` })
       .where(eq(usersTable.id, userId));
-    return { success: true, message: "تم تسجيل الخروج. تم إنهاء جميع الجلسات." };
+    return { success: true, message: "تم تسجيل الخروج." };
   }
 
   /* ── User: change own password (while logged in) ── */
@@ -1021,6 +1045,7 @@ export class AuthService {
         passwordHash,
         failedLoginAttempts: 0,
         tokenVersion: sql`${usersTable.tokenVersion} + 1`,
+        mobileTokenVersion: sql`${usersTable.mobileTokenVersion} + 1`,
       })
       .where(eq(usersTable.id, user.id));
 
@@ -1119,11 +1144,13 @@ export class AuthService {
       throw new UnauthorizedException("رمز التحقق غير صحيح");
     }
 
-    // Single session per tenant too: bump the version with the login stamp so
-    // the tenant's previous device is signed out (SESSION_REPLACED).
+    // Tenants sign in on the mobile app only, and the app is not counted
+    // toward the single session (owner decision, 28 Oct 2026): a login does
+    // not bump the version, so the tenant and their representative — or two
+    // phones — stay signed in together. Logout / force-logout still revoke.
     const now = new Date();
     const [bumped] = await this.db.update(tenantsTable)
-      .set({ lastLoginAt: now, tokenVersion: sql`${tenantsTable.tokenVersion} + 1` })
+      .set({ lastLoginAt: now })
       .where(eq(tenantsTable.id, tenant.id))
       .returning({ tokenVersion: tenantsTable.tokenVersion });
     if (!bumped) throw new UnauthorizedException("بيانات غير صحيحة");
@@ -1266,13 +1293,14 @@ export class AuthService {
       await this.recordLogin(user.id, phone, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("حساب المنشأة موقوف. تواصل مع مسؤول الحساب");
     }
-    // Single session: this login revokes every earlier token for the account,
-    // including a web session of the same users row.
+    // Phone OTP is the mobile app's login (the portal signs in by email), and
+    // the app has its own session slot: this signs nobody out — not the web
+    // session of the same users row, not another phone.
     const now = new Date();
-    const tokenVersion = await this.beginUserSession(user.id, now);
+    const tokenVersion = await this.beginMobileSession(user.id, now);
     await this.recordLogin(user.id, user.email, "success", ctx.ip, ctx.ua);
     const roleKey = user.roleKey ?? "user";
-    const token = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion, loginAt: now.getTime() });
+    const token = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion, loginAt: now.getTime(), ch: "mobile" });
     return { token, user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: roleKey } };
   }
 

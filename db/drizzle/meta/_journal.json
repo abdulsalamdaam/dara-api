@@ -575,6 +575,13 @@
       "when": 1793836800000,
       "tag": "0092_contract_co_parties",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1793923200000,
+      "tag": "0093_users_mobile_session",
+      "breakpoints": true
     }
   ]
 }

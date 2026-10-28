@@ -30,6 +30,12 @@ export const SESSION_REPLACED_MESSAGE =
 
 export interface SessionClaims {
   tv?: number;
+  /**
+   * "mobile" on a token minted by the app's phone-OTP login. Its `tv` is the
+   * account's mobile_token_version, which logins never bump: the app does not
+   * count toward the single session (owner decision, 28 Oct 2026).
+   */
+  ch?: "mobile";
   /** ms epoch of the login that minted this token (absent on pre-change tokens). */
   loginAt?: number;
   /** jsonwebtoken's issued-at, seconds. */
@@ -39,10 +45,13 @@ export interface SessionClaims {
 export interface SessionRow {
   tokenVersion: number | null;
   lastLoginAt: Date | string | null;
+  /** users only — the app's own counter (0093). Absent for tenants. */
+  mobileTokenVersion?: number | null;
 }
 
 /** True when the token's version is still the account's current one. */
 export function sessionIsCurrent(claims: SessionClaims, row: SessionRow): boolean {
+  if (claims.ch === "mobile") return (claims.tv ?? 0) === (row.mobileTokenVersion ?? 0);
   return (claims.tv ?? 0) === (row.tokenVersion ?? 0);
 }
 
@@ -63,7 +72,8 @@ export function wasReplacedByLaterLogin(claims: SessionClaims, row: SessionRow):
 }
 
 export function staleSessionException(claims: SessionClaims, row: SessionRow): UnauthorizedException {
-  if (wasReplacedByLaterLogin(claims, row)) {
+  // A mobile token is never displaced by a login — only revoked on purpose.
+  if (claims.ch !== "mobile" && wasReplacedByLaterLogin(claims, row)) {
     return new UnauthorizedException({
       statusCode: 401,
       error: SESSION_REPLACED_CODE,

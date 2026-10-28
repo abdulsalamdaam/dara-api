@@ -908,8 +908,9 @@ class AdminController {
     const id = parseInt(userId, 10);
     // Ending your own session from the console would sign you out mid-click.
     if (id === admin.id) throw new BadRequestException("لا يمكن إنهاء جلستك من هنا — استخدم تسجيل الخروج");
+    // Web and the mobile app hold separate sessions (0093) — end both.
     const [user] = await this.db.update(usersTable)
-      .set({ tokenVersion: sql`${usersTable.tokenVersion} + 1` })
+      .set({ tokenVersion: sql`${usersTable.tokenVersion} + 1`, mobileTokenVersion: sql`${usersTable.mobileTokenVersion} + 1` })
       .where(eq(usersTable.id, id))
       .returning();
     if (!user) throw new NotFoundException("Not found");
