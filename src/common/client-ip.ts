@@ -1,4 +1,4 @@
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 
 /**
  * Who the caller actually is — one definition, used everywhere.
@@ -11,24 +11,29 @@ import { isIP } from "node:net";
  * user. It also weakened the per-IP rate limit: thousands of unrelated users
  * share one edge address, so they shared one bucket.
  *
- * Precedence, most trustworthy first:
+ * How we know who is calling (2026-10-28, after the origin was found answering
+ * requests that never went through Cloudflare):
  *
- *  1. `cf-connecting-ip` — Cloudflare rewrites this on every request it
- *     proxies and it is the only header on that path that names the origin.
- *  2. `x-real-ip` — what a plain nginx/Traefik hop in front of us sets.
- *  3. the first entry of `x-forwarded-for` — the original client, per the
- *     convention that each hop appends itself.
- *  4. `req.socket.remoteAddress` — the truth when nothing is in front of us
- *     (local dev, a direct container hit).
+ *  1. The **peer** is the address that actually opened the TCP connection to
+ *     Traefik. Traefik trusts no upstream (`forwardedHeaders.trustedIPs` is
+ *     unset), so it strips any `x-real-ip` the caller sent and writes the peer
+ *     there itself. That header is therefore NOT attacker-controlled on the
+ *     path we run. Without Traefik (local dev) the socket is the peer.
+ *  2. If the peer is a **Cloudflare edge**, the client is `cf-connecting-ip` —
+ *     Cloudflare overwrites it on every request it proxies.
+ *  3. Otherwise the peer IS the client, and `cf-connecting-ip` /
+ *     `x-forwarded-for` are ignored: anyone can type them. Before this, a
+ *     request sent straight to the origin IP could name a fresh address on
+ *     every attempt and get a fresh OTP / login rate-limit bucket each time.
  *
- * **Every one of the first three is attacker-controlled.** We are behind
- * Cloudflare, which overwrites `cf-connecting-ip`, so in production the header
- * we prefer is the one we can trust — but nothing stops a request that reaches
- * the container directly from inventing all three. Hence the `isIP` check: a
- * value that is not an IP address is discarded rather than stored or used as a
- * rate-limit key. A forged header can still name *someone else's* IP; what it
- * cannot do is smuggle a 4KB string, a SQL fragment or a wildcard into a
- * throttler bucket or a log column.
+ * The server firewall now only lets Cloudflare reach 80/443 (ufw
+ * `after.rules`, DOCKER-USER), so in production case 3 should not happen at
+ * all; this is the second lock in case that rule is ever lost.
+ *
+ * Every value is still checked with `isIP`: a value that is not an IP address
+ * is discarded rather than stored or used as a rate-limit key, so a header
+ * cannot smuggle a 4KB string, a SQL fragment or a wildcard into a throttler
+ * bucket or a log column.
  *
  * `trust proxy` is deliberately NOT the mechanism. Express's `req.ip` would
  * need the hop count configured correctly and still would not know about
@@ -84,6 +89,37 @@ function normalizeIp(raw: string | null | undefined): string | null {
 }
 
 /**
+ * Cloudflare's edge ranges — https://www.cloudflare.com/ips-v4 and /ips-v6,
+ * fetched 2026-10-28. The server firewall carries the same v4 list; if
+ * Cloudflare adds a range, update both. A missing range here is not an outage,
+ * only those users sharing their edge's rate-limit bucket; a missing range in
+ * the firewall IS one.
+ */
+const CLOUDFLARE_RANGES: ReadonlyArray<readonly [string, number]> = [
+  ["173.245.48.0", 20], ["103.21.244.0", 22], ["103.22.200.0", 22], ["103.31.4.0", 22],
+  ["141.101.64.0", 18], ["108.162.192.0", 18], ["190.93.240.0", 20], ["188.114.96.0", 20],
+  ["197.234.240.0", 22], ["198.41.128.0", 17], ["162.158.0.0", 15], ["104.16.0.0", 13],
+  ["104.24.0.0", 14], ["172.64.0.0", 13], ["131.0.72.0", 22],
+  ["2400:cb00::", 32], ["2606:4700::", 32], ["2803:f800::", 32], ["2405:b500::", 32],
+  ["2405:8100::", 32], ["2a06:98c0::", 29], ["2c0f:f248::", 32],
+];
+
+const cloudflare = new BlockList();
+for (const [net, prefix] of CLOUDFLARE_RANGES) {
+  cloudflare.addSubnet(net, prefix, isIP(net) === 6 ? "ipv6" : "ipv4");
+}
+
+/** Whether a (normalized) address belongs to a Cloudflare edge. */
+export function isCloudflareIp(ip: string): boolean {
+  // `::ffff:1.2.3.4` is how a v4 peer shows up on a dual-stack socket.
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (mapped) return cloudflare.check(mapped[1]!, "ipv4");
+  const family = isIP(ip);
+  if (family === 0) return false;
+  return cloudflare.check(ip, family === 6 ? "ipv6" : "ipv4");
+}
+
+/**
  * The client's IP address, or the string `"unknown"` when nothing usable was
  * sent. `"unknown"` rather than null because both call sites that store it
  * (login logs, contact submissions) and the throttler tracker want a string,
@@ -92,17 +128,14 @@ function normalizeIp(raw: string | null | undefined): string | null {
  */
 export function clientIp(req: IpRequestLike | null | undefined): string {
   const headers = req?.headers ?? {};
-  const candidates: Array<string | null | undefined> = [
-    headerValue(headers["cf-connecting-ip"]),
-    headerValue(headers["x-real-ip"]),
-    headerValue(headers["x-forwarded-for"])?.split(",")[0],
-    req?.socket?.remoteAddress,
-  ];
-  for (const candidate of candidates) {
-    const ip = normalizeIp(candidate);
-    if (ip) return ip;
+  const peer =
+    normalizeIp(headerValue(headers["x-real-ip"])) ??
+    normalizeIp(req?.socket?.remoteAddress);
+  if (!peer) return "unknown";
+  if (isCloudflareIp(peer)) {
+    return normalizeIp(headerValue(headers["cf-connecting-ip"])) ?? peer;
   }
-  return "unknown";
+  return peer;
 }
 
 /**
