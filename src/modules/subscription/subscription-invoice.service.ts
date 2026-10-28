@@ -351,6 +351,37 @@ export class SubscriptionInvoiceService {
   }
 
   /**
+   * Email the platform admins that this payment came in. Fire-and-forget from
+   * the activation path, next to `issueAndEmail`, and only from the caller that
+   * won the paid transition — so exactly once per payment. Never throws.
+   */
+  async notifyAdminsPaid(db: Drizzle, paymentId: number): Promise<void> {
+    try {
+      const [row] = await db.select().from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.id, paymentId));
+      if (!row || row.status !== "paid") return;
+      const { user, company } = await this.loadBuyer(db, row.userId);
+      await this.email.sendAdminPaymentReceived({
+        paymentId: row.id,
+        kind: row.kind === "addon" ? "addon" : "subscription",
+        plan: row.plan,
+        billingCycle: row.billingCycle,
+        amount: row.amount,
+        currency: row.currency,
+        description: row.description,
+        moyasarPaymentId: row.moyasarPaymentId,
+        paidAt: row.paidAt,
+        accountId: row.userId,
+        name: user?.name ?? null,
+        email: user?.email ?? null,
+        phone: user?.phone ?? null,
+        companyName: company?.name ?? null,
+      });
+    } catch (err: any) {
+      this.log.error(`admin payment notice for payment ${paymentId} failed: ${err?.message || err}`);
+    }
+  }
+
+  /**
    * Record a non-delivery where somebody will see it.
    *
    * The Nest logger only reaches container stdout, which dies with the

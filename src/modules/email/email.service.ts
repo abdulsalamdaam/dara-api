@@ -142,6 +142,30 @@ export interface AdminRegistrationEmailPayload {
 }
 
 /**
+ * A Moyasar payment that has just been verified and marked paid — a plan
+ * subscription or an account-limit add-on. Everything an admin needs to know
+ * money came in without opening the portal.
+ */
+export interface AdminPaymentEmailPayload {
+  paymentId: number;
+  kind: "subscription" | "addon";
+  plan: string | null;
+  billingCycle: string | null;
+  /** What Moyasar collected, VAT-inclusive, as stored on the row. */
+  amount: string | number;
+  currency: string | null;
+  /** The add-on's line ("5 extra seats"…); null for a plain subscription. */
+  description?: string | null;
+  moyasarPaymentId?: string | null;
+  paidAt?: Date | string | null;
+  accountId: number;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  companyName?: string | null;
+}
+
+/**
  * Resend wrapper. We hit the REST API directly (same pattern as the Twilio
  * service) to avoid pulling in another SDK. Failures are logged but never
  * thrown to the caller — email is best-effort and must not block user flows
@@ -924,6 +948,71 @@ export class EmailService {
       // way sendContactReceived does for the contact form.
       replyTo: payload.email || undefined,
       category: "admin_new_registration",
+    });
+  }
+
+  /**
+   * Tell the platform admins that a payment came in. Fires once per payment,
+   * from the winner of the paid transition (`activateFromPaidRow`), so a
+   * webhook racing the pay self-heal or /sync never sends two.
+   *
+   * Same audience as a new registration (`adminRegistrationRecipients`): every
+   * active platform admin, or `ADMIN_REGISTRATION_NOTIFY_EMAILS` when set —
+   * which staging sets, because its admin rows are a copy of production's.
+   * The subject says "staging" there so a test payment is never mistaken for
+   * real money.
+   */
+  async sendAdminPaymentReceived(payload: AdminPaymentEmailPayload, to?: string[]): Promise<boolean> {
+    const recipients = to?.length ? normaliseRecipients(to) : await this.adminRegistrationRecipients();
+    if (!recipients.length) {
+      this.log.warn("sendAdminPaymentReceived: no recipient — no active platform admin has an email; skipping");
+      return false;
+    }
+    const staging = /staging/i.test(APP_PUBLIC_URL);
+    const name = payload.companyName || payload.name || "—";
+    const amount = Number(payload.amount);
+    const amountLabel = `${Number.isFinite(amount) ? amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : String(payload.amount)} ${payload.currency === "SAR" || !payload.currency ? "ر.س" : payload.currency}`;
+    const kindLabel = payload.kind === "addon" ? "إضافة على الحدود" : "اشتراك باقة";
+    const planLabel = payload.plan ? `${resolvePackage(payload.plan).labelAr} (${payload.plan})` : "—";
+    const cycleLabel = isBillingCycle(payload.billingCycle) ? CYCLE_LABEL_AR[payload.billingCycle] : "—";
+    const when = riyadhTimestamp(payload.paidAt);
+    const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/admin`;
+    const html = layout(`
+      ${staging ? `<p style="margin:0 0 12px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:13px;">بيئة الاختبار (staging) — ليست دفعة حقيقية على الإنتاج.</p>` : ""}
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">وصلت دفعة جديدة: ${escapeHtml(amountLabel)}</h1>
+      ${row("العميل", name)}
+      ${row("رقم الحساب", String(payload.accountId))}
+      ${row("البريد الإلكتروني", payload.email || "—")}
+      ${row("الجوال", payload.phone || "—")}
+      ${row("نوع الدفعة", kindLabel)}
+      ${payload.kind === "addon" ? row("الوصف", payload.description || "—") : `${row("الباقة", planLabel)}${row("دورة الفوترة", cycleLabel)}`}
+      ${row("المبلغ (شامل الضريبة)", amountLabel)}
+      ${row("رقم العملية في ميسر", payload.moyasarPaymentId || "—")}
+      ${row("رقم الدفعة", String(payload.paymentId))}
+      ${row("وقت الدفع", `${when} (بتوقيت الرياض)`)}
+      <div style="margin-top:24px;text-align:center;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">فتح لوحة الإدارة</a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">رسالة تلقائية إلى فريق دارا عند كل دفعة ناجحة عبر ميسر.</p>
+    `);
+    return this.send({
+      to: recipients,
+      subject: `${staging ? "[staging] " : ""}دفعة جديدة ${amountLabel} — ${name}`,
+      html,
+      text: [
+        staging ? "بيئة الاختبار (staging) — ليست دفعة حقيقية." : "",
+        `وصلت دفعة جديدة: ${amountLabel}`,
+        `العميل: ${name} (حساب ${payload.accountId})`,
+        `البريد الإلكتروني: ${payload.email || "—"}`,
+        `الجوال: ${payload.phone || "—"}`,
+        `نوع الدفعة: ${kindLabel}`,
+        payload.kind === "addon" ? `الوصف: ${payload.description || "—"}` : `الباقة: ${planLabel} — ${cycleLabel}`,
+        `رقم العملية في ميسر: ${payload.moyasarPaymentId || "—"}`,
+        `وقت الدفع: ${when} (بتوقيت الرياض)`,
+        `لوحة الإدارة: ${link}`,
+      ].filter(Boolean).join("\n"),
+      replyTo: payload.email || undefined,
+      category: "admin_payment_received",
     });
   }
 

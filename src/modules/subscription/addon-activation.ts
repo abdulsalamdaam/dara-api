@@ -86,6 +86,7 @@ export async function activateAddonFromPaidRow(
   // The invoice (SUB- numbering, add-on description), fire-and-forget like the subscription path.
   if (invoices) {
     void invoices.issueAndEmail(db, row.id, { start: now, end: periodEnd ?? now });
+    void invoices.notifyAdminsPaid(db, row.id);
   }
   signalLimitAddonPaid(addonId);
   return true;

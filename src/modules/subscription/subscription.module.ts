@@ -185,6 +185,7 @@ export async function activateFromPaidRow(
   // every failure inside is logged and swallowed.
   if (invoices) {
     void invoices.issueAndEmail(db, row.id, { start, end });
+    void invoices.notifyAdminsPaid(db, row.id);
   }
   // Finance v2 is on by default for plans that include accounting: queue the
   // automatic provisioning (webhook, pay self-heal and /sync all land here).
