@@ -13,6 +13,22 @@
  */
 import { EJAR_UUID_RE, type EjarBody, type JsonApiRef, type JsonApiResource } from "./ejar.types";
 
+/** `YYYY-MM-DD` in Asia/Riyadh. */
+const riyadhToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Riyadh" });
+
+/**
+ * Ejar leaves some ended contracts "active": nobody closed them, and their
+ * `days_remaining` stopped counting. A contract past its end date that does
+ * not renew itself has ended, whatever the status says — it is read as
+ * `expired`, so the import does not book its units as rented.
+ */
+export function effectiveState(
+  state: string | null, endDate: string | null, autoRenewal: boolean | null, today = riyadhToday(),
+): string | null {
+  if (autoRenewal !== false || !endDate || endDate >= today) return state;
+  return /active|registered|نشط|ساري|current|valid/i.test(state ?? "") ? "expired" : state;
+}
+
 type Attrs = Record<string, unknown>;
 export interface Bilingual { en: string | null; ar: string | null }
 
@@ -402,7 +418,7 @@ export function mapLookup(
         ejarId: str(a.contract_id) ?? String(listed.id),
         contractNumber: str(a.contract_number),
         contractType: str(a.contract_type)?.toLowerCase() ?? null,
-        state: str(a.status),
+        state: effectiveState(str(a.status), date10(a.end_time ?? a.end_date), boolOf(a.auto_renewal_enabled)),
         status: str(a.status),
         startDate: date10(a.start_time ?? a.start_date),
         endDate: date10(a.end_time ?? a.end_date),
