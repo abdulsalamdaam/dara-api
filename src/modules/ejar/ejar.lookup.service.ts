@@ -556,7 +556,7 @@ export class EjarLookupService {
       required: computeRequired(chosen, reqCtx),
       prefill: computePrefill(mapped, resolved, cityLabel),
       linkedParties: { landlord: linkedLandlord, tenant: linkedTenant },
-      rent: rentFigures(rentBasis(mapped), vatFromContractType(mapped.contract.contractType)),
+      rent: rentFigures(rentBasis(mapped, vatFromContractType(mapped.contract.contractType)), vatFromContractType(mapped.contract.contractType)),
       partyCheck,
       principals: { landlord: pLandlord, tenant: pTenant },
       logs,

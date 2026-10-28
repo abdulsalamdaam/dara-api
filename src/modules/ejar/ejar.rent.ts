@@ -24,6 +24,18 @@
  * which is exactly what the installments carry: their VAT is extracted from
  * the VAT-inclusive amounts. Only when Ejar sent neither invoices nor a total
  * is total_rent_amount used — as the annual rent before VAT.
+ *
+ * GENERAL SERVICES (verified on 20498373268's contract PDF, 28 Oct 2026): the
+ * "25% on top" was 15% VAT plus «الأجرة السنوية للخدمات العامة» — 6,350 a year
+ * of maintenance fees, billed inside every rent payment WITHOUT VAT (each
+ * invoice = 31,750 rent + 4,762.50 VAT + 3,175 services = 39,687). Ejar's API
+ * has no field for it, but it is exactly what the invoices carry beyond
+ * total_rent_amount (+ VAT when Ejar charges it). When that remainder is there
+ * it is NOT rent: the rent is total_rent_amount ÷ 12, the services become their
+ * own fee on the invoices' dates, and each rent installment drops its share —
+ * otherwise VAT would be extracted from the services too. The security deposit
+ * (security_deposit_value) is a separate, one-off figure and never in the
+ * invoices; on this contract it happens to be the same 6,350.
  */
 
 export const RENT_VAT_RATE = 0.15;
@@ -51,23 +63,78 @@ export interface RentBasis {
   months: number;
   /** Ejar's annual rent before VAT — used only when there is no gross. */
   annualExVat: number | null;
+  /** The general-services share of the invoices (see above), or null when there is none. */
+  services?: EjarServices | null;
+}
+
+/** General services Ejar bills inside the rent payments, before any VAT. */
+export interface EjarServices {
+  /** Per contract year. */
+  annual: number;
+  /** Over the whole contract. */
+  total: number;
+  /** One entry per invoice, same order and dates as the rent schedule. */
+  schedule: Array<{ dueDate: string; amount: number }>;
+}
+
+/**
+ * What the invoices carry beyond the rent (and its VAT when Ejar charges it).
+ * `ejarVat` is Ejar's own treatment — its contract type — not Dara's verdict:
+ * it decides how Ejar built the amounts. Null when there is no remainder worth
+ * a fee (under 1 SAR: Ejar's rounding), when Ejar sent no annual rent, or when
+ * the remainder is implausible (over half the bills — a rent that changes by
+ * year, not a service), so nothing is split on a guess.
+ */
+export function ejarServices(
+  m: {
+    contract: { periodDays?: number | null; startDate: string | null; endDate: string | null };
+    financial: { totalRentAmount: number | null };
+    invoices: Array<{ dueDate?: string | null; amount: number | null }>;
+  },
+  ejarVat: boolean,
+): EjarServices | null {
+  const annual = pos(m.financial.totalRentAmount);
+  const bills = m.invoices.filter((i) => i.dueDate && pos(i.amount) != null) as Array<{ dueDate: string; amount: number }>;
+  if (annual == null || bills.length === 0) return null;
+  const gross = round2(bills.reduce((s, i) => s + i.amount, 0));
+  const years = contractMonths(m.contract) / 12;
+  const total = round2(gross - annual * years * (ejarVat ? 1 + RENT_VAT_RATE : 1));
+  if (total < 1 || total > gross / 2) return null;
+  // Ejar bills the same services amount with every payment; the last absorbs the halalas.
+  const each = round2(total / bills.length);
+  const schedule = bills.map((b, i) => ({
+    dueDate: b.dueDate,
+    amount: i === bills.length - 1 ? round2(total - each * (bills.length - 1)) : each,
+  }));
+  return { annual: round2(total / years), total, schedule };
 }
 
 export function rentBasis(m: {
   contract: { periodDays?: number | null; startDate: string | null; endDate: string | null; totalValue?: number | null };
   financial: { totalRentAmount: number | null };
-  invoices: Array<{ amount: number | null }>;
-}): RentBasis {
+  invoices: Array<{ dueDate?: string | null; amount: number | null }>;
+}, ejarVat?: boolean): RentBasis {
   const schedule = round2(m.invoices.reduce((s, i) => s + (pos(i.amount) ?? 0), 0));
   return {
     gross: pos(schedule) ?? pos(m.contract.totalValue ?? null),
     months: contractMonths(m.contract),
     annualExVat: pos(m.financial.totalRentAmount),
+    services: ejarVat === undefined ? null : ejarServices(m, ejarVat),
   };
+}
+
+/** The rent part of each invoice — the invoice less its services share. */
+export function rentSchedule(
+  invoices: Array<{ dueDate: string; amount: string }>, services: EjarServices | null | undefined,
+): Array<{ dueDate: string; amount: string }> {
+  if (!services) return invoices;
+  return invoices.map((i, k) => ({ dueDate: i.dueDate, amount: String(round2(Number(i.amount) - (services.schedule[k]?.amount ?? 0))) }));
 }
 
 /** The monthly rent before VAT, 2 decimals (0 when Ejar gave nothing to go on). */
 export function monthlyRentFrom(b: RentBasis, vat: boolean): number {
+  // Services split out: what is left is exactly Ejar's annual rent.
+  if (b.services && b.annualExVat != null) return round2(b.annualExVat / 12);
   if (b.gross != null) return round2(b.gross / (vat ? 1 + RENT_VAT_RATE : 1) / b.months);
   if (b.annualExVat != null) return round2(b.annualExVat / 12);
   return 0;
@@ -87,11 +154,16 @@ export interface RentFigures {
   totalVat: number;
   /** Ejar's own rental_fees.total_rent_amount (per contract year, before VAT). */
   ejarAnnualRent: number | null;
+  /** General services billed with the rent — imported as their own fee. */
+  services: EjarServices | null;
 }
 
 export function rentFigures(b: RentBasis, vat: boolean): RentFigures {
   const monthly = monthlyRentFrom(b, vat);
   const annual = round2(monthly * 12);
+  const services = b.services ?? null;
+  // The rent's own gross: the bills less the services in them.
+  const rentGross = b.gross != null ? round2(b.gross - (services?.total ?? 0)) : null;
   return {
     total: b.gross,
     months: b.months,
@@ -99,7 +171,8 @@ export function rentFigures(b: RentBasis, vat: boolean): RentFigures {
     monthly,
     annual,
     annualVat: vat ? round2(annual * RENT_VAT_RATE) : 0,
-    totalVat: vat && b.gross != null ? round2(b.gross - b.gross / (1 + RENT_VAT_RATE)) : 0,
+    totalVat: vat && rentGross != null ? round2(rentGross - rentGross / (1 + RENT_VAT_RATE)) : 0,
     ejarAnnualRent: b.annualExVat,
+    services,
   };
 }

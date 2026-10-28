@@ -84,8 +84,20 @@ describe("Ejar import: a double click writes one contract (database)", { skip: f
     assert.equal(rows.length, 1, "one contract");
     const props = await t.pool.query(`select count(*)::int as n from properties where user_id = $1`, [ACCOUNT]);
     assert.equal(props.rows[0].n, 1, "the loser's property/unit/parties rolled back with it");
-    const pays = await t.pool.query(`select count(*)::int as n from payments where contract_id = $1`, [rows[0].id]);
-    assert.equal(pays.rows[0].n, 6, "one schedule");
+    const pays = await t.pool.query(
+      `select description, amount::text as amount, vat_enabled from payments where contract_id = $1 order by due_date, description nulls first`, [rows[0].id]);
+    // One schedule: Ejar's 6 bills (39,687 each here), each split into its
+    // rent and its general services, which carry no VAT (ejar.rent.ts).
+    const services = pays.rows.filter((p) => p.description === "الخدمات العامة");
+    const rent = pays.rows.filter((p) => p.description !== "الخدمات العامة");
+    assert.equal(pays.rows.length, 12, "one schedule");
+    assert.equal(rent.length, 6);
+    assert.equal(services.length, 6);
+    assert.ok(rent.every((p) => p.vat_enabled === true), "rent carries the VAT");
+    assert.ok(services.every((p) => p.amount === "3174.50" && p.vat_enabled === false), "services carry none");
+    const sum = pays.rows.reduce((s, p) => s + Number(p.amount), 0);
+    assert.equal(Math.round(sum * 100) / 100, 6 * 39687, "rent + services = Ejar's bills");
+    assert.equal(Number(rows[0].rent), 5291.67, "rent is Ejar's 63,500 a year");
   });
 
   it("a third import after the first committed is a 409 too", async () => {

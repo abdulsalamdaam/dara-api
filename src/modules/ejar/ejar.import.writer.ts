@@ -871,6 +871,7 @@ export function sanitizeFees(raw: unknown): Array<Record<string, any>> {
       dueDate: "",
       paymentMethod: "separate",
       vat: !!f?.vat,
+      ...(f?.source === "ejar_services" ? { source: "ejar_services" } : {}),
       // The fee's ZATCA treatment, as the fees step chose it.
       ...(typeof f?.vatCategory === "string" ? { vatCategory: f.vatCategory } : {}),
       ...(typeof f?.exemptionReason === "string" && f.exemptionReason ? { exemptionReason: f.exemptionReason } : {}),

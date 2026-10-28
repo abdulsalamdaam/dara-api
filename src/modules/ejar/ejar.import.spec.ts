@@ -101,7 +101,7 @@ describe("POST /ejar/import (service)", () => {
     assert.equal(c.depositAmount, "6000");
     // The invoices (2 × 34,500, VAT included) over 36 months, before VAT, 2 decimals (ejar.rent.ts).
     assert.equal(c.monthlyRent, "1666.67", "Σ invoices ÷ 1.15 ÷ 36 months");
-    assert.deepEqual(c.rentBasis, { gross: 69000, months: 36, annualExVat: 60000 });
+    assert.deepEqual(c.rentBasis, { gross: 69000, months: 36, annualExVat: 60000, services: null });
     assert.equal(c.vatFallback, true, "commercial contract → 15% when usage cannot decide (the writer applies usage first)");
     assert.equal(plan.invoices.length, 2);
     assert.ok(plan.invoices.every((i) => i.number), "the Ejar invoice numbers travel to the attach step");

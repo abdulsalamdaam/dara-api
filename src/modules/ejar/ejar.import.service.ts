@@ -13,7 +13,7 @@ import {
   type CoParty, type LookupParty, type MainChoice, type MainSide, type MappedLookup, type PartyContact,
 } from "./ejar.lookup.map";
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
-import { monthlyRentFrom, rentBasis } from "./ejar.rent";
+import { monthlyRentFrom, rentBasis, rentSchedule, type EjarServices } from "./ejar.rent";
 import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
 import {
@@ -509,7 +509,7 @@ export class EjarImportService {
         coParties,
         externalSettlementMode: externalSettlementMode(body?.externalSettlementMode), // finance-v2: 0084 — the user's choice for Ejar-paid installments
       },
-      additionalFees: Array.isArray(body?.additionalFees) ? body.additionalFees : [],
+      additionalFees: withServicesFee(Array.isArray(body?.additionalFees) ? body.additionalFees : [], rentBasis({ ...mapped, contract: { ...mapped.contract, startDate, endDate } }, vatFallback).services),
       invoices: summarizeInvoices(saved.invoicesBody as EjarBody | null),
     };
     return this.runner.run(accountId, plan);
@@ -518,14 +518,17 @@ export class EjarImportService {
   private contractFields(
     m: MappedLookup, startDate: string, endDate: string, status: string, vatFallback: boolean, notes: unknown,
   ): ImportPlan["contract"] {
-    const customSchedule = m.invoices
-      .filter((i) => i.dueDate && (i.amount ?? 0) > 0)
-      .map((i) => ({ dueDate: i.dueDate!, amount: String(i.amount) }));
-    // The rent comes from what Ejar bills (the invoices), not from
-    // total_rent_amount — that is the rent per contract year before VAT, not
-    // the total (ejar.rent.ts). The writer re-derives the monthly rent under
-    // the final VAT verdict; this is the contract-type estimate.
-    const basis = rentBasis({ ...m, contract: { ...m.contract, startDate, endDate } });
+    // The rent comes from what Ejar bills (the invoices), less the general
+    // services billed inside them, which become their own fee
+    // (withServicesFee; ejar.rent.ts). The writer re-derives the monthly rent
+    // under the final VAT verdict; this is the contract-type estimate.
+    const basis = rentBasis({ ...m, contract: { ...m.contract, startDate, endDate } }, vatFallback);
+    const customSchedule = rentSchedule(
+      m.invoices
+        .filter((i) => i.dueDate && (i.amount ?? 0) > 0)
+        .map((i) => ({ dueDate: i.dueDate!, amount: String(i.amount) })),
+      basis.services,
+    );
     return {
       startDate, endDate, status,
       signingDate: m.contract.registeredAt?.slice(0, 10) ?? null,
@@ -574,4 +577,34 @@ export class EjarImportService {
       },
     };
   }
+}
+
+/** Marks the fee that carries Ejar's general services (ejar.rent.ts). */
+export const EJAR_SERVICES_SOURCE = "ejar_services";
+
+/**
+ * The general-services fee, always on Ejar's own figures. The review sends it
+ * with the VAT treatment the user chose; only that treatment is taken from the
+ * client — the amounts and dates are re-derived here, so the fee and the rent
+ * rows it was taken out of always add up to Ejar's invoices. A client that did
+ * not send it (an older app) gets it with no VAT, as Ejar bills it.
+ */
+export function withServicesFee(
+  fees: Array<Record<string, unknown>>, services: EjarServices | null | undefined,
+): Array<Record<string, unknown>> {
+  const rest = fees.filter((f) => f?.source !== EJAR_SERVICES_SOURCE);
+  if (!services) return rest;
+  const sent = fees.find((f) => f?.source === EJAR_SERVICES_SOURCE);
+  const treatment = sent && typeof sent.vatCategory === "string"
+    ? { vat: sent.vatCategory === "S", vatCategory: sent.vatCategory, exemptionReason: sent.exemptionReason, exemptionReasonText: sent.exemptionReasonText }
+    : { vat: false };
+  return [
+    {
+      id: EJAR_SERVICES_SOURCE, source: EJAR_SERVICES_SOURCE, typeKey: "services", name: "الخدمات العامة",
+      amount: String(services.total), recurrence: "custom",
+      customSchedule: services.schedule.map((e) => ({ dueDate: e.dueDate, amount: String(e.amount) })),
+      ...treatment,
+    },
+    ...rest,
+  ];
 }

@@ -217,7 +217,8 @@ describe("the import from the production shape", () => {
     assert.equal(c.brokerIdNumber, "1000000091");
     assert.equal(c.vatFallback, true, "commercial → rent VAT when usage cannot decide");
     assert.equal(c.customSchedule.length, 6, "installments are Ejar's invoices");
-    assert.equal(c.customSchedule[0].amount, "39687");
+    // Each 39,687.50 bill less its 3,175 of general services, which import as their own fee (ejar.rent.ts).
+    assert.equal(c.customSchedule[0].amount, "36512.5");
     assert.equal(c.ejarRaw?.unifiedNumber, "7009990003");
     assert.equal(c.ejarRaw?.companyCrNumber, COMPANY_CR);
     assert.equal(c.ejarRaw?.periodDays, 1095);

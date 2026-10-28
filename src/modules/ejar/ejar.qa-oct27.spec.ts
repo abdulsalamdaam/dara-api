@@ -162,31 +162,73 @@ describe("3 · rent from what Ejar bills", () => {
     assert.equal(63500 * 3 * 1.25, 238125, "the schedule is 3 years of 63,500 plus 25% (15% of it VAT)");
   });
 
-  it("commercial (VAT): monthly 5,751.81, annual 69,021.72, annual VAT 10,353.26, VAT over the contract 31,059.78", () => {
-    const b = rentBasis(m268());
-    assert.deepEqual(b, { gross: 238125, months: 36, annualExVat: 63500 });
+  // The contract (PDF, 28 Oct): each bill = 31,750 rent + 4,762.50 VAT + 3,175
+  // general services (no VAT) = 39,687; deposit 6,350 is separate.
+  const SERVICES = {
+    annual: 6350, total: 19050,
+    schedule: ["2026-11-26", "2027-05-26", "2027-11-26", "2028-05-26", "2028-11-26", "2029-05-26"].map((dueDate) => ({ dueDate, amount: 3175 })),
+  };
+
+  it("the 25% on top is 15% VAT + 6,350 a year of general services; rent is total_rent_amount ÷ 12", () => {
+    const b = rentBasis(m268(), true);
+    assert.equal(b.gross, 238125);
+    assert.equal(b.months, 36);
+    assert.equal(b.annualExVat, 63500);
+    assert.deepEqual(b.services?.annual, 6350);
+    assert.deepEqual(b.services?.total, 19050);
+    assert.deepEqual(b.services?.schedule.map((e) => e.amount), [3175, 3175, 3175, 3175, 3175, 3175]);
     const f = rentFigures(b, true);
-    assert.equal(f.monthly, 5751.81);
-    assert.equal(f.annual, 69021.72);
-    assert.equal(f.annualVat, 10353.26);
-    assert.equal(f.totalVat, 31059.78);
-    // The installments carry VAT extracted from their VAT-inclusive amounts:
-    const instVat = [39687, 39687, 39687, 39687, 39687, 39690].reduce((s, a) => s + (a - a / 1.15), 0);
-    assert.equal(Math.round(instVat * 100) / 100, f.totalVat, "header VAT × years = the installments' VAT");
-    assert.ok(Math.abs(f.annualVat * 3 - f.totalVat) < 0.05);
-    assert.ok(Math.abs((f.annual + f.annualVat) * 3 - 238125) < 1, "annual incl. VAT × 3 years = the schedule");
+    assert.equal(f.monthly, 5291.67);
+    assert.equal(f.annual, 63500.04);
+    assert.equal(f.totalVat, 28575, "VAT only on the rent: 190,500 × 15%");
+    assert.equal(rentBasis(m268()).services, null, "no Ejar VAT basis given → nothing split");
   });
 
-  it("the import stores that monthly rent, 2 decimals, with the basis for the writer's final VAT verdict", async () => {
+  it("no services remainder (rent + VAT = bills) → nothing split, rent from the bills as before", () => {
+    const m = m268();
+    m.financial.totalRentAmount = 238125 / 3 / 1.15;
+    const b = rentBasis(m, true);
+    assert.equal(b.services, null);
+    assert.equal(monthlyRentFrom(b, true), 5751.81);
+  });
+
+  it("the import stores rent 5,291.67, rent rows less 3,175 each, and a no-VAT services fee on the same dates", async () => {
     w = prodWorld();
     await w.svc.lookup(USER, { contract_number: N });
     const runner = new RecordingRunner();
     await new EjarImportService(w.store, runner).import(USER, { contract_number: N });
-    const c = runner.plans[0].contract;
-    assert.equal(c.monthlyRent, "5751.81");
-    assert.deepEqual(c.rentBasis, { gross: 238125, months: 36, annualExVat: 63500 });
-    assert.equal(c.customSchedule.length, 6, "the installments stay Ejar's invoices as billed");
+    const plan = runner.plans[0];
+    const c = plan.contract;
+    assert.equal(c.monthlyRent, "5291.67");
+    assert.deepEqual(c.customSchedule.map((e) => e.amount), ["36512", "36512", "36512", "36512", "36512", "36515"]);
+    assert.equal(c.customSchedule.reduce((s, e) => s + Number(e.amount), 0) + 19050, 238125, "rent rows + services = Ejar's bills");
     assert.equal((c.ejarRaw as { cycle?: string }).cycle, "semi_annual");
+    const fee = plan.additionalFees[0] as Record<string, any>;
+    assert.equal(fee.source, "ejar_services");
+    assert.equal(fee.typeKey, "services");
+    assert.equal(fee.recurrence, "custom");
+    assert.equal(fee.vat, false);
+    assert.deepEqual(fee.customSchedule, SERVICES.schedule.map((e) => ({ dueDate: e.dueDate, amount: "3175" })));
+  });
+
+  it("the services fee keeps the user's VAT treatment but never the client's amounts", async () => {
+    w = prodWorld();
+    await w.svc.lookup(USER, { contract_number: N });
+    const runner = new RecordingRunner();
+    await new EjarImportService(w.store, runner).import(USER, {
+      contract_number: N,
+      additionalFees: [
+        { source: "ejar_services", amount: "1", recurrence: "one_time", vatCategory: "E", exemptionReason: "VATEX-SA-29", vat: false },
+        { id: "x", typeKey: "cleaning", name: "نظافة", amount: "500", recurrence: "one_time", vatCategory: "S", vat: true },
+      ],
+    } as never);
+    const fees = runner.plans[0].additionalFees as Array<Record<string, any>>;
+    assert.equal(fees.length, 2);
+    assert.equal(fees[0].amount, "19050");
+    assert.equal(fees[0].vatCategory, "E");
+    assert.equal(fees[0].exemptionReason, "VATEX-SA-29");
+    assert.equal(fees[0].customSchedule.length, 6);
+    assert.equal(fees[1].name, "نظافة");
   });
 
   it("the lookup answers the same figures for the review", async () => {
@@ -194,7 +236,7 @@ describe("3 · rent from what Ejar bills", () => {
     const res = await w.svc.lookup(USER, { contract_number: N });
     assert.deepEqual(
       { total: res.rent.total, monthly: res.rent.monthly, annual: res.rent.annual, annualVat: res.rent.annualVat, ejarAnnualRent: res.rent.ejarAnnualRent, vat: res.rent.vat },
-      { total: 238125, monthly: 5751.81, annual: 69021.72, annualVat: 10353.26, ejarAnnualRent: 63500, vat: true },
+      { total: 238125, monthly: 5291.67, annual: 63500.04, annualVat: 9525.01, ejarAnnualRent: 63500, vat: true },
     );
   });
 
