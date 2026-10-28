@@ -179,7 +179,8 @@ describe("3 · rent from what Ejar bills", () => {
     assert.deepEqual(b.services?.schedule.map((e) => e.amount), [3175, 3175, 3175, 3175, 3175, 3175]);
     const f = rentFigures(b, true);
     assert.equal(f.monthly, 5291.67);
-    assert.equal(f.annual, 63500.04);
+    assert.equal(f.annual, 63500);
+    assert.equal(f.annualVat, 9525);
     assert.equal(f.totalVat, 28575, "VAT only on the rent: 190,500 × 15%");
     assert.equal(rentBasis(m268()).services, null, "no Ejar VAT basis given → nothing split");
   });
@@ -236,7 +237,7 @@ describe("3 · rent from what Ejar bills", () => {
     const res = await w.svc.lookup(USER, { contract_number: N });
     assert.deepEqual(
       { total: res.rent.total, monthly: res.rent.monthly, annual: res.rent.annual, annualVat: res.rent.annualVat, ejarAnnualRent: res.rent.ejarAnnualRent, vat: res.rent.vat },
-      { total: 238125, monthly: 5291.67, annual: 63500.04, annualVat: 9525.01, ejarAnnualRent: 63500, vat: true },
+      { total: 238125, monthly: 5291.67, annual: 63500, annualVat: 9525, ejarAnnualRent: 63500, vat: true },
     );
   });
 

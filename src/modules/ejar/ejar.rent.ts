@@ -160,8 +160,10 @@ export interface RentFigures {
 
 export function rentFigures(b: RentBasis, vat: boolean): RentFigures {
   const monthly = monthlyRentFrom(b, vat);
-  const annual = round2(monthly * 12);
   const services = b.services ?? null;
+  // With services split out the annual rent is Ejar's own figure, not
+  // monthly × 12 (5,291.67 × 12 = 63,500.04 for 63,500).
+  const annual = services && b.annualExVat != null ? round2(b.annualExVat) : round2(monthly * 12);
   // The rent's own gross: the bills less the services in them.
   const rentGross = b.gross != null ? round2(b.gross - (services?.total ?? 0)) : null;
   return {
