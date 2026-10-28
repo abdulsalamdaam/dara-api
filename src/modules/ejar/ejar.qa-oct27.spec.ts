@@ -206,30 +206,51 @@ describe("3 · rent from what Ejar bills", () => {
     assert.equal((c.ejarRaw as { cycle?: string }).cycle, "semi_annual");
     const fee = plan.additionalFees[0] as Record<string, any>;
     assert.equal(fee.source, "ejar_services");
-    assert.equal(fee.typeKey, "services");
+    assert.equal(fee.typeKey, "other", "an older client: one unnamed row — Ejar does not say what it is");
+    assert.equal(fee.name, "مبالغ إضافية من إيجار");
     assert.equal(fee.recurrence, "custom");
     assert.equal(fee.vat, false);
     assert.deepEqual(fee.customSchedule, SERVICES.schedule.map((e) => ({ dueDate: e.dueDate, amount: "3175" })));
   });
 
-  it("the services fee keeps the user's VAT treatment but never the client's amounts", async () => {
+  it("the user's split: each row keeps its type, name and VAT treatment; every bill still adds up", async () => {
     w = prodWorld();
     await w.svc.lookup(USER, { contract_number: N });
     const runner = new RecordingRunner();
     await new EjarImportService(w.store, runner).import(USER, {
       contract_number: N,
       additionalFees: [
-        { source: "ejar_services", amount: "1", recurrence: "one_time", vatCategory: "E", exemptionReason: "VATEX-SA-29", vat: false },
+        { source: "ejar_services", typeKey: "services", name: "خدمات", amount: "15000", recurrence: "one_time", vatCategory: "E", exemptionReason: "VATEX-SA-29", vat: false },
+        { source: "ejar_services", typeKey: "water", name: "المياه", amount: "4050", vatCategory: "S", vat: true },
         { id: "x", typeKey: "cleaning", name: "نظافة", amount: "500", recurrence: "one_time", vatCategory: "S", vat: true },
       ],
     } as never);
-    const fees = runner.plans[0].additionalFees as Array<Record<string, any>>;
-    assert.equal(fees.length, 2);
-    assert.equal(fees[0].amount, "19050");
-    assert.equal(fees[0].vatCategory, "E");
-    assert.equal(fees[0].exemptionReason, "VATEX-SA-29");
-    assert.equal(fees[0].customSchedule.length, 6);
-    assert.equal(fees[1].name, "نظافة");
+    const plan = runner.plans[0];
+    const fees = plan.additionalFees as Array<Record<string, any>>;
+    assert.equal(fees.length, 3);
+    assert.deepEqual(fees.map((f) => [f.name, f.amount, f.vatCategory, f.recurrence]), [
+      ["خدمات", "15000", "E", "custom"], ["المياه", "4050", "S", "custom"], ["نظافة", "500", "S", "one_time"],
+    ]);
+    assert.deepEqual(fees[0].customSchedule.map((e: any) => e.amount), ["2500", "2500", "2500", "2500", "2500", "2500"]);
+    assert.deepEqual(fees[1].customSchedule.map((e: any) => e.amount), ["675", "675", "675", "675", "675", "675"]);
+    plan.contract.customSchedule.forEach((r, k) => {
+      const bill = Number(r.amount) + Number(fees[0].customSchedule[k].amount) + Number(fees[1].customSchedule[k].amount);
+      assert.equal(bill, [39687, 39687, 39687, 39687, 39687, 39690][k], `bill ${k + 1} = Ejar's`);
+    });
+  });
+
+  it("a split that does not add up to Ejar's extra is refused (400 ejar_extra_split), nothing imported", async () => {
+    w = prodWorld();
+    await w.svc.lookup(USER, { contract_number: N });
+    const runner = new RecordingRunner();
+    await assert.rejects(
+      new EjarImportService(w.store, runner).import(USER, {
+        contract_number: N,
+        additionalFees: [{ source: "ejar_services", typeKey: "services", name: "خدمات", amount: "19000", vatCategory: "S", vat: true }],
+      } as never),
+      (e: any) => e.getResponse?.().code === "ejar_extra_split" && e.getResponse().total === 19050,
+    );
+    assert.equal(runner.plans.length, 0);
   });
 
   it("the lookup answers the same figures for the review", async () => {

@@ -87,9 +87,9 @@ describe("Ejar import: a double click writes one contract (database)", { skip: f
     const pays = await t.pool.query(
       `select description, amount::text as amount, vat_enabled from payments where contract_id = $1 order by due_date, description nulls first`, [rows[0].id]);
     // One schedule: Ejar's 6 bills (39,687 each here), each split into its
-    // rent and its general services, which carry no VAT (ejar.rent.ts).
-    const services = pays.rows.filter((p) => p.description === "الخدمات العامة");
-    const rent = pays.rows.filter((p) => p.description !== "الخدمات العامة");
+    // rent and the extra Ejar bills on top, which carry no VAT (ejar.rent.ts).
+    const services = pays.rows.filter((p) => p.description === "مبالغ إضافية من إيجار");
+    const rent = pays.rows.filter((p) => p.description !== "مبالغ إضافية من إيجار");
     assert.equal(pays.rows.length, 12, "one schedule");
     assert.equal(rent.length, 6);
     assert.equal(services.length, 6);

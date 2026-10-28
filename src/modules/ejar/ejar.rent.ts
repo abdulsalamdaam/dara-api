@@ -84,6 +84,11 @@ export interface EjarServices {
  * a fee (under 1 SAR: Ejar's rounding), when Ejar sent no annual rent, or when
  * the remainder is implausible (over half the bills — a rent that changes by
  * year, not a service), so nothing is split on a guess.
+ *
+ * What the remainder IS, Ejar does not say: on 20498373268 it is general
+ * services, but the contract total may also hold fixed yearly electricity,
+ * water or gas. So the import never names it — the user splits it into fee
+ * rows (withServicesFee in ejar.import.service.ts).
  */
 export function ejarServices(
   m: {
