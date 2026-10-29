@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ejarDenialFor, ejarEnvMode, ejarModeOf } from "./ejar.access";
+import { ejarAccessModeOf, ejarDenialFor, ejarEnvMode, ejarModeOf } from "./ejar.access";
 
 describe("ejarDenialFor — EJAR_ACCESS × the account switch (decision 6)", () => {
   const allow = { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" };
@@ -19,6 +19,17 @@ describe("ejarDenialFor — EJAR_ACCESS × the account switch (decision 6)", () 
   it("disabled always blocks, even on an allowlisted user or EJAR_ACCESS=all", () => {
     assert.equal(ejarDenialFor("disabled", 5, allow)?.code, "ejar_disabled_for_account");
     assert.equal(ejarDenialFor("disabled", 7, {})?.code, "ejar_disabled_for_account");
+  });
+  it("trial blocks with ejar_trial, even when enabled or allowlisted", () => {
+    assert.equal(ejarDenialFor("trial", 5, allow)?.code, "ejar_trial");
+    assert.equal(ejarDenialFor("trial", 7, {})?.code, "ejar_trial");
+    assert.equal(ejarDenialFor("trial", 7, { EJAR_ACCESS: "off" })?.code, "access_denied");
+  });
+  it("the trial overrides the switch, except disabled (which keeps its own message)", () => {
+    assert.equal(ejarAccessModeOf("default", true), "trial");
+    assert.equal(ejarAccessModeOf("enabled", true), "trial");
+    assert.equal(ejarAccessModeOf("disabled", true), "disabled");
+    assert.equal(ejarAccessModeOf("enabled", false), "enabled");
   });
   it("modes and env normalise", () => {
     assert.equal(ejarModeOf(1), "enabled");

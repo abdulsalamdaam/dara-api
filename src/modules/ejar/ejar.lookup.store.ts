@@ -11,7 +11,7 @@ import type { LookupUsage, PlanPeriod } from "./ejar.budget";
 import { ejarLookupUsage, WRONG_NUMBER_SQL } from "./ejar.usage";
 import { readPool, type EjarPool } from "./ejar.pool";
 import { readAdjustments, type LimitAdjustment } from "../../common/limit-core";
-import { accountEjarMode, type EjarAccountMode } from "./ejar.access";
+import { accountEjarAccessMode, type EjarAccessMode } from "./ejar.access";
 import { resolvePartyCheck, type EjarPartyCheck } from "./ejar.party-check";
 import { ejarLandlordCapPeek, type CapIdentity } from "./ejar.landlord-cap";
 import { findContractByEjarNumber } from "../../common/ejar-contract-number";
@@ -106,8 +106,8 @@ export interface EjarLookupStore {
   planPeriod(accountId: number): Promise<PlanPeriod | null>;
   /** The account's override / active add-ons for its Ejar lookup quota (common/limits.ts). */
   ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment>;
-  /** The account's Ejar switch (ejar.access.ts). */
-  ejarAccountMode(accountId: number): Promise<EjarAccountMode>;
+  /** The account's Ejar switch, or `trial` while on the free trial (ejar.access.ts). */
+  ejarAccountMode(accountId: number): Promise<EjarAccessMode>;
   getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null>;
   saveLookup(row: Omit<SavedLookup, "id" | "createdAt">): Promise<SavedLookup>;
   /**
@@ -226,8 +226,8 @@ export class DrizzleEjarLookupStore implements EjarLookupStore {
     return (await readAdjustments(this.db, accountId)).ejar_lookups;
   }
 
-  ejarAccountMode(accountId: number): Promise<EjarAccountMode> {
-    return accountEjarMode(this.db, accountId);
+  ejarAccountMode(accountId: number): Promise<EjarAccessMode> {
+    return accountEjarAccessMode(this.db, accountId);
   }
 
   async getLookup(accountId: number, contractNumber: string): Promise<SavedLookup | null> {

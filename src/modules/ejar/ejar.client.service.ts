@@ -9,7 +9,7 @@ import {
 } from "./ejar.types";
 import { EjarLogService, truncateBody } from "./ejar.log.service";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
-import { accountEjarMode, ejarAccessDenial, ejarDenialFor, type EjarAccountMode } from "./ejar.access";
+import { accountEjarAccessMode, ejarAccessDenial, ejarDenialFor, type EjarAccessMode } from "./ejar.access";
 
 const SECRET_HEADER = "X-IBM-Client-Secret";
 const REDACTED = "***redacted***";
@@ -219,7 +219,7 @@ export class EjarClientService {
       /** The scope owner the call is for — its per-account Ejar switch applies. */
       accountId?: number | null;
       /** The account's switch, when the caller already read it (saves a query). */
-      accountMode?: EjarAccountMode;
+      accountMode?: EjarAccessMode;
     } = {},
   ): Promise<EjarCallResult<T>> {
     const def = EJAR_ENDPOINTS[endpoint];
@@ -391,9 +391,9 @@ export class EjarClientService {
   }
 
   /** EJAR_ACCESS plus, when the call names its account, that account's switch (ejar.access.ts). */
-  private async denialFor(opts: { userId?: number | null; accountId?: number | null; accountMode?: EjarAccountMode }): Promise<string | null> {
+  private async denialFor(opts: { userId?: number | null; accountId?: number | null; accountMode?: EjarAccessMode }): Promise<string | null> {
     let mode = opts.accountMode;
-    if (!mode && opts.accountId != null && this.db) mode = await accountEjarMode(this.db, opts.accountId);
+    if (!mode && opts.accountId != null && this.db) mode = await accountEjarAccessMode(this.db, opts.accountId);
     if (!mode) return ejarAccessDenial(opts.userId);
     return ejarDenialFor(mode, opts.userId)?.message ?? null;
   }

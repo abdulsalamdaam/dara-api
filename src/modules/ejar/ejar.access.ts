@@ -7,13 +7,18 @@
  *  - account `disabled` always blocks (403 `ejar_disabled_for_account`).
  *  - account `enabled` lets the account through `EJAR_ACCESS=allowlist`.
  *  - account `default` (no row) follows `EJAR_ACCESS` as before.
+ *  - an account on its free trial is blocked (403 `ejar_trial`) whatever the
+ *    switch says: Ejar is a paid-subscription feature. Paying clears the
+ *    trial flag, which opens it.
  */
 import { and, eq } from "drizzle-orm";
-import { accountLimitOverridesTable } from "@dara/database";
+import { accountLimitOverridesTable, usersTable } from "@dara/database";
 import type { Drizzle } from "../../database/database.module";
 import { EJAR_ENABLED_KEY } from "../../common/limit-core";
 
 export type EjarAccountMode = "default" | "enabled" | "disabled";
+/** The switch, or `trial` when the account is on its free trial (and not switched off). */
+export type EjarAccessMode = EjarAccountMode | "trial";
 export type EjarEnvMode = "all" | "allowlist" | "off";
 
 /** `EJAR_ACCESS`, normalised: unset → all; any value but all/allowlist → off. */
@@ -40,19 +45,23 @@ export function ejarAccessDenial(userId: number | null | undefined, env: Record<
 }
 
 export interface EjarDenial {
-  code: "access_denied" | "ejar_disabled_for_account";
+  code: "access_denied" | "ejar_disabled_for_account" | "ejar_trial";
   message: string;
 }
 
 export const EJAR_DISABLED_FOR_ACCOUNT_MESSAGE =
   "خدمة إيجار غير مفعّلة لهذا الحساب — تواصل مع الدعم · Ejar is switched off for this account; contact support.";
 
+export const EJAR_TRIAL_MESSAGE =
+  "الاستيراد من إيجار غير متاح خلال الفترة التجريبية — اشترك لتفعيله · Ejar import isn't available during the free trial; subscribe to unlock it.";
+
 /** The rule above, for an account whose switch is `mode`. Pure. */
 export function ejarDenialFor(
-  mode: EjarAccountMode, userId: number | null | undefined, env: Record<string, string | undefined> = process.env,
+  mode: EjarAccessMode, userId: number | null | undefined, env: Record<string, string | undefined> = process.env,
 ): EjarDenial | null {
   if (ejarEnvMode(env) === "off") return { code: "access_denied", message: ejarAccessDenial(userId, env)! };
   if (mode === "disabled") return { code: "ejar_disabled_for_account", message: EJAR_DISABLED_FOR_ACCOUNT_MESSAGE };
+  if (mode === "trial") return { code: "ejar_trial", message: EJAR_TRIAL_MESSAGE };
   if (mode === "enabled") return null;
   const d = ejarAccessDenial(userId, env);
   return d ? { code: "access_denied", message: d } : null;
@@ -75,11 +84,32 @@ export async function accountEjarMode(db: Drizzle, accountId: number): Promise<E
   return ejarModeOf(row?.value);
 }
 
+/** Whether the account (scope owner) is on its free trial. */
+export async function accountOnTrial(db: Drizzle, accountId: number): Promise<boolean> {
+  const [row] = await db
+    .select({ trial: usersTable.subscriptionIsTrial })
+    .from(usersTable)
+    .where(eq(usersTable.id, accountId))
+    .limit(1);
+  return !!row?.trial;
+}
+
+/** The switch combined with the trial: what the access rule is applied to. */
+export function ejarAccessModeOf(mode: EjarAccountMode, onTrial: boolean): EjarAccessMode {
+  return onTrial && mode !== "disabled" ? "trial" : mode;
+}
+
+/** The account's switch plus its trial — the mode every Ejar gate checks. */
+export async function accountEjarAccessMode(db: Drizzle, accountId: number): Promise<EjarAccessMode> {
+  const [mode, trial] = await Promise.all([accountEjarMode(db, accountId), accountOnTrial(db, accountId)]);
+  return ejarAccessModeOf(mode, trial);
+}
+
 /** Why `userId` (acting for account `scopeId`) may not reach Ejar, or null. */
 export async function accountEjarDenial(
   db: Drizzle, scopeId: number, userId?: number | null, env: Record<string, string | undefined> = process.env,
 ): Promise<EjarDenial | null> {
-  return ejarDenialFor(await accountEjarMode(db, scopeId), userId, env);
+  return ejarDenialFor(await accountEjarAccessMode(db, scopeId), userId, env);
 }
 
 /** Whether Ejar is usable for this caller right now — what /auth/me and /me/package report. */

@@ -15,7 +15,7 @@ import {
 import { summarizeInvoices, normalizeStatus, type EjarPartyInfo } from "./ejar.map";
 import { monthlyRentFrom, rentBasis, rentSchedule, type EjarServices } from "./ejar.rent";
 import type { EjarLookupStore } from "./ejar.lookup.store";
-import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE } from "./ejar.access";
+import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE, EJAR_TRIAL_MESSAGE } from "./ejar.access";
 import {
   BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lockedMain, lookupContext, mapSaved,
   matchedUnitEjarIds, partyCheckPasses, partyMismatch,
@@ -226,9 +226,12 @@ export class EjarImportService {
 
     // The import never calls Ejar, so EJAR_ACCESS does not apply — but an
     // account an admin switched off Ejar for cannot import either.
-    if ((await this.store.ejarAccountMode(accountId)) === "disabled") {
+    // Nor can an account on its free trial.
+    const mode = await this.store.ejarAccountMode(accountId);
+    if (mode === "disabled") {
       throw new ForbiddenException({ code: "ejar_disabled_for_account", message: EJAR_DISABLED_FOR_ACCOUNT_MESSAGE });
     }
+    if (mode === "trial") throw new ForbiddenException({ code: "ejar_trial", message: EJAR_TRIAL_MESSAGE });
 
     const saved = await this.store.getLookup(accountId, contractNumber);
     if (!saved) {

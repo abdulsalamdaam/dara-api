@@ -11,7 +11,7 @@ import { EjarClientService } from "../ejar.client.service";
 import { EjarLookupService } from "../ejar.lookup.service";
 import type { EjarLookupStore, LinkedParty, LookupMatches, MatchKeys, PartyKey, PartyMatch, SavedLookup } from "../ejar.lookup.store";
 import type { LimitAdjustment } from "../../../common/limit-core";
-import type { EjarAccountMode } from "../ejar.access";
+import type { EjarAccessMode } from "../ejar.access";
 import type { EjarScope } from "../ejar.scope";
 import type { EjarPartyCheck } from "../ejar.party-check";
 import type { LookupUsage, PlanPeriod } from "../ejar.budget";
@@ -190,12 +190,12 @@ export class MemStore implements EjarLookupStore {
   /** account → Ejar quota override / active add-on total; unset = none. */
   quotaAdjust: Record<number, LimitAdjustment> = {};
   /** account → Ejar switch; unset = default. */
-  ejarModes: Record<number, EjarAccountMode> = {};
+  ejarModes: Record<number, EjarAccessMode> = {};
   /** Whether an Ejar pack is for sale. */
   async ejarQuotaAdjustment(accountId: number): Promise<LimitAdjustment> {
     return this.quotaAdjust[accountId] ?? { override: undefined, addons: 0 };
   }
-  async ejarAccountMode(accountId: number): Promise<EjarAccountMode> { return this.ejarModes[accountId] ?? "default"; }
+  async ejarAccountMode(accountId: number): Promise<EjarAccessMode> { return this.ejarModes[accountId] ?? "default"; }
   async getLookup(accountId: number, n: string) { return this.lookups.get(`${accountId}:${n}`) ?? null; }
   async saveLookup(row: Omit<SavedLookup, "id" | "createdAt">) {
     const saved = { ...row, id: this.nextId++, createdAt: new Date() };

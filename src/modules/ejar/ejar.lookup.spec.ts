@@ -938,6 +938,20 @@ describe("the per-account Ejar switch (ejar.access.ts)", () => {
     assert.equal(body.code, "ejar_disabled_for_account");
   });
 
+  it("trial: 403 ejar_trial on lookup and import, nothing sent, budget says enabled:false", async () => {
+    w = dworld();
+    w.store.ejarModes[1] = "trial";
+    const { status, body } = await httpError(w.svc.lookup(USER, { contract_number: CN }));
+    assert.equal(status, 403);
+    assert.equal(body.code, "ejar_trial");
+    assert.equal(w.calls.length, 0);
+    assert.equal((await w.svc.budget(1, undefined, 1)).enabled, false);
+    const importer = new EjarImportService(w.store, {} as never);
+    const imp = await httpError(importer.import(USER, { contract_number: CN }));
+    assert.equal(imp.status, 403);
+    assert.equal(imp.body.code, "ejar_trial");
+  });
+
   it("enabled overrides EJAR_ACCESS=allowlist for that account only", async () => {
     w = dworld({ env: { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" } });
     w.store.ejarModes[1] = "enabled";
