@@ -15,7 +15,7 @@ import { qaBypassEnabled, appReviewLogin, isAppReviewPhone } from "../../common/
  *
  *   - 4 digits (the SMS is short and the code is typed on a phone keypad),
  *     stored as a bcrypt hash and never in plaintext
- *   - 10-minute expiry, single use, 5 wrong attempts and the row is burned
+ *   - 2-minute expiry, single use, 5 wrong attempts and the row is burned
  *   - a 60-second resend cooldown enforced in the DB, so a restart can't
  *     reset it and a loop can't spend the SMS balance
  *   - the code is bound to (phone, purpose), so a tenant code cannot be
@@ -28,7 +28,7 @@ import { qaBypassEnabled, appReviewLogin, isAppReviewPhone } from "../../common/
 
 export type OtpPurpose = "tenant" | "user";
 
-export const PHONE_OTP_TTL_MIN = 10;
+export const PHONE_OTP_TTL_MIN = 2;
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_SEC = 60;
 export const DEV_BYPASS_CODE = "1234";
@@ -56,9 +56,11 @@ export class PhoneOtpService {
 
   private message(code: string): string {
     // Short on purpose: Arabic is UCS-2, so ~70 characters is one SMS segment
-    // and anything past that doubles the cost of every login. This renders at
-    // 62 characters with the 10-minute TTL — re-count before adding a word.
-    return `رمز الدخول إلى دارا: ${code}\nصالح لمدة ${minutesAr(PHONE_OTP_TTL_MIN)}. لا تشاركه مع أحد.`;
+    // and anything past that doubles the cost of every login.
+    // No product name in the text: it goes out under the DaamTech sender, and
+    // Taqnyat flags a brand in the body that differs from the sender as
+    // "sending on behalf of others" (CST spam rules, warning of 2026-10-31).
+    return `رمز الدخول: ${code}\nصالح لمدة ${minutesAr(PHONE_OTP_TTL_MIN)}. لا تشاركه مع أحد.`;
   }
 
   /**
