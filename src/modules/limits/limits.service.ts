@@ -7,7 +7,7 @@ import {
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EJAR_ENABLED_KEY, effectiveLimit, effectiveLimits, isLimitKey, type LimitKey } from "../../common/limits";
 import { amountInclVat } from "../../common/addon-catalog";
-import { accountEjarMode, ejarDenialFor, ejarEnvMode, type EjarAccountMode } from "../ejar/ejar.access";
+import { accountEjarAccessMode, accountEjarMode, ejarDenialFor, ejarEnvMode, type EjarAccountMode } from "../ejar/ejar.access";
 import { AddonCatalogService } from "./addon-catalog.service";
 import {
   LIMITS_BILLING_PORT, LIMITS_NOTIFIER, NoopLimitsBillingPort, NoopLimitsNotifier,
@@ -116,16 +116,18 @@ export class LimitsService {
 
   async adminView(accountId: number): Promise<AdminLimitsView> {
     await this.assertAccount(accountId);
-    const [limits, overrides, addons, mode, events] = await Promise.all([
+    const [limits, overrides, addons, mode, accessMode, events] = await Promise.all([
       effectiveLimits(this.db, accountId),
       this.overrides(accountId),
       this.addonViews(accountId),
       accountEjarMode(this.db, accountId),
+      // The switch plus the subscription (paid → on, trial → off) — what the account actually gets.
+      accountEjarAccessMode(this.db, accountId),
       this.events(accountId, 1, 50).then((r) => r.items),
     ]);
     return {
       limits, overrides, addons,
-      ejar: { mode, envMode: ejarEnvMode(), effective: ejarDenialFor(mode, null) == null },
+      ejar: { mode, envMode: ejarEnvMode(), effective: ejarDenialFor(accessMode, null) == null },
       events,
     };
   }

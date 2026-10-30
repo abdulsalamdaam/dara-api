@@ -16,7 +16,7 @@ import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType
 import { planFeatures } from "../../common/plan-features";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
-import { ejarEnabledFor } from "../ejar/ejar.access";
+import { accountEjarDenial } from "../ejar/ejar.access";
 
 const MAX_FAILED = 5;
 
@@ -944,7 +944,7 @@ export class AuthService {
       planFeatures: planFeatures(packagePlan),
       // Ejar lookups/imports open to this caller: EJAR_ACCESS plus the
       // account's own switch (ejar/ejar.access.ts).
-      ejarEnabled: await ejarEnabledFor(this.db, row.ownerUserId ?? row.id, row.id),
+      ...(await ejarAccessFields(this.db, row.ownerUserId ?? row.id, row.id)),
       loginCount: row.loginCount,
       lastLoginAt: row.lastLoginAt,
       createdAt: row.createdAt,
@@ -1325,4 +1325,10 @@ export class AuthService {
       .where(eq(tenantsTable.id, tenantId));
     return { success: true, message: "تم تسجيل الخروج." };
   }
+}
+
+/** `ejarEnabled` plus `ejarBlock` (why not: ejar_trial / ejar_disabled_for_account / access_denied). */
+async function ejarAccessFields(db: Parameters<typeof accountEjarDenial>[0], scopeId: number, userId: number) {
+  const denial = await accountEjarDenial(db, scopeId, userId);
+  return { ejarEnabled: denial == null, ejarBlock: denial?.code ?? null };
 }

@@ -10,11 +10,15 @@
  *  - an account on its free trial is blocked (403 `ejar_trial`) whatever the
  *    switch says: Ejar is a paid-subscription feature. Paying clears the
  *    trial flag, which opens it.
+ *  - an account with an active PAID subscription (not a trial, not in grace)
+ *    and no switch row counts as `enabled`: Ejar is on by default for paying
+ *    customers, so it gets through `EJAR_ACCESS=allowlist` without an admin.
  */
 import { and, eq } from "drizzle-orm";
 import { accountLimitOverridesTable, usersTable } from "@dara/database";
 import type { Drizzle } from "../../database/database.module";
 import { EJAR_ENABLED_KEY } from "../../common/limit-core";
+import { deriveSubscription } from "../../common/subscription";
 
 export type EjarAccountMode = "default" | "enabled" | "disabled";
 /** The switch, or `trial` when the account is on its free trial (and not switched off). */
@@ -84,25 +88,42 @@ export async function accountEjarMode(db: Drizzle, accountId: number): Promise<E
   return ejarModeOf(row?.value);
 }
 
-/** Whether the account (scope owner) is on its free trial. */
-export async function accountOnTrial(db: Drizzle, accountId: number): Promise<boolean> {
+export type EjarSubscriptionState = "trial" | "paid" | "other";
+
+/** The account's (scope owner's) subscription as Ejar sees it: trial, active paid, or anything else. */
+export async function accountSubscriptionState(db: Drizzle, accountId: number, now = new Date()): Promise<EjarSubscriptionState> {
   const [row] = await db
-    .select({ trial: usersTable.subscriptionIsTrial })
+    .select({
+      trial: usersTable.subscriptionIsTrial,
+      status: usersTable.subscriptionStatus,
+      endsAt: usersTable.subscriptionEndsAt,
+    })
     .from(usersTable)
     .where(eq(usersTable.id, accountId))
     .limit(1);
-  return !!row?.trial;
+  if (!row) return "other";
+  if (row.trial) return "trial";
+  const sub = deriveSubscription({ storedStatus: row.status, subscriptionEndsAt: row.endsAt, isTrial: false, now });
+  return sub.status === "active" ? "paid" : "other";
 }
 
-/** The switch combined with the trial: what the access rule is applied to. */
-export function ejarAccessModeOf(mode: EjarAccountMode, onTrial: boolean): EjarAccessMode {
-  return onTrial && mode !== "disabled" ? "trial" : mode;
+/**
+ * The switch combined with the subscription: what the access rule is applied
+ * to. Admin `disabled` always wins; then the trial; then an active paid
+ * subscription turns the default on.
+ */
+export function ejarAccessModeOf(mode: EjarAccountMode, sub: EjarSubscriptionState | boolean): EjarAccessMode {
+  const state: EjarSubscriptionState = sub === true ? "trial" : sub === false ? "other" : sub;
+  if (mode === "disabled") return "disabled";
+  if (state === "trial") return "trial";
+  if (state === "paid") return "enabled";
+  return mode;
 }
 
-/** The account's switch plus its trial — the mode every Ejar gate checks. */
+/** The account's switch plus its subscription — the mode every Ejar gate checks. */
 export async function accountEjarAccessMode(db: Drizzle, accountId: number): Promise<EjarAccessMode> {
-  const [mode, trial] = await Promise.all([accountEjarMode(db, accountId), accountOnTrial(db, accountId)]);
-  return ejarAccessModeOf(mode, trial);
+  const [mode, sub] = await Promise.all([accountEjarMode(db, accountId), accountSubscriptionState(db, accountId)]);
+  return ejarAccessModeOf(mode, sub);
 }
 
 /** Why `userId` (acting for account `scopeId`) may not reach Ejar, or null. */

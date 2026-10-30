@@ -31,6 +31,16 @@ describe("ejarDenialFor — EJAR_ACCESS × the account switch (decision 6)", () 
     assert.equal(ejarAccessModeOf("disabled", true), "disabled");
     assert.equal(ejarAccessModeOf("enabled", false), "enabled");
   });
+  it("an active paid subscription turns the default on; admin disabled still wins", () => {
+    const allow = { EJAR_ACCESS: "allowlist", EJAR_ALLOWED_USER_IDS: "5" };
+    assert.equal(ejarAccessModeOf("default", "paid"), "enabled");
+    assert.equal(ejarDenialFor(ejarAccessModeOf("default", "paid"), 7, allow), null);
+    assert.equal(ejarAccessModeOf("disabled", "paid"), "disabled");
+    assert.equal(ejarAccessModeOf("default", "other"), "default");
+    assert.equal(ejarDenialFor(ejarAccessModeOf("default", "other"), 7, allow)?.code, "access_denied");
+    assert.equal(ejarAccessModeOf("enabled", "trial"), "trial");
+    assert.equal(ejarDenialFor(ejarAccessModeOf("default", "paid"), 7, { EJAR_ACCESS: "off" })?.code, "access_denied");
+  });
   it("modes and env normalise", () => {
     assert.equal(ejarModeOf(1), "enabled");
     assert.equal(ejarModeOf(0), "disabled");

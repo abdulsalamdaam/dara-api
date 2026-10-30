@@ -12,7 +12,7 @@ import { PERMISSIONS } from "../../common/permissions";
 import { resolvePackage, packageMode, planPrice, isPayablePlan, parseCycle, purchasableCycle, type BillingCycle } from "../../common/packages";
 import { packageUsage, quotaView } from "../../common/quota";
 import { effectiveLimits, type EffectiveLimit } from "../../common/limits";
-import { ejarEnabledFor } from "../ejar/ejar.access";
+import { accountEjarDenial } from "../ejar/ejar.access";
 import { ejarAvailableFor } from "../ejar/ejar.usage";
 import { deriveSubscription } from "../../common/subscription";
 import { trialView } from "../../common/trial";
@@ -50,10 +50,11 @@ class PackageController {
     // breakdown {base, override, addons, effective, remaining, resetsAt}.
     // `ejarLookups` is only `{ available }`: how many Ejar lookups the account
     // has, used or has left is never sent to a customer (admins see it).
-    const [eff, ejarEnabled] = await Promise.all([
+    const [eff, ejarDenial] = await Promise.all([
       effectiveLimits(this.db, ownerId),
-      ejarEnabledFor(this.db, ownerId, user.id),
+      accountEjarDenial(this.db, ownerId, user.id),
     ]);
+    const ejarEnabled = ejarDenial == null;
     const view = (key: EffectiveLimit["key"]) => {
       const l = eff.find((x) => x.key === key)!;
       return {
@@ -120,6 +121,9 @@ class PackageController {
       // Whether Ejar lookups/imports are open to this caller (EJAR_ACCESS +
       // the account's switch, ejar/ejar.access.ts).
       ejarEnabled,
+      // Why it is off, so the portal can say the right thing: `ejar_trial`
+      // (subscribe), `ejar_disabled_for_account` (admin), `access_denied`.
+      ejarBlock: ejarDenial?.code ?? null,
       userType: owner?.userType ?? "individual",
       onboarded: owner?.onboardedAt != null,
       // First-run getting-started checklist completed (persisted, not local).
