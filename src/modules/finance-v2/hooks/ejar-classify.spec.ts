@@ -27,6 +27,15 @@ describe("finance v2: Ejar import classification", () => {
       { status: null, reported: null, reportedAmount: null });
   });
 
+  it("Ejar 'Paid' with remaining still equal to the amount is paid (prod Ejar leaves remaining unchanged)", () => {
+    assert.deepEqual(mapEjarStatusV2({ status: "Paid", amount: "65167.0", remaining: "65167.0" }),
+      { status: "settled_external", reported: "paid", reportedAmount: "65167.00" });
+    assert.deepEqual(mapEjarStatusV2({ status: "مدفوعة", amount: "3000", remaining: "3000" }),
+      { status: "settled_external", reported: "paid", reportedAmount: "3000.00" });
+    assert.equal(mapEjarStatusLegacy({ status: "Paid", amount: "65167.0", remaining: "65167.0" }), "paid");
+    assert.equal(mapEjarStatusLegacy({ status: "Unpaid", amount: "65167.0", remaining: "65167.0" }), null);
+  });
+
   it("11b (flag off): the legacy status mapping says partially_paid for the partial wording", () => {
     assert.equal(mapEjarStatusLegacy({ status: "مدفوعة جزئياً", amount: "3000", remaining: "1000" }), "partially_paid");
     assert.equal(mapEjarStatusLegacy({ status: "مدفوعة جزئياً", amount: "3000", remaining: null }), "partially_paid");
