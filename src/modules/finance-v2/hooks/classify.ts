@@ -193,7 +193,12 @@ function ejarPaidState(inv: EjarInvoiceLike): { state: "paid" | "partial" | "unp
     return { state: "partial", paidAmount: fromHalalas(amountH - remainingH) };
   }
   if (partialWord && !unpaidWord && !(remainingH != null && remainingH <= 0)) return { state: "partial", paidAmount: null };
-  if (paidWord && !(remainingH != null && amountH != null && remainingH >= amountH && amountH > 0)) {
+  // "Paid" wins over remaining == amount: on production Ejar sends paid invoices
+  // with invoice_remaining_amount still equal to the full amount (contract
+  // 20907287012, Nov 2026: all 7 paid invoices), so that figure is not evidence
+  // of non-payment. Only a remaining strictly between 0 and the amount (above)
+  // overrides the word.
+  if (paidWord) {
     return { state: "paid", paidAmount: amountH != null ? fromHalalas(amountH) : null };
   }
   return { state: "unpaid", paidAmount: null };
