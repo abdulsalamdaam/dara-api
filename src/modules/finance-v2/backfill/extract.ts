@@ -55,7 +55,7 @@ export interface Note {
 
 export interface ExtractResult {
   events: PlannedEvent[];
-  /** Extraction-level findings for the dry-run report (cancelled_history, paid_without_collection, covered_by_opening, external_skipped). */
+  /** Extraction-level findings for the dry-run report (cancelled_history, paid_without_collection, covered_by_opening, external_skipped, ejar_paid_restamped). */
   notes: Record<string, Note>;
 }
 
@@ -107,6 +107,24 @@ function note(notes: Record<string, Note>, code: string, x: { sourceType: string
   const n = (notes[code] ??= { count: 0, sample: [] });
   n.count++;
   if (n.sample.length < 10) n.sample.push(x);
+}
+
+/**
+ * Ejar-paid installments that an import stored as `paid` while Accounting was off (before the legacy mapping wrote
+ * `settled_external`). No collection backs them — the rent was paid through Ejar — so the ledger left them as open
+ * receivables and the collections report could not show them as collected outside the platform. Restamped as the
+ * import now stores them, inside the run's transaction (a dry run rolls it back), so E33 below settles them.
+ * Only rent rows the Ejar import stamped ("فاتورة إيجار…"), on an Ejar contract, with no collection at all.
+ */
+export async function restampEjarPaid(q: Sql, userId: number): Promise<number> {
+  return q.exec(
+    `update payments p set status = 'settled_external', paid_date = coalesce(p.paid_date, p.due_date), updated_at = now()
+       from contracts c
+      where c.id = p.contract_id and c.user_id = p.user_id and c.ejar_source = 'ejar' and c.deleted_at is null
+        and p.user_id = $1 and p.status = 'paid' and p.deleted_at is null and p.description like 'فاتورة إيجار%'
+        and not exists (select 1 from payment_collections pc where pc.user_id = p.user_id and pc.payment_id = p.id)`,
+    [userId],
+  );
 }
 
 export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRow, opts: ExtractOptions): Promise<ExtractResult> {
@@ -194,6 +212,8 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
   }
 
   // ── Installments: due-date charges (E02), external settlements (E33), releases (E35) ──
+  const restamped = await restampEjarPaid(q, userId);
+  if (restamped > 0) notes.ejar_paid_restamped = { count: restamped, sample: [] };
   const pays = await q.rows<InstallmentRow & { created: string; doc_date: string | null; collected: string; has_col: boolean;
     c_status: string; ended: string | null; charge_events: number; written_off: boolean; ejar_reported: string | null; ejar_partial_posted: string | null;
     ext_mode: string | null }>(

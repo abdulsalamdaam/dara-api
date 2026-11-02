@@ -63,7 +63,7 @@ export class EjarImportRunner implements EjarImportRunnerLike {
     if (installments.length && plan.invoices.length) {
       try {
         if (fv2) await this.fv2h!.ejarAttachV2({ fv2, userId: ownerId }, installments, plan.invoices as any[]); // finance-v2: v2 replaces the attach step (E7)
-        else await new EjarImportWriter(this.db).attachEjarInvoices(installments, plan.invoices, { skipExternal: plan.contract.externalSettlementMode === "skip" }); // finance-v2: flag off → the legacy attach (0084: skip stores Ejar-paid as settled_external)
+        else await new EjarImportWriter(this.db).attachEjarInvoices(installments, plan.invoices); // finance-v2: flag off → the legacy attach (Ejar-paid stored settled_external, as v2)
       } catch {
         // The contract and its schedule are saved; only the invoice stamps are missing.
       }
