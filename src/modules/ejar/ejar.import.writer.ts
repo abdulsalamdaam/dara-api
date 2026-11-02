@@ -95,7 +95,6 @@ export class EjarImportWriter {
   async attachEjarInvoices(
     rows: Array<{ id: number; dueDate: string }>,
     invoices: EjarInvoiceRow[],
-    opts: { skipExternal?: boolean } = {}, // finance-v2: 0084
   ): Promise<void> {
     if (rows.length === 0 || invoices.length === 0) return;
     // Invoices are RENT: match rent rows only, each invoice once, so a fee on
@@ -107,10 +106,10 @@ export class EjarImportWriter {
     const descOf = new Map(described.map((d) => [d.id, d.description]));
     for (const { row, inv } of matchEjarInvoices(rows.map((r) => ({ ...r, description: descOf.get(r.id) ?? null })), invoices)) {
       // "مدفوعة جزئياً" is a part payment, never fully paid (issue 11b).
-      const legacyStatus = mapEjarStatusLegacy(inv);
-      // finance-v2: 0084 — on a contract set to SKIP them, an Ejar-paid row is stored `settled_external` (as v2 does),
-      // so the reports can leave it out; `paid` with no collection behind it would count as collected everywhere.
-      const status = opts.skipExternal && legacyStatus === "paid" ? "settled_external" : legacyStatus; // finance-v2:
+      // An Ejar-paid row is stored `settled_external` (as v2 does), whatever the contract's 0084 mode: `paid` with no
+      // collection behind it stays an open receivable once Accounting is switched on, and never reads as collected
+      // outside the platform.
+      const status = mapEjarStatusLegacy(inv);
       await this.db
         .update(paymentsTable)
         .set(

@@ -222,10 +222,15 @@ export function mapEjarStatusV2(inv: EjarInvoiceLike):
   return { status: null, reported: null, reportedAmount: null };
 }
 
-/** The flag-off (legacy) stored status for an imported installment: the same reading of Ejar, as the legacy statuses. */
-export function mapEjarStatusLegacy(inv: EjarInvoiceLike): "paid" | "partially_paid" | null {
+/**
+ * The flag-off (legacy) stored status for an imported installment: the same reading of Ejar, as the legacy statuses.
+ * Ejar's PAID is `settled_external` here too, not `paid`: the rent was collected through Ejar, so no Dara collection
+ * backs it. A `paid` row without collections stayed an open receivable once Accounting was switched on (E33 settles
+ * `settled_external` only), and the collections report could not show it as collected outside the platform.
+ */
+export function mapEjarStatusLegacy(inv: EjarInvoiceLike): "settled_external" | "partially_paid" | null {
   const s = ejarPaidState(inv).state;
-  return s === "paid" ? "paid" : s === "partial" ? "partially_paid" : null;
+  return s === "paid" ? "settled_external" : s === "partial" ? "partially_paid" : null;
 }
 
 /**

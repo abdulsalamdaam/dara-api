@@ -324,17 +324,12 @@ describe("Ejar attach, flag off (0084)", () => {
   const rows = [{ id: 1, dueDate: "2026-01-01" }, { id: 2, dueDate: "2026-02-01" }];
   const invoices = [invoice("I1", "2026-01-01", "مدفوعة", "0"), invoice("I2", "2026-02-01", "غير مدفوعة", "1000")];
 
-  it("count (default): an Ejar-paid row is stored paid, as before", async () => {
+  it("an Ejar-paid row is stored settled_external (paid date = due date), never paid without a collection", async () => {
     const sets: Array<Record<string, unknown>> = [];
     await new EjarImportWriter(fakeDb(sets) as never).attachEjarInvoices(rows, invoices);
-    assert.equal(sets[0].status, "paid");
-    assert.equal(sets[0].paidDate, undefined);
-  });
-  it("skip: an Ejar-paid row is stored settled_external (paid date = due date), so the reports can leave it out", async () => {
-    const sets: Array<Record<string, unknown>> = [];
-    await new EjarImportWriter(fakeDb(sets) as never).attachEjarInvoices(rows, invoices, { skipExternal: true });
     assert.deepEqual([sets[0].status, sets[0].paidDate], ["settled_external", "2026-01-01"]);
-    assert.notEqual(sets[1].status, "settled_external", "an unpaid invoice is untouched by the choice");
+    assert.notEqual(sets[1].status, "settled_external", "an unpaid invoice is untouched");
+    assert.equal(sets[1].paidDate, undefined);
   });
 });
 
