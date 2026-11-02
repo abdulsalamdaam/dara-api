@@ -11,7 +11,7 @@ import { ejarRentVatVerdict } from "./ejar-rent-vat"; // finance-v2: 11g — ren
 import { ejarLandlordCapGate } from "./ejar.landlord-cap"; // finance-v2: n/a — plan landlord cap (CONTRACT2 §5)
 import type { EjarPartyInfo, EjarInvoiceRow } from "./ejar.map";
 import type { CoParty } from "./ejar.lookup.map";
-import { monthlyRentFrom, type RentBasis } from "./ejar.rent";
+import { monthlyRentFrom, RENT_VAT_RATE, type RentBasis } from "./ejar.rent";
 import {
   EJAR_PROPERTY_TYPE, EJAR_UNIT_TYPE, EJAR_USAGE, EJAR_DIRECTION, EJAR_FINISHING,
   EJAR_FURNISHING, EJAR_DEED_TYPE, EJAR_UNIT_STATUS, mapEjarValue, lookupOrOther, partyKind, asBool,
@@ -663,7 +663,10 @@ export class EjarImportWriter {
         endDate: c.endDate,
         monthlyRent,
         paymentFrequency: freq as never,
-        customSchedule: c.customSchedule.length ? c.customSchedule : null,
+        // Stored as the manual path stores it — before VAT, which
+        // buildInstallments and the edit wizard add on top. The installments
+        // below are built from Ejar's VAT-inclusive bills as they are.
+        customSchedule: c.customSchedule.length ? scheduleExVat(c.customSchedule, rentVat) : null,
         depositAmount: c.depositAmount,
         depositStatus: c.depositAmount && Number(c.depositAmount) > 0 ? "pending" : null,
         vatEnabled: rentVat, // finance-v2: 11g — was always false
@@ -885,4 +888,16 @@ export function sanitizeFees(raw: unknown): Array<Record<string, any>> {
         : {}),
     }))
     .filter((f: Record<string, any>) => (f.recurrence === "custom" ? (f.customSchedule?.length ?? 0) > 0 : Number(f.amount) > 0));
+}
+
+/**
+ * A contract's custom schedule holds amounts BEFORE VAT (installments.ts adds
+ * VAT on top when the contract has it). Ejar bills are VAT-inclusive, so they
+ * are stored ÷ 1.15 at 6 decimals: × 1.15 gives the bill back to the halala.
+ */
+export function scheduleExVat(
+  schedule: Array<{ dueDate: string; amount: string }>, vat: boolean,
+): Array<{ dueDate: string; amount: string }> {
+  if (!vat) return schedule;
+  return schedule.map((e) => ({ dueDate: e.dueDate, amount: (Number(e.amount) / (1 + RENT_VAT_RATE)).toFixed(6) }));
 }

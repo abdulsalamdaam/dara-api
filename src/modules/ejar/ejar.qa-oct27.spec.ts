@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { STG, world, httpError, baladyOk, baladyErr, fixture, CN } from "./__tests__/lookup-harness";
 import { EjarImportService, type EjarImportRunnerLike } from "./ejar.import.service";
 import type { ImportPlan, ImportResult } from "./ejar.import.writer";
-import { ejarCycle } from "./ejar.import.writer";
+import { ejarCycle, scheduleExVat } from "./ejar.import.writer";
 import { mapLookup } from "./ejar.lookup.map";
 import { contractMonths, monthlyRentFrom, rentBasis, rentFigures } from "./ejar.rent";
 
@@ -201,6 +201,25 @@ describe("3 · rent from what Ejar bills", () => {
     assert.ok(m.invoices.reduce((s, i) => s + (i.amount ?? 0), 0) > 63500 * 3 * 1.15, "bills exceed year-1 rent × 3 + VAT");
     assert.equal(rentBasis(m, true).services, null);
     assert.equal(rentBasis(m, false).services, null);
+  });
+
+  it("a rent that steps up: the contract states Ejar's first-year rent, not the schedule's average", () => {
+    const m = m268();
+    m.invoices = m.invoices.map((i, k) => ({ ...i, amount: k < 2 ? 36512 : 40163 }));
+    m.financial.totalRentAmount = 63500;
+    const b = rentBasis(m, true);
+    assert.equal(b.flat, false);
+    assert.equal(monthlyRentFrom(b, true), 5291.67);
+    assert.equal(rentFigures(b, true).annual, 63500);
+    assert.equal(rentBasis(m268(), true).flat, true, "flat bills stay flat");
+  });
+
+  it("the stored custom schedule is before VAT, and × 1.15 gives Ejar's bill back to the halala", () => {
+    const bills = [97807, 107588, 112478, 112488, 36512, 39687].map((a, k) => ({ dueDate: `2030-0${k + 1}-01`, amount: String(a) }));
+    const ex = scheduleExVat(bills, true);
+    ex.forEach((e, k) => assert.equal(Math.round(Number(e.amount) * 1.15 * 100) / 100, Number(bills[k].amount)));
+    assert.equal(ex[0].amount, "85049.565217");
+    assert.deepEqual(scheduleExVat(bills, false), bills, "no VAT → stored as billed");
   });
 
   it("the import stores rent 5,291.67, rent rows less 3,175 each, and a no-VAT services fee on the same dates", async () => {
