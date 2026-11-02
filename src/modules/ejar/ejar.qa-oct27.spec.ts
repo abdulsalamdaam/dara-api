@@ -193,6 +193,16 @@ describe("3 · rent from what Ejar bills", () => {
     assert.equal(monthlyRentFrom(b, true), 5751.81);
   });
 
+  it("bills that step up are a rent increase, not services → nothing split", () => {
+    // Synthetic escalating lease: total_rent_amount is year 1 only (63,500 → 36,512.50 a bill
+    // with VAT), then +10%. Before the flat-bills guard the whole increase read as "services".
+    const m = m268();
+    m.invoices = m.invoices.map((i, k) => ({ ...i, amount: k < 2 ? 36512 : 40163 }));
+    assert.ok(m.invoices.reduce((s, i) => s + (i.amount ?? 0), 0) > 63500 * 3 * 1.15, "bills exceed year-1 rent × 3 + VAT");
+    assert.equal(rentBasis(m, true).services, null);
+    assert.equal(rentBasis(m, false).services, null);
+  });
+
   it("the import stores rent 5,291.67, rent rows less 3,175 each, and a no-VAT services fee on the same dates", async () => {
     w = prodWorld();
     await w.svc.lookup(USER, { contract_number: N });
