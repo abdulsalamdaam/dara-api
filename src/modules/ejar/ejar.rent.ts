@@ -82,14 +82,27 @@ export interface EjarServices {
  * `ejarVat` is Ejar's own treatment — its contract type — not Dara's verdict:
  * it decides how Ejar built the amounts. Null when there is no remainder worth
  * a fee (under 1 SAR: Ejar's rounding), when Ejar sent no annual rent, or when
- * the remainder is implausible (over half the bills — a rent that changes by
- * year, not a service), so nothing is split on a guess.
+ * the bills are not flat or the remainder is over half the bills (a rent that
+ * changes by year, not a service), so nothing is split on a guess.
  *
  * What the remainder IS, Ejar does not say: on 20498373268 it is general
  * services, but the contract total may also hold fixed yearly electricity,
  * water or gas. So the import never names it — the user splits it into fee
  * rows (withServicesFee in ejar.import.service.ts).
  */
+/**
+ * Whether Ejar bills the same amount every time (the last bill may differ: it
+ * absorbs the halalas). Services ride on a flat bill; bills that step up are a
+ * rent that changes by year — total_rent_amount is only the FIRST year's rent,
+ * so on an escalating lease the whole increase would otherwise look like a
+ * service (prod lookup, 2 Nov 2026: 10 years at +10% then +15% → 205,396 of
+ * "extra"; and 380,000 → 430,000 → 69,000).
+ */
+export function flatBills(amounts: number[]): boolean {
+  const body = amounts.length > 1 ? amounts.slice(0, -1) : amounts;
+  return Math.max(...body) - Math.min(...body) <= 1;
+}
+
 export function ejarServices(
   m: {
     contract: { periodDays?: number | null; startDate: string | null; endDate: string | null };
@@ -101,6 +114,7 @@ export function ejarServices(
   const annual = pos(m.financial.totalRentAmount);
   const bills = m.invoices.filter((i) => i.dueDate && pos(i.amount) != null) as Array<{ dueDate: string; amount: number }>;
   if (annual == null || bills.length === 0) return null;
+  if (!flatBills(bills.map((b) => b.amount))) return null;
   const gross = round2(bills.reduce((s, i) => s + i.amount, 0));
   const years = contractMonths(m.contract) / 12;
   const total = round2(gross - annual * years * (ejarVat ? 1 + RENT_VAT_RATE : 1));
