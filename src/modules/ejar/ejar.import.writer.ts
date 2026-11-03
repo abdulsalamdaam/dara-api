@@ -118,10 +118,10 @@ export class EjarImportWriter {
     );
     const settled: number[] = [];
     for (const { row, inv } of matchEjarInvoices(rows.map((r) => ({ ...r, description: byId.get(r.id)?.description ?? null })), invoices)) {
-      if (!want.has(inv.id)) continue;
+      if (!want.has(String(inv.id))) continue;
       const cur = byId.get(row.id);
       if (!cur || cur.status === "settled_external" || cur.status === "paid" || cur.status === "cancelled" || collected.has(row.id)) continue;
-      const paidDate = settledOutsideDate(want.get(inv.id), row.dueDate);
+      const paidDate = settledOutsideDate(want.get(String(inv.id)), row.dueDate);
       await this.db.update(paymentsTable).set({ status: "settled_external", paidDate } as never).where(eq(paymentsTable.id, row.id));
       settled.push(row.id);
     }
