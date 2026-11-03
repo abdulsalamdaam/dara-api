@@ -86,6 +86,11 @@ export interface PostState {
   baseBooked: Record<number, number>;
   /** Unreleased 2131 per installment (credit − debit), halalas. */
   unreleased: Record<number, number>;
+  /**
+   * 2131 booked per installment by everything but releases (charges, documents, cancellations; credit − debit),
+   * halalas — so `urBooked − unreleased` is what E35 / E35C released. Read for E35C only.
+   */
+  urBooked?: Record<number, number>;
   /** Installments listed in a write-off. */
   writtenOff: number[];
 }

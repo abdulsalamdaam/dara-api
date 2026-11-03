@@ -50,6 +50,11 @@ export interface InstallmentFacts extends Base {
   amount?: string | null;
   /** E33 only: already settled outside Dara by an earlier part settlement (`ejar_partial`), deducted from the amount. */
   settledBefore?: string | null;
+  /**
+   * E35C only: how much of the installment's gross the tenant has paid so far — collections (net of refunds),
+   * settled outside the platform, an Ejar-reported part payment; the whole of it once written off.
+   */
+  settledGross?: string | null;
 }
 
 /** E35: a monthly straight-line release. */

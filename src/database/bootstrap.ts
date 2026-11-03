@@ -802,6 +802,16 @@ export async function ensureSchema(): Promise<void> {
       log.error(`ensure users mobile session failed — every authenticated request will fail: ${err?.message || err}`);
     }
 
+    // 0094: finance_settings.rent_revenue_basis (accrual | cash). Read by the
+    // recognizer and the posting facts; a missing column only stops finance v2.
+    try {
+      const basis = findSqlFile(join("drizzle", "0094_finance_rent_revenue_basis.sql"));
+      if (basis) await client.query(readFileSync(basis, "utf8"));
+      else log.warn("0094_finance_rent_revenue_basis.sql not found — finance_settings.rent_revenue_basis not ensured");
+    } catch (err: any) {
+      log.warn(`ensure rent revenue basis failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

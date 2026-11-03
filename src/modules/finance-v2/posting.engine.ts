@@ -342,6 +342,18 @@ export class PostingEngine {
       [userId, paymentIds, SYS.ur],
     );
     for (const r of ur.rows) state.unreleased[r.payment_id] = toHalalas(r.bal);
+    // E35C (cash basis): what 2131 holds for the installment before any release, monthly or cash.
+    const booked = await c.query(
+      `select l.payment_id, coalesce(sum(l.credit - l.debit), 0)::text as bal
+         from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+         join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+        where l.user_id = $1 and a.system_key = $3 and l.payment_id = any($2::int[])
+          and e.event !~ '^(reversal:)?(cash)?release:'
+        group by l.payment_id`,
+      [userId, paymentIds, SYS.ur],
+    );
+    state.urBooked = {};
+    for (const r of booked.rows) state.urBooked[r.payment_id] = toHalalas(r.bal);
     const wo = await c.query(
       `select distinct unnest(payment_ids) as p from finance_write_offs where user_id = $1 and payment_ids && $2::int[]`,
       [userId, paymentIds],

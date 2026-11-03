@@ -32,6 +32,8 @@ const STANDALONE = { treatment: "principal" as Treatment, warnings: [] as string
 export interface FinanceSettingsRow {
   mode: AccountingMode;
   deferRent: boolean;
+  /** 0094 rent_revenue_basis = 'cash': rent still charges to 2131, released as received (E35C), never monthly. */
+  cashBasis: boolean;
   forfeitVat: "O" | "S" | "E";
   goLive: string | null;
   ledgerStarted: boolean;
@@ -39,7 +41,7 @@ export interface FinanceSettingsRow {
 
 export async function loadSettings(q: Sql, userId: number): Promise<FinanceSettingsRow | null> {
   const [r] = await q.rows(
-    `select accounting_mode as mode, defer_rent_straight_line as defer, deposit_forfeit_vat as fv,
+    `select accounting_mode as mode, defer_rent_straight_line as defer, rent_revenue_basis as basis, deposit_forfeit_vat as fv,
             to_char(ledger_go_live_date,'YYYY-MM-DD') as go_live, ledger_started_at is not null as started
        from finance_settings where account_user_id = $1 and finance_v2_enabled`,
     [userId],
@@ -47,7 +49,9 @@ export async function loadSettings(q: Sql, userId: number): Promise<FinanceSetti
   if (!r) return null;
   return {
     mode: r.mode === "owner" ? "owner" : "manager",
-    deferRent: r.defer !== false,
+    // Cash basis needs the charge in 2131 too: the receivable is booked when due, the revenue when received.
+    deferRent: r.defer !== false || r.basis === "cash",
+    cashBasis: r.basis === "cash",
     forfeitVat: r.fv === "S" || r.fv === "E" ? r.fv : "O",
     goLive: r.go_live ?? null,
     ledgerStarted: r.started === true,

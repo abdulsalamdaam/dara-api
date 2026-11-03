@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, Logger, Not
 import { FV2_POOL, type Fv2Pool } from "../db";
 import { FinanceFlagService } from "../flag.service";
 import { LedgerEmitter, type LedgerEvent } from "../ledger-emitter.service";
+import type { RecognizerService } from "../recognizer.service";
 import { appLog } from "../../../common/logging/app-log.service";
 import { sqlOf, type Sql } from "./sql";
 import {
@@ -90,6 +91,19 @@ export class FinanceV2Hooks {
     private readonly flag: FinanceFlagService,
     private readonly emitter: LedgerEmitter,
   ) {}
+
+  /** Cash basis (0094): handed over by FinanceV2Module (the hooks module cannot import the recognizer). */
+  recognizer?: RecognizerService;
+
+  /** Cash basis (0094): money moved on these installments — release (or pull back) their rent now. Never throws. */
+  private async cashReleases(userId: number, paymentIds: number[]): Promise<void> {
+    if (!paymentIds.length || !this.recognizer) return;
+    try {
+      await this.recognizer.runCashReleases(userId, paymentIds);
+    } catch (err) {
+      this.fail("cash_release", userId, err);
+    }
+  }
 
   /** The flag for this scope, resolved once per request (never throws; off when unknown). */
   async resolve(scopeUserId: number): Promise<boolean> {
@@ -808,6 +822,7 @@ export class FinanceV2Hooks {
    */
   private async run(ctx: HookCtx, what: string, build: (q: Sql, s: FinanceSettingsRow) => Promise<LedgerEvent[]>): Promise<void> {
     if (ctx?.fv2 !== true) return;
+    let cashIds: number[] = [];
     try {
       if (ctx.tx && typeof ctx.tx.transaction === "function") {
         // Everything on the caller's connection (no second pool connection while it holds its locks, §1.2).
@@ -817,9 +832,11 @@ export class FinanceV2Hooks {
           if (!s) return;
           const events = await build(q, s);
           for (const e of events) await this.emitter.emit({ fv2: true, userId: ctx.userId, tx: sp }, e);
+          if (s.cashBasis) cashIds = installmentIdsOf(events);
         });
         const t = setTimeout(() => this.emitter.kick(ctx.userId), 1000);
         t.unref?.();
+        if (cashIds.length) { const c = setTimeout(() => void this.cashReleases(ctx.userId, cashIds), 1500); c.unref?.(); } // after the caller commits
         return;
       }
       const s = await loadSettings(this.sqlPool(), ctx.userId);
@@ -827,6 +844,7 @@ export class FinanceV2Hooks {
       const events = await build(this.sqlPool(), s);
       for (const e of events) await this.emitter.emit({ fv2: true, userId: ctx.userId }, e);
       this.emitter.kick(ctx.userId);
+      if (s.cashBasis) await this.cashReleases(ctx.userId, installmentIdsOf(events));
     } catch (err) {
       this.fail(what, ctx.userId, err);
     }
@@ -841,4 +859,16 @@ export class FinanceV2Hooks {
       /* never reaches the user action */
     }
   }
+}
+
+/** The installments a batch of ledger events is about (`payload.paymentIds`, or the facts' own installment). */
+function installmentIdsOf(events: LedgerEvent[]): number[] {
+  const ids = new Set<number>();
+  for (const e of events) {
+    const p: any = e.payload ?? {};
+    for (const id of Array.isArray(p.paymentIds) ? p.paymentIds : []) if (Number.isInteger(Number(id))) ids.add(Number(id));
+    if (Number.isInteger(Number(p.facts?.paymentId)) && p.facts?.paymentId != null) ids.add(Number(p.facts.paymentId));
+    if (e.sourceType === "payment" && Number.isInteger(Number(e.sourceId))) ids.add(Number(e.sourceId));
+  }
+  return [...ids];
 }

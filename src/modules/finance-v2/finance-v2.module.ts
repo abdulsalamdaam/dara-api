@@ -17,6 +17,7 @@ import { PostingErrorsService } from "./posting-errors.service";
 import { LedgerStartService } from "./ledger-start.service";
 import { RecognizerService } from "./recognizer.service";
 import { FinanceV2HooksModule } from "./hooks/hooks.module";
+import { FinanceV2Hooks } from "./hooks/hooks.service";
 import { BackfillService } from "./backfill/backfill.service";
 import { ManualJournalsService } from "./manual-journals.service";
 import { TrustTransferService } from "./trust-transfer.service";
@@ -106,4 +107,9 @@ import { ModeMigrationService } from "./mode-migration.service";
   ],
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService, ModeMigrationService, LedgerResetService],
 })
-export class FinanceV2Module {}
+export class FinanceV2Module {
+  // Cash basis (0094): the global hooks module cannot import the recognizer (it lives here), so it is handed over.
+  constructor(hooks: FinanceV2Hooks, recognizer: RecognizerService) {
+    hooks.recognizer = recognizer;
+  }
+}

@@ -1,6 +1,7 @@
 /**
  * Installment rules (DESIGN §4.1, §4.4): E02 due-date charge, E05 charge
- * cancelled, E33 settled outside Dara, E35 monthly straight-line release.
+ * cancelled, E33 settled outside Dara, E35 monthly straight-line release,
+ * E35C cash-basis release.
  * Charge state (marker, advance VAT, unreleased 2131) comes from PostState,
  * read at post time (§5.3).
  */
@@ -171,4 +172,37 @@ export function monthlyRelease(f: ReleaseFacts, s: PostState): RuleOutput {
     ...cr(sys(revenueKey("rent", f.usage, s.charges[f.paymentId]?.category ?? f.category)), r.amount, dims),
   ];
   return { lines, warnings, effects: [], date: r.date, memo: f.memo ?? null };
+}
+
+/**
+ * E35C (0094, cash basis): rent reaches revenue as it is received. The charge
+ * still books 2131 (so the receivable is right); this moves to revenue the
+ * share of what 2131 booked that the tenant has paid — `settledGross / gross`
+ * of it — less what any release (monthly or cash) already moved: Dr UR / Cr
+ * REV, or the reverse after a refund. State-based, so a repeat posts nothing,
+ * and switching from straight line restates what the monthly releases did.
+ */
+export function cashRelease(f: InstallmentFacts, s: PostState): RuleOutput {
+  const warnings = [...(f.warnings ?? [])];
+  const skip = (reason: string): RuleOutput => ({ lines: [], warnings, skip: reason, effects: [], date: f.date });
+  const p = f.paymentId;
+  if (f.treatment === "agent") return skip("agent_not_deferred");
+  if (f.nature !== "rent") return skip("nothing_to_release");
+  if (!s.charges[p]) return skip("not_charged");
+  const booked = Math.max(0, s.urBooked?.[p] ?? 0);
+  const unreleased = s.unreleased[p] ?? 0;
+  const gross = toHalalas(f.gross);
+  if (booked <= 0 || gross <= 0) return skip("nothing_to_release");
+  const paid = Math.min(Math.max(0, toHalalas(f.settledGross ?? "0")), gross);
+  const target = mulDivRound(booked, paid, gross);
+  const released = booked - unreleased;
+  const delta = target - released;
+  const amount = delta > 0 ? Math.min(delta, Math.max(0, unreleased)) : Math.min(-delta, Math.max(0, released));
+  if (amount <= 0) return skip("nothing_to_release");
+  const dims = { ...f.dims, paymentId: p };
+  const revenue = sys(revenueKey("rent", f.usage, s.charges[p]?.category ?? f.category));
+  const lines = delta > 0
+    ? [...dr(sys(SYS.ur), amount, dims), ...cr(revenue, amount, dims)]
+    : [...dr(revenue, amount, dims), ...cr(sys(SYS.ur), amount, dims)];
+  return { lines, warnings, effects: [], date: f.date, memo: f.memo ?? null };
 }

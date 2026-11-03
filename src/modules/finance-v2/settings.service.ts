@@ -6,6 +6,7 @@ import { LOCK_KEYS } from "./lock-keys";
 import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { FinanceFlagService } from "./flag.service";
 import { recordCollectedCutover } from "./commission-run";
+import { RecognizerService } from "./recognizer.service";
 
 /** The fields `PATCH /finance/v2/settings` may change (DESIGN §10.2), camelCase → column. */
 const EDITABLE = {
@@ -15,6 +16,8 @@ const EDITABLE = {
   commissionBasis: "commission_basis",
   depositForfeitVat: "deposit_forfeit_vat",
   agencyCollectionsToTrust: "agency_collections_to_trust",
+  // 0094: accrual (straight line) or cash. The recognizer restates open periods to it right after the change.
+  rentRevenueBasis: "rent_revenue_basis",
 } as const;
 type Editable = keyof typeof EDITABLE;
 
@@ -47,6 +50,7 @@ export class FinanceSettingsService {
     @Inject(FV2_POOL) private readonly pool: Fv2Pool,
     @Optional() banks?: BankAccountsService,
     @Optional() private readonly flag?: FinanceFlagService,
+    @Optional() private readonly recognizer?: RecognizerService,
   ) {
     this.banks = banks ?? new BankAccountsService(pool);
   }
@@ -120,6 +124,10 @@ export class FinanceSettingsService {
       return (await c.query(`select * from finance_settings where account_user_id = $1`, [scope])).rows[0];
     });
     this.flag?.invalidate(scope);
+    if ("rentRevenueBasis" in want && this.recognizer) {
+      // Restate now rather than at tonight's run: cash releases what was received, accrual resumes the monthly releases.
+      try { await this.recognizer.runAccount(scope); } catch { /* the daily run retries */ }
+    }
     return this.shape(out);
   }
 
@@ -140,6 +148,7 @@ export class FinanceSettingsService {
         }
         case "vatFilingFrequency": want[k] = oneOf(k, ["monthly", "quarterly"]); break;
         case "depositForfeitVat": want[k] = oneOf(k, ["O", "S", "E"]); break;
+        case "rentRevenueBasis": want[k] = oneOf(k, ["accrual", "cash"]); break;
         case "commissionBasis":
           // collected: the monthly commission run (commission-run.service.ts); billed: one COM per approved rent document.
           want[k] = oneOf(k, ["billed", "collected"]);
@@ -175,6 +184,7 @@ export class FinanceSettingsService {
       commissionBasis: d.commissionBasis,
       depositForfeitVat: d.depositForfeitVat,
       deferRentStraightLine: d.deferRentStraightLine,
+      rentRevenueBasis: d.rentRevenueBasis,
       inputVatMethod: d.inputVatMethod,
       ledgerGoLiveDate: d.ledgerGoLiveDate,
       ledgerStarted: d.ledgerStartedAt != null,

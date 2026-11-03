@@ -282,14 +282,16 @@ describe("finance v2: Ejar import settles, classifies and taxes by what Ejar rep
     assert.equal(e.rule, "E09");
   });
 
-  it("flag off: fee not stamped, 'مدفوعة جزئياً' is partially_paid (not paid), a numberless invoice is rent, VAT by usage", async () => {
+  it("flag off: fee not stamped, Ejar-paid is settled_external, 'مدفوعة جزئياً' is partially_paid (not paid), a numberless invoice is rent, VAT by usage", async () => {
     const [ct] = await off.q(`select id, vat_enabled from contracts where user_id = $1`, [U_OFF]);
     assert.equal(ct.vat_enabled, true);
     const rows = await rowsOf(off, ct.id);
     const fee = rows.find((r: any) => r.description === "رسوم خدمات")!;
     assert.equal(fee.status, "pending");
     const rent = rows.filter((r: any) => r.description !== "رسوم خدمات");
-    assert.deepEqual(rent.slice(0, 3).map((r: any) => r.status), ["paid", "partially_paid", "pending"]);
+    // Ejar's Paid is settled outside the platform with the flag off too (2 Nov 2026, 3954b13): `paid` with no
+    // collection stayed an open receivable once Accounting was switched on.
+    assert.deepEqual(rent.slice(0, 3).map((r: any) => r.status), ["settled_external", "partially_paid", "pending"]);
     assert.match(rent[2].description, /^فاتورة إيجار/);
     assert.ok(rent.every((r: any) => r.vat_enabled === true));
     assert.equal(fee.vat_enabled, false);
