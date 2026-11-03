@@ -125,6 +125,20 @@ class PaymentsController {
     const dueTo = parseDateBound(rawQuery?.dueTo);
     if (dueFrom) conds.push(gte(paymentsTable.dueDate, dueFrom));
     if (dueTo) conds.push(lte(paymentsTable.dueDate, dueTo));
+    // `paidFrom` / `paidTo` — an inclusive window on when money was paid: the
+    // installment's paid date (fully paid, or settled outside the platform on
+    // that day) or any collection recorded against it in the window, so a part
+    // payment shows in the window it was received. Rows only, like the due window.
+    const paidFrom = parseDateBound(rawQuery?.paidFrom);
+    const paidTo = parseDateBound(rawQuery?.paidTo);
+    if (paidFrom || paidTo) {
+      const inWin = (col: ReturnType<typeof sql>) => sql.join(
+        [paidFrom ? sql`${col} >= ${paidFrom}::date` : null, paidTo ? sql`${col} <= ${paidTo}::date` : null].filter((x): x is NonNullable<typeof x> => x != null),
+        sql` and `,
+      );
+      conds.push(sql`((${paymentsTable.paidDate} is not null and ${inWin(sql`${paymentsTable.paidDate}`)})
+        or exists (select 1 from payment_collections pcw where pcw.payment_id = ${paymentsTable.id} and ${inWin(sql`pcw.collected_date`)}))`);
+    }
     // Deposits are not installments — they live on the contract as a receipt
     // voucher, so never surface them in the financial schedule (covers legacy
     // deposit rows created before the deposit-as-voucher change).
