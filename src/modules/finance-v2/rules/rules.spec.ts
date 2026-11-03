@@ -58,6 +58,7 @@ function cases(rule: RuleCode, t: Treatment, cat: VatCategory, amt: number): Cas
     case "E05": return [pay(inst(t, cat, amt), chargedState(cat, amt))];
     case "E33": return [pay(inst(t, cat, amt), chargedState(cat, amt))];
     case "E35": return [pay({ date: "2026-08-31", treatment: t, dims: DIMS, paymentId: P, month: "2026-08", windowStart: "2026-08-10", windowEnd: "2026-11-09", category: cat, usage: "residential" }, { ...EMPTY_STATE, unreleased: { [P]: amt } })];
+    case "E35C": return [pay({ ...inst(t, cat, amt), settledGross: s(Math.round(amt / 2)) }, { ...chargedState(cat, amt), unreleased: { [P]: amt }, urBooked: { [P]: amt } })];
     case "E03": return [pay(coll(t, amt, "rent", cat))];
     case "E04": return [pay(coll(t, -amt, "rent", cat))];
     case "E09C": return [pay(coll(t, amt, "deposit_installment")), pay(coll(t, -amt, "deposit_installment"))];
@@ -181,7 +182,7 @@ describe("fv2 posting rules: every rule balances in both modes (§11.1-a, c)", (
           }
         }
         assert.ok(n > 500, `ran ${n} postings`);
-        const skippedByDesign: Record<Treatment, string[]> = { principal: ["E14", "E15", "E16", "E36"], agent: ["E14", "E35"] };
+        const skippedByDesign: Record<Treatment, string[]> = { principal: ["E14", "E15", "E16", "E36"], agent: ["E14", "E35", "E35C"] };
         for (const rule of codes) {
           if (skippedByDesign[treatment].includes(rule)) assert.ok(!posted.has(rule), `${rule} should skip for ${treatment}`);
           else assert.ok(posted.has(rule), `${rule} never posted for ${treatment}`);

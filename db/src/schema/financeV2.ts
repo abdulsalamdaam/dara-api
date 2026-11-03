@@ -33,6 +33,8 @@ export const financeSettingsTable = pgTable("finance_settings", {
   ledgerGoLiveDate: date("ledger_go_live_date"),
   ledgerStartedAt: ts("ledger_started_at"),
   deferRentStraightLine: boolean("defer_rent_straight_line").notNull().default(true),
+  /** 0094: 'accrual' (straight line, E35) or 'cash' (released as received, E35C). */
+  rentRevenueBasis: text("rent_revenue_basis").$type<"accrual" | "cash">().notNull().default("accrual"),
   inputVatMethod: text("input_vat_method").$type<"direct_plus_ratio" | "direct_only">().notNull().default("direct_plus_ratio"),
   enabledAt: ts("enabled_at"),
   enabledBy: integer("enabled_by"),

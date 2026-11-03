@@ -582,6 +582,13 @@
       "when": 1793923200000,
       "tag": "0093_users_mobile_session",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1794009600000,
+      "tag": "0094_finance_rent_revenue_basis",
+      "breakpoints": true
     }
   ]
 }

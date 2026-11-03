@@ -84,7 +84,7 @@ export function rankOf(code: string): number {
     case "FA01": return 8; // fixed-asset acquisition
     case "FA03": return 8.7; // disposal: after the reversals of that day
     case "FA02": return 9; // depreciation at the month end, with the releases
-    case "E35": case "E37": return 9;
+    case "E35": case "E35C": case "E37": return 9;
     default: return 8;
   }
 }
@@ -296,7 +296,7 @@ export async function extractEvents(q: Sql, userId: number, s: FinanceSettingsRo
         payload: { rule: "E33", facts: { ...f, amount: p.ejar_reported }, paymentIds: [p.id] } }, p.created);
     }
     // Straight-line releases for principal rent (§4.1), every passed month-end inside the window.
-    if (s.deferRent && ctx && ctx.treatment === "principal" && installmentNature(p.description) === "rent") {
+    if (s.deferRent && !s.cashBasis && ctx && ctx.treatment === "principal" && installmentNature(p.description) === "rent") { // cash basis (0094): E35C from the recognizer instead
       const w = await coverageWindow(q, userId, p, ctx);
       if (!w) continue;
       const category = installmentVat({ vatEnabled: p.vat_enabled === true, usage: ctx.usage, sellerRegistered: ctx.sellerRegistered }).category;

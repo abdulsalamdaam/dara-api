@@ -224,7 +224,7 @@ describe("fv2 reconciliation and minor API fixes (real Postgres, real legacy rou
       assert.equal(s.vatFilingFrequency, "quarterly");
       assert.equal(typeof s.defaultBankAccountId, "number");
       assert.deepEqual([...s.readOnly].sort(), ["accountingMode", "deferRentStraightLine", "fiscalYearStartMonth", "inputVatMethod"]);
-      assert.deepEqual([...s.editable].sort(), ["agencyCollectionsToTrust", "commissionBasis", "defaultBankAccountId", "defaultCashAccountId", "depositForfeitVat", "vatFilingFrequency"]);
+      assert.deepEqual([...s.editable].sort(), ["agencyCollectionsToTrust", "commissionBasis", "defaultBankAccountId", "defaultCashAccountId", "depositForfeitVat", "rentRevenueBasis", "vatFilingFrequency"]);
     });
 
     it("PATCH validates: reason, unknown and read-only fields, values, ids in scope", async () => {

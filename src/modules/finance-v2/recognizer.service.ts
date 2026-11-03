@@ -6,6 +6,7 @@ import { sqlOf, type Sql } from "./hooks/sql";
 import { contractCtx, ejarPartialRows, ejarPartialSettled, installmentFacts, INSTALLMENT_COLS, loadSettings, type ContractCtx, type FinanceSettingsRow, type InstallmentRow } from "./hooks/facts-loader";
 import { DEPOSIT_DESC, installmentNature, installmentVat } from "./hooks/classify";
 import { SYS, type ReleaseFacts } from "./rules";
+import { fromHalalas, mulDivRound, toHalalas } from "./money";
 import { fv2PlanEntitledSql } from "./flag.service";
 
 const CHECK_MS = 60_000;
@@ -32,7 +33,9 @@ export interface RecognizerSummary {
  *    and E33 `payment,<id>,ejar_partial` for the part Ejar reported paid on a
  *    charged open row;
  *  - E35 `payment,<id>,release:YYYY-MM` for every passed month-end inside the
- *    coverage window of a principal rent charge with unreleased 2131.
+ *    coverage window of a principal rent charge with unreleased 2131 — or,
+ *    on a cash-basis account (0094), E35C `payment,<id>,cashrelease:<n>`
+ *    whenever what the tenant paid no longer matches what 2131 released.
  * Keys are the backfill's keys, so a run is idempotent and a repeat is free.
  * Runs daily at 00:10 Riyadh (`FINANCE_V2_WORKER_DISABLED=1` switches the
  * timer off, as for the worker), and on demand via `runAccount`.
@@ -132,8 +135,10 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
       if (await emit({ sourceType: "payment", sourceId: p.id, event: "ejar_partial", occurredOn: p.due, payload: { rule: "E33", facts: f, paymentIds: [p.id] } })) summary.settlements++;
     }
 
+    // 3. Cash basis (0094): release as received (E35C), never by the month.
+    if (s.cashBasis) summary.releases += await this.cashReleases(q, userId, s, ctxOf, emit, today);
     // 3. Straight-line releases (E35) for principal rent with unreleased 2131.
-    if (s.deferRent) {
+    else if (s.deferRent) {
       for (const r of await this.releasable(q, userId)) {
         const ctx = await ctxOf(r.contract_id);
         if (!ctx || ctx.treatment !== "principal") continue;
@@ -186,6 +191,87 @@ export class RecognizerService implements OnModuleInit, OnModuleDestroy {
         order by p.due_date, p.id`,
       [userId, today, DEPOSIT_DESC, s.goLive],
     );
+  }
+
+  /**
+   * Cash basis (0094) for one account, now: E35C for the given installments (all of them when omitted). Called
+   * after money moves on an installment (collection, refund, settle / revert outside) and after the basis changes.
+   */
+  async runCashReleases(userId: number, paymentIds?: number[], today = riyadhToday()): Promise<number> {
+    const q = sqlOf(this.pool as any);
+    const s = await loadSettings(q, userId);
+    if (!s || !s.ledgerStarted || !s.cashBasis) return 0;
+    const ctxCache = new Map<number, ContractCtx | null>();
+    const ctxOf = async (cid: number) => {
+      if (!ctxCache.has(cid)) ctxCache.set(cid, await contractCtx(q, userId, s.mode, cid));
+      return ctxCache.get(cid) ?? null;
+    };
+    const n = await this.cashReleases(q, userId, s, ctxOf, (e) => this.emitter.emit({ fv2: true, userId }, { ...e, origin: "recognizer" }), today, paymentIds);
+    if (n > 0) this.emitter.kick(userId);
+    return n;
+  }
+
+  /**
+   * E35C candidates: charged principal rent whose paid share no longer matches what 2131 released. Paid =
+   * collections net of refunds, the whole gross once settled outside or written off, else plus an Ejar-reported
+   * part payment. Dated at the later of the last money date and the charge, so 2131 is never released before it
+   * is booked. One event at a time per installment (`cashrelease:<n>`); the rule recomputes from ledger state.
+   */
+  private async cashReleases(
+    q: Sql, userId: number, s: FinanceSettingsRow, ctxOf: (cid: number) => Promise<ContractCtx | null>,
+    emit: (e: LedgerEvent) => Promise<boolean>, today: string, paymentIds?: number[],
+  ): Promise<number> {
+    const rows = await q.rows<InstallmentRow & {
+      charged_on: string; collected: string; last_collected: string | null; ejar_part: string | null; written_off: boolean;
+      paid_on: string | null; booked: string; unreleased: string; n: number; pending: boolean;
+    }>(
+      `with ur as (
+         select l.payment_id, sum(l.credit - l.debit) as bal,
+                sum(case when e.event !~ '^(reversal:)?(cash)?release:' then l.credit - l.debit else 0 end) as booked
+           from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
+           join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+          where l.user_id = $1 and a.system_key = $2 and l.payment_id is not null
+          group by l.payment_id)
+       select ${INSTALLMENT_COLS}, to_char(ch.charged_on,'YYYY-MM-DD') as charged_on,
+              coalesce((select sum(pc.amount) from payment_collections pc where pc.payment_id = p.id and pc.user_id = p.user_id), 0)::text as collected,
+              (select to_char(max(pc.collected_date),'YYYY-MM-DD') from payment_collections pc where pc.payment_id = p.id and pc.user_id = p.user_id) as last_collected,
+              (select fes.reported_amount::text from finance_ejar_settlements fes
+                where fes.payment_id = p.id and fes.user_id = p.user_id and fes.reported_status = 'partially_paid') as ejar_part,
+              exists (select 1 from finance_write_offs w where w.user_id = p.user_id and p.id = any(w.payment_ids)) as written_off,
+              to_char(p.paid_date,'YYYY-MM-DD') as paid_on, ur.booked::text as booked, ur.bal::text as unreleased,
+              (select count(*)::int from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment' and o.source_id = p.id
+                 and o.event like 'cashrelease:%') as n,
+              exists (select 1 from ledger_outbox o where o.user_id = p.user_id and o.source_type = 'payment' and o.source_id = p.id
+                 and o.event like 'cashrelease:%' and o.status in ('pending', 'failed')) as pending
+         from payments p
+         join finance_installment_charges ch on ch.payment_id = p.id and ch.user_id = p.user_id and ch.reversed_at is null
+         join ur on ur.payment_id = p.id
+        where p.user_id = $1 and p.deleted_at is null and ur.booked > 0
+          and ($3::int[] is null or p.id = any($3::int[]))
+        order by p.id`,
+      [userId, SYS.ur, paymentIds?.length ? paymentIds : null],
+    );
+    let emitted = 0;
+    for (const r of rows) {
+      if (r.pending || installmentNature(r.description) !== "rent") continue;
+      const ctx = await ctxOf(r.contract_id);
+      if (!ctx || ctx.treatment !== "principal") continue;
+      const gross = toHalalas(r.amount);
+      if (gross <= 0) continue;
+      const settled = r.status === "settled_external" || r.written_off ? gross
+        : Math.min(gross, Math.max(0, toHalalas(r.collected) + (r.ejar_part ? toHalalas(r.ejar_part) : 0)));
+      const booked = toHalalas(r.booked);
+      const released = booked - toHalalas(r.unreleased);
+      if (mulDivRound(booked, settled, gross) === released) continue;
+      const moneyOn = [r.last_collected, r.status === "settled_external" ? r.paid_on : null].filter((d): d is string => !!d).sort().pop() ?? r.charged_on;
+      let date = moneyOn > r.charged_on ? moneyOn : r.charged_on;
+      if (date > today) date = today;
+      if (s.goLive && date < s.goLive) date = s.goLive;
+      const f = installmentFacts(r, ctx, s, date, { settledGross: fromHalalas(settled) });
+      if (!f) continue;
+      if (await emit({ sourceType: "payment", sourceId: r.id, event: `cashrelease:${r.n + 1}`, occurredOn: date, payload: { rule: "E35C", facts: f, paymentIds: [r.id] } })) emitted++;
+    }
+    return emitted;
   }
 
   /** Principal rent installments with a positive unreleased 2131 balance. */

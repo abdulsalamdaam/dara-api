@@ -237,6 +237,7 @@ export function toSettingsDto(r: any) {
     ledgerGoLiveDate: r.ledger_go_live_date,
     ledgerStartedAt: r.ledger_started_at,
     deferRentStraightLine: r.defer_rent_straight_line,
+    rentRevenueBasis: r.rent_revenue_basis ?? "accrual",
     inputVatMethod: r.input_vat_method,
     enabledAt: r.enabled_at,
     enabledBy: r.enabled_by,
