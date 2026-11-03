@@ -16,6 +16,7 @@ import { PermissionsGuard, RequirePermissions } from "../../common/permissions.d
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
 import { liveStatus, liveStatusSql, riyadhToday } from "../../common/payment-status";
+import { settledOutsideDate } from "../../common/external-settlement";
 import { FinanceV2Hooks } from "../finance-v2/hooks/hooks.service"; // finance-v2: posting hooks and v2 guards (DESIGN §5.1, §9 E7)
 
 const PAYMENT_STATUSES = ["paid", "pending", "overdue", "cancelled", "partially_paid", "settled_external"];
@@ -344,19 +345,26 @@ class PaymentsController {
    * Mark a single PENDING installment as settled outside the portal
    * (historical). No collection is recorded, so it stays out of all revenue /
    * overdue reporting. Refuses if money was already collected against it.
+   * `paidDate` (optional, not in the future) is the day it was settled; blank → its due date.
    */
   @Post(":paymentId/settle-external")
   @RequirePermissions(PERMISSIONS.PAYMENTS_WRITE)
-  async settleExternal(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string) {
+  async settleExternal(@CurrentUser() user: AuthUser, @Param("paymentId") paymentId: string, @Body() body?: any) {
     const id = parseInt(paymentId, 10);
     const fv2 = (await this.fv2h?.resolve(scopeId(user))) === true; // finance-v2: E27
     await this.fv2h?.guardSettleExternal(fv2, scopeId(user), id); // finance-v2:
     const [p] = await this.db.select().from(paymentsTable)
       .where(and(eq(paymentsTable.id, id), eq(paymentsTable.userId, scopeId(user)), isNull(paymentsTable.deletedAt)));
     if (!p) throw new NotFoundException("Payment not found");
-    if (p.status === "paid" || p.status === "partially_paid") throw new BadRequestException("لا يمكن — تم تحصيل مبالغ على هذه الدفعة");
+    // A part payment Ejar reported (no collection here) may be settled; a collected one may not.
+    if (p.status === "paid") throw new BadRequestException("لا يمكن — تم تحصيل مبالغ على هذه الدفعة");
+    if (p.status === "settled_external" || p.status === "cancelled") throw new BadRequestException("الدفعة مسواة أو ملغاة مسبقًا · Already settled or cancelled");
+    const [collected] = await this.db.select({ id: paymentCollectionsTable.id }).from(paymentCollectionsTable)
+      .where(eq(paymentCollectionsTable.paymentId, id)).limit(1);
+    if (collected) throw new BadRequestException("لا يمكن — تم تحصيل مبالغ على هذه الدفعة");
+    const paidDate = settledOutsideDate(body?.paidDate, String(p.dueDate));
     const [row] = await this.db.update(paymentsTable)
-      .set({ status: "settled_external", paidDate: p.dueDate } as any)
+      .set({ status: "settled_external", paidDate } as any)
       .where(eq(paymentsTable.id, id)).returning();
     await this.fv2h?.settledExternal({ fv2, userId: scopeId(user) }, id); // finance-v2: E33 when charged
     return row;

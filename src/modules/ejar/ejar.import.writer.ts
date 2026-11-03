@@ -1,8 +1,9 @@
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   contractsTable, paymentsTable, propertiesTable, unitsTable, contractUnitsTable,
-  ownersTable, deedsTable, tenantsTable,
+  ownersTable, deedsTable, tenantsTable, paymentCollectionsTable,
 } from "@dara/database";
+import { settledOutsideDate } from "../../common/external-settlement";
 import { buildInstallments } from "../contracts/installments";
 import { resolveLookupId } from "../../common/lookups-resolve";
 import type { Drizzle } from "../../database/database.module";
@@ -92,6 +93,41 @@ export class EjarImportWriter {
    * settled, so an imported contract's Payment Log opens in the right state
    * instead of showing everything as pending.
    */
+  /**
+   * The landlord's own "settled outside" marks: the RENT installment each chosen
+   * invoice matched is stored `settled_external` with the date given (its due
+   * date when blank). Only a row with no collection behind it and not settled
+   * already; returns the ids it settled, for the finance-v2 hook.
+   */
+  async settleChosen(
+    ownerId: number,
+    rows: Array<{ id: number; dueDate: string }>,
+    invoices: EjarInvoiceRow[],
+    chosen: Array<{ invoiceId: string; paidDate: string | null }>,
+  ): Promise<number[]> {
+    if (rows.length === 0 || chosen.length === 0) return [];
+    const want = new Map(chosen.map((c) => [c.invoiceId, c.paidDate]));
+    const current = await this.db
+      .select({ id: paymentsTable.id, description: paymentsTable.description, status: paymentsTable.status })
+      .from(paymentsTable)
+      .where(and(inArray(paymentsTable.id, rows.map((r) => r.id)), eq(paymentsTable.userId, ownerId), isNull(paymentsTable.deletedAt)));
+    const byId = new Map(current.map((d) => [d.id, d]));
+    const collected = new Set(
+      (await this.db.select({ id: paymentCollectionsTable.paymentId }).from(paymentCollectionsTable)
+        .where(inArray(paymentCollectionsTable.paymentId, rows.map((r) => r.id)))).map((r) => r.id),
+    );
+    const settled: number[] = [];
+    for (const { row, inv } of matchEjarInvoices(rows.map((r) => ({ ...r, description: byId.get(r.id)?.description ?? null })), invoices)) {
+      if (!want.has(inv.id)) continue;
+      const cur = byId.get(row.id);
+      if (!cur || cur.status === "settled_external" || cur.status === "paid" || cur.status === "cancelled" || collected.has(row.id)) continue;
+      const paidDate = settledOutsideDate(want.get(inv.id), row.dueDate);
+      await this.db.update(paymentsTable).set({ status: "settled_external", paidDate } as never).where(eq(paymentsTable.id, row.id));
+      settled.push(row.id);
+    }
+    return settled;
+  }
+
   async attachEjarInvoices(
     rows: Array<{ id: number; dueDate: string }>,
     invoices: EjarInvoiceRow[],
@@ -733,6 +769,8 @@ export type PartyChoice = { existingId: number } | { party: EjarPartyInfo | null
 /** Everything one v2 import writes, decided and validated by EjarImportService. */
 export interface ImportPlan {
   contractNumber: string;
+  /** Ejar invoices the landlord marks settled outside the platform although Ejar does not report them paid. */
+  settledOutside?: Array<{ invoiceId: string; paidDate: string | null }>;
   landlord: PartyChoice;
   tenant: PartyChoice;
   property:

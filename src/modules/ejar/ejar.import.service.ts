@@ -22,7 +22,7 @@ import {
 } from "./ejar.lookup.service";
 import { EjarImportWriter, ejarCycle, lockImport, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
-import { externalSettlementMode } from "../../common/external-settlement"; // finance-v2: 0084
+import { externalSettlementMode, settledOutsideChoices } from "../../common/external-settlement"; // finance-v2: 0084
 
 export const EJAR_IMPORT_RUNNER = Symbol("EJAR_IMPORT_RUNNER");
 
@@ -66,6 +66,17 @@ export class EjarImportRunner implements EjarImportRunnerLike {
         else await new EjarImportWriter(this.db).attachEjarInvoices(installments, plan.invoices); // finance-v2: flag off → the legacy attach (Ejar-paid stored settled_external, as v2)
       } catch {
         // The contract and its schedule are saved; only the invoice stamps are missing.
+      }
+    }
+    // The landlord's own "settled outside" marks, after the attach (which would
+    // otherwise restamp the status). Best-effort like the attach: the contract
+    // is saved, and a row can still be marked from the contract afterwards.
+    if (installments.length && plan.settledOutside?.length) {
+      try {
+        const ids = await new EjarImportWriter(this.db).settleChosen(ownerId, installments, plan.invoices, plan.settledOutside);
+        for (const id of ids) await this.fv2h?.settledExternal({ fv2, userId: ownerId }, id); // finance-v2: E33 when charged, as POST /payments/:id/settle-external
+      } catch {
+        // Nothing more to undo: each settled row stands on its own.
       }
     }
     return result;
@@ -506,6 +517,7 @@ export class EjarImportService {
 
     const plan: ImportPlan = {
       contractNumber,
+      settledOutside: settledOutsideChoices(body?.settledOutside),
       landlord, tenant, property, unit,
       contract: {
         ...this.contractFields(mapped, startDate, endDate, status, vatFallback, body?.contract?.notes),
