@@ -144,6 +144,20 @@ describe("finance lists: filters by id, contractIds=0, per-row invoices, honest 
     assert.equal(rows[0].id, kTwin.p[1]);
   });
 
+  it("paidFrom / paidTo: rows paid, part-collected or settled outside in the window", async () => {
+    const c = String(kH.id);
+    const d1 = addDays(today, -40), d2 = addDays(today, -10);
+    // A part collection 40 days ago, an installment settled outside 10 days ago.
+    await env.payments.addCollection(userFor(L), String(kH.p[1]), { amount: "500", collectedDate: d1, method: "cash", receiptNumber: "WIN-1" });
+    await env.payments.settleExternal(userFor(L), String(kH.p[2]), { paidDate: d2 });
+    const ids = async (q: Record<string, unknown>) => ((await pay(L, { contractIds: c, ...q })) as any).data.map((r: any) => Number(r.id)).sort((a: number, b: number) => a - b);
+    assert.deepEqual(await ids({ paidFrom: addDays(d1, -1), paidTo: addDays(d1, 1) }), [kH.p[1]], "the part payment, in the window it was received");
+    assert.deepEqual(await ids({ paidFrom: d2, paidTo: d2 }), [kH.p[2]], "settled outside on that day (bounds inclusive)");
+    assert.deepEqual(await ids({ paidFrom: addDays(d1, -1) }), [kH.p[1], kH.p[2]].sort((a, b) => a - b), "open-ended");
+    assert.deepEqual(await ids({ paidTo: addDays(d1, -1) }), [], "nothing paid before");
+    assert.equal(((await pay(L, { contractIds: c, paidFrom: "not-a-date" })) as any).total, kH.p.length, "a bad bound is ignored");
+  });
+
   it("the Upcoming card's part-paid figure is what is still owed", async () => {
     await env.payments.addCollection(userFor(L), String(kA1.p[1]), { amount: "400", collectedDate: today, method: "cash" });
     const st = ((await pay(L, { contractIds: String(kA1.id) })) as any).stats;
