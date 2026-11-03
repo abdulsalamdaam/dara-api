@@ -18,6 +18,13 @@ type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 
 const CATS: readonly VatCategory[] = ["S", "Z", "E", "O"];
 
+/** `createMany`: the row (0-based) that was refused, and why. */
+export class ExpenseRowError extends Error {
+  constructor(public readonly index: number, public readonly reason: unknown) {
+    super(`expense row ${index}: ${(reason as Error)?.message ?? reason}`);
+  }
+}
+
 export interface ExpenseV2Out {
   id: number;
   expenseDate: string | null;
@@ -149,28 +156,59 @@ export class ExpensesV2Service {
   }
 
   async create(scope: number, user: { id: number }, body: any): Promise<ExpenseV2Out> {
-    const out = await withTx(this.pool, async (c) => {
-      const n = await this.normalise(c, scope, body, null);
-      await this.assertPeriodNotLocked(c, scope, n.expenseOn);
-      const ins = await c.query(
-        `insert into expenses (user_id, property_id, owner_id, category, amount, expense_date, notes) values ($1, $2, $3, $4, $5, $6, $7) returning id`,
-        [scope, n.propertyId, n.ownerId, n.category, fromHalalas(n.gross), n.expenseOn, n.notes],
-      );
-      const id = Number(ins.rows[0].id);
-      await c.query(
-        `insert into finance_expense_details (expense_id, user_id, revision, expense_on, gross_amount, net_amount, vat_rate, vat_amount, vat_category,
-            vat_recoverable, supplier_name, supplier_vat_number, supplier_invoice_no, supplier_invoice_date, attachment_key, bank_account_id, charge_to,
-            gl_account_id, updated_by)
-         values ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
-        [id, scope, n.expenseOn, fromHalalas(n.gross), fromHalalas(n.net), n.rate, fromHalalas(n.vat), n.vatCategory, n.vatRecoverable,
-          n.supplierName, n.supplierVatNumber, n.supplierInvoiceNo, n.supplierInvoiceDate, n.attachmentKey, n.bankAccountId, n.chargeTo, n.glAccountId, user.id],
-      );
-      await this.enqueue(c, scope, id, null, { allow: body?.allowTrustOverdraw, actorId: user.id, source: "/finance/v2/expenses" });
-      await auditRow(c, scope, user.id, "expense", id, "/finance/v2/expenses");
-      return this.get(scope, id, c);
-    });
+    const out = await withTx(this.pool, async (c) => this.get(scope, await this.insert(c, scope, user, body, "/finance/v2/expenses"), c));
     this.emitter.kick(scope);
     return out;
+  }
+
+  /**
+   * The Excel import (POST /expenses/import): every row through the same
+   * insert as `create`, in ONE transaction — a row the trust guard (or
+   * anything else) refuses rolls them all back, and `ExpenseRowError` says
+   * which row it was.
+   */
+  async createMany(scope: number, user: { id: number }, bodies: readonly any[], source: string): Promise<number[]> {
+    const ids = await withTx(this.pool, async (c) => {
+      const out: number[] = [];
+      for (let i = 0; i < bodies.length; i++) {
+        try {
+          out.push(await this.insert(c, scope, user, bodies[i], source));
+        } catch (err) {
+          throw new ExpenseRowError(i, err);
+        }
+      }
+      return out;
+    });
+    this.emitter.kick(scope);
+    return ids;
+  }
+
+  /** `create`'s checks with no write (normalise + the period lock): the import's dry run. Returns the amounts it would book. */
+  async validate(scope: number, body: any): Promise<{ ownerId: number | null; net: string; vat: string; gross: string }> {
+    const n = await this.normalise(this.pool, scope, body, null);
+    await this.assertPeriodNotLocked(this.pool, scope, n.expenseOn);
+    return { ownerId: n.ownerId, net: fromHalalas(n.net), vat: fromHalalas(n.vat), gross: fromHalalas(n.gross) };
+  }
+
+  private async insert(c: Fv2Client, scope: number, user: { id: number }, body: any, source: string): Promise<number> {
+    const n = await this.normalise(c, scope, body, null);
+    await this.assertPeriodNotLocked(c, scope, n.expenseOn);
+    const ins = await c.query(
+      `insert into expenses (user_id, property_id, owner_id, category, amount, expense_date, notes) values ($1, $2, $3, $4, $5, $6, $7) returning id`,
+      [scope, n.propertyId, n.ownerId, n.category, fromHalalas(n.gross), n.expenseOn, n.notes],
+    );
+    const id = Number(ins.rows[0].id);
+    await c.query(
+      `insert into finance_expense_details (expense_id, user_id, revision, expense_on, gross_amount, net_amount, vat_rate, vat_amount, vat_category,
+          vat_recoverable, supplier_name, supplier_vat_number, supplier_invoice_no, supplier_invoice_date, attachment_key, bank_account_id, charge_to,
+          gl_account_id, updated_by)
+       values ($1, $2, 1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      [id, scope, n.expenseOn, fromHalalas(n.gross), fromHalalas(n.net), n.rate, fromHalalas(n.vat), n.vatCategory, n.vatRecoverable,
+        n.supplierName, n.supplierVatNumber, n.supplierInvoiceNo, n.supplierInvoiceDate, n.attachmentKey, n.bankAccountId, n.chargeTo, n.glAccountId, user.id],
+    );
+    await this.enqueue(c, scope, id, null, { allow: body?.allowTrustOverdraw, actorId: user.id, source });
+    await auditRow(c, scope, user.id, "expense", id, source);
+    return id;
   }
 
   async update(scope: number, user: { id: number }, id: number, body: any): Promise<ExpenseV2Out> {
