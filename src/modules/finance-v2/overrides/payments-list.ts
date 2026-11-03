@@ -91,6 +91,16 @@ export async function paymentsListV2(q: Sql, scope: number, raw: any) {
   const dueTo = parseDateBound(raw?.dueTo);
   if (dueFrom) rowConds.push(`p.due_date >= ${P(dueFrom)}::date`);
   if (dueTo) rowConds.push(`p.due_date <= ${P(dueTo)}::date`);
+  // `paidFrom` / `paidTo` — when money was paid: the paid date (fully paid, or
+  // settled outside on that day) or any collection recorded in the window (as
+  // the legacy list, payments.module.ts).
+  const paidFrom = parseDateBound(raw?.paidFrom);
+  const paidTo = parseDateBound(raw?.paidTo);
+  if (paidFrom || paidTo) {
+    const win = (col: string) => [paidFrom ? `${col} >= ${P(paidFrom)}::date` : null, paidTo ? `${col} <= ${P(paidTo)}::date` : null].filter(Boolean).join(" and ");
+    rowConds.push(`((p.paid_date is not null and ${win("p.paid_date")})
+      or exists (select 1 from payment_collections pcw where pcw.payment_id = p.id and pcw.user_id = p.user_id and ${win("pcw.collected_date")}))`);
+  }
   const where = rowConds.join(" and ");
   const dir = lq.order === "asc" ? "asc" : "desc";
   const order = raw?.sort === "createdAt" ? `p.created_at desc, p.id desc`

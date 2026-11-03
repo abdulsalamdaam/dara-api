@@ -158,6 +158,18 @@ describe("finance lists: filters by id, contractIds=0, per-row invoices, honest 
     assert.equal(((await pay(L, { contractIds: c, paidFrom: "not-a-date" })) as any).total, kH.p.length, "a bad bound is ignored");
   });
 
+  it("paidFrom / paidTo on a finance-v2 account (its own list query)", async () => {
+    const prop = Number((await env.q(`insert into properties (user_id, name, owner_id) values ($1, 'Synthetic Window', $2) returning id`, [V, sv.holder]))[0].id);
+    const unit = Number((await env.q(`insert into units (property_id, unit_number) values ($1, 'W1') returning id`, [prop]))[0].id);
+    const k = await contract(V, unit, "1500", null);
+    const d1 = addDays(today, -35);
+    await env.payments.addCollection(userFor(V), String(k.p[0]), { amount: "1500", collectedDate: d1, method: "cash", receiptNumber: "WIN-V1" });
+    const ids = async (q: Record<string, unknown>) => ((await pay(V, { contractIds: String(k.id), ...q })) as any).data.map((r: any) => Number(r.id));
+    assert.deepEqual(await ids({ paidFrom: d1, paidTo: d1 }), [k.p[0]]);
+    assert.deepEqual(await ids({ paidTo: addDays(d1, -1) }), []);
+    assert.equal((await ids({})).length, k.p.length, "no window, every row");
+  });
+
   it("the Upcoming card's part-paid figure is what is still owed", async () => {
     await env.payments.addCollection(userFor(L), String(kA1.p[1]), { amount: "400", collectedDate: today, method: "cash" });
     const st = ((await pay(L, { contractIds: String(kA1.id) })) as any).stats;
