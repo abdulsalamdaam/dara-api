@@ -47,6 +47,7 @@ import { PackageModule } from "./modules/package/package.module";
 import { SubscriptionModule } from "./modules/subscription/subscription.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { ReportsModule } from "./modules/reports/reports.module";
+import { ExpenseImportModule } from "./modules/expenses-import/expense-import.module";
 import { OpsReportsModule } from "./modules/reports/ops/ops-reports.module";
 import { NewsModule } from "./modules/news/news.module";
 import { FinanceV2Module } from "./modules/finance-v2/finance-v2.module";
@@ -143,6 +144,7 @@ import { LimitsModule } from "./modules/limits/limits.module";
     AuditModule,
     OpsReportsModule,
     ReportsModule,
+    ExpenseImportModule,
     NewsModule,
     FinanceV2Module,
     PlanTransitionModule,

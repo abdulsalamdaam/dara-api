@@ -105,7 +105,7 @@ import { ModeMigrationService } from "./mode-migration.service";
     // Tier 2 reminders: the ONLY sender binding is the dry run (DESIGN §8.3 b); nothing is ever sent.
     { provide: REMINDER_SENDER, useClass: DryRunReminderSender },
   ],
-  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService, ModeMigrationService, LedgerResetService],
+  exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService, ModeMigrationService, LedgerResetService, ExpensesV2Service],
 })
 export class FinanceV2Module {
   // Cash basis (0094): the global hooks module cannot import the recognizer (it lives here), so it is handed over.
