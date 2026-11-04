@@ -98,8 +98,9 @@ describe("expense import: template → dry run → all-or-nothing commit", { ski
       { expenseDate: today, category: "قرطاسية", amount: 100, amountMode: "غير شامل الضريبة", vatCategory: "خاضعة 15%" },
       { expenseDate: today, category: "صيانة", amount: 230, ownerId: `Synthetic Landlord A (#${sv.agent})`, propertyId: `Synthetic Tower (#${sv.propA})`, chargeTo: "المؤجر", vatCategory: "خاضعة 15%" },
     ];
-    // The account-holder landlord is not an agent landlord: charge-to-landlord is refused by the service.
-    const holderRow = { expenseDate: today, category: "x", amount: 50, ownerId: `Synthetic Holder (#${sv.holder})`, chargeTo: "المؤجر" };
+    // Charge-to-landlord with no landlord at all is refused by the service (the account holder's own landlord is
+    // accepted and booked as the account's own expense — see tier1.db.spec).
+    const holderRow = { expenseDate: today, category: "x", amount: 50, chargeTo: "المؤجر" };
     const dry: any = await svc.run(userFor(V), await filled(svc, V, "v2", [...good, holderRow]), true);
     assert.deepEqual([dry.mode, dry.valid, dry.invalid], ["v2", 2, 1]);
     assert.deepEqual([dry.rows[0].preview.net, dry.rows[0].preview.vat, dry.rows[0].preview.gross], ["100.00", "15.00", "115.00"]);

@@ -26,11 +26,12 @@ export type OpsReportId =
   | "collections_summary" | "installments_schedule"
   | "maintenance_requests" | "data_quality";
 
-export type OpsFilterKey = "from" | "to" | "asOf" | "ownerId" | "propertyId" | "status" | "days";
+export type OpsFilterKey = "from" | "to" | "asOf" | "ownerId" | "propertyId" | "unitId" | "tenantId" | "status" | "days";
 
 export type OpsParams = {
   from?: string; to?: string; asOf?: string;
   ownerId?: number | null; propertyId?: number | null;
+  unitId?: number | null; tenantId?: number | null;
   status?: string | null; days?: number;
 };
 
@@ -178,6 +179,7 @@ export type DateDefault = "last12" | "thisMonth" | "none";
 export type ResolvedParams = {
   from: string; to: string; asOf: string; today: string;
   ownerId: number | null; propertyId: number | null;
+  unitId: number | null; tenantId: number | null;
   status: string | null; days: number;
 };
 
@@ -239,6 +241,8 @@ export function resolveParams(raw: Record<string, unknown>, opts: { dates: DateD
     from, to, asOf, today,
     ownerId: parseId(raw?.ownerId, "ownerId"),
     propertyId: parseId(raw?.propertyId, "propertyId"),
+    unitId: parseId(raw?.unitId, "unitId"),
+    tenantId: parseId(raw?.tenantId, "tenantId"),
     status, days,
   };
 }

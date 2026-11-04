@@ -1,5 +1,5 @@
 import { BadRequestException, HttpException, Inject, Injectable, Optional } from "@nestjs/common";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { expensesTable, ownersTable, propertiesTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -60,8 +60,8 @@ export class ExpenseImportService {
   }
 
   /** The account's landlords, properties and used items — what the template lists and the parser resolves against. */
-  async lists(scope: number): Promise<{ owners: Ref[]; properties: PropertyRef[]; categories: string[] }> {
-    const [owners, properties, cats] = await Promise.all([
+  async lists(scope: number): Promise<{ owners: Ref[]; properties: PropertyRef[]; categories: string[]; expenseAccounts: Ref[] }> {
+    const [owners, properties, cats, accts] = await Promise.all([
       this.db.select({ id: ownersTable.id, name: ownersTable.name }).from(ownersTable)
         .where(and(eq(ownersTable.userId, scope), isNull(ownersTable.deletedAt))).orderBy(asc(ownersTable.name), asc(ownersTable.id)),
       this.db.select({ id: propertiesTable.id, name: propertiesTable.name, ownerId: propertiesTable.ownerId }).from(propertiesTable)
@@ -69,11 +69,16 @@ export class ExpenseImportService {
       // GET /reports/expenses/categories
       this.db.selectDistinct({ category: expensesTable.category }).from(expensesTable)
         .where(and(eq(expensesTable.userId, scope), isNull(expensesTable.deletedAt))).orderBy(asc(expensesTable.category)),
+      // The chart's active expense leaves (finance v2; none on an account without it), the ones the account added included.
+      this.db.execute(sql`select id, code, name_ar from accounts where user_id = ${scope} and type = 'expense' and not is_group and is_active order by code`)
+        .catch(() => ({ rows: [] })),
     ]);
+    const acctRows: any[] = Array.isArray(accts) ? accts : ((accts as any)?.rows ?? []);
     return {
       owners: owners.map((o) => ({ id: Number(o.id), name: String(o.name ?? "") })),
       properties: properties.map((p) => ({ id: Number(p.id), name: String(p.name ?? ""), ownerId: p.ownerId == null ? null : Number(p.ownerId) })),
       categories: cats.map((c) => c.category).filter((c): c is string => !!c && !!c.trim()),
+      expenseAccounts: acctRows.map((a) => ({ id: Number(a.id), name: `${a.code} ${a.name_ar}` })),
     };
   }
 
@@ -94,7 +99,7 @@ export class ExpenseImportService {
     }
     const mode = await this.mode(scope);
     const lists = await this.lists(scope);
-    const mapped = sheet.rows.map((r) => mapRow(r, { mode, owners: lists.owners, properties: lists.properties }));
+    const mapped = sheet.rows.map((r) => mapRow(r, { mode, owners: lists.owners, properties: lists.properties, expenseAccounts: lists.expenseAccounts }));
     if (mode === "v2") {
       // The service's own checks (landlord mode, charge-to, VAT, period lock) — only for rows the sheet checks passed.
       for (const m of mapped) {

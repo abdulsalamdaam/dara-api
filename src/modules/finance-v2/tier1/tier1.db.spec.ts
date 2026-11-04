@@ -182,7 +182,10 @@ describe("fv2 tier 1 on the real legacy routes (real Postgres)", { skip: fv2DbSk
   it("expenses: refusals — bad supplier VAT, charge-to-landlord for a principal landlord, a foreign property, a locked period", async () => {
     const base = { expenseDate: today, category: "x", amount: "100" };
     assert.equal(((await attempt(() => expenses.create(U, user, { ...base, supplierVatNumber: "123" }))) as any).body.error, "BAD_SUPPLIER_VAT");
-    assert.equal(((await attempt(() => expenses.create(U, user, { ...base, ownerId: s.holder, chargeTo: "landlord" }))) as any).body.error, "CHARGE_TO_NOT_ALLOWED");
+    assert.equal(((await attempt(() => expenses.create(U, user, { ...base, chargeTo: "landlord" }))) as any).body.error, "CHARGE_TO_NOT_ALLOWED", "no landlord to charge");
+    // The account holder's own landlord: accepted, booked as the account's own expense (customer notes, 4 Nov 2026).
+    const own: any = await expenses.create(U, user, { ...base, ownerId: s.holder, chargeTo: "landlord" });
+    assert.equal((await env.q(`select charge_to from finance_expense_details where expense_id = $1`, [own.id]))[0].charge_to, "company");
     assert.equal(((await attempt(() => expenses.create(U, user, { ...base, propertyId: 987654 }))) as any).status, 404);
     assert.equal(((await attempt(() => expenses.create(U, user, { ...base, ownerId: s.holder, propertyId: s.propA }))) as any).body.error, "OWNER_PROPERTY_MISMATCH");
     const lockedDay = `${Number(today.slice(0, 4)) - 1}-01-15`;

@@ -14,7 +14,7 @@ import { CoreReportsService } from "../reports/core-reports.service";
 export class FinanceV2CoreReportsController {
   constructor(private readonly reports: CoreReportsService) {}
 
-  /** ?from&to&cmpFrom&cmpTo&compare=none&ownerId&propertyId&level=leaf|group&postClosing&includeZero&lang */
+  /** ?from&to&cmpFrom&cmpTo&compare=none&ownerId&propertyId&unitId&tenantId&level=leaf|group&postClosing&includeZero&lang */
   @Get("trial-balance")
   @RequireCapability("view")
   trialBalance(@Req() req: Fv2Request, @Query() q: any) {
@@ -28,14 +28,14 @@ export class FinanceV2CoreReportsController {
     return this.reports.generalLedger(scopeId(req.user!), q);
   }
 
-  /** ?from&to&columns=total|property|landlord|month&cmpFrom&cmpTo&compare=previous&ownerId&propertyId&lang */
+  /** ?from&to&columns=total|property|landlord|month&cmpFrom&cmpTo&compare=previous&ownerId&propertyId&unitId&tenantId&lang */
   @Get("income-statement")
   @RequireCapability("view")
   incomeStatement(@Req() req: Fv2Request, @Query() q: any) {
     return this.reports.incomeStatement(scopeId(req.user!), q);
   }
 
-  /** ?asOf&cmpAsOf&presentation=net|gross&ownerId&propertyId&includeZero&lang */
+  /** ?asOf&cmpAsOf&presentation=net|gross&ownerId&propertyId&unitId&tenantId&includeZero&lang */
   @Get("balance-sheet")
   @RequireCapability("view")
   balanceSheet(@Req() req: Fv2Request, @Query() q: any) {

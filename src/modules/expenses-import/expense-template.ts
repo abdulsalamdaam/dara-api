@@ -15,6 +15,8 @@ export interface TemplateInput {
   owners: readonly Ref[];
   properties: readonly PropertyRef[];
   categories: readonly string[];
+  /** v2: active expense leaf accounts, labelled `code name`. */
+  expenseAccounts?: readonly Ref[];
 }
 
 /**
@@ -50,6 +52,7 @@ export async function buildTemplate(input: TemplateInput): Promise<Buffer> {
       { key: "chargeTo", title: "يتحمّلها", values: CHARGE_TO.map((c) => c.label) },
       { key: "amountMode", title: "طريقة المبلغ", values: AMOUNT_MODE.map((c) => c.label) },
       { key: "vatCategory", title: "نوع الضريبة", values: VAT_CATEGORY.map((c) => c.label) },
+      { key: "glAccountId", title: "حسابات المصروفات", values: (input.expenseAccounts ?? []).map(refLabel) },
     );
   }
   const rangeOf = new Map<string, string>();
@@ -76,6 +79,7 @@ export async function buildTemplate(input: TemplateInput): Promise<Buffer> {
   const validations: [Field, ExcelJS.DataValidation | null][] = [
     ["ownerId", strict("ownerId", "المؤجر")],
     ["propertyId", strict("propertyId", "العقار")],
+    ["glAccountId", strict("glAccountId", "حساب المصروف")],
     // Items are free text: the list only suggests.
     ["category", rangeOf.has("category") ? { type: "list", allowBlank: true, formulae: [rangeOf.get("category")], showErrorMessage: false } : null],
     ["amount", {

@@ -296,6 +296,19 @@ describe("operational reports (real Postgres, synthetic fixtures)", { skip }, ()
     assert.deepEqual(dq.rows.map((x) => [x.entity, x.record]), [["property", "Villa B"], ["landlord", "Landlord Two"]]);
   });
 
+  it("unitId / tenantId narrow to one unit or one tenant inside a property (customer notes, 4 Nov 2026)", async () => {
+    const all = await run(A, "contracts_report", { propertyId: String(ids.P1) });
+    assert.ok(all.rows.length > 1, "the property has several contracts");
+    const u2 = await run(A, "contracts_report", { propertyId: String(ids.P1), unitId: String(ids.U2) });
+    assert.deepEqual(u2.rows.map((x) => x.contractNumber), ["C-2"]);
+    const ali = await run(A, "tenant_balances", { tenantId: String(ids.T1) });
+    assert.deepEqual(Object.keys(byKey(ali, "tenant")), ["Tenant Ali"]);
+    const badrOnU1 = await run(A, "contracts_report", { unitId: String(ids.U1), tenantId: String(ids.T2) });
+    assert.equal(badrOnU1.rows.length, 0, "a tenant with no contract on that unit: nothing");
+    const vac = await run(A, "vacant_units", { unitId: String(ids.U3) });
+    assert.deepEqual(vac.rows.map((x: any) => x.unit), ["U3"]);
+  });
+
   it("scoping: account B never sees account A, even when passing A's ownerId / propertyId", async () => {
     for (const def of OPS_DEFS) {
       for (const raw of [{ ownerId: String(ids.O1) }, { propertyId: String(ids.P1) }, { ownerId: String(ids.O1), propertyId: String(ids.P1) }]) {

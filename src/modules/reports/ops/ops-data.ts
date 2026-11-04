@@ -61,6 +61,8 @@ export type OpsDataset = {
 
 export type LoadOpts = {
   ownerId: number | null; propertyId: number | null; today: string;
+  /** A single unit, or a single tenant's contracts (customer notes, 4 Nov 2026). Optional: older callers omit them. */
+  unitId?: number | null; tenantId?: number | null;
   need: { installments?: boolean; maintenance?: boolean };
 };
 
@@ -68,7 +70,9 @@ const num = (v: unknown): number => (v == null ? 0 : Number(v));
 const dstr = (v: unknown): string => String(v).slice(0, 10);
 
 export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promise<OpsDataset> {
-  const filtered = o.ownerId != null || o.propertyId != null;
+  const unitId = o.unitId ?? null;
+  const tenantId = o.tenantId ?? null;
+  const filtered = o.ownerId != null || o.propertyId != null || unitId != null || tenantId != null;
   // Drafts are not leases yet — every report leaves them out (said in the notes).
   const contractScope = and(eq(contractsTable.userId, uid), isNull(contractsTable.deletedAt), eq(contractsTable.isDraft, false));
 
@@ -168,17 +172,23 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
   });
 
   // ── the filter, intersected with the scope ──
+  // A tenant narrows to the units its contracts cover; a unit to that unit (and its property).
+  const tenantUnits = tenantId != null
+    ? new Set(allContracts.filter((c) => c.tenantId === tenantId).flatMap((c) => c.unitIds)) : null;
+  const unitProps = unitId != null || tenantUnits
+    ? new Set(allUnits.filter((u) => (unitId == null || u.id === unitId) && (!tenantUnits || tenantUnits.has(u.id))).map((u) => u.propertyId)) : null;
   const properties = allProps.filter((p) =>
-    (o.ownerId == null || p.ownerId === o.ownerId) && (o.propertyId == null || p.id === o.propertyId));
+    (o.ownerId == null || p.ownerId === o.ownerId) && (o.propertyId == null || p.id === o.propertyId) && (!unitProps || unitProps.has(p.id)));
   const propSet = new Set(properties.map((p) => p.id));
-  const units = filtered ? allUnits.filter((u) => propSet.has(u.propertyId)) : allUnits;
+  const units = filtered ? allUnits.filter((u) => propSet.has(u.propertyId)
+    && (unitId == null || u.id === unitId) && (!tenantUnits || tenantUnits.has(u.id))) : allUnits;
   const unitSet = new Set(units.map((u) => u.id));
   // Under a filter a multi-unit contract is attributed to the property of its
   // first unit INSIDE the filter — otherwise a contract spanning two properties
   // would count in the filtered collections/balances but show 0 under the very
   // property that was picked in property_performance / landlord_portfolio.
   const contracts = filtered
-    ? allContracts.filter((c) => c.unitIds.some((u) => unitSet.has(u))).map((c) => {
+    ? allContracts.filter((c) => c.unitIds.some((u) => unitSet.has(u)) && (tenantId == null || c.tenantId === tenantId)).map((c) => {
       const first = c.unitIds.find((u) => unitSet.has(u))!;
       return { ...c, propertyId: unitById.get(first)!.propertyId };
     })
@@ -258,7 +268,7 @@ export async function loadDataset(db: Drizzle, uid: number, o: LoadOpts): Promis
   return {
     today: o.today, filtered,
     properties, units, owners,
-    tenants: tenantsRaw,
+    tenants: tenantId != null ? tenantsRaw.filter((t) => t.id === tenantId) : tenantsRaw,
     contracts: filtered ? contracts : allContracts,
     installments, maintenance,
   };

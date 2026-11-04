@@ -344,10 +344,13 @@ export class ExpensesV2Service {
     }
     if (amount <= 0) throw new BadRequestException({ error: "BAD_AMOUNT", message: "المبلغ غير صالح · amount must be positive" });
     const a = expenseAmounts(mode, amount, vatCategory, rate);
-    const chargeTo: "company" | "landlord" = body?.chargeTo === "landlord" ? "landlord" : "company";
+    let chargeTo: "company" | "landlord" = body?.chargeTo === "landlord" ? "landlord" : "company";
     if (body?.chargeTo != null && body.chargeTo !== "landlord" && body.chargeTo !== "company") {
       throw new BadRequestException({ error: "BAD_INPUT", message: "chargeTo must be company or landlord" });
     }
+    // The landlord is the account holder himself (Owner mode, or his own property in Manager mode): an expense "on the
+    // landlord" is already the account's own, so it is booked as one rather than refused (customer notes, 4 Nov 2026).
+    if (chargeTo === "landlord" && !ctx.agent && ctx.ownerId != null) chargeTo = "company";
     if (chargeTo === "landlord" && !ctx.agent) {
       throw new BadRequestException({ error: "CHARGE_TO_NOT_ALLOWED", message: "التحميل على المؤجر متاح لمؤجري الوكالة في وضع المدير فقط · Charge to landlord applies only to agent landlords in Manager mode" });
     }
