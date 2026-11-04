@@ -34,6 +34,8 @@ function echo(id: OpsReportId, p: ResolvedParams): OpsParams {
     if (f === "asOf") out.asOf = p.asOf;
     if (f === "ownerId") out.ownerId = p.ownerId;
     if (f === "propertyId") out.propertyId = p.propertyId;
+    if (f === "unitId") out.unitId = p.unitId;
+    if (f === "tenantId") out.tenantId = p.tenantId;
     if (f === "status") out.status = p.status;
     if (f === "days") out.days = p.days;
   }
@@ -51,7 +53,7 @@ export async function runOpsReport(db: Drizzle, uid: number, id: string, raw: Re
     if (e instanceof OpsParamError) throw new BadRequestException(e.message);
     throw e;
   }
-  const ds = await loadDataset(db, uid, { ownerId: p.ownerId, propertyId: p.propertyId, today: p.today, need: NEEDS[def.id] ?? {} });
+  const ds = await loadDataset(db, uid, { ownerId: p.ownerId, propertyId: p.propertyId, unitId: p.unitId, tenantId: p.tenantId, today: p.today, need: NEEDS[def.id] ?? {} });
   const body = capRows(BUILDERS[def.id](ds, p));
   return { id: def.id, params: echo(def.id, p), generatedAt: new Date().toISOString(), ...body };
 }

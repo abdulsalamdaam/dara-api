@@ -112,6 +112,14 @@ describe("expense sheet: row mapping", () => {
     assert.equal(mapRow(raw({ expenseDate: "2026-01-15", category: "x", amount: 1, vatCategory: "معفى", chargeTo: "الشركة" }), v2).body.vatCategory, "E");
   });
 
+  it("v2: «حساب المصروف» resolves to one of the account's expense accounts, or is a row error", () => {
+    const ctx: MapCtx = { ...v2, expenseAccounts: [{ id: 501, name: "5110 صيانة" }, { id: 777, name: "5199 مصروف أنشأه المستخدم" }] };
+    const ok = mapRow(raw({ expenseDate: "2026-01-15", category: "x", amount: 1, glAccountId: "5199 مصروف أنشأه المستخدم (#777)" }), ctx);
+    assert.deepEqual([ok.errors.length, ok.body.glAccountId, ok.preview.glAccountName], [0, 777, "5199 مصروف أنشأه المستخدم"]);
+    assert.equal(mapRow(raw({ expenseDate: "2026-01-15", category: "x", amount: 1 }), ctx).body.glAccountId, null, "blank: from the item");
+    assert.equal(mapRow(raw({ expenseDate: "2026-01-15", category: "x", amount: 1, glAccountId: "حساب غير موجود" }), ctx).errors[0].field, "glAccountId");
+  });
+
   it("v2: an unknown choice or a bad supplier VAT number is a row error", () => {
     const m = mapRow(raw({ expenseDate: "2026-01-15", category: "x", amount: 1, vatCategory: "10%", chargeTo: "someone", supplierVatNumber: "123" }), v2);
     assert.deepEqual(m.errors.map((e) => e.field), ["chargeTo", "vatCategory", "supplierVatNumber"]);

@@ -237,7 +237,7 @@ export class CoreReportsService {
     if (q.level && !["group", "leaf"].includes(q.level)) throw bad("BAD_LEVEL", "level must be leaf or group");
     const postClosing = boolOf(q.postClosing);
     const includeZero = boolOf(q.includeZero);
-    const f = await this.filterOf(scope, q, ["ownerId", "propertyId"]);
+    const f = await this.filterOf(scope, q, ["ownerId", "propertyId", "unitId", "tenantId"]); // + unit / tenant (customer notes, 4 Nov 2026)
     const list = await this.accounts(scope);
     const accts = new Map(list.map((a) => [a.id, a]));
     const fy = fyStartOf(from, sm);
@@ -521,7 +521,7 @@ export class CoreReportsService {
       cmp = { from: isoDate(q.cmpFrom, "cmpFrom"), to: isoDate(q.cmpTo, "cmpTo") };
       if (cmp.from > cmp.to) throw bad("BAD_RANGE", "cmpFrom must not be after cmpTo");
     } else if (q.compare === "previous") cmp = previousRange(from, to);
-    const f = await this.filterOf(scope, q, ["ownerId", "propertyId"]);
+    const f = await this.filterOf(scope, q, ["ownerId", "propertyId", "unitId", "tenantId"]); // + unit / tenant (customer notes, 4 Nov 2026)
     const list = await this.accounts(scope);
     const accts = new Map(list.map((a) => [a.id, a]));
 
@@ -724,7 +724,7 @@ export class CoreReportsService {
     const presentation = (q.presentation ?? "net") as "net" | "gross";
     if (!["net", "gross"].includes(presentation)) throw bad("BAD_PRESENTATION", "presentation must be net or gross");
     const includeZero = boolOf(q.includeZero);
-    const f = await this.filterOf(scope, q, ["ownerId", "propertyId"]);
+    const f = await this.filterOf(scope, q, ["ownerId", "propertyId", "unitId", "tenantId"]); // + unit / tenant (customer notes, 4 Nov 2026)
     const list = await this.accounts(scope);
     const accts = new Map(list.map((a) => [a.id, a]));
     const cur = await this.bsAt(scope, list, asOf, sm, f, presentation);

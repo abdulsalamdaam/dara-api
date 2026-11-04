@@ -14,7 +14,7 @@ export type ImportMode = "v2" | "legacy";
 
 export type Field =
   | "expenseDate" | "category" | "amount" | "ownerId" | "propertyId"
-  | "chargeTo" | "amountMode" | "vatCategory" | "supplierName" | "supplierVatNumber" | "supplierInvoiceNo" | "notes";
+  | "chargeTo" | "amountMode" | "vatCategory" | "supplierName" | "supplierVatNumber" | "supplierInvoiceNo" | "glAccountId" | "notes";
 
 export interface ColDef { key: Field; header: string; required?: boolean; v2Only?: boolean; width: number }
 
@@ -38,6 +38,8 @@ export const COLUMNS: readonly ColDef[] = [
   { key: "supplierName", header: "اسم المورد", v2Only: true, width: 22 },
   { key: "supplierVatNumber", header: "الرقم الضريبي للمورد", v2Only: true, width: 20 },
   { key: "supplierInvoiceNo", header: "رقم فاتورة المورد", v2Only: true, width: 18 },
+  // Any active expense account of the chart, the ones the account added included (customer notes, 4 Nov 2026). Blank: from the item.
+  { key: "glAccountId", header: "حساب المصروف", v2Only: true, width: 32 },
   { key: "notes", header: "ملاحظات", width: 34 },
 ];
 
@@ -178,6 +180,8 @@ export interface RowPreview {
   supplierName?: string | null;
   supplierVatNumber?: string | null;
   supplierInvoiceNo?: string | null;
+  glAccountId?: number | null;
+  glAccountName?: string | null;
   /** v2, once the row passes the service's own checks. */
   net?: string;
   vat?: string;
@@ -185,7 +189,11 @@ export interface RowPreview {
 }
 export interface MappedRow { row: number; body: Record<string, unknown>; errors: RowError[]; preview: RowPreview }
 
-export interface MapCtx { mode: ImportMode; owners: readonly Ref[]; properties: readonly PropertyRef[] }
+export interface MapCtx {
+  mode: ImportMode; owners: readonly Ref[]; properties: readonly PropertyRef[];
+  /** v2: the active expense leaf accounts (`code name`), for «حساب المصروف». */
+  expenseAccounts?: readonly Ref[];
+}
 
 /**
  * One sheet row → the single create's body, or the reasons it cannot be one.
@@ -263,6 +271,15 @@ export function mapRow(raw: RawRow, ctx: MapCtx): MappedRow {
     if (supplierVatNumber && !SUPPLIER_VAT_RE.test(supplierVatNumber)) err("supplierVatNumber", "الرقم الضريبي للمورد: 15 رقماً يبدأ وينتهي بـ 3");
     const supplierInvoiceNo = text(raw.supplierInvoiceNo ?? null);
     if (supplierInvoiceNo.length > 100) err("supplierInvoiceNo", "رقم فاتورة المورد أطول من 100 حرف");
+    let glAccount: Ref | undefined;
+    const glText = text(raw.glAccountId ?? null);
+    if (glText) {
+      const r = resolveRef(glText, ctx.expenseAccounts ?? [], "حساب المصروف");
+      if (r.error) err("glAccountId", r.error);
+      glAccount = r.ref;
+    }
+    Object.assign(body, { glAccountId: glAccount?.id ?? null });
+    Object.assign(preview, { glAccountId: glAccount?.id ?? null, glAccountName: glAccount?.name ?? null });
     Object.assign(body, {
       chargeTo, amountMode, vatCategory, vatRate: vatCategory === "S" ? 15 : undefined,
       supplierName: supplierName || null, supplierVatNumber: supplierVatNumber || null, supplierInvoiceNo: supplierInvoiceNo || null,
