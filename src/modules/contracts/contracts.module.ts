@@ -343,6 +343,7 @@ class ContractsController {
         contractId: contractUnitsTable.contractId,
         unit: unitsTable,
         propertyName: propertiesTable.name,
+        propertyBranchName: propertiesTable.branchName,
         propertyTypeLookupId: propertiesTable.typeLookupId,
         propertyBuildingType: propertiesTable.buildingType,
         propertyUsageLookupId: propertiesTable.usageLookupId,
@@ -367,6 +368,7 @@ class ContractsController {
       list.push({
         ...r.unit,
         propertyName: r.propertyName,
+        propertyBranchName: r.propertyBranchName,
         propertyTypeLookupId: r.propertyTypeLookupId,
         propertyBuildingType: r.propertyBuildingType,
         propertyUsageLookupId: r.propertyUsageLookupId,
@@ -406,6 +408,7 @@ class ContractsController {
         unitNumber: first?.unitNumber ?? null,
         propertyId: first?.propertyId ?? null,
         propertyName: first?.propertyName ?? null,
+        propertyBranchName: first?.propertyBranchName ?? null,
         propertyType: first?.propertyType ?? null,
         propertyBuildingType: first?.propertyBuildingType ?? null,
         propertyUsageType: first?.propertyUsageType ?? null,

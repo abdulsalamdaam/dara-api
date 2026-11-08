@@ -38,6 +38,9 @@ export const propertiesTable = pgTable("properties", {
   ownerId: integer("owner_id").references(() => ownersTable.id, { onDelete: "set null" }),
   amenitiesData: text("amenities_data"),
   notes: text("notes"),
+  // The account's own label (e.g. a tenant's «فرع الشعلة»). Never written by
+  // an Ejar import, so it stays editable when `name` is locked.
+  branchName: text("branch_name"),
   // MinIO object key for the property photo (legacy single image).
   imageKey: text("image_key"),
   // JSON array of MinIO object keys — the property photo gallery.

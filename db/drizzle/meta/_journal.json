@@ -589,6 +589,13 @@
       "when": 1794009600000,
       "tag": "0094_finance_rent_revenue_basis",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1794096000000,
+      "tag": "0095_property_branch_name",
+      "breakpoints": true
     }
   ]
 }
