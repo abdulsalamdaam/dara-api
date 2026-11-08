@@ -79,6 +79,7 @@ export class EjarImportRunner implements EjarImportRunnerLike {
         // Nothing more to undo: each settled row stands on its own.
       }
     }
+    await this.fv2h?.catchUp({ fv2, userId: ownerId }); // finance-v2: past-due rows (Ejar-paid ones too) reach the ledger now, not at 00:10
     return result;
   }
 }

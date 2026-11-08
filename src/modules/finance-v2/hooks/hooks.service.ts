@@ -3,6 +3,7 @@ import { FV2_POOL, type Fv2Pool } from "../db";
 import { FinanceFlagService } from "../flag.service";
 import { LedgerEmitter, type LedgerEvent } from "../ledger-emitter.service";
 import type { RecognizerService } from "../recognizer.service";
+import type { PostingWorker } from "../posting-worker.service";
 import { appLog } from "../../../common/logging/app-log.service";
 import { sqlOf, type Sql } from "./sql";
 import {
@@ -94,6 +95,8 @@ export class FinanceV2Hooks {
 
   /** Cash basis (0094): handed over by FinanceV2Module (the hooks module cannot import the recognizer). */
   recognizer?: RecognizerService;
+  /** The import catch-up posts between its recognizer passes; handed over like the recognizer. */
+  worker?: PostingWorker;
 
   /** Cash basis (0094): money moved on these installments — release (or pull back) their rent now. Never throws. */
   private async cashReleases(userId: number, paymentIds: number[]): Promise<void> {
@@ -102,6 +105,25 @@ export class FinanceV2Hooks {
       await this.recognizer.runCashReleases(userId, paymentIds);
     } catch (err) {
       this.fail("cash_release", userId, err);
+    }
+  }
+
+  /**
+   * A contract just arrived with installments already past due (an Ejar import, a contract entered late): run the
+   * recognizer for the account now, so their charges, the Ejar-paid settlements (E33) and the revenue of the months
+   * already passed (E35) reach the ledger at once instead of over the next two nightly runs (00:10: the first
+   * charges, the second settles and releases, since both need the posted charge). So: recognizer, post, recognizer,
+   * post. Idempotent (the recognizer's keys), flag on only, never throws. Call it after the source has committed.
+   */
+  async catchUp(ctx: HookCtx): Promise<void> {
+    if (ctx?.fv2 !== true || !this.recognizer || !this.worker) return;
+    try {
+      for (let pass = 0; pass < 2; pass++) {
+        await this.recognizer.runAccount(ctx.userId);
+        await this.worker.drainAccount(ctx.userId);
+      }
+    } catch (err) {
+      this.fail("catch_up", ctx.userId, err);
     }
   }
 

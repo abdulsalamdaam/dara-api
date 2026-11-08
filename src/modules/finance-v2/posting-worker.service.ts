@@ -129,6 +129,19 @@ export class PostingWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Post one account's due rows now, WAITING for its lock (a tick may hold it), in a few rounds: a posted row can
+   * unblock the next. For the hooks' catch-up, which needs the charges posted before it can settle and release them.
+   */
+  async drainAccount(userId: number, rounds = 10): Promise<void> {
+    await this.withAccountLock(userId, async () => {
+      for (let i = 0; i < rounds; i++) {
+        const r = await this.engine.processAccount(userId);
+        if (!r.posted && !r.skipped) break;
+      }
+    });
+  }
+
   /** Post one account's due rows under its session lock. Returns null when another worker holds it. */
   async runAccount(userId: number, limit = 200) {
     const lp = this.tickLocks();

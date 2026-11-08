@@ -108,8 +108,10 @@ import { ModeMigrationService } from "./mode-migration.service";
   exports: [PostingEngine, PostingWorker, LedgerStartService, RecognizerService, BackfillService, ModeMigrationService, LedgerResetService, ExpensesV2Service],
 })
 export class FinanceV2Module {
-  // Cash basis (0094): the global hooks module cannot import the recognizer (it lives here), so it is handed over.
-  constructor(hooks: FinanceV2Hooks, recognizer: RecognizerService) {
+  // Cash basis (0094) and the import catch-up: the global hooks module cannot import the recognizer or the worker
+  // (they live here), so they are handed over.
+  constructor(hooks: FinanceV2Hooks, recognizer: RecognizerService, worker: PostingWorker) {
     hooks.recognizer = recognizer;
+    hooks.worker = worker;
   }
 }

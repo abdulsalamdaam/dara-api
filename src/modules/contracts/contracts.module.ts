@@ -1160,6 +1160,7 @@ class ContractsController {
       await this.fv2h?.contractMaterialized({ fv2, userId: ownerId, tx }, row!.id); // finance-v2: dims, advance (E03/E34), deposit (E09)
       return { row, created };
     });
+    void this.fv2h?.catchUp({ fv2, userId: ownerId }); // finance-v2: installments already past due reach the ledger now, not at 00:10 (never throws; not awaited)
 
     return { ...contract.row, unitIds: p.unitIds, installmentsCreated: contract.created };
   }
