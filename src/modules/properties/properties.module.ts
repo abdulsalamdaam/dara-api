@@ -106,6 +106,7 @@ function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): v
   applyText(v, "mapUrl", "رابط الموقع", LIMITS.address);
   applyText(v, "amenitiesData", "تفاصيل المرافق", LIMITS.blob);
   applyText(v, "notes", "الملاحظات", LIMITS.notes);
+  applyText(v, "branchName", "اسم الفرع", LIMITS.shortName);
   applyText(v, "imageKey", "صورة العقار", LIMITS.address);
   applyBoolNonNull(v, "isDraft", "مسودة");
   applyForeignKey(v, "typeLookupId", "نوع العقار");
@@ -122,7 +123,7 @@ function sanitizePropertyFields(v: Record<string, unknown>, isDraft: boolean): v
 const PROPERTY_FIELDS = [
   "name", "status", "district", "street", "deedNumber", "totalUnits", "floors", "elevators",
   "parkings", "buildingType", "yearBuilt", "postalCode", "buildingNumber", "additionalNumber",
-  "mapUrl", "amenitiesData", "notes", "imageKey", "images", "isDraft",
+  "mapUrl", "amenitiesData", "notes", "branchName", "imageKey", "images", "isDraft",
   "typeLookupId", "usageLookupId", "regionLookupId", "cityLookupId",
 ] as const;
 
@@ -500,6 +501,7 @@ class PropertiesController {
       mapUrl: body.mapUrl ?? null,
       amenitiesData: body.amenitiesData ?? null,
       notes: body.notes ?? null,
+      branchName: body.branchName ?? null,
       imageKey: body.imageKey ?? null,
       images: Array.isArray(body.images) ? body.images : null,
       isDraft: Boolean(body.isDraft ?? false),

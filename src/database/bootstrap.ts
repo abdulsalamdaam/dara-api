@@ -812,6 +812,15 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure rent revenue basis failed: ${err?.message || err}`);
     }
 
+    // 0095: properties.branch_name, the account's own label for a property.
+    try {
+      const branch = findSqlFile(join("drizzle", "0095_property_branch_name.sql"));
+      if (branch) await client.query(readFileSync(branch, "utf8"));
+      else log.warn("0095_property_branch_name.sql not found — properties.branch_name not ensured");
+    } catch (err: any) {
+      log.warn(`ensure property branch name failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
