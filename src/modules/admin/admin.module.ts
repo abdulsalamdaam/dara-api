@@ -1,4 +1,6 @@
-import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Inject, Module, NotFoundException, Param, Patch, Post, Put, Query, Res, UseGuards } from "@nestjs/common";
+import type { Response } from "express";
+import { ParseInt4Pipe } from "../../common/int4.pipe";
 import { sendExpoPush } from "../../common/push";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
@@ -1374,6 +1376,77 @@ class AdminController {
     await this.db.delete(propertiesTable).where(eq(propertiesTable.userId, demoUserId));
     await seedDemoData(this.db, demoUserId);
     return { success: true, message: "تم إعادة ضبط بيانات الحساب التجريبي" };
+  }
+
+  /**
+   * The account's subscription payments — plan and add-on — newest first, for
+   * the invoices card in the customer drawer. An employee id resolves to the
+   * account root, the same as the overview, because payments are owned by the
+   * account. Every status is returned so a failed or still-pending attempt is
+   * visible too; only `paid` rows have a document (see the PDF route below).
+   */
+  @Get("users/:id/subscription-payments")
+  async subscriptionPayments(@Param("id", ParseInt4Pipe) id: number) {
+    const [user] = await this.db.select({ id: usersTable.id, ownerUserId: usersTable.ownerUserId })
+      .from(usersTable).where(eq(usersTable.id, id));
+    if (!user) throw new NotFoundException("المستخدم غير موجود");
+    const accountId = user.ownerUserId ?? user.id;
+
+    const rows = await this.db.select().from(subscriptionPaymentsTable)
+      .where(eq(subscriptionPaymentsTable.userId, accountId))
+      .orderBy(desc(subscriptionPaymentsTable.createdAt), desc(subscriptionPaymentsTable.id));
+
+    return rows.map((r) => ({
+      id: r.id,
+      kind: r.kind ?? "subscription",
+      description: r.description ?? null,
+      plan: r.plan,
+      billingCycle: r.billingCycle,
+      amount: Number(r.amount) || 0,
+      currency: r.currency,
+      status: r.status,
+      // A paid row always has a number on its document: the stamped one, or the
+      // one the renderer derives from the id for a row paid before stamping.
+      invoiceNumber: r.status === "paid" ? (r.invoiceNumber || subscriptionInvoiceNumber(r.id)) : null,
+      invoiceIssuedAt: r.invoiceIssuedAt ?? null,
+      invoiceEmailedAt: r.invoiceEmailedAt ?? null,
+      paidAt: r.paidAt ?? null,
+      periodStart: r.periodStart ?? null,
+      periodEnd: r.periodEnd ?? null,
+      createdAt: r.createdAt ?? null,
+    }));
+  }
+
+  /**
+   * The customer's invoice for one paid subscription payment, as the PDF they
+   * received. Read-only: rendered from the row exactly like the customer's own
+   * download, and — unlike `issue-invoice` — it stamps nothing and emails
+   * nobody, so opening it from the admin portal cannot change the document.
+   */
+  @Get("subscription-payments/:id/invoice.pdf")
+  async subscriptionInvoicePdf(@CurrentUser() admin: AuthUser, @Param("id", ParseInt4Pipe) id: number, @Res() res: Response) {
+    const [row] = await this.db.select().from(subscriptionPaymentsTable)
+      .where(eq(subscriptionPaymentsTable.id, id));
+    if (!row) throw new NotFoundException("الدفعة غير موجودة");
+    if (row.status !== "paid") throw new BadRequestException("لا تصدر فاتورة إلا لدفعة مؤكدة الدفع");
+
+    const buyer = await this.subscriptionInvoices.loadBuyer(this.db, row.userId);
+    const pdf = await this.subscriptionInvoices.renderPdf(row, buyer);
+    const name = row.invoiceNumber || subscriptionInvoiceNumber(row.id);
+
+    this.appLog?.record({
+      level: "log",
+      event: "subscription_invoice_admin_download",
+      context: "AdminSubscriptionInvoice",
+      userId: row.userId,
+      message: `admin ${admin?.id ?? "?"} downloaded ${name}`,
+      meta: { paymentId: row.id, invoiceNumber: name, adminUserId: admin?.id ?? null },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}.pdf"`);
+    res.setHeader("Content-Length", String(pdf.length));
+    res.end(pdf);
   }
 
   /**
