@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { FinanceFlagService, type AccountingMode } from "./flag.service";
-import { FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-features";
+import { ACCOUNTING_ENABLED_KEY, FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-features";
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
@@ -120,6 +120,7 @@ export class FinanceV2AdminService {
               coalesce(fs.finance_v2_enabled, false) as enabled, fs.accounting_mode as mode,
               fs.enabled_at as "enabledAt", fs.ledger_started_at as "ledgerStartedAt",
               coalesce(ev.new_value = 'false'::jsonb, false) as "adminOff",
+              exists (select 1 from account_limit_overrides o where o.account_id = u.id and o.limit_key = '${ACCOUNTING_ENABLED_KEY}' and o.value = 1) as "accountingGranted",
               case when ap.account_user_id is null then null
                    else json_build_object('outcome', ap.new_value->>'outcome', 'reason', ap.reason, 'at', ap.created_at,
                                           'dryRunId', ap.new_value->'dryRunId', 'realRunId', ap.new_value->'realRunId') end as "autoProvision"
@@ -137,7 +138,7 @@ export class FinanceV2AdminService {
         order by u.id`,
     );
     return r.rows.map((row: any) => {
-      const planLocked = !planHasFeature(row.packagePlan, "accounting");
+      const planLocked = !planHasFeature(row.packagePlan, "accounting", row.accountingGranted === true);
       return { ...row, planLocked, requiredPlan: planLocked ? FEATURE_REQUIRED_PLAN : null, effective: row.enabled === true && !planLocked };
     });
   }

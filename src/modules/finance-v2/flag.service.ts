@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from "@nestjs/common";
 import { FV2_POOL, type Fv2Pool } from "./db";
 import { appLog } from "../../common/logging/app-log.service";
 import { currentRequestContext, type RequestContext } from "../../common/request-context";
-import { planHasFeature, planKeysWithout } from "../../common/plan-features";
+import { ACCOUNTING_ENABLED_KEY, planHasFeature, planKeysAccountingGrantable, planKeysWithout } from "../../common/plan-features";
 
 export type AccountingMode = "owner" | "manager";
 
@@ -13,14 +13,16 @@ export interface FlagState {
   ledgerStartedAt: Date | null;
   /** The stored `finance_settings.finance_v2_enabled`, untouched by plan changes (admin views only). */
   flagOn: boolean;
-  /** The account owner's plan does not include `accounting` (common/plan-features.ts). */
+  /** The account owner's plan does not include `accounting`, and no admin grant opens it (common/plan-features.ts). */
   planLocked: boolean;
 }
 
 const OFF: FlagState = Object.freeze({ on: false, mode: null, ledgerStartedAt: null, flagOn: false, planLocked: false }) as FlagState;
 
 /** Locked plan keys as a SQL literal list — fixed constants from packages.ts, never user input. */
-const LOCKED_PLAN_SQL = planKeysWithout("accounting").map((k) => `'${k.replace(/'/g, "''")}'`).join(", ");
+const sqlList = (keys: string[]) => keys.map((k) => `'${k.replace(/'/g, "''")}'`).join(", ");
+const LOCKED_PLAN_SQL = sqlList(planKeysWithout("accounting"));
+const GRANTABLE_PLAN_SQL = sqlList(planKeysAccountingGrantable());
 
 /**
  * SQL predicate: the account in column `accountCol` is ENTITLED to Finance v2
@@ -28,11 +30,17 @@ const LOCKED_PLAN_SQL = planKeysWithout("accounting").map((k) => `'${k.replace(/
  * background jobs that pick accounts straight from `finance_settings`: add
  * `and ${fv2PlanEntitledSql("s.account_user_id")}` next to
  * `finance_v2_enabled`, so they skip exactly the accounts `FinanceFlagService`
- * reads as off. A null/unknown plan stays entitled (DEFAULT_PACKAGE).
+ * reads as off. A null/unknown plan stays entitled (DEFAULT_PACKAGE). A
+ * grantable plan (عقاري) is entitled while an admin grant
+ * (account_limit_overrides `accounting.enabled` = 1) is in place.
  */
 export function fv2PlanEntitledSql(accountCol: string): string {
   if (!LOCKED_PLAN_SQL) return "true";
-  return `coalesce((select pu.package_plan from users pu where pu.id = ${accountCol}), '') not in (${LOCKED_PLAN_SQL})`;
+  const plan = `coalesce((select pu.package_plan from users pu where pu.id = ${accountCol}), '')`;
+  const byPlan = `${plan} not in (${LOCKED_PLAN_SQL})`;
+  if (!GRANTABLE_PLAN_SQL) return byPlan;
+  return `(${byPlan} or (${plan} in (${GRANTABLE_PLAN_SQL}) and exists (select 1 from account_limit_overrides alo
+             where alo.account_id = ${accountCol} and alo.limit_key = '${ACCOUNTING_ENABLED_KEY}' and alo.value = 1)))`;
 }
 const TTL_MS = 15_000;
 const LOG_EVERY_MS = 60_000;
@@ -145,7 +153,8 @@ export class FinanceFlagService {
     let row: any;
     try {
       const r = await this.pool.query(
-        `select fs.finance_v2_enabled as on, fs.accounting_mode as mode, fs.ledger_started_at as started, u.package_plan as plan
+        `select fs.finance_v2_enabled as on, fs.accounting_mode as mode, fs.ledger_started_at as started, u.package_plan as plan,
+                exists (select 1 from account_limit_overrides o where o.account_id = k.id and o.limit_key = '${ACCOUNTING_ENABLED_KEY}' and o.value = 1) as granted
            from (select $1::int as id) k
            left join finance_settings fs on fs.account_user_id = k.id
            left join users u on u.id = k.id`,
@@ -159,7 +168,7 @@ export class FinanceFlagService {
       row = { plan };
     }
     const flagOn = row.on === true;
-    const planLocked = !planHasFeature(row.plan ?? null, "accounting");
+    const planLocked = !planHasFeature(row.plan ?? null, "accounting", row.granted === true);
     return { on: flagOn && !planLocked, mode: row.mode ?? null, ledgerStartedAt: row.started ?? null, flagOn, planLocked };
   }
 

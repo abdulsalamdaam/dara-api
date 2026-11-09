@@ -56,6 +56,12 @@ export interface AdminLimitsView {
   overrides: OverrideView[];
   addons: AddonView[];
   ejar: { mode: EjarAccountMode; envMode: string; effective: boolean };
+  /**
+   * Accounting on request: `planIncludes` = the package has it; `grantable` =
+   * an admin may switch it on (عقاري); `granted` = the switch is on;
+   * `effective` = what the account gets.
+   */
+  accounting: { planIncludes: boolean; grantable: boolean; granted: boolean; effective: boolean };
   /** Latest 50. */
   events: LimitEvent[];
 }

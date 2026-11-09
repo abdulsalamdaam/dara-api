@@ -132,9 +132,24 @@ describe("FinanceFlagService (DESIGN §1.2)", () => {
     it("fv2PlanEntitledSql excludes exactly the plan keys without accounting; a null plan stays entitled", () => {
       const sql = fv2PlanEntitledSql("s.account_user_id");
       assert.match(sql, /pu\.id = s\.account_user_id/);
-      assert.match(sql, /not in \('basic', 'tenant'\)$/);
+      assert.match(sql, /not in \('basic', 'tenant'\) or /);
       assert.match(sql, /coalesce\(/);
       for (const k of ["professional", "enterprise", "broker"]) assert.ok(!sql.includes(`'${k}'`), k);
+    });
+    it("fv2PlanEntitledSql: an عقاري account is entitled only with the admin accounting grant", () => {
+      const sql = fv2PlanEntitledSql("s.account_user_id");
+      assert.match(sql, /in \('basic'\) and exists \(select 1 from account_limit_overrides alo/);
+      assert.match(sql, /alo\.account_id = s\.account_user_id and alo\.limit_key = 'accounting\.enabled' and alo\.value = 1/);
+    });
+    it("basic with the admin accounting grant: stored flag on reads on", async () => {
+      const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "owner", started: null, plan: "basic", granted: true })).pool);
+      const s = await f.state(1);
+      assert.equal(s.on, true);
+      assert.equal(s.planLocked, false);
+    });
+    it("tenant with a stray accounting grant stays locked", async () => {
+      const f = new FinanceFlagService(fakePool(() => ({ on: true, mode: "owner", started: null, plan: "tenant", granted: true })).pool);
+      assert.equal((await f.state(1)).on, false);
     });
   });
 });
