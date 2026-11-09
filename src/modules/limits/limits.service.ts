@@ -7,6 +7,9 @@ import {
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { EJAR_ENABLED_KEY, effectiveLimit, effectiveLimits, isLimitKey, type LimitKey } from "../../common/limits";
 import { amountInclVat } from "../../common/addon-catalog";
+import { ACCOUNTING_ENABLED_KEY, planAccountingGrantable, planHasFeature } from "../../common/plan-features";
+import { accountAccountingGranted, accountPlan } from "../../common/account-plan";
+import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
 import { accountEjarAccessMode, accountEjarMode, ejarDenialFor, ejarEnvMode, type EjarAccountMode } from "../ejar/ejar.access";
 import { AddonCatalogService } from "./addon-catalog.service";
 import {
@@ -116,7 +119,7 @@ export class LimitsService {
 
   async adminView(accountId: number): Promise<AdminLimitsView> {
     await this.assertAccount(accountId);
-    const [limits, overrides, addons, mode, accessMode, events] = await Promise.all([
+    const [limits, overrides, addons, mode, accessMode, events, plan, granted] = await Promise.all([
       effectiveLimits(this.db, accountId),
       this.overrides(accountId),
       this.addonViews(accountId),
@@ -124,10 +127,17 @@ export class LimitsService {
       // The switch plus the subscription (paid → on, trial → off) — what the account actually gets.
       accountEjarAccessMode(this.db, accountId),
       this.events(accountId, 1, 50).then((r) => r.items),
+      accountPlan(this.db, accountId),
+      accountAccountingGranted(this.db, accountId),
     ]);
+    const planIncludes = planHasFeature(plan, "accounting");
     return {
       limits, overrides, addons,
       ejar: { mode, envMode: ejarEnvMode(), effective: ejarDenialFor(accessMode, null) == null },
+      accounting: {
+        planIncludes, grantable: planAccountingGrantable(plan), granted,
+        effective: planHasFeature(plan, "accounting", granted),
+      },
       events,
     };
   }
@@ -248,6 +258,38 @@ export class LimitsService {
         oldValue: val(before), newValue: val(mode), note, meta: { from: before, to: mode },
       });
     });
+  }
+
+  /**
+   * Accounting on request (plan-features.ts ACCOUNTING_ENABLED_KEY): switch
+   * Finance v2 on for a grantable plan (عقاري) without changing the package —
+   * everything else the plan locks stays locked. Off removes the grant; the
+   * ledger is kept and reads plan-locked, as after a downgrade. On queues
+   * auto-provisioning so the ledger starts now, not at the nightly sweep.
+   */
+  async setAccountingAccess(accountId: number, enabled: boolean, note: string, actor: LimitsActor): Promise<void> {
+    await this.db.transaction(async (raw) => {
+      const tx = raw as unknown as Tx;
+      await this.lockAccount(tx, accountId);
+      const plan = await accountPlan(tx, accountId);
+      const before = await accountAccountingGranted(tx, accountId);
+      if (enabled && !planAccountingGrantable(plan)) {
+        throw new BadRequestException(
+          planHasFeature(plan, "accounting") ? "accounting is already part of this account's package" : "accounting can be granted on the عقاري package only",
+        );
+      }
+      if (enabled) {
+        await this.upsertOverride(tx, accountId, ACCOUNTING_ENABLED_KEY, 1, note, actor.userId);
+      } else {
+        await tx.delete(accountLimitOverridesTable)
+          .where(and(eq(accountLimitOverridesTable.accountId, accountId), eq(accountLimitOverridesTable.limitKey, ACCOUNTING_ENABLED_KEY)));
+      }
+      await this.recordEvent(tx, {
+        accountId, actor, source: "admin_override", limitKey: ACCOUNTING_ENABLED_KEY,
+        oldValue: before ? 1 : 0, newValue: enabled ? 1 : 0, note, meta: { accountingGrant: enabled },
+      });
+    });
+    if (enabled) signalFv2Entitlement(accountId, "admin_accounting_grant");
   }
 
   /**

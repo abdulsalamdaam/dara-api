@@ -58,6 +58,16 @@ export class AdminLimitsController {
     return this.limits.adminView(userId);
   }
 
+  /** `{ enabled: boolean, note }` — accounting on request for an عقاري account (plan-features.ts ACCOUNTING_ENABLED_KEY). */
+  @Put("customers/:userId/accounting-access")
+  async setAccountingAccess(
+    @CurrentUser() user: AuthUser, @Param("userId", ParseInt4Pipe) userId: number, @Body() body: any,
+  ): Promise<AdminLimitsView> {
+    if (typeof body?.enabled !== "boolean") throw new BadRequestException("enabled must be true | false");
+    await this.limits.setAccountingAccess(userId, body.enabled, requireNote(body?.note), admin(user));
+    return this.limits.adminView(userId);
+  }
+
   /** `{ limitKey, quantity, mode: free|invoice|offer, catalogKey?, priceSar?, period, endsAt?, activation, note, notify }`. */
   @Post("customers/:userId/addons")
   async createAddon(

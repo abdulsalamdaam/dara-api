@@ -13,7 +13,7 @@ import { qaBypassEnabled, EMAIL_OTP_BYPASS_CODE } from "../../common/qa-bypass";
 import { EmailService } from "../email/email.service";
 import { ROLE_PRESETS, ALL_PERMISSIONS } from "../../common/permissions";
 import { isPackagePlan, isBillingCycle, purchasableCycle, planAllowedForUserType, planUserTypeError } from "../../common/packages";
-import { planFeatures } from "../../common/plan-features";
+import { accountFeatures } from "../../common/account-plan";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { accountEjarDenial } from "../ejar/ejar.access";
@@ -940,8 +940,8 @@ export class AuthService {
       companyId: row.companyId,
       roleId: row.roleId,
       packagePlan,
-      // Features the account owner's plan unlocks (common/plan-features.ts).
-      planFeatures: planFeatures(packagePlan),
+      // Features the account owner's plan unlocks, plus an admin accounting grant (common/plan-features.ts).
+      planFeatures: await accountFeatures(this.db, row.ownerUserId ?? row.id, packagePlan),
       // Ejar lookups/imports open to this caller: EJAR_ACCESS plus the
       // account's own switch (ejar/ejar.access.ts).
       ...(await ejarAccessFields(this.db, row.ownerUserId ?? row.id, row.id)),

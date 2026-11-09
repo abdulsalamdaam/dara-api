@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { ForbiddenException } from "@nestjs/common";
 import {
   FEATURE_REQUIRED_PLAN, LOCKED_OPS_REPORTS, PLAN_FEATURE_KEYS, PlanUpgradeRequiredException,
-  planFeatures, planHasFeature, planKeysWithout, planUpgradeRequiredBody,
+  planAccountingGrantable, planAllowsCommission, planFeatures, planHasFeature, planKeysAccountingGrantable, planKeysWithout,
+  planUpgradeRequiredBody,
 } from "./plan-features";
 
 describe("plan features (pricing table → enforcement)", () => {
@@ -63,5 +64,29 @@ describe("plan features (pricing table → enforcement)", () => {
     assert.ok(e instanceof ForbiddenException);
     assert.equal(e.getStatus(), 403);
     assert.equal((e.getResponse() as any).teaser, null);
+  });
+});
+
+describe("accounting on request (admin grant)", () => {
+  it("is grantable on عقاري only", () => {
+    assert.equal(planAccountingGrantable("basic"), true);
+    for (const p of ["tenant", "professional", "enterprise", "broker", null]) assert.equal(planAccountingGrantable(p), false, String(p));
+    assert.deepEqual(planKeysAccountingGrantable(), ["basic"]);
+  });
+
+  it("a grant on عقاري adds accounting and nothing else", () => {
+    assert.deepEqual(planFeatures("basic", true), ["accounting"]);
+    assert.equal(planHasFeature("basic", "accounting", true), true);
+    assert.equal(planHasFeature("basic", "advanced_reports", true), false);
+    assert.equal(planHasFeature("basic", "rental_offers", true), false);
+  });
+
+  it("a grant never brings commission (that stays an Offices/Companies activity)", () => {
+    assert.equal(planAllowsCommission("basic"), false);
+  });
+
+  it("a grant is ignored on tenant, and changes nothing on plans that already have accounting", () => {
+    assert.deepEqual(planFeatures("tenant", true), []);
+    assert.deepEqual(planFeatures("professional", true), ["accounting", "advanced_reports", "rental_offers"]);
   });
 });

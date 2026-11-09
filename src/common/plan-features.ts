@@ -36,6 +36,24 @@ const FEATURES_BY_PLAN: Record<PackagePlan, readonly PlanFeature[]> = {
   enterprise: ALL,
 };
 
+/**
+ * Accounting on request (عقاري only): an admin may switch `accounting` on for
+ * one account without changing its package. It lives in
+ * account_limit_overrides under ACCOUNTING_ENABLED_KEY (1 = granted; no row =
+ * the plan decides). It unlocks Finance v2 and nothing else — commission
+ * (planAllowsCommission), the analysis reports, rental offers and every
+ * عقاري quota (one landlord, the Ejar landlord-CR/ID pin) stay as the plan
+ * says, because those read the plan alone.
+ */
+export const ACCOUNTING_ENABLED_KEY = "accounting.enabled";
+
+/** The plans an admin may grant accounting to. */
+export const ACCOUNTING_GRANTABLE_PLANS: readonly PackagePlan[] = ["basic"];
+
+export function planAccountingGrantable(plan: string | null | undefined): boolean {
+  return ACCOUNTING_GRANTABLE_PLANS.includes(resolvePackage(plan).key);
+}
+
 /** Ops report ids that need a feature (everything else stays open on every plan). */
 export const LOCKED_OPS_REPORTS: Record<string, PlanFeature> = {
   defaulting_tenants: "advanced_reports",
@@ -46,13 +64,19 @@ export const LOCKED_OPS_REPORTS: Record<string, PlanFeature> = {
   contract_movement: "advanced_reports",
 };
 
-/** The features a (stored, possibly null/legacy) plan key unlocks. */
-export function planFeatures(plan: string | null | undefined): PlanFeature[] {
-  return [...FEATURES_BY_PLAN[resolvePackage(plan).key]];
+/**
+ * The features a (stored, possibly null/legacy) plan key unlocks.
+ * `accountingGranted`: the account's admin grant (ACCOUNTING_ENABLED_KEY) —
+ * adds `accounting` on a grantable plan, ignored on any other.
+ */
+export function planFeatures(plan: string | null | undefined, accountingGranted = false): PlanFeature[] {
+  const out = [...FEATURES_BY_PLAN[resolvePackage(plan).key]];
+  if (accountingGranted && !out.includes("accounting") && planAccountingGrantable(plan)) out.unshift("accounting");
+  return out;
 }
 
-export function planHasFeature(plan: string | null | undefined, f: PlanFeature): boolean {
-  return FEATURES_BY_PLAN[resolvePackage(plan).key].includes(f);
+export function planHasFeature(plan: string | null | undefined, f: PlanFeature, accountingGranted = false): boolean {
+  return planFeatures(plan, accountingGranted).includes(f);
 }
 
 /**
@@ -64,6 +88,12 @@ export function planHasFeature(plan: string | null | undefined, f: PlanFeature):
 export function planKeysWithout(f: PlanFeature): string[] {
   const keys = [...Object.keys(PACKAGES), ...Object.keys(LEGACY_ALIASES)];
   return keys.filter((k) => !planHasFeature(k, f)).sort();
+}
+
+/** Every stored plan key (current + legacy alias) on which an admin may grant accounting. For SQL filters. */
+export function planKeysAccountingGrantable(): string[] {
+  const keys = [...Object.keys(PACKAGES), ...Object.keys(LEGACY_ALIASES)];
+  return keys.filter((k) => planAccountingGrantable(k)).sort();
 }
 
 const LOCK_MESSAGE_AR: Record<PlanFeature, string> = {
@@ -113,6 +143,7 @@ export class PlanUpgradeRequiredException extends ForbiddenException {
  * an admin-assigned plan is that plan, null/unknown/`broker` → professional.
  */
 export function planAllowsCommission(plan: string | null | undefined): boolean {
+  // The plan alone: an admin accounting grant on عقاري never brings commission.
   return planHasFeature(plan, "accounting");
 }
 
