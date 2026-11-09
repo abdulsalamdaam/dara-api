@@ -15,7 +15,8 @@ import {
   type CustomerEjarBudget, type EjarBudget, type LookupConfig, type PlanQuota,
 } from "./ejar.budget";
 import {
-  allPartyIdentifiers, computePrefill, computeRequired, lookupUuid, mapLookup, normalizeContractNumber, partyContact, partyMatches,
+  allPartyIdentifiers, computePrefill, computeRequired, lessorIdentifiers, lookupUuid, mapLookup, normalizeContractNumber, normalizeIdentifier,
+  partyContact, partyMatches, tenantIdentifiers,
   partyIdentifiers, pickContractsResource, principalIndexFor, principalsOf, withMain,
   type LookupPrefill, type MainChoice, type MainSide, type MappedLookup, type PartyContact, type RequiredContext, type RequiredEntry,
 } from "./ejar.lookup.map";
@@ -41,6 +42,13 @@ export const PARTY_ID_MISSING_MESSAGE: Record<EjarPartyRole, string> = {
     "أكمل بيانات المؤجر في حسابك أولاً (السجل التجاري أو رقم الهوية) — يُستخدم للتحقق من أن عقد إيجار يخصك · Complete your landlord record (CR or national ID) first — it is how we check the Ejar contract is yours.",
   tenant:
     "أكمل بيانات حسابك أولاً (السجل التجاري أو رقم الهوية) — يُستخدم للتحقق من أنك المستأجر في عقد إيجار · Add your CR or national ID to your account first — it is how we check you are the tenant on the Ejar contract.",
+};
+/** A Details-fallback import: the typed national ID is not the one on the account's record. */
+export const TYPED_ID_MISMATCH_MESSAGE: Record<EjarPartyRole, string> = {
+  landlord:
+    "رقم الهوية المُدخل لا يطابق هوية المؤجر المسجّل في حسابك · The ID number you typed is not your account's landlord ID.",
+  tenant:
+    "رقم الهوية المُدخل لا يطابق رقم الهوية المسجّل في حسابك · The ID number you typed is not the ID on your account.",
 };
 /** Ejar's answer does not name the account's own record on that side of the contract. */
 export const PARTY_MISMATCH_MESSAGE: Record<EjarPartyRole, string> = {
@@ -71,9 +79,31 @@ export function assertPartyIdOnFile(check: EjarPartyCheck): void {
   }
 }
 
-/** True when the inquiry is unpinned, or the pinned identity is on the right side of the contract. */
+/**
+ * The pinned side carries no identifier at all — a Details-fallback answer,
+ * whose individual parties come without their ID numbers. Ejar cannot be
+ * checked against the account then; the user types the ID at the review and
+ * the import requires it to be the account's own (`assertTypedPartyId`).
+ */
+export function partyCheckDeferred(check: EjarPartyCheck, m: Pick<MappedLookup, "parties" | "contract">): boolean {
+  if (!check.role) return false;
+  return (check.role === "landlord" ? lessorIdentifiers(m) : tenantIdentifiers(m)).length === 0;
+}
+
+/** True when the inquiry is unpinned, the check is deferred to the import, or the pinned identity is on the right side of the contract. */
 export function partyCheckPasses(check: EjarPartyCheck, m: Pick<MappedLookup, "parties" | "contract">): boolean {
-  return !check.role || partyMatches(m, check.role, check.idNumber);
+  return !check.role || partyCheckDeferred(check, m) || partyMatches(m, check.role, check.idNumber);
+}
+
+/** A deferred check: the ID typed for the pinned side must be the account's stored one, else 422 party_mismatch. */
+export function assertTypedPartyId(check: EjarPartyCheck, m: Pick<MappedLookup, "parties" | "contract">, body: Record<string, any>): void {
+  if (!partyCheckDeferred(check, m)) return;
+  const typed = normalizeIdentifier(body?.[check.role!]?.idNumber);
+  if (!typed || typed !== normalizeIdentifier(check.idNumber)) {
+    throw new UnprocessableEntityException({
+      code: "party_mismatch", role: check.role, typed: true, message: TYPED_ID_MISMATCH_MESSAGE[check.role!],
+    });
+  }
 }
 
 export function partyMismatch(check: EjarPartyCheck, extra: Record<string, unknown> = {}) {
@@ -113,7 +143,11 @@ export interface LookupResponse extends Omit<MappedLookup, "contractsResource"> 
   /** Every value the import takes from Ejar, as the review's inputs hold them (ids, the city label). */
   prefill: LookupPrefill;
   /** Whose stored identity the inquiry was pinned to, and that it matched (null role: unpinned). */
-  partyCheck: { role: EjarPartyRole | null; idNumber: string | null; matched: boolean | null };
+  partyCheck: {
+    role: EjarPartyRole | null; idNumber: string | null; matched: boolean | null;
+    /** Ejar gave no ID on the pinned side (Details fallback): the user types it, and it must equal `idNumber`. */
+    typedIdRequired?: boolean;
+  };
   /**
    * Ejar's PRINCIPAL lessors / tenants and which one is the main one. The
    * top-level `parties`, `required`, `prefill` and `linkedParties` describe
@@ -557,7 +591,9 @@ export class EjarLookupService {
       prefill: computePrefill(mapped, resolved, cityLabel),
       linkedParties: { landlord: linkedLandlord, tenant: linkedTenant },
       rent: rentFigures(rentBasis(mapped, vatFromContractType(mapped.contract.contractType)), vatFromContractType(mapped.contract.contractType)),
-      partyCheck,
+      partyCheck: partyCheckDeferred({ role: partyCheck.role, idNumber: partyCheck.idNumber }, full)
+        ? { ...partyCheck, matched: null, typedIdRequired: true }
+        : partyCheck,
       principals: { landlord: pLandlord, tenant: pTenant },
       logs,
     };

@@ -18,7 +18,7 @@ import type { EjarLookupStore } from "./ejar.lookup.store";
 import { EJAR_DISABLED_FOR_ACCOUNT_MESSAGE, EJAR_TRIAL_MESSAGE } from "./ejar.access";
 import {
   BAD_FORMAT_MESSAGE, EJAR_LOOKUP_STORE, SCOPE_MISMATCH_MESSAGE, assertPartyIdOnFile, lockedMain, lookupContext, mapSaved,
-  matchedUnitEjarIds, partyCheckPasses, partyMismatch,
+  matchedUnitEjarIds, partyCheckPasses, partyMismatch, assertTypedPartyId,
 } from "./ejar.lookup.service";
 import { EjarImportWriter, ejarCycle, lockImport, type ImportPlan, type ImportResult, type PartyChoice } from "./ejar.import.writer";
 import type { EjarBody } from "./ejar.types";
@@ -272,6 +272,8 @@ export class EjarImportService {
     // list only (co_parties) — never a landlord / tenant row.
     const main = chooseMain(full.parties, body, lockedMain(full.parties, check));
     const mapped = withMain(full, main);
+    // Details fallback (Ejar gave the pinned side no ID): the typed ID must be the account's own.
+    assertTypedPartyId(check, mapped, body);
     const coParties = coPartiesOf(full.parties, main);
 
     // ── Picked records must be the caller's own ──
