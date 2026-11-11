@@ -139,6 +139,13 @@ export interface AdminRegistrationEmailPayload {
   desiredPackagePlan?: string | null;
   desiredBillingCycle?: string | null;
   createdAt?: Date | string | null;
+  /**
+   * Self-serve sign-up: the account is already active on `desiredPackagePlan`
+   * (with a trial ending `trialEndsAt`, if one was granted) — the email is an
+   * FYI and asks for nothing.
+   */
+  autoActivated?: boolean;
+  trialEndsAt?: Date | string | null;
 }
 
 /**
@@ -910,20 +917,27 @@ export class EmailService {
     const cycleLabel = isBillingCycle(payload.desiredBillingCycle) ? CYCLE_LABEL_AR[payload.desiredBillingCycle] : "—";
     const when = riyadhTimestamp(payload.createdAt);
     const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/admin`;
+    const auto = !!payload.autoActivated;
+    const trialEnd = auto && payload.trialEndsAt ? riyadhTimestamp(payload.trialEndsAt) : null;
+    const heading = auto ? `تسجيل جديد في دارا #${payload.id}` : `طلب تسجيل جديد بانتظار المراجعة #${payload.id}`;
+    const intro = auto
+      ? `سجّل عميل جديد في <strong>دارا</strong> وأكّد بريده، وتم تفعيل حسابه تلقائياً${trialEnd ? " مع الفترة التجريبية" : ""}. <strong>لا يلزم أي إجراء</strong> — هذه الرسالة للعلم فقط.`
+      : `وصل طلب تسجيل جديد إلى <strong>دارا</strong>، وهو الآن في قائمة الطلبات المعلّقة بانتظار المراجعة والتفعيل.`;
     const html = layout(`
-      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">طلب تسجيل جديد بانتظار المراجعة #${payload.id}</h1>
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">${heading}</h1>
       <p style="margin:0 0 16px;color:#334155;line-height:1.7;">
-        وصل طلب تسجيل جديد إلى <strong>دارا</strong>، وهو الآن في قائمة الطلبات المعلّقة بانتظار المراجعة والتفعيل.
+        ${intro}
       </p>
       ${row("الاسم", name)}
       ${row("البريد الإلكتروني", payload.email || "—")}
       ${row("الجوال", payload.phone || "—")}
       ${row("نوع الحساب", typeLabel)}
-      ${row("الباقة المطلوبة", planLabel)}
+      ${row(auto ? "الباقة" : "الباقة المطلوبة", planLabel)}
+      ${trialEnd ? row("نهاية الفترة التجريبية", `${trialEnd} (بتوقيت الرياض)`) : ""}
       ${row("دورة الفوترة", cycleLabel)}
       ${row("تاريخ الطلب", `${when} (بتوقيت الرياض)`)}
       <div style="margin-top:24px;text-align:center;">
-        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">مراجعة طلبات التسجيل</a>
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">${auto ? "فتح لوحة الإدارة" : "مراجعة طلبات التسجيل"}</a>
       </div>
       <p style="margin:24px 0 0;color:#64748b;font-size:13px;">
         رسالة تلقائية إلى فريق دارا عند وصول كل طلب تسجيل جديد. يمكنك الرد على هذا البريد للتواصل مع مقدّم الطلب مباشرة.
@@ -931,18 +945,19 @@ export class EmailService {
     `);
     return this.send({
       to: recipients,
-      subject: `طلب تسجيل جديد #${payload.id} — ${name}`,
+      subject: auto ? `تسجيل جديد (مفعّل) #${payload.id} — ${name}` : `طلب تسجيل جديد #${payload.id} — ${name}`,
       html,
       text: [
-        `طلب تسجيل جديد بانتظار المراجعة #${payload.id}`,
+        auto ? `تسجيل جديد — تم التفعيل تلقائياً، لا يلزم أي إجراء #${payload.id}` : `طلب تسجيل جديد بانتظار المراجعة #${payload.id}`,
         `الاسم: ${name}`,
         `البريد الإلكتروني: ${payload.email || "—"}`,
         `الجوال: ${payload.phone || "—"}`,
         `نوع الحساب: ${typeLabel}`,
-        `الباقة المطلوبة: ${planLabel}`,
+        `${auto ? "الباقة" : "الباقة المطلوبة"}: ${planLabel}`,
+        ...(trialEnd ? [`نهاية الفترة التجريبية: ${trialEnd} (بتوقيت الرياض)`] : []),
         `دورة الفوترة: ${cycleLabel}`,
         `تاريخ الطلب: ${when} (بتوقيت الرياض)`,
-        `مراجعة الطلبات: ${link}`,
+        `${auto ? "لوحة الإدارة" : "مراجعة الطلبات"}: ${link}`,
       ].join("\n"),
       // Lets an admin reply straight to the person who registered, the same
       // way sendContactReceived does for the contact form.

@@ -101,8 +101,8 @@ export class AuthController {
   @Post("verify-email-otp")
   @HttpCode(200)
   @Throttle({ default: { limit: 20, ttl: 3600_000 } })
-  verifyEmailOtp(@Body() body: { email?: string; code?: string }) {
-    return this.auth.verifyEmailWithOtp(body?.email ?? "", body?.code ?? "");
+  verifyEmailOtp(@Body() body: { email?: string; code?: string }, @Req() req: Request) {
+    return this.auth.verifyEmailWithOtp(body?.email ?? "", body?.code ?? "", clientCtx(req));
   }
 
   // Re-send a verification link (public; doesn't reveal account existence).
