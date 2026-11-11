@@ -6,6 +6,7 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { TenantAuthGuard } from "../../common/guards/tenant-auth.guard";
 import { TwilioModule } from "../twilio/twilio.module";
 import { SmsModule } from "../sms/sms.module";
+import { TrialSettingsService } from "../admin/trial-settings.service";
 
 /** Anything shorter than this is not a signing key for a production API. */
 const MIN_JWT_SECRET_LENGTH = 32;
@@ -52,7 +53,7 @@ function jwtSecret(): string {
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtAuthGuard, TenantAuthGuard],
+  providers: [AuthService, JwtAuthGuard, TenantAuthGuard, TrialSettingsService],
   exports: [AuthService, JwtAuthGuard, TenantAuthGuard],
 })
 export class AuthModule {}

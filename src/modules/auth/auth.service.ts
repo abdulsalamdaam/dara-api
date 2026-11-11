@@ -17,6 +17,10 @@ import { accountFeatures } from "../../common/account-plan";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { accountEjarDenial } from "../ejar/ejar.access";
+import { registrationRequiresApproval } from "../../common/registration-policy";
+import { TrialSettingsService } from "../admin/trial-settings.service";
+import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
+import { signalPlanChanged } from "../plan-transition/plan-transition-signal";
 
 const MAX_FAILED = 5;
 
@@ -79,7 +83,101 @@ export class AuthService {
     private readonly twilio: TwilioVerifyService,
     private readonly phoneOtp: PhoneOtpService,
     private readonly email: EmailService,
+    private readonly trialSettings: TrialSettingsService,
   ) {}
+
+  /**
+   * Self-serve sign-up: activate a `pending` registration once its email is
+   * proven, on the plan the registrant picked, with the platform trial.
+   *
+   * Mirrors the default branch of `PATCH /admin/registrations/:id/approve`
+   * (no admin overrides): trial on and never consumed → an active trial
+   * window; otherwise an active account on `pending_payment` (pay screen).
+   * Only an account holder's own registration qualifies — employees are
+   * created active by their landlord and never sit in `pending`. Returns false
+   * (and changes nothing) when approval is required (common/registration-policy),
+   * the row is not pending, or another request activated it first.
+   */
+  private async activateSelfServeRegistration(userId: number): Promise<boolean> {
+    if (registrationRequiresApproval()) return false;
+    const [u] = await this.db.select({
+      id: usersTable.id, name: usersTable.name, email: usersTable.email, phone: usersTable.phone,
+      accountStatus: usersTable.accountStatus, ownerUserId: usersTable.ownerUserId,
+      userType: usersTable.userType, trialConsumedAt: usersTable.trialConsumedAt,
+      desiredPlan: usersTable.desiredPackagePlan, desiredCycle: usersTable.desiredBillingCycle,
+      createdAt: usersTable.createdAt,
+    }).from(usersTable).where(and(eq(usersTable.id, userId), isNull(usersTable.deletedAt)));
+    if (!u || u.accountStatus !== "pending" || u.ownerUserId != null) return false;
+
+    // The picked plan, if this account type may hold it; else the entry
+    // landlord plan (the same fallback the admin approval uses).
+    const plan = isPackagePlan(u.desiredPlan) && planAllowedForUserType(u.desiredPlan, u.userType)
+      ? u.desiredPlan : "basic";
+    const cycle = purchasableCycle(u.desiredCycle);
+    const policy = await this.trialSettings.getTrialSettings();
+    const grant = policy.enabled && u.trialConsumedAt == null;
+    const startedAt = new Date();
+    const endsAt = new Date(startedAt.getTime() + policy.days * 86_400_000);
+
+    const [updated] = await this.db.update(usersTable)
+      .set({
+        accountStatus: "active", isActive: true,
+        emailVerified: true, emailVerifiedAt: startedAt, emailVerifyTokenHash: null, emailVerifyExpiresAt: null,
+        packagePlan: plan, billingCycle: cycle,
+        subscriptionStatus: grant ? "active" : "pending_payment",
+        subscriptionStartedAt: grant ? startedAt : null,
+        subscriptionEndsAt: grant ? endsAt : null,
+        subscriptionIsTrial: grant,
+        trialConsumedAt: grant ? startedAt : u.trialConsumedAt,
+        // Kept when nothing was granted, so the pay screen preselects it.
+        desiredPackagePlan: grant ? null : u.desiredPlan,
+        desiredBillingCycle: grant ? null : u.desiredCycle,
+      })
+      .where(and(eq(usersTable.id, u.id), eq(usersTable.accountStatus, "pending")))
+      .returning({ id: usersTable.id });
+    if (!updated) return false;
+
+    signalFv2Entitlement(u.id, "self_serve_activation");
+    // The same event as an admin's first approval: the account's initial plan.
+    signalPlanChanged(u.id, { from: null, to: plan, source: "admin_approve" });
+    // FYI to the platform admins — nothing for them to do.
+    void this.email.sendAdminNewRegistration({
+      id: u.id, name: u.name, email: u.email, phone: u.phone, userType: u.userType,
+      desiredPackagePlan: plan, desiredBillingCycle: cycle, createdAt: u.createdAt,
+      autoActivated: true, trialEndsAt: grant ? endsAt : null,
+    });
+    return true;
+  }
+
+  /** A session for a just-activated self-serve account (same shape as verifyEmailOtp). */
+  private async sessionFor(userId: number, ctx: { ip: string; ua?: string }) {
+    const now = new Date();
+    const [user] = await this.db
+      .select({
+        id: usersTable.id, email: usersTable.email, name: usersTable.name, isActive: usersTable.isActive,
+        accountStatus: usersTable.accountStatus, phone: usersTable.phone, loginCount: usersTable.loginCount,
+        createdAt: usersTable.createdAt, companyId: usersTable.companyId, roleId: usersTable.roleId,
+        roleKey: rolesTable.key, companyName: companiesTable.name,
+      })
+      .from(usersTable)
+      .leftJoin(rolesTable, eq(usersTable.roleId, rolesTable.id))
+      .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
+      .where(eq(usersTable.id, userId));
+    if (!user) return null;
+    const tokenVersion = await this.beginUserSession(user.id, now, { loginCount: sql`${usersTable.loginCount} + 1` });
+    await this.recordLogin(user.id, user.email, "success", ctx.ip, ctx.ua);
+    const roleKey = user.roleKey ?? "user";
+    const token = this.signUserToken({ id: user.id, email: user.email, role: roleKey, tokenVersion, loginAt: now.getTime() });
+    return {
+      token,
+      user: {
+        id: user.id, email: user.email, name: user.name, role: roleKey, isActive: user.isActive,
+        accountStatus: user.accountStatus, phone: user.phone, company: user.companyName,
+        companyId: user.companyId, roleId: user.roleId, loginCount: (user.loginCount ?? 0) + 1,
+        lastLoginAt: now, createdAt: user.createdAt,
+      },
+    };
+  }
 
   private device(ua: string | undefined): string {
     if (!ua) return "Desktop";
@@ -315,8 +413,12 @@ export class AuthService {
     // Mirror the password-flow account-status checks so suspended users
     // can't bypass moderation by switching to email OTP.
     const isAdminRole = user.roleKey === "super_admin" || user.roleKey === "admin";
+    // Self-serve sign-up: a registration that never entered its verification
+    // code may sign in instead — the login code proves the same inbox, and
+    // verifying it activates the account (verifyEmailOtp).
+    const selfServePending = user.accountStatus === "pending" && user.ownerUserId == null && !registrationRequiresApproval();
     if (!isAdminRole) {
-      if (user.accountStatus === "pending") {
+      if (user.accountStatus === "pending" && !selfServePending) {
         throw new ForbiddenException({ error: "حسابك قيد المراجعة، يرجى انتظار موافقة المشرف", code: "PENDING" });
       }
       if (user.accountStatus === "rejected") {
@@ -327,7 +429,7 @@ export class AuthService {
         throw new ForbiddenException({ error: "يرجى تأكيد بريدك الإلكتروني أولاً عبر الرابط المُرسَل إليك", code: "EMAIL_NOT_VERIFIED" });
       }
     }
-    if (!user.isActive) throw new UnauthorizedException("الحساب غير مفعّل. تواصل مع الدعم");
+    if (!user.isActive && !selfServePending) throw new UnauthorizedException("الحساب غير مفعّل. تواصل مع الدعم");
     if (await this.holderBlocked(user.ownerUserId)) {
       throw new UnauthorizedException("حساب المنشأة موقوف. تواصل مع مسؤول الحساب");
     }
@@ -469,6 +571,12 @@ export class AuthService {
     if (!user) {
       await this.recordLogin(null, email, "failed", ctx.ip, ctx.ua);
       throw new UnauthorizedException("الحساب غير موجود");
+    }
+
+    // Self-serve sign-up: a correct login code proves the inbox, so a pending
+    // registration is activated here (no-op unless it is one; see the helper).
+    if (user.accountStatus === "pending" && await this.activateSelfServeRegistration(user.id)) {
+      Object.assign(user, { accountStatus: "active", isActive: true, emailVerified: true });
     }
 
     // The same account-state checks as requestEmailOtp. They lived only on the
@@ -650,7 +758,10 @@ export class AuthService {
     // not wait on Resend, and a notification that fails must not fail the
     // registration. sendAdminNewRegistration resolves its own recipients and
     // swallows every failure, so this can never reject.
-    void this.email.sendAdminNewRegistration({
+    // Self-serve (the default): the admins are told once the account is
+    // activated at email verification, not now — an unverified sign-up may
+    // never become an account. With approval on, they're told now, as before.
+    if (registrationRequiresApproval()) void this.email.sendAdminNewRegistration({
       id: user!.id,
       name: user!.name,
       email: user!.email,
@@ -663,7 +774,10 @@ export class AuthService {
 
     return {
       pending: true,
-      message: "تم استلام طلب التسجيل. أرسلنا رمز تأكيد إلى بريدك الإلكتروني — أدخله لتأكيد بريدك، ثم سيقوم المشرف بمراجعة الحساب وتفعيله.",
+      requiresApproval: registrationRequiresApproval(),
+      message: registrationRequiresApproval()
+        ? "تم استلام طلب التسجيل. أرسلنا رمز تأكيد إلى بريدك الإلكتروني — أدخله لتأكيد بريدك، ثم سيقوم المشرف بمراجعة الحساب وتفعيله."
+        : "أرسلنا رمز تأكيد إلى بريدك الإلكتروني — أدخله لتفعيل حسابك وبدء الفترة التجريبية.",
       user: { id: user!.id, email: user!.email, name: user!.name, accountStatus: user!.accountStatus },
     };
   }
@@ -806,14 +920,14 @@ export class AuthService {
   }
 
   /** Verify an email-verification OTP code (email + 6-digit code). */
-  async verifyEmailWithOtp(email: string, code: string) {
+  async verifyEmailWithOtp(email: string, code: string, ctx?: { ip: string; ua?: string }) {
     const e = normalizeEmail(email);
     const c = (code || "").trim();
     if (!e || !c) throw new BadRequestException("البريد الإلكتروني والرمز مطلوبان");
     const [user] = await this.db.select().from(usersTable)
       .where(and(emailMatches(e), isNull(usersTable.deletedAt)));
     if (!user) throw new BadRequestException({ error: "الرمز غير صحيح أو منتهي الصلاحية", code: "INVALID_CODE" });
-    if (user.emailVerified) {
+    if (user.emailVerified && user.accountStatus !== "pending") {
       return { success: true, alreadyVerified: true, message: "تم تأكيد بريدك الإلكتروني مسبقاً" };
     }
     if (!user.emailVerifyTokenHash || !user.emailVerifyExpiresAt
@@ -825,6 +939,12 @@ export class AuthService {
     await this.db.update(usersTable)
       .set({ emailVerified: true, emailVerifiedAt: new Date(), emailVerifyTokenHash: null, emailVerifyExpiresAt: null })
       .where(eq(usersTable.id, user.id));
+    // Self-serve sign-up: the verified registration is activated on its plan
+    // with the trial, and signed straight in (step 3 of the sign-up wizard).
+    if (user.accountStatus === "pending" && await this.activateSelfServeRegistration(user.id)) {
+      const session = await this.sessionFor(user.id, ctx ?? { ip: "" });
+      return { success: true, alreadyVerified: false, activated: true, message: "تم تأكيد بريدك الإلكتروني وتفعيل حسابك", ...(session ?? {}) };
+    }
     return { success: true, alreadyVerified: false, message: "تم تأكيد بريدك الإلكتروني بنجاح" };
   }
 

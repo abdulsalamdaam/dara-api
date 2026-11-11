@@ -60,7 +60,7 @@ const okPhone: any = { check: async () => true, start: async () => undefined, no
 const ctx = { ip: "127.0.0.1", ua: "spec" };
 
 function service(db: any, phoneOtp: any = okPhone) {
-  return new AuthService(db, jwt, {} as any, phoneOtp, noopEmail);
+  return new AuthService(db, jwt, {} as any, phoneOtp, noopEmail, { getTrialSettings: async () => ({ days: 14, enabled: true }) } as any);
 }
 const setOf = (op: Op) => op.calls.find(([m]) => m === "set")?.[1][0] as Record<string, unknown>;
 const isIncrement = (v: unknown) => is(v, SQL);
@@ -141,6 +141,25 @@ describe("login bumps tokenVersion — single active session", () => {
       await assert.rejects(service(db).verifyEmailOtp({ email: "owner@example.com", code: "482913" }, ctx), ForbiddenException);
       assert.equal(ops.filter((o) => o.kind === "update" && o.table === "users").length, 0);
     }
+  });
+
+  it("email OTP: a self-serve pending registration is activated with the trial and signed in", async () => {
+    const codeHash = await bcrypt.hash("482913", 4);
+    const pending = { ...USER, accountStatus: "pending", isActive: false, emailVerified: false, ownerUserId: null };
+    const { db, ops } = fakeDb({
+      "select:email_otp_tokens": [[{ id: 1, codeHash, attempts: 0 }]],
+      "select:users": [[pending], [{ ...pending, userType: "individual", trialConsumedAt: null, desiredPlan: "basic", desiredCycle: "yearly" }]],
+      "update:users": [[{ id: USER.id }], [{ tokenVersion: 12 }]],
+    });
+    const res = await service(db).verifyEmailOtp({ email: "owner@example.com", code: "482913" }, ctx);
+    const activation = setOf(ops.filter((o) => o.kind === "update" && o.table === "users")[0]!);
+    assert.equal(activation.accountStatus, "active");
+    assert.equal(activation.packagePlan, "basic");
+    assert.equal(activation.subscriptionIsTrial, true);
+    assert.equal(activation.subscriptionStatus, "active");
+    const days = ((activation.subscriptionEndsAt as Date).getTime() - (activation.subscriptionStartedAt as Date).getTime()) / 86_400_000;
+    assert.equal(days, 14);
+    assert.equal(jwt.verify<any>(res.token).tv, 12);
   });
 
   it("a failed code bumps nothing", async () => {
