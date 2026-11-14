@@ -301,8 +301,11 @@ export class EjarImportService {
     }
 
     const propertyRow = await existing("property", (id) => this.store.property(accountId, id));
-    const unitRow = await existing("unit", (id) => this.store.unit(accountId, id));
-    if (unitRow && (!propertyRow || unitRow.propertyId !== propertyRow.id)) {
+    // One contract can let several units: `unit.existingIds` picks them all
+    // (`unit.existingId` is the single-unit form and still accepted).
+    const unitRows = await this.existingUnits(accountId, body?.unit, notInAccount);
+    const unitRow = unitRows[0] ?? null;
+    if (unitRows.some((u) => !propertyRow || u.propertyId !== propertyRow.id)) {
       throw new BadRequestException({
         code: "invalid_field", key: "unit.existingId",
         message: "الوحدة المختارة لا تتبع العقار المختار · The chosen unit does not belong to the chosen property.",
@@ -464,7 +467,7 @@ export class EjarImportService {
 
     let unit: ImportPlan["unit"];
     if (unitRow) {
-      unit = { existingId: unitRow.id };
+      unit = { existingIds: unitRows.map((u) => u.id) };
     } else if (ejarUnits.length) {
       // Ejar's units, reused by Ejar UUID under the property; one with the
       // same number already on an existing property is linked, not duplicated.
@@ -531,6 +534,40 @@ export class EjarImportService {
       invoices: summarizeInvoices(saved.invoicesBody as EjarBody | null),
     };
     return this.runner.run(accountId, plan);
+  }
+
+  /**
+   * The existing units the review picked: `unit.existingIds` (several) or
+   * `unit.existingId` (one). Each must be a valid id in the caller's account;
+   * duplicates collapse. Empty when the body picks none.
+   */
+  private async existingUnits(
+    accountId: number,
+    unit: Record<string, any> | undefined,
+    notInAccount: (key: string) => Error,
+  ): Promise<Array<{ id: number; propertyId: number; usageLookupId: number | null }>> {
+    const many = unit?.existingIds;
+    if (many != null && !Array.isArray(many)) {
+      throw new BadRequestException({ code: "invalid_field", key: "unit.existingIds", message: "unit.existingIds must be a list of unit ids" });
+    }
+    const raw: unknown[] = Array.isArray(many) && many.length ? many : blank(unit?.existingId) ? [] : [unit!.existingId];
+    if (raw.length > 200) {
+      throw new BadRequestException({ code: "invalid_field", key: "unit.existingIds", message: "Too many units on one contract" });
+    }
+    const key = Array.isArray(many) && many.length ? "unit.existingIds" : "unit.existingId";
+    const ids: number[] = [];
+    for (const v of raw) {
+      const id = idOf(v);
+      if (id == null) throw new BadRequestException({ code: "invalid_field", key, message: `${key} is not a valid id` });
+      if (!ids.includes(id)) ids.push(id);
+    }
+    const rows = [];
+    for (const id of ids) {
+      const row = await this.store.unit(accountId, id);
+      if (!row) throw notInAccount(key);
+      rows.push(row);
+    }
+    return rows;
   }
 
   private contractFields(

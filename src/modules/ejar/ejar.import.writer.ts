@@ -628,7 +628,7 @@ export class EjarImportWriter {
 
     // 4) Unit
     let unitIds: number[];
-    if ("existingId" in plan.unit) { unitIds = [plan.unit.existingId]; linked.push("unit"); }
+    if ("existingIds" in plan.unit) { unitIds = [...plan.unit.existingIds]; for (const _ of unitIds) linked.push("unit"); }
     else if ("ejar" in plan.unit) {
       // Ejar's units: reused by Ejar UUID under the property (upsertUnits), or
       // linked when the same number already exists there.
@@ -785,7 +785,8 @@ export interface ImportPlan {
         };
       };
   unit:
-    | { existingId: number }
+    /** Units picked in the review — one or several (a contract may let more than one). */
+    | { existingIds: number[] }
     | { create: { u: Record<string, unknown>; overrides: UnitOverrides } }
     | {
         ejar: {

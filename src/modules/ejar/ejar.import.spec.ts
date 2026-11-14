@@ -184,9 +184,31 @@ describe("POST /ejar/import (service)", () => {
     assert.equal((plan.landlord as { party: any }).party.name, "فهد تجريبي");
     assert.equal((plan.landlord as { party: any }).party.idNumber, "1000000001");
     assert.deepEqual(plan.property, { existingId: 31 });
-    assert.deepEqual(plan.unit, { existingId: 41 });
+    assert.deepEqual(plan.unit, { existingIds: [41] });
     assert.equal(plan.contract.vatFallback, false, "residential contract → exempt");
     assert.equal(plan.contract.depositAmount, null, "a zero deposit is no deposit");
+  });
+
+  it("links several picked units to one contract (unit.existingIds)", async () => {
+    await seed(individualDetails());
+    w.store.properties.push({ id: 31, accountId: 1, ownerId: 11, usageLookupId: 3 }, { id: 32, accountId: 1, ownerId: null, usageLookupId: 3 });
+    w.store.units.push(
+      { id: 41, propertyId: 31, unitNumber: "G14", usageLookupId: null },
+      { id: 42, propertyId: 31, unitNumber: "G15", usageLookupId: null },
+      { id: 43, propertyId: 32, unitNumber: "X1", usageLookupId: null },
+    );
+    const body = (unit: unknown) => ({
+      contract_number: CN, landlord: { idNumber: "1000000001" }, tenant: { idNumber: "2000000002" },
+      property: { existingId: 31 }, unit,
+    });
+    await svc.import(USER, body({ existingIds: [41, 42, 41] }));
+    assert.deepEqual(runner.plans[0].unit, { existingIds: [41, 42] }, "deduplicated, in the picked order");
+    // A unit on another property, one outside the account, or a bad id is refused.
+    assert.equal((await httpError(svc.import(USER, body({ existingIds: [41, 43] })))).status, 400);
+    assert.equal((await httpError(svc.import(USER, body({ existingIds: [41, 99] })))).status, 404);
+    assert.equal((await httpError(svc.import(USER, body({ existingIds: [41, "x"] })))).status, 400);
+    assert.equal((await httpError(svc.import(USER, body({ existingIds: 41 })))).status, 400);
+    assert.equal(runner.plans.length, 1);
   });
 
   it("individual parties need an ID number typed (400 missing_fields)", async () => {
