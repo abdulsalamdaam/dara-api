@@ -792,7 +792,7 @@ const blank = (v: unknown) => v == null || (typeof v === "string" && v.trim() ==
 
 /**
  * The required keys an import body leaves unsatisfied. A section with an
- * `existingId` satisfies all of its keys; property/unit fields are read from
+ * `existingId` (or a non-empty `existingIds`) satisfies all of its keys; property/unit fields are read from
  * `<section>.new`, party fields from the section itself.
  */
 export function missingRequired(required: RequiredEntry[], body: Record<string, any>): string[] {
@@ -801,6 +801,7 @@ export function missingRequired(required: RequiredEntry[], body: Record<string, 
     if (!r.required) continue;
     const sec = body?.[r.section];
     if (sec && sec.existingId != null && sec.existingId !== "") continue;
+    if (sec && Array.isArray(sec.existingIds) && sec.existingIds.length > 0) continue;
     const field = r.key.slice(r.section.length + 1);
     const holder = r.section === "property" || r.section === "unit" ? sec?.new : sec;
     if (blank(holder?.[field])) missing.push(r.key);
