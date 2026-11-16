@@ -20,7 +20,6 @@ import { RecurringBillingService, STALE_PROCESSING_MS } from "./recurring-billin
 
 const SECRET = "whsec_test_only";
 const U = 9201;
-const MIG_0096 = join(__dirname, "../../../db/drizzle/0096_linked_accounts.sql");
 const MIG_0097 = join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql");
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -118,9 +117,7 @@ describe("recurring billing with saved Moyasar tokens (real Postgres)", { skip: 
     globalThis.fetch = fakeFetch as any;
 
     t = await withDb({ legacy: "full", migrate: false });
-    await t.apply(MIG_0096);
     await t.apply(MIG_0097);
-    await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
