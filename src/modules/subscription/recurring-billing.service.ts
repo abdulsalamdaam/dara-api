@@ -1,3 +1,4 @@
+import { tokenizationEnabled, testPriceFor } from "../../common/billing-flags";
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, lt, lte, ne, sql } from "drizzle-orm";
@@ -55,7 +56,7 @@ export const STALE_PROCESSING_MS = 15 * 60 * 1000;
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
 const flag = (k: string) => String(process.env[k] || "").toLowerCase() === "true";
-export const tokenizationEnabled = () => flag("BILLING_TOKENIZATION_ENABLED") && isMoyasarConfigured() && !!moyasarPublishableKey();
+export { tokenizationEnabled } from "../../common/billing-flags";
 export const autoRenewEnabled = () => flag("BILLING_AUTORENEW_ENABLED");
 export const applePayRecurringEnabled = () => flag("BILLING_APPLEPAY_RECURRING");
 
@@ -115,8 +116,8 @@ export class RecurringBillingService {
     if (!u) throw new NotFoundException("Account not found");
     const method = await this.defaultMethod(ownerId, u.defaultPaymentMethodId);
     return {
-      enabled: tokenizationEnabled(),
-      publishableKey: tokenizationEnabled() ? moyasarPublishableKey() : null,
+      enabled: tokenizationEnabled(ownerId),
+      publishableKey: tokenizationEnabled(ownerId) ? moyasarPublishableKey() : null,
       testMode: isMoyasarTestMode(),
       applePay: applePayRecurringEnabled(),
       autoRenew: !!u.autoRenew,
@@ -147,7 +148,7 @@ export class RecurringBillingService {
    * makes the payment; `complete` then confirms it with Moyasar.
    */
   async startCheckout(user: AuthUser, body: any) {
-    if (!tokenizationEnabled()) throw new BadRequestException({ code: "TOKENIZATION_DISABLED", message: "الدفع داخل التطبيق غير مفعّل" });
+    if (!tokenizationEnabled(user.ownerUserId ?? user.id)) throw new BadRequestException({ code: "TOKENIZATION_DISABLED", message: "الدفع داخل التطبيق غير مفعّل" });
     const { ownerId, plan, cycle, amount, shared } = await resolvePaySelection(this.db, user, body);
 
     // One open checkout per account: an earlier one the user abandoned is closed
@@ -352,7 +353,7 @@ export class RecurringBillingService {
    */
   async replaceCard(user: AuthUser, tokenId: string) {
     if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
-    if (!tokenizationEnabled()) throw new BadRequestException({ code: "TOKENIZATION_DISABLED", message: "الدفع داخل التطبيق غير مفعّل" });
+    if (!tokenizationEnabled(user.id)) throw new BadRequestException({ code: "TOKENIZATION_DISABLED", message: "الدفع داخل التطبيق غير مفعّل" });
     if (!/^token_[A-Za-z0-9]{8,80}$/.test(String(tokenId || ""))) throw new BadRequestException("رمز البطاقة غير صالح");
     const userId = user.id;
     const tok = await fetchMoyasarToken(tokenId).catch(() => null);
@@ -469,7 +470,7 @@ export class RecurringBillingService {
       return { status: "skipped", reason: "plan_not_payable" };
     }
     const shared = await sharedGroupCharge(this.db, userId, plan, cycle);
-    const amount = shared ? shared.charged : planPrice(plan, cycle);
+    const amount = testPriceFor(userId) ?? (shared ? shared.charged : planPrice(plan, cycle));
     if (!amount || amount <= 0) return { status: "skipped", reason: "no_amount" };
 
     const method = await this.defaultMethod(userId, u.defaultPaymentMethodId);

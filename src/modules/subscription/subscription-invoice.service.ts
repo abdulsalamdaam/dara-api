@@ -1,3 +1,4 @@
+import { testPriceFor } from "../../common/billing-flags";
 import { Injectable, Logger } from "@nestjs/common";
 import { eq } from "drizzle-orm";
 import { usersTable, companiesTable, subscriptionPaymentsTable } from "@dara/database";
@@ -359,6 +360,8 @@ export class SubscriptionInvoiceService {
     try {
       const [row] = await db.select().from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.id, paymentId));
       if (!row || row.status !== "paid") return;
+      // A production test account's payments are not news to the admins.
+      if (testPriceFor(row.userId) != null) return;
       const { user, company } = await this.loadBuyer(db, row.userId);
       await this.email.sendAdminPaymentReceived({
         paymentId: row.id,
