@@ -1311,6 +1311,47 @@ The webhook looks up `metadata.subscriptionPaymentId` **by primary key with no
 user scoping**, so a staging payment can activate an unrelated production
 account. Scope that lookup before relying on staging for payment testing.
 
+### Recurring billing — saved cards (Moyasar tokens), staging only (16 Nov 2026)
+
+Replaces "send an invoice link every period" with a saved card charged by the
+API. Off unless the flags are set; with them off the hosted-invoice flow is
+exactly as before, so existing subscribers keep working. Their next payment
+goes through the in-app checkout and that saves the card.
+
+- **Flow.** `POST /me/subscription/checkout` → the Moyasar.js form in the
+  browser (publishable key, `save_card: true`) → back on `?checkout=<row>&id=`,
+  `POST …/checkout/:id/complete` confirms with `GET /v1/payments/:id`. The
+  webhook does the same for a payment event with no invoice id. The token
+  (`source.token`) goes in `payment_methods`, and `users.next_billing_at` =
+  the period end.
+- **Renewal job** (`RecurringBillingScheduler`, hourly, `BILLING_AUTORENEW_ENABLED=true`)
+  charges `POST /v1/payments` with `source.type=token` (secret key, no 3DS for
+  an active token).
+- **No double charge.** One renewal row per (account, period end), enforced by
+  a unique index. The row is claimed `processing` before any call. Each
+  attempt's `given_id` is stored first, and Moyasar returns the existing
+  payment for a repeated id. A run that died mid-call is recovered by looking
+  that id up after 15 minutes, never by charging again.
+- **Dunning.** A failure sets `past_due` and retries on day 1, 3 and 7 after
+  the period end, each with an "update your card" email. Then it stops, and
+  the existing 15-day grace locks the account. A token that is not `active`,
+  or a renewal the issuer wants 3DS for, gets no charge and no retries, only
+  the email.
+- **Apple Pay.** Moyasar does not document recurring Apple Pay charges, so
+  Apple Pay tokens are not kept unless `BILLING_APPLEPAY_RECURRING=true`. When
+  that is on and a renewal fails, the user is asked for a card.
+- **Environment tag.** Checkout and renewal payments carry `metadata.app` (the
+  app host), and `verifyMoyasarPaid` refuses another environment's payment.
+  Staging and prod share one Moyasar account, and staging has prod's ids.
+- **Env.** `MOYASAR_PUBLISHABLE_KEY`, `BILLING_TOKENIZATION_ENABLED`,
+  `BILLING_AUTORENEW_ENABLED`, `BILLING_APPLEPAY_RECURRING`, and
+  `BILLING_EMAIL_ALLOWLIST` (staging: renewal emails only to the account holder).
+  Staging must use `sk_test_`/`pk_test_` keys.
+- **Testing.** `POST /admin/billing/renew/:userId` (super admin) runs one
+  renewal now; `scripts/renew-one.ts` calls it. DB specs are in
+  `recurring-billing.db.spec.ts`.
+- Migration `0097`, applied at boot by `bootstrap.ts`.
+
 ---
 
 ## 4b. SMS — Taqnyat, and why the OTP lifecycle is ours
