@@ -56,6 +56,19 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   addonId: integer("addon_id"),
   /** Line description for an add-on invoice; null = the package line. */
   description: text("description"),
+  /**
+   * How this row is paid (migration 0097): `invoice` — a hosted invoice link
+   * (the old flow); `checkout` — the first in-app payment, which saves the
+   * card; `renewal` — a server-side charge of the saved token.
+   */
+  chargeType: text("charge_type").$type<"invoice" | "checkout" | "renewal">().notNull().default("invoice"),
+  paymentMethodId: integer("payment_method_id"),
+  /** The subscription end a renewal pays for — unique per account (no double charge). */
+  renewalOf: timestamp("renewal_of", { withTimezone: true }),
+  /** The Moyasar `given_id` of the current attempt; a repeat returns the same payment. */
+  moyasarGivenId: text("moyasar_given_id"),
+  attempt: integer("attempt").notNull().default(0),
+  failureReason: text("failure_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

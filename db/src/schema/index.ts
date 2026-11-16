@@ -38,3 +38,4 @@ export * from "./appLogs";
 export * from "./news";
 export * from "./rentalOffers";
 export * from "./accountLimits";
+export * from "./paymentMethods";

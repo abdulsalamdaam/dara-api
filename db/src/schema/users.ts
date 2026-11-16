@@ -109,6 +109,17 @@ export const usersTable = pgTable("users", {
   desiredPackagePlan: text("desired_package_plan"),
   /** The billing cycle the user picked on the landing page. */
   desiredBillingCycle: text("desired_billing_cycle"),
+  /**
+   * Recurring billing with a saved Moyasar token (migration 0097). The renewal
+   * job charges `default_payment_method_id` when `next_billing_at` passes —
+   * the period end, or the next dunning retry. NULL `next_billing_at` = nothing
+   * scheduled. `billing_state`: ok | past_due | canceled.
+   */
+  autoRenew: boolean("auto_renew").notNull().default(false),
+  defaultPaymentMethodId: integer("default_payment_method_id"),
+  nextBillingAt: timestamp("next_billing_at", { withTimezone: true }),
+  billingState: text("billing_state").$type<"ok" | "past_due" | "canceled">().notNull().default("ok"),
+  billingFailedAttempts: integer("billing_failed_attempts").notNull().default(0),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

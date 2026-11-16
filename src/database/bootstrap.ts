@@ -821,6 +821,17 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure property branch name failed: ${err?.message || err}`);
     }
 
+    // 0097: recurring billing with Moyasar tokens — payment_methods, users.auto_renew/
+    // next_billing_at/billing_state, subscription_payments.charge_type/renewal_of.
+    // Full-row selects of `users` read the new columns, so a failure here is an error.
+    try {
+      const tok = findSqlFile(join("drizzle", "0097_moyasar_tokenization.sql"));
+      if (tok) await client.query(readFileSync(tok, "utf8"));
+      else log.error("0097_moyasar_tokenization.sql not found — users.auto_renew missing; full user selects will fail");
+    } catch (err: any) {
+      log.error(`ensure moyasar tokenization failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
