@@ -1296,6 +1296,13 @@ class AdminController {
     if (!planAllowedForUserType(plan, target.userType)) {
       throw new BadRequestException(planUserTypeError(plan));
     }
+    {
+      const g = await groupOfAccount(this.db, id);
+      if (g && g.billingMode === "shared" && g.primaryUserId === id) {
+        const bad = await sharedPlanMisfit(this.db, g, plan);
+        if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(plan, bad.name) });
+      }
+    }
     await assertAdminPlanChangeAllowed(id, plan, (body as any)?.force, (body as any)?.reason); // finance-v2: plan transitions D2 — 409 DOWNGRADE_NEEDS_SUPPORT unless force + reason
     const trialDays = normalizeTrialDays(body?.trialDays);
     const stated = trialDays != null || !!body?.subscriptionEndsAt;
@@ -1306,13 +1313,6 @@ class AdminController {
     const win = stated || !hasWindow
       ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined })
       : null;
-    {
-      const g = await groupOfAccount(this.db, id);
-      if (g && g.billingMode === "shared" && g.primaryUserId === id) {
-        const bad = await sharedPlanMisfit(this.db, g, plan);
-        if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(plan, bad.name) });
-      }
-    }
     const [user] = await this.db.update(usersTable)
       .set({
         packagePlan: plan,
