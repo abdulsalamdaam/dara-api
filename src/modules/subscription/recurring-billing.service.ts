@@ -1,6 +1,6 @@
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, lte, ne, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { usersTable, subscriptionPaymentsTable, paymentMethodsTable, type PaymentMethod } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -540,7 +540,9 @@ export class RecurringBillingService {
       if (!stale) return { kind: "busy", row };
       // Take the abandoned row over — conditionally, so two recoverers cannot both win.
       const [took] = await this.db.update(subscriptionPaymentsTable).set({ updatedAt: now })
-        .where(and(eq(subscriptionPaymentsTable.id, row.id), eq(subscriptionPaymentsTable.status, "processing"), eq(subscriptionPaymentsTable.updatedAt, row.updatedAt)))
+        // "still stale" rather than "updated_at = what we read": JS dates are
+        // milliseconds, Postgres keeps microseconds, so equality never matches.
+        .where(and(eq(subscriptionPaymentsTable.id, row.id), eq(subscriptionPaymentsTable.status, "processing"), lt(subscriptionPaymentsTable.updatedAt, new Date(now.getTime() - STALE_PROCESSING_MS))))
         .returning();
       return took ? { kind: "recover", row: took } : { kind: "busy", row };
     }
