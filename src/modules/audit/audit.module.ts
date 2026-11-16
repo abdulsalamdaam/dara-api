@@ -40,7 +40,8 @@ class AuditInterceptor implements NestInterceptor {
       // Fire-and-forget — auditing must never break or slow the response.
       this.db.insert(auditLogsTable).values({
         ownerUserId: user.ownerUserId ?? user.id,
-        actorUserId: user.id,
+        // Linked accounts: the person signed in, even when switched in as the account's holder.
+        actorUserId: user.actorUserId ?? user.id,
         action: method === "DELETE" ? "delete" : "update",
         entity,
         entityId,

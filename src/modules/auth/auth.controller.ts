@@ -116,13 +116,20 @@ export class AuthController {
   @Get("me")
   @UseGuards(JwtAuthGuard)
   me(@CurrentUser() user: AuthUser) {
-    return this.auth.me(user.id);
+    return this.auth.me(user);
   }
 
   /** Effective permission keys for the logged-in user. */
   @Get("me/permissions")
   @UseGuards(JwtAuthGuard)
   myPermissions(@CurrentUser() user: AuthUser) {
+    // A switched session (linked accounts) holds the role it was granted in
+    // that account, which the guard already resolved — not the row's own.
+    if (user.act != null) {
+      return this.auth.permissionsForUser(user.actorUserId ?? user.id).then((p) => ({
+        ...p, role: user.role, permissions: user.permissions ?? [],
+      }));
+    }
     return this.auth.permissionsForUser(user.id);
   }
 
@@ -135,7 +142,8 @@ export class AuthController {
     // row's tokenVersion logged the whole office out whenever a landlord
     // signed out of the app. Owner tokens are stateless; nothing to revoke.
     if (user.ownerScopeId != null) return { success: true };
-    return this.auth.logoutUser(user.id, user.ch);
+    // A switched session belongs to the person signed in, not the account.
+    return this.auth.logoutUser(user.actorUserId ?? user.id, user.ch);
   }
 
   /** Change the logged-in user's own password. */

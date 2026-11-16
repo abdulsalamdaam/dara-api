@@ -28,6 +28,7 @@ import { PaymentsModule } from "./modules/payments/payments.module";
 import { BillingModule } from "./modules/billing/billing.module";
 import { AdminModule } from "./modules/admin/admin.module";
 import { ProfileModule } from "./modules/profile/profile.module";
+import { LinkedAccountsModule } from "./modules/linked-accounts/linked-accounts.module";
 import { OwnersModule } from "./modules/owners/owners.module";
 import { TenantsModule } from "./modules/tenants/tenants.module";
 import { MaintenanceModule } from "./modules/maintenance/maintenance.module";
@@ -126,6 +127,7 @@ import { LimitsModule } from "./modules/limits/limits.module";
     NotificationsModule,
     AdminModule,
     ProfileModule,
+    LinkedAccountsModule,
     OwnersModule,
     TenantsModule,
     MaintenanceModule,

@@ -56,6 +56,12 @@ export const usersTable = pgTable("users", {
   /** FK → roles.id. Source of role key + permissions + label. */
   roleId: integer("role_id"),
   /**
+   * FK → account_groups.id (0096). Set on an account HOLDER row that belongs
+   * to a linked-accounts group (the primary included); never on an employee.
+   * Not declared as a reference here to avoid an import cycle.
+   */
+  accountGroupId: integer("account_group_id"),
+  /**
    * Subscription package — a PackagePlan key (tenant | basic | professional |
    * enterprise), or the "broker" default for an unassigned account, which
    * resolves to professional. Drives seats and feature gates (see

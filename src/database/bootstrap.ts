@@ -821,6 +821,16 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure property branch name failed: ${err?.message || err}`);
     }
 
+    // 0096: linked accounts — account_groups, account_access, users.account_group_id.
+    // Full-row selects of `users` read the new column, so a failure here is an error.
+    try {
+      const linked = findSqlFile(join("drizzle", "0096_linked_accounts.sql"));
+      if (linked) await client.query(readFileSync(linked, "utf8"));
+      else log.error("0096_linked_accounts.sql not found — users.account_group_id missing; full user selects will fail");
+    } catch (err: any) {
+      log.error(`ensure linked accounts failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

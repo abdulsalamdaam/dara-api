@@ -596,6 +596,13 @@
       "when": 1794096000000,
       "tag": "0095_property_branch_name",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1794182400000,
+      "tag": "0096_linked_accounts",
+      "breakpoints": true
     }
   ]
 }

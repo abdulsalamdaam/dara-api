@@ -175,7 +175,11 @@ export class SubscriptionInvoiceService {
         // glance, and the period it covers is already implied by the issue
         // date and the cycle. An account-limit add-on prints its own line
         // (e.g. "مستخدم إضافي × 2 — 3 أشهر"), stored on the row when it was opened.
-        description: row.kind === "addon" && row.description ? row.description : `اشتراك باقة «${pkg.labelAr}» — ${cycleLabel}`,
+        // An add-on prints its own line; so does a shared linked-accounts
+        // package, which names the accounts it covers. Any other row's stray
+        // description is ignored.
+        description: row.description && (row.kind === "addon" || row.description.includes("حسابات مرتبطة"))
+          ? row.description : `اشتراك باقة «${pkg.labelAr}» — ${cycleLabel}`,
         quantity: 1,
         unitPrice: subtotal,
         amount: subtotal,

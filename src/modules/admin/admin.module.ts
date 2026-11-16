@@ -6,6 +6,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
 import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable, appLogsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
+import { syncSharedSubscription } from "../../common/linked-accounts";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -1326,6 +1327,8 @@ class AdminController {
     if (!user) throw new NotFoundException("User not found");
     signalFv2Entitlement(user.id, "admin_package_change"); // finance-v2: auto-provision when the plan includes accounting (async, never throws)
     signalPlanChanged(user.id, { from: target.packagePlan, to: plan, source: "admin_package_change", reason: (body as any)?.reason ?? null, forced: (body as any)?.force === true }); // finance-v2: plan transitions (async, never throws)
+    // Linked accounts, shared package: every member follows the primary.
+    await syncSharedSubscription(this.db, user.id);
     return {
       success: true, id: user.id, packagePlan: plan,
       subscriptionEndsAt: user.subscriptionEndsAt,

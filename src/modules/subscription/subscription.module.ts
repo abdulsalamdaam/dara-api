@@ -21,6 +21,9 @@ import type { Response } from "express";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
 import { assertCustomerPlanChangeAllowed, signalPlanChanged } from "../plan-transition/plan-transition-signal";
 import { activateAddonFromPaidRow } from "./addon-activation";
+import { extraAccountListPrice, groupMemberIds, groupOfAccount, sharedBillingPayer, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
+import { chargedVatRate } from "../../common/packages";
+import type { AccountGroup } from "@dara/database";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
@@ -177,6 +180,8 @@ export async function activateFromPaidRow(
     // account had its one free trial, which paying does not undo.
     subscriptionIsTrial: false,
   }).where(eq(usersTable.id, row.userId));
+  // Linked accounts, shared package: the members' windows follow this payment.
+  await syncSharedSubscription(db, row.userId);
 
   // Issue the tax invoice and email it. Deliberately NOT awaited: this spawns
   // headless Chrome, and the caller is either a Moyasar webhook — which retries
@@ -194,6 +199,23 @@ export async function activateFromPaidRow(
   // Plan transitions: record the change and run its steps (async, never throws).
   signalPlanChanged(row.userId, { from: acct?.packagePlan ?? null, to: row.plan, source: "subscription_paid", paymentId: row.id });
   return true;
+}
+
+/**
+ * Linked accounts, shared package (common/linked-accounts.ts): what the
+ * primary pays on `cycle` — the plan plus each extra member account at the
+ * group's price. Null when the account is not the primary of a shared group.
+ */
+async function sharedGroupCharge(db: Drizzle, accountId: number, plan: string | null | undefined, cycle: BillingCycle): Promise<{ group: AccountGroup; extras: number; extraPrice: number; charged: number } | null> {
+  const g = await groupOfAccount(db, accountId);
+  if (!g || g.billingMode !== "shared" || g.primaryUserId !== accountId) return null;
+  const extras = (await groupMemberIds(db, g)).length - 1;
+  const base = planPrice(plan, cycle);
+  const extraList = extraAccountListPrice(g, plan, cycle);
+  if (base == null || extraList == null) return null;
+  const vat = chargedVatRate();
+  const extraCharged = vat == null ? extraList : Math.round(extraList * (100 + vat)) / 100;
+  return { group: g, extras, extraPrice: extraList, charged: Math.round((base + extras * extraCharged) * 100) / 100 };
 }
 
 @ApiTags("subscription")
@@ -223,17 +245,25 @@ export class SubscriptionController {
     // Subscription rows only: an add-on's open invoice is paid from the
     // limits card, never offered as "Continue payment" for the plan.
     const open = payments.find((p) => p.kind !== "addon" && p.status === "pending" && !!p.paymentUrl);
+    // Linked accounts: a shared package is paid by the primary only.
+    const payerId = await sharedBillingPayer(this.db, ownerId);
+    const [payer] = payerId ? await accountRows(this.db, [payerId]) : [];
+    const shared = await sharedGroupCharge(this.db, ownerId, owner?.packagePlan, purchasableCycle(cycle));
     return {
       plan: resolvePackage(owner?.packagePlan).key,
       // What the plan unlocks (common/plan-features.ts) — the same list /auth/me carries as `planFeatures`.
       features: await accountFeatures(this.db, ownerId, owner?.packagePlan),
       billingCycle: cycle,
       // What the next payment costs — a monthly account renews quarterly.
-      amountDue: planPrice(owner?.packagePlan, purchasableCycle(cycle)),
+      amountDue: shared ? shared.charged : planPrice(owner?.packagePlan, purchasableCycle(cycle)),
+      // Linked accounts: `sharedBy` = this account's package is paid by the
+      // primary; `sharedPackage` = the primary pays for N extra accounts.
+      sharedBy: payer ? { accountId: payer.id, name: payer.name } : null,
+      sharedPackage: shared ? { extraAccounts: shared.extras, extraAccountPrice: shared.extraPrice } : null,
       // Every payable plan × cycle, so the checkout shows the amount that
       // will actually be charged rather than a copy of the price list.
       prices: planPriceTable(),
-      payable: isPayablePlan(owner?.packagePlan),
+      payable: payer ? false : isPayablePlan(owner?.packagePlan),
       moyasarConfigured: isMoyasarConfigured(),
       pendingPayment: open
         ? { id: open.id, plan: open.plan, billingCycle: open.billingCycle, amount: Number(open.amount), url: open.paymentUrl, createdAt: open.createdAt }
@@ -344,6 +374,10 @@ export class SubscriptionController {
   async pay(@CurrentUser() user: AuthUser, @Body() body: any) {
     if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
     const ownerId = user.id;
+    // Linked accounts: a member of a shared package does not pay for itself.
+    if (await sharedBillingPayer(this.db, ownerId)) {
+      throw new BadRequestException({ code: "SHARED_PACKAGE_MEMBER", message: "اشتراك هذا الحساب ضمن الباقة الموحدة ويُدفع من الحساب الرئيسي" });
+    }
     const [owner] = await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
     if (!owner) throw new BadRequestException("Account not found");
 
@@ -368,7 +402,8 @@ export class SubscriptionController {
     if (plan !== owner.packagePlan) await assertCustomerPlanChangeAllowed(ownerId, plan);
 
     if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
-    const amount = planPrice(plan, cycle);
+    const shared = await sharedGroupCharge(this.db, ownerId, plan, cycle);
+    const amount = shared ? shared.charged : planPrice(plan, cycle);
     if (!amount || amount <= 0) throw new BadRequestException("تعذّر تحديد قيمة الاشتراك");
 
     // Record the chosen plan/cycle as the DESIRED selection only — do NOT touch
@@ -451,12 +486,17 @@ export class SubscriptionController {
     // Record a fresh pending payment, then create the Moyasar invoice referencing it.
     const [row] = await this.db.insert(subscriptionPaymentsTable).values({
       userId: ownerId, plan, billingCycle: cycle, amount: amount.toFixed(2), currency: "SAR", status: "pending",
+      description: shared && shared.extras > 0
+        ? `اشتراك باقة «${resolvePackage(plan).labelAr}» الموحدة — ${CYCLE_LABEL_AR[cycle]} — تشمل ${shared.extras + 1} حسابات مرتبطة`
+        : null,
     }).returning();
 
     const planLabel = resolvePackage(plan).labelAr;
     const invoice = await createMoyasarInvoice({
       amountSar: amount,
-      description: `اشتراك دارا — ${planLabel} (${CYCLE_LABEL_AR[cycle]})`,
+      description: shared && shared.extras > 0
+        ? `اشتراك دارا — ${planLabel} الموحدة لـ ${shared.extras + 1} حسابات (${CYCLE_LABEL_AR[cycle]})`
+        : `اشتراك دارا — ${planLabel} (${CYCLE_LABEL_AR[cycle]})`,
       callbackUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing&paid=1`,
       successUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing&paid=1`,
       backUrl: `${APP_PUBLIC_URL}/dashboard/settings?section=billing`,

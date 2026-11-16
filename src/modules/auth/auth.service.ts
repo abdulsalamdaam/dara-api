@@ -17,6 +17,8 @@ import { accountFeatures } from "../../common/account-plan";
 import { hashEmailVerifyToken, newEmailVerifyOtp, verifyEmailOtpCode, EMAIL_VERIFY_OTP_TTL_MIN } from "../../common/email-verification";
 import { assertEmailAvailable, emailMatches, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import { accountEjarDenial } from "../ejar/ejar.access";
+import { switchableAccounts } from "../../common/linked-accounts";
+import { scopeId } from "../../common/scope";
 import { registrationRequiresApproval } from "../../common/registration-policy";
 import { TrialSettingsService } from "../admin/trial-settings.service";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
@@ -220,12 +222,14 @@ export class AuthService {
   }
 
   /* ── User token ── */
-  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number; loginAt?: number; ch?: "mobile" }): string {
+  signUserToken(payload: { id: number; email: string; role: AuthUser["role"]; tokenVersion: number; loginAt?: number; ch?: "mobile"; act?: number | null }): string {
     return this.jwt.sign(
       {
         id: payload.id, email: payload.email, role: payload.role, kind: "user", tv: payload.tokenVersion,
         ...(payload.loginAt != null ? { loginAt: payload.loginAt } : {}),
         ...(payload.ch ? { ch: payload.ch } : {}),
+        // Linked accounts: the member account this session works in (common/linked-accounts.ts).
+        ...(payload.act != null ? { act: payload.act } : {}),
       },
     );
   }
@@ -1011,7 +1015,9 @@ export class AuthService {
   }
 
   /* ── User: profile ── */
-  async me(userId: number) {
+  async me(auth: AuthUser | number) {
+    const user: AuthUser = typeof auth === "number" ? { id: auth, email: "", role: "user" } : auth;
+    const userId = user.id;
     const [row] = await this.db
       .select({
         id: usersTable.id,
@@ -1039,32 +1045,46 @@ export class AuthService {
       .leftJoin(companiesTable, eq(usersTable.companyId, companiesTable.id))
       .where(eq(usersTable.id, userId));
     if (!row) throw new UnauthorizedException("User not found");
+    // A switched session (linked accounts) works in another account: the
+    // account, role and company come from the request, not from the row.
+    const switched = user.act != null;
+    const accountId = switched ? scopeId(user) : (row.ownerUserId ?? row.id);
     // Employees inherit the owner account's subscription package.
     let packagePlan = row.packagePlan;
-    if (row.ownerUserId) {
+    if (accountId !== row.id) {
       const [owner] = await this.db
         .select({ p: usersTable.packagePlan })
         .from(usersTable)
-        .where(eq(usersTable.id, row.ownerUserId));
+        .where(eq(usersTable.id, accountId));
       packagePlan = owner?.p ?? packagePlan;
+    }
+    let companyName = row.companyName;
+    if (switched && user.companyId !== row.companyId) {
+      const [c] = user.companyId
+        ? await this.db.select({ name: companiesTable.name }).from(companiesTable).where(eq(companiesTable.id, user.companyId))
+        : [];
+      companyName = c?.name ?? null;
     }
     return {
       id: row.id,
       email: row.email,
       name: row.name,
-      role: row.roleKey ?? "user",
+      role: switched ? user.role : (row.roleKey ?? "user"),
       isActive: row.isActive,
       accountStatus: row.accountStatus,
       phone: row.phone,
-      company: row.companyName,
-      companyId: row.companyId,
-      roleId: row.roleId,
+      company: companyName,
+      companyId: switched ? (user.companyId ?? null) : row.companyId,
+      roleId: switched ? (user.roleId ?? null) : row.roleId,
       packagePlan,
       // Features the account owner's plan unlocks, plus an admin accounting grant (common/plan-features.ts).
-      planFeatures: await accountFeatures(this.db, row.ownerUserId ?? row.id, packagePlan),
+      planFeatures: await accountFeatures(this.db, accountId, packagePlan),
       // Ejar lookups/imports open to this caller: EJAR_ACCESS plus the
       // account's own switch (ejar/ejar.access.ts).
-      ...(await ejarAccessFields(this.db, row.ownerUserId ?? row.id, row.id)),
+      ...(await ejarAccessFields(this.db, accountId, row.id)),
+      // Linked accounts: which account this session works in, who is signed
+      // in, and every account the person can switch to (empty = no switcher).
+      linkedAccounts: await switchableAccounts(this.db, user),
       loginCount: row.loginCount,
       lastLoginAt: row.lastLoginAt,
       createdAt: row.createdAt,

@@ -9,6 +9,7 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { routeAllowsOwnerToken } from "../permissions.decorator";
 import { STAFF_ROLE_KEYS } from "../permissions";
 import { sessionIsCurrent, staleSessionException } from "../session";
+import { resolveActingAccess } from "../linked-accounts";
 
 /**
  * `role` is the role *key* string (e.g. "super_admin", "admin", "user",
@@ -41,6 +42,17 @@ export type AuthUser = {
    * the account scope. Null/undefined for normal user/employee logins.
    */
   ownerScopeId?: number | null;
+  /**
+   * Linked accounts: the account holder id the session switched into (token
+   * claim, re-authorised on every request — common/linked-accounts.ts).
+   */
+  act?: number | null;
+  /**
+   * The person actually signed in when that differs from `id` — set on a
+   * primary holder's switched session, where `id` becomes the member account's
+   * holder id. Logout, audit and "who am I" must use this.
+   */
+  actorUserId?: number | null;
 };
 
 /**
@@ -149,9 +161,49 @@ export class JwtAuthGuard implements CanActivate {
         && (row.roleCompanyId != null || row.ownerUserId != null)) {
       throw new ForbiddenException("Invalid role assignment");
     }
+    // Linked accounts: a switched session works in another member account.
+    // Re-authorised here on every request so an unlink or a revoked grant
+    // bites immediately. A claim naming the session's own account is no switch.
+    const act = typeof decoded.act === "number" && Number.isInteger(decoded.act) ? decoded.act : null;
+    if (act != null && act !== (row.ownerUserId ?? row.id)) {
+      const access = await resolveActingAccess(this.db, { id: row.id, ownerUserId: row.ownerUserId ?? null }, act);
+      if (!access) {
+        throw new UnauthorizedException({
+          statusCode: 401, error: "ACCOUNT_SWITCH_REVOKED", code: "ACCOUNT_SWITCH_REVOKED",
+          message: "لم يعد لديك وصول إلى هذا الحساب · You no longer have access to this account",
+        });
+      }
+      const base = { ...decoded, kind: "user" as const, ownerScopeId: null, act, actorUserId: row.id };
+      req.user = access.kind === "holder"
+        ? {
+            ...base,
+            // The primary acts AS the member account's holder: every
+            // holder-only rule (billing, team, ZATCA) applies unchanged.
+            id: access.account.id,
+            email: access.account.email,
+            role: access.account.roleKey ?? "user",
+            permissions: access.account.permissions,
+            ownerUserId: null,
+            companyId: access.account.companyId,
+            roleId: access.account.roleId,
+          }
+        : {
+            ...base,
+            // An employee works in the member account like one of its own
+            // employees, with the role the grant gives them there.
+            role: access.roleKey,
+            permissions: access.permissions,
+            ownerUserId: access.account.id,
+            companyId: access.account.companyId,
+            roleId: access.roleId,
+          };
+      return true;
+    }
     req.user = {
       ...decoded,
       kind: "user",
+      act: null,
+      actorUserId: null,
       role: row.roleKey ?? "user",
       permissions: row.rolePermissions ?? [],
       ownerUserId: row.ownerUserId ?? null,
