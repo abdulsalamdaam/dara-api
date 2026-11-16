@@ -6,7 +6,6 @@ import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
 import { resolvePackage, isPayablePlan, purchasableCycle, planPrice, CYCLE_LABEL_AR } from "../../common/packages";
 import { deriveSubscription } from "../../common/subscription";
-import { sharedBillingPayer } from "../../common/linked-accounts";
 import {
   isMoyasarConfigured, isMoyasarTestMode, moyasarPublishableKey, moyasarAppTag,
   fetchMoyasarPayment, findMoyasarPayment, chargeMoyasarToken, fetchMoyasarToken, deleteMoyasarToken,
@@ -454,10 +453,6 @@ export class RecurringBillingService {
     if (!opts.force) {
       if (!u.autoRenew || u.billingState === "canceled") return { status: "skipped", reason: "auto_renew_off" };
       if (!u.nextBillingAt || new Date(u.nextBillingAt).getTime() > now.getTime()) return { status: "skipped", reason: "not_due" };
-    }
-    if (await sharedBillingPayer(this.db, userId)) {
-      await this.db.update(usersTable).set({ nextBillingAt: null }).where(eq(usersTable.id, userId));
-      return { status: "skipped", reason: "shared_package_member" };
     }
     if (!u.subscriptionEndsAt) return { status: "skipped", reason: "no_period" };
     const renewalOf = new Date(u.subscriptionEndsAt);
