@@ -216,7 +216,10 @@ export async function chargeMoyasarToken(input: {
     description: input.description,
     callback_url: input.callbackUrl,
     metadata: input.metadata,
-    source: { type: "token", token: input.token },
+    // Merchant-initiated renewal: no cardholder to do 3DS. Moyasar defaults
+    // `3ds` from the token status (active → false) but its guide and API
+    // reference disagree on that default, so say it outright.
+    source: { type: "token", token: input.token, "3ds": false },
   };
   const r = await moyasarJson<MoyasarPaymentFull & { message?: string; type?: string }>("POST", "/payments", body);
   if ((r.status === 200 || r.status === 201) && r.data?.id) return r.data;
