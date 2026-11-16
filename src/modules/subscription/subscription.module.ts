@@ -13,7 +13,7 @@ import { resolvePackage, planPrice, planPriceTable, isPayablePlan, isPackagePlan
 import { deriveSubscription, nextEndDate, renewalPeriodStart } from "../../common/subscription";
 import { accountFeatures } from "../../common/account-plan";
 import { trialView } from "../../common/trial";
-import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, isMoyasarConfigured, type MoyasarInvoice, type MoyasarPayment } from "../../common/moyasar";
+import { createMoyasarInvoice, fetchMoyasarInvoice, cancelMoyasarInvoice, fetchMoyasarPayment, isMoyasarConfigured, moyasarAppTag, type MoyasarInvoice, type MoyasarPayment, type MoyasarPaymentFull } from "../../common/moyasar";
 import { InvoiceModule } from "../invoice/invoice.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { AppLogService } from "../../common/logging/app-log.service";
@@ -25,6 +25,16 @@ import { activateAddonFromPaidRow } from "./addon-activation";
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
 type SubscriptionPaymentRow = typeof subscriptionPaymentsTable.$inferSelect;
+
+/**
+ * In-app checkout and renewal rows (charge_type `checkout` / `renewal`) are
+ * settled by RecurringBillingService — it also saves the card and schedules
+ * the next renewal. Registered at boot rather than imported, because that
+ * service builds on the helpers in this file.
+ */
+type TokenPaymentHandler = (row: SubscriptionPaymentRow, payment: MoyasarPaymentFull) => Promise<{ status: string; activated?: boolean; reason?: string }>;
+let tokenPaymentHandler: TokenPaymentHandler | null = null;
+export function registerTokenPaymentHandler(fn: TokenPaymentHandler | null): void { tokenPaymentHandler = fn; }
 
 /**
  * What Moyasar says happened, reduced to the facts a payment row is checked
@@ -111,6 +121,11 @@ export function verifyMoyasarPaid(
   const metaUser = meta.userId != null ? String(meta.userId) : null;
   if (metaRow != null && metaRow !== String(row.id)) return { ok: false, reason: "metadata_mismatch" };
   if (metaUser != null && metaUser !== String(row.userId)) return { ok: false, reason: "metadata_mismatch" };
+  // In-app checkout and renewal payments name the environment that made them
+  // (`metadata.app`, the app host). Staging and production share one Moyasar
+  // account and staging is a copy of production's ids, so row + user alone can
+  // match a payment from the other environment.
+  if (meta.app != null && String(meta.app) !== moyasarAppTag()) return { ok: false, reason: "environment_mismatch" };
   // A row with no Moyasar invoice on file can only be tied to a payment by
   // metadata naming both the row AND its account.
   if (!row.moyasarInvoiceId && (metaRow == null || metaUser == null)) return { ok: false, reason: "no_reference" };
@@ -196,6 +211,63 @@ export async function activateFromPaidRow(
   return true;
 }
 
+/** Shared-package charge (linked accounts). Linked accounts are not on this
+ *  build, so no account is ever billed for a group. */
+export type SharedCharge = { extras: number; extraPrice: number; charged: number };
+export async function sharedGroupCharge(_db: Drizzle, _accountId: number, _plan: string | null | undefined, _cycle: BillingCycle): Promise<SharedCharge | null> {
+  return null;
+}
+
+/**
+ * The plan, cycle and amount a payment opened by `user` is for — shared by the
+ * hosted-invoice `pay` and the in-app checkout (recurring-billing.service.ts)
+ * so both enforce the same rules: account holder only, not a shared-package
+ * member, plan allowed for the account type, downgrade checks, payable plan.
+ * Records the choice as the DESIRED selection only; the live package changes
+ * when the payment is confirmed.
+ */
+export async function resolvePaySelection(db: Drizzle, user: AuthUser, body: any): Promise<{
+  ownerId: number; plan: string; cycle: BillingCycle; amount: number;
+  shared: SharedCharge | null;
+}> {
+  if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
+  const ownerId = user.id;
+  const [owner] = await db.select().from(usersTable).where(eq(usersTable.id, ownerId));
+  if (!owner) throw new BadRequestException("Account not found");
+
+  // Optional plan/cycle switch (upgrade or change cycle).
+  let plan = owner.packagePlan;
+  // Monthly is no longer sold: an account still on it renews quarterly.
+  let cycle = purchasableCycle(owner.billingCycle);
+  if (body?.plan && isPackagePlan(body.plan)) plan = body.plan;
+  if (isBillingCycle(body?.cycle)) cycle = purchasableCycle(body.cycle);
+
+  // Some plans are sold to one account type only (e.g. the Tenants plan is
+  // for companies). This is the 4th path that ends up writing
+  // `users.package_plan` (via the webhook) — enforce the same restriction the
+  // registration / admin-approval / admin-change paths do, or an individual
+  // account could buy a company-only plan straight from the billing screen.
+  if (!planAllowedForUserType(plan, owner.userType)) {
+    throw new BadRequestException(planUserTypeError(plan));
+  }
+  // A downgrade out of accounting while the office holds client money or manages other landlords' active
+  // contracts is support's call (plan transitions D2): 409 DOWNGRADE_NEEDS_SUPPORT with the preview, before
+  // anything is written — the desired plan and the pending payment rows stay as they are.
+  if (plan !== owner.packagePlan) await assertCustomerPlanChangeAllowed(ownerId, plan);
+
+  if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
+  const shared = await sharedGroupCharge(db, ownerId, plan, cycle);
+  const amount = shared ? shared.charged : planPrice(plan, cycle);
+  if (!amount || amount <= 0) throw new BadRequestException("تعذّر تحديد قيمة الاشتراك");
+
+  // Record the chosen plan/cycle as the DESIRED selection only — do NOT touch
+  // the live package yet. The pending payment row carries the choice, and the
+  // webhook applies it once payment is actually confirmed. This stops a click
+  // on "Pay" from upgrading/switching a user who never paid.
+  await db.update(usersTable).set({ desiredPackagePlan: plan, desiredBillingCycle: cycle }).where(eq(usersTable.id, ownerId));
+  return { ownerId, plan, cycle, amount, shared };
+}
+
 @ApiTags("subscription")
 @ApiBearerAuth("user-jwt")
 @Controller("me/subscription")
@@ -235,6 +307,12 @@ export class SubscriptionController {
       prices: planPriceTable(),
       payable: isPayablePlan(owner?.packagePlan),
       moyasarConfigured: isMoyasarConfigured(),
+      // In-app checkout with a saved card (recurring-billing.service.ts). When
+      // false the web keeps the hosted-invoice link flow.
+      tokenizationEnabled: String(process.env.BILLING_TOKENIZATION_ENABLED || "").toLowerCase() === "true" && isMoyasarConfigured() && !!process.env.MOYASAR_PUBLISHABLE_KEY,
+      autoRenew: !!owner?.autoRenew,
+      nextBillingAt: owner?.nextBillingAt ?? null,
+      billingState: owner?.billingState ?? "ok",
       pendingPayment: open
         ? { id: open.id, plan: open.plan, billingCycle: open.billingCycle, amount: Number(open.amount), url: open.paymentUrl, createdAt: open.createdAt }
         : null,
@@ -342,40 +420,7 @@ export class SubscriptionController {
   @Post("pay")
   @RequirePermissions(PERMISSIONS.SUBSCRIPTION_MANAGE)
   async pay(@CurrentUser() user: AuthUser, @Body() body: any) {
-    if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
-    const ownerId = user.id;
-    const [owner] = await this.db.select().from(usersTable).where(eq(usersTable.id, ownerId));
-    if (!owner) throw new BadRequestException("Account not found");
-
-    // Optional plan/cycle switch (upgrade or change cycle).
-    let plan = owner.packagePlan;
-    // Monthly is no longer sold: an account still on it renews quarterly.
-    let cycle = purchasableCycle(owner.billingCycle);
-    if (body?.plan && isPackagePlan(body.plan)) plan = body.plan;
-    if (isBillingCycle(body?.cycle)) cycle = purchasableCycle(body.cycle);
-
-    // Some plans are sold to one account type only (e.g. the Tenants plan is
-    // for companies). This is the 4th path that ends up writing
-    // `users.package_plan` (via the webhook) — enforce the same restriction the
-    // registration / admin-approval / admin-change paths do, or an individual
-    // account could buy a company-only plan straight from the billing screen.
-    if (!planAllowedForUserType(plan, owner.userType)) {
-      throw new BadRequestException(planUserTypeError(plan));
-    }
-    // A downgrade out of accounting while the office holds client money or manages other landlords' active
-    // contracts is support's call (plan transitions D2): 409 DOWNGRADE_NEEDS_SUPPORT with the preview, before
-    // anything is written — the desired plan and the pending payment rows stay as they are.
-    if (plan !== owner.packagePlan) await assertCustomerPlanChangeAllowed(ownerId, plan);
-
-    if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
-    const amount = planPrice(plan, cycle);
-    if (!amount || amount <= 0) throw new BadRequestException("تعذّر تحديد قيمة الاشتراك");
-
-    // Record the chosen plan/cycle as the DESIRED selection only — do NOT touch
-    // the live package yet. The pending payment row below carries the choice,
-    // and the webhook applies it once payment is actually confirmed. This stops
-    // a click on "Pay" from upgrading/switching a user who never paid.
-    await this.db.update(usersTable).set({ desiredPackagePlan: plan, desiredBillingCycle: cycle }).where(eq(usersTable.id, ownerId));
+    const { ownerId, plan, cycle, amount, shared } = await resolvePaySelection(this.db, user, body);
 
     if (!isMoyasarConfigured()) {
       throw new BadRequestException("بوابة الدفع غير مُهيأة بعد. يرجى المحاولة لاحقاً.");
@@ -526,6 +571,8 @@ export class SubscriptionWebhookController {
     let verified = false;
     // What Moyasar says happened; every row match below is checked against it.
     let evidence: MoyasarPaidEvidence | null = null;
+    // The payment itself, when the event is about one (in-app checkout / renewal).
+    let paymentObj: MoyasarPaymentFull | null = null;
 
     // "Don't trust the payload alone" was the intent; the code only managed it
     // when an invoice id happened to be present. Without one, `paid` came
@@ -559,11 +606,31 @@ export class SubscriptionWebhookController {
         });
       }
     }
+    // A payment event with no invoice: an in-app checkout or a token renewal.
+    // Verified the same way — by asking Moyasar for the payment ourselves.
+    if (!invoiceId && eventPaymentId && isMoyasarConfigured()) {
+      try {
+        paymentObj = await fetchMoyasarPayment(String(eventPaymentId));
+        evidence = evidenceFromPayment(paymentObj as any);
+        paid = evidence.status === "paid";
+        verified = true;
+      } catch (err) {
+        this.appLog.record({
+          level: "error",
+          event: "moyasar_webhook_verify_failed",
+          message: "could not verify a Moyasar payment — refusing to activate on the payload alone",
+          context: "MoyasarWebhook",
+          error: err,
+          meta: { eventPaymentId, metaPaymentId },
+        });
+      }
+    }
     if (!verified) {
       // The shared secret is the only other thing that can prove the sender.
       if (expected && body?.secret_token === expected) {
         evidence = evidenceFromPayment(data);
         paid = evidence.status === "paid";
+        if (!invoiceId && data?.id) paymentObj = data as MoyasarPaymentFull;
       } else {
         console.error("[moyasar] webhook REFUSED: payload could not be verified", {
           hasInvoiceId: !!invoiceId, moyasarConfigured: isMoyasarConfigured(),
@@ -630,6 +697,14 @@ export class SubscriptionWebhookController {
       return { ok: true, unmatched: true };
     }
     if (row.status === "paid") return { ok: true, already: true };
+
+    // In-app checkout / renewal: settled (and checked against the row) by the
+    // recurring-billing service, which also saves the card.
+    if (row.chargeType !== "invoice" && paymentObj && tokenPaymentHandler) {
+      const r = await tokenPaymentHandler(row, paymentObj);
+      if (r.status === "mismatch") return { ok: true, ignored: true, reason: r.reason };
+      return r.activated ? { ok: true, activated: true } : { ok: true, already: true };
+    }
 
     // Paid, but paid for THIS row? Amount, currency, invoice and metadata.
     const check = verifyMoyasarPaid(row, evidence!);
