@@ -73,7 +73,9 @@ export type RenewOutcome =
 export function cardLabel(m: Pick<PaymentMethod, "type" | "brand" | "last4"> | null | undefined): string | null {
   if (!m) return null;
   if (m.type === "applepay") return `Apple Pay${m.last4 ? ` •••• ${m.last4}` : ""}`;
-  const brand = m.brand ? m.brand.charAt(0).toUpperCase() + m.brand.slice(1) : "Card";
+  const known: Record<string, string> = { visa: "Visa", master: "Mastercard", mastercard: "Mastercard", mada: "mada", amex: "Amex", unionpay: "UnionPay" };
+  const b = (m.brand || "").toLowerCase();
+  const brand = known[b] ?? (m.brand ? m.brand.charAt(0).toUpperCase() + m.brand.slice(1) : "Card");
   return `${brand}${m.last4 ? ` •••• ${m.last4}` : ""}`;
 }
 
@@ -374,9 +376,13 @@ export class RecurringBillingService {
       // A new card while a renewal is owed (past due, or the period already
       // ended): charge it on the next run instead of waiting for a retry day.
       const owed = u.subscriptionEndsAt && new Date(u.subscriptionEndsAt).getTime() <= Date.now();
+      // A new card starts a fresh dunning run: the old card's failures neither
+      // keep the "update your card" warning up nor count against this one.
       await this.db.update(usersTable).set({
         autoRenew: true,
         nextBillingAt: owed ? new Date() : (u.subscriptionEndsAt ?? null),
+        billingState: "ok",
+        billingFailedAttempts: 0,
       }).where(eq(usersTable.id, userId));
     }
     return this.overview(userId);
