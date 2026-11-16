@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "../../../db/src/schema";
 import { fv2DbSkip, withDb, type TestDb } from "../finance-v2/__tests__/with-db";
@@ -94,6 +95,9 @@ describe("subscription: no PAID email or paid state before a verified payment (r
     globalThis.fetch = fakeFetch as any;
 
     t = await withDb({ legacy: "full", migrate: false });
+    // users gained columns in 0096 (linked accounts) and 0097 (recurring billing).
+    await t.apply(join(__dirname, "../../../db/drizzle/0096_linked_accounts.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
@@ -325,6 +329,8 @@ describe("subscription vs add-on payments are independent (real Postgres)", { sk
     delete process.env.DARA_SELLER_VAT;
     globalThis.fetch = fakeFetch as any;
     t = await withDb({ legacy: "full", migrate: false });
+    await t.apply(join(__dirname, "../../../db/drizzle/0096_linked_accounts.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
