@@ -21,7 +21,7 @@ import {
 } from "../../common/packages";
 import { assertEmailAvailable, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import {
-  accountRows, extraAccountListPrice, extraAccountYearlyPrice, groupMemberIds, groupOfAccount, resolveActingAccess,
+  accountRows, extraAccountListPrice, extraAccountYearlyPrice, memberPriceOverride, sharedPriceLines, groupMemberIds, groupOfAccount, resolveActingAccess,
   switchableAccountIds, syncSharedSubscription, sharedPlanMisfit, sharedPlanMisfitMessage,
 } from "../../common/linked-accounts";
 import { deriveSubscription } from "../../common/subscription";
@@ -77,22 +77,25 @@ export class LinkedAccountsService {
     return g;
   }
 
-  /** Shared-mode price preview for the primary's plan on its cycle. */
-  private pricing(group: AccountGroup | null, primary: { packagePlan: string; billingCycle: string }, memberCount: number) {
+  /** Shared-mode price preview for the primary's plan on its cycle (before VAT), priced per account. */
+  private async pricing(group: AccountGroup | null, primary: { packagePlan: string; billingCycle: string }, memberCount: number) {
     const cycle = purchasableCycle(primary.billingCycle);
     const base = listPrice(primary.packagePlan, cycle);
     const extra = group ? extraAccountListPrice(group, primary.packagePlan, cycle) : null;
     const extras = Math.max(0, memberCount - 1);
+    const lines = group ? await sharedPriceLines(this.db, group, primary.packagePlan, cycle) : [];
+    const priced = lines.length > 0 && lines.every((l) => l.list != null);
     return {
       mode: group?.billingMode ?? "separate",
       cycle,
       plan: resolvePackage(primary.packagePlan).key,
-      basePrice: base,
+      basePrice: lines.find((l) => l.isPrimary)?.list ?? base,
       extraAccounts: extras,
       extraAccountPrice: extra,
       extraAccountYearlyPrice: group ? extraAccountYearlyPrice(group, primary.packagePlan) : null,
-      specialPrice: group?.extraAccountPriceYearly != null,
-      total: base != null && extra != null ? base + extras * extra : null,
+      specialPrice: group?.extraAccountPriceYearly != null || lines.some((l) => l.custom),
+      perAccount: lines.map((l) => ({ accountId: l.accountId, price: l.list, custom: l.custom })),
+      total: priced ? lines.reduce((t, l) => t + l.list!, 0) : (base != null && extra != null ? base + extras * extra : null),
       vatRate: chargedVatRate(),
     };
   }
@@ -144,7 +147,7 @@ export class LinkedAccountsService {
       accounts,
       employees,
       presets: EMPLOYEE_PRESET_KEYS.map((k) => ({ key: k, labelAr: EMPLOYEE_PRESETS[k]!.labelAr, labelEn: EMPLOYEE_PRESETS[k]!.labelEn })),
-      billing: this.pricing(group, primary ?? { packagePlan: actor.packagePlan, billingCycle: actor.billingCycle }, memberIds.length),
+      billing: await this.pricing(group, primary ?? { packagePlan: actor.packagePlan, billingCycle: actor.billingCycle }, memberIds.length),
     };
   }
 
@@ -317,6 +320,13 @@ export async function unlinkMember(db: Drizzle, group: AccountGroup, accountId: 
   await db.transaction(async (tx) => {
     await tx.update(usersTable).set({ accountGroupId: null }).where(eq(usersTable.id, accountId));
     await tx.delete(accountAccessTable).where(eq(accountAccessTable.accountId, accountId));
+    // Its special price belongs to this group only — it does not follow the account out.
+    if (group.memberPrices && String(accountId) in group.memberPrices) {
+      const [cur] = await tx.select({ memberPrices: accountGroupsTable.memberPrices }).from(accountGroupsTable).where(eq(accountGroupsTable.id, group.id));
+      const next = { ...(cur?.memberPrices ?? {}) };
+      delete next[String(accountId)];
+      await tx.update(accountGroupsTable).set({ memberPrices: next }).where(eq(accountGroupsTable.id, group.id));
+    }
     const emps = await tx.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.ownerUserId, accountId));
     if (emps.length) await tx.delete(accountAccessTable).where(inArray(accountAccessTable.userId, emps.map((e) => e.id)));
   });
@@ -382,6 +392,9 @@ export class AdminLinkedAccountsController {
     const cycle = purchasableCycle(p?.billingCycle);
     const base = listPrice(p?.packagePlan, cycle);
     const extra = extraAccountListPrice(g, p?.packagePlan, cycle);
+    const lines = await sharedPriceLines(this.db, g, p?.packagePlan, cycle);
+    const byId = new Map(lines.map((l) => [l.accountId, l]));
+    const priced = lines.length > 0 && lines.every((l) => l.list != null);
     return {
       accountId,
       group: {
@@ -389,8 +402,20 @@ export class AdminLinkedAccountsController {
         extraAccountPriceYearly: g.extraAccountPriceYearly != null ? Number(g.extraAccountPriceYearly) : null,
         defaultExtraAccountPriceYearly: extraAccountYearlyPrice({ extraAccountPriceYearly: null }, p?.packagePlan),
       },
-      members: rows.map((r) => ({ ...r, isPrimary: r.id === g.primaryUserId })),
-      pricing: { plan: resolvePackage(p?.packagePlan).key, cycle, basePrice: base, extraAccountPrice: extra, extraAccounts: ids.length - 1, total: base != null && extra != null ? base + (ids.length - 1) * extra : null },
+      members: rows.map((r) => {
+        const l = byId.get(r.id);
+        return {
+          ...r, isPrimary: r.id === g.primaryUserId,
+          // Yearly before VAT: the admin's special price for this account (null = default), and that default.
+          priceYearly: memberPriceOverride(g, r.id), defaultPriceYearly: l?.defaultYearly ?? null,
+          cyclePrice: l?.list ?? null,
+        };
+      }),
+      pricing: {
+        plan: resolvePackage(p?.packagePlan).key, cycle, basePrice: base, extraAccountPrice: extra, extraAccounts: ids.length - 1,
+        total: priced ? lines.reduce((t, l) => t + l.list!, 0) : null,
+        perAccount: lines.some((l) => l.custom),
+      },
     };
   }
 
@@ -431,6 +456,21 @@ export class AdminLinkedAccountsController {
       }
     }
     if (body?.name !== undefined) set.name = body.name ? String(body.name).trim().slice(0, 120) : null;
+    // Per-account special prices: { [accountId]: yearly SAR before VAT | null (back to default) }.
+    if (body?.memberPrices !== undefined) {
+      if (!body.memberPrices || typeof body.memberPrices !== "object" || Array.isArray(body.memberPrices)) throw new BadRequestException("memberPrices غير صالح");
+      const ids = await groupMemberIds(this.db, g);
+      const next: Record<string, number> = { ...(g.memberPrices ?? {}) };
+      for (const [k, v] of Object.entries(body.memberPrices as Record<string, unknown>)) {
+        const id = Number(k);
+        if (!ids.includes(id)) throw new BadRequestException(`الحساب ${k} ليس ضمن المجموعة`);
+        if (v === null || v === "") { delete next[String(id)]; continue; }
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0 || n > 1_000_000) throw new BadRequestException("السعر غير صالح");
+        next[String(id)] = Math.round(n * 100) / 100;
+      }
+      set.memberPrices = next;
+    }
     if ((set.billingMode ?? g.billingMode) === "shared") {
       const [p] = await this.db.select({ plan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, g.primaryUserId));
       const bad = await sharedPlanMisfit(this.db, g, p?.plan);

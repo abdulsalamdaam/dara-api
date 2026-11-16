@@ -21,7 +21,7 @@ import type { Response } from "express";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
 import { assertCustomerPlanChangeAllowed, signalPlanChanged } from "../plan-transition/plan-transition-signal";
 import { activateAddonFromPaidRow } from "./addon-activation";
-import { extraAccountListPrice, groupMemberIds, groupOfAccount, sharedBillingPayer, sharedPlanMisfit, sharedPlanMisfitMessage, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
+import { sharedPriceLines, type SharedPriceLine, groupMemberIds, groupOfAccount, sharedBillingPayer, sharedPlanMisfit, sharedPlanMisfitMessage, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
 import { chargedVatRate } from "../../common/packages";
 import type { AccountGroup } from "@dara/database";
 
@@ -221,16 +221,35 @@ export async function activateFromPaidRow(
  * primary pays on `cycle` — the plan plus each extra member account at the
  * group's price. Null when the account is not the primary of a shared group.
  */
-export async function sharedGroupCharge(db: Drizzle, accountId: number, plan: string | null | undefined, cycle: BillingCycle): Promise<{ group: AccountGroup; extras: number; extraPrice: number; charged: number } | null> {
+export type SharedGroupCharge = {
+  group: AccountGroup; extras: number;
+  /** Average extra-account cycle price before VAT (kept for older callers). */
+  extraPrice: number;
+  /** All extra accounts together, cycle price before VAT. */
+  extrasList: number;
+  lines: SharedPriceLine[];
+  charged: number;
+};
+
+/** Shared package, priced per account (admin special price per account, else default). */
+export async function sharedGroupCharge(db: Drizzle, accountId: number, plan: string | null | undefined, cycle: BillingCycle): Promise<SharedGroupCharge | null> {
   const g = await groupOfAccount(db, accountId);
   if (!g || g.billingMode !== "shared" || g.primaryUserId !== accountId) return null;
-  const extras = (await groupMemberIds(db, g)).length - 1;
-  const base = planPrice(plan, cycle);
-  const extraList = extraAccountListPrice(g, plan, cycle);
-  if (base == null || extraList == null) return null;
+  const lines = await sharedPriceLines(db, g, plan, cycle);
+  if (lines.some((l) => l.list == null)) return null;
   const vat = chargedVatRate();
-  const extraCharged = vat == null ? extraList : Math.round(extraList * (100 + vat)) / 100;
-  return { group: g, extras, extraPrice: extraList, charged: Math.round((base + extras * extraCharged) * 100) / 100 };
+  const withVat = (n: number) => (vat == null ? n : Math.round(n * (100 + vat)) / 100);
+  const primary = lines.find((l) => l.isPrimary);
+  // No special price on the primary → exactly what a standalone account pays (incl. TEST flat price).
+  const base = primary?.custom ? withVat(primary.list!) : planPrice(plan, cycle);
+  if (base == null) return null;
+  const others = lines.filter((l) => !l.isPrimary);
+  const extrasList = others.reduce((a, l) => a + l.list!, 0);
+  const extrasCharged = others.reduce((a, l) => a + withVat(l.list!), 0);
+  return {
+    group: g, extras: others.length, extraPrice: others.length ? Math.round(extrasList / others.length) : 0,
+    extrasList, lines, charged: Math.round((base + extrasCharged) * 100) / 100,
+  };
 }
 
 /**
@@ -243,7 +262,7 @@ export async function sharedGroupCharge(db: Drizzle, accountId: number, plan: st
  */
 export async function resolvePaySelection(db: Drizzle, user: AuthUser, body: any): Promise<{
   ownerId: number; plan: string; cycle: BillingCycle; amount: number;
-  shared: { group: AccountGroup; extras: number; extraPrice: number; charged: number } | null;
+  shared: SharedGroupCharge | null;
 }> {
   if (user.ownerUserId) throw new BadRequestException("صلاحية الدفع لصاحب الحساب فقط");
   const ownerId = user.id;
@@ -336,7 +355,7 @@ export class SubscriptionController {
       // Linked accounts: `sharedBy` = this account's package is paid by the
       // primary; `sharedPackage` = the primary pays for N extra accounts.
       sharedBy: payer ? { accountId: payer.id, name: payer.name } : null,
-      sharedPackage: shared ? { extraAccounts: shared.extras, extraAccountPrice: shared.extraPrice } : null,
+      sharedPackage: shared ? { extraAccounts: shared.extras, extraAccountPrice: shared.extraPrice, extrasTotal: shared.extrasList, perAccount: shared.lines.some((l) => l.custom) } : null,
       // Every payable plan × cycle, so the checkout shows the amount that
       // will actually be charged rather than a copy of the price list.
       prices: planPriceTable(),

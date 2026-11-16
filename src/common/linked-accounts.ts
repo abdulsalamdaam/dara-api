@@ -137,6 +137,45 @@ export function extraAccountListPrice(group: Pick<AccountGroup, "extraAccountPri
   return Math.round((yearly * (1 + CYCLE_UPLIFT[cycle]) * CYCLE_MONTHS[cycle]) / 12);
 }
 
+/** Cycle list price (before VAT) from a yearly price — the same formula as `listPrice`. */
+export function cycleListPrice(yearly: number, cycle: BillingCycle): number {
+  return Math.round((yearly * (1 + CYCLE_UPLIFT[cycle]) * CYCLE_MONTHS[cycle]) / 12);
+}
+
+/** The admin's special yearly price for one account in the group, or null. */
+export function memberPriceOverride(group: Pick<AccountGroup, "memberPrices">, accountId: number): number | null {
+  const v = (group.memberPrices ?? {})[String(accountId)];
+  return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+}
+
+export interface SharedPriceLine {
+  accountId: number;
+  isPrimary: boolean;
+  /** Yearly before VAT. */
+  yearly: number | null;
+  /** Default yearly before VAT (what it costs without a special price). */
+  defaultYearly: number | null;
+  /** Cycle list price before VAT. */
+  list: number | null;
+  custom: boolean;
+}
+
+/**
+ * Shared package, priced per account: each member's own special price if an
+ * admin set one, else the plan price (primary) or the extra-account price.
+ * Primary first.
+ */
+export async function sharedPriceLines(db: Drizzle, group: AccountGroup, plan: string | null | undefined, cycle: BillingCycle): Promise<SharedPriceLine[]> {
+  const ids = await groupMemberIds(db, group);
+  return ids.map((id) => {
+    const isPrimary = id === group.primaryUserId;
+    const defaultYearly = isPrimary ? (PLAN_YEARLY_PRICE[resolvePackage(plan).key] ?? null) : extraAccountYearlyPrice(group, plan);
+    const custom = memberPriceOverride(group, id);
+    const yearly = custom ?? defaultYearly;
+    return { accountId: id, isPrimary, yearly, defaultYearly, list: yearly == null ? null : cycleListPrice(yearly, cycle), custom: custom != null };
+  });
+}
+
 /**
  * Shared mode: copy the primary's plan and subscription window onto every
  * other member, so each member account's own gates (lock, trial, plan

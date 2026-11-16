@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { extraAccountListPrice, extraAccountYearlyPrice } from "./linked-accounts";
+import { cycleListPrice, extraAccountListPrice, extraAccountYearlyPrice, memberPriceOverride } from "./linked-accounts";
 import { listPrice } from "./packages";
 
 describe("linked accounts — shared package pricing", () => {
@@ -25,5 +25,20 @@ describe("linked accounts — shared package pricing", () => {
   it("is on request when the plan is (enterprise) and no special price is set", () => {
     assert.equal(extraAccountListPrice({ extraAccountPriceYearly: null }, "enterprise", "yearly"), null);
     assert.equal(extraAccountListPrice({ extraAccountPriceYearly: "3000" }, "enterprise", "yearly"), 3000);
+  });
+
+  it("reads a per-account special price, ignoring missing or junk entries", () => {
+    const g = { memberPrices: { "74": 1500, "75": 0, "76": "x" as unknown as number } };
+    assert.equal(memberPriceOverride(g, 74), 1500);
+    assert.equal(memberPriceOverride(g, 75), 0);
+    assert.equal(memberPriceOverride(g, 76), null);
+    assert.equal(memberPriceOverride(g, 99), null);
+    assert.equal(memberPriceOverride({ memberPrices: {} }, 74), null);
+  });
+
+  it("prices a per-account yearly price on any cycle like the plan", () => {
+    assert.equal(cycleListPrice(1500, "yearly"), 1500);
+    assert.equal(cycleListPrice(1200, "semiannual"), 660);
+    assert.equal(cycleListPrice(5400, "quarterly"), 1620);
   });
 });

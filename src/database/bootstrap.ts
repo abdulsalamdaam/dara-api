@@ -842,6 +842,16 @@ export async function ensureSchema(): Promise<void> {
       log.error(`ensure moyasar tokenization failed: ${err?.message || err}`);
     }
 
+    // 0098: linked accounts — per-account special price in a shared package (account_groups.member_prices).
+    // Full-row selects of account_groups read the column, so a failure here is an error.
+    try {
+      const mp = findSqlFile(join("drizzle", "0098_linked_member_prices.sql"));
+      if (mp) await client.query(readFileSync(mp, "utf8"));
+      else log.error("0098_linked_member_prices.sql not found — account_groups.member_prices missing");
+    } catch (err: any) {
+      log.error(`ensure linked member prices failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

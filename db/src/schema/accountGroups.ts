@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, numeric, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, numeric, jsonb, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { usersTable } from "./users";
 import { rolesTable } from "./roles";
 
@@ -18,6 +18,8 @@ export const accountGroupsTable = pgTable("account_groups", {
   billingMode: text("billing_mode").$type<GroupBillingMode>().notNull().default("separate"),
   /** Shared mode: SAR before VAT per extra account per year. NULL = default (half the plan's yearly price). */
   extraAccountPriceYearly: numeric("extra_account_price_yearly", { precision: 12, scale: 2 }),
+  /** Shared mode (0098): account id → SAR before VAT per year, set by an admin per account. Missing = default. */
+  memberPrices: jsonb("member_prices").$type<Record<string, number>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
