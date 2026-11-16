@@ -1,3 +1,4 @@
+import { tokenizationEnabled, testPriceFor } from "../../common/billing-flags";
 import { BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, desc, eq, ne } from "drizzle-orm";
@@ -303,7 +304,8 @@ export async function resolvePaySelection(db: Drizzle, user: AuthUser, body: any
 
   if (!isPayablePlan(plan)) throw new BadRequestException("هذه الباقة تُسعّر عند الطلب — تواصل مع المبيعات");
   const shared = await sharedGroupCharge(db, ownerId, plan, cycle);
-  const amount = shared ? shared.charged : planPrice(plan, cycle);
+  // A test account on production pays a fixed few riyals (common/billing-flags.ts).
+  const amount = testPriceFor(ownerId) ?? (shared ? shared.charged : planPrice(plan, cycle));
   if (!amount || amount <= 0) throw new BadRequestException("تعذّر تحديد قيمة الاشتراك");
 
   // Record the chosen plan/cycle as the DESIRED selection only — do NOT touch
@@ -351,7 +353,7 @@ export class SubscriptionController {
       features: await accountFeatures(this.db, ownerId, owner?.packagePlan),
       billingCycle: cycle,
       // What the next payment costs — a monthly account renews quarterly.
-      amountDue: shared ? shared.charged : planPrice(owner?.packagePlan, purchasableCycle(cycle)),
+      amountDue: testPriceFor(ownerId) ?? (shared ? shared.charged : planPrice(owner?.packagePlan, purchasableCycle(cycle))),
       // Linked accounts: `sharedBy` = this account's package is paid by the
       // primary; `sharedPackage` = the primary pays for N extra accounts.
       sharedBy: payer ? { accountId: payer.id, name: payer.name } : null,
@@ -363,7 +365,7 @@ export class SubscriptionController {
       moyasarConfigured: isMoyasarConfigured(),
       // In-app checkout with a saved card (recurring-billing.service.ts). When
       // false the web keeps the hosted-invoice link flow.
-      tokenizationEnabled: String(process.env.BILLING_TOKENIZATION_ENABLED || "").toLowerCase() === "true" && isMoyasarConfigured() && !!process.env.MOYASAR_PUBLISHABLE_KEY,
+      tokenizationEnabled: tokenizationEnabled(ownerId),
       autoRenew: !!owner?.autoRenew,
       nextBillingAt: owner?.nextBillingAt ?? null,
       billingState: owner?.billingState ?? "ok",

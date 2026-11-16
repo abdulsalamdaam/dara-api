@@ -120,6 +120,7 @@ describe("recurring billing with saved Moyasar tokens (real Postgres)", { skip: 
     t = await withDb({ legacy: "full", migrate: false });
     await t.apply(MIG_0096);
     await t.apply(MIG_0097);
+    await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
@@ -385,6 +386,27 @@ describe("recurring billing with saved Moyasar tokens (real Postgres)", { skip: 
     assert.equal(a.subscription_status, "active");
     assert.equal(a.auto_renew, false);
     assert.equal((await methods()).length, 0);
+  });
+
+  it("production test account: opted in by id, charged the test price on checkout and renewal", async () => {
+    delete process.env.BILLING_TOKENIZATION_ENABLED;
+    process.env.BILLING_TOKENIZATION_USERS = String(U);
+    process.env.BILLING_TEST_PRICE_USERS = `${U}=5`;
+    try {
+      const other = { id: U + 1000, ownerUserId: null } as any;
+      await assert.rejects(() => svc.startCheckout(other, { plan: "basic", cycle: "quarterly" }), "everyone else keeps the invoice flow");
+      const { cfg } = await subscribeWithCard();
+      assert.equal(cfg.amount, 5);
+      assert.equal(cfg.amountHalalas, 500);
+      const end = await periodEnded(0);
+      const out = await svc.runDue(new Date(end.getTime() + 60_000));
+      assert.equal(out[0]!.outcome.status, "paid");
+      assert.equal(charges[0]!.amount, 500, "the renewal charges the test price too");
+    } finally {
+      process.env.BILLING_TOKENIZATION_ENABLED = "true";
+      delete process.env.BILLING_TOKENIZATION_USERS;
+      delete process.env.BILLING_TEST_PRICE_USERS;
+    }
   });
 
   it("BILLING_EMAIL_ALLOWLIST: renewal emails go only to listed addresses (staging)", async () => {

@@ -98,6 +98,7 @@ describe("subscription: no PAID email or paid state before a verified payment (r
     // users gained columns in 0096 (linked accounts) and 0097 (recurring billing).
     await t.apply(join(__dirname, "../../../db/drizzle/0096_linked_accounts.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
@@ -331,6 +332,7 @@ describe("subscription vs add-on payments are independent (real Postgres)", { sk
     t = await withDb({ legacy: "full", migrate: false });
     await t.apply(join(__dirname, "../../../db/drizzle/0096_linked_accounts.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
