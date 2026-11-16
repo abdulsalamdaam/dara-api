@@ -311,6 +311,9 @@ describe("recurring billing with saved Moyasar tokens (real Postgres)", { skip: 
     chargeMode = "paid";
     const fresh = newToken("active", "4242");
     await svc.replaceCard(user, fresh.id);
+    a = await account();
+    assert.equal(a.billing_state, "ok", "a new card clears the update-your-card warning");
+    assert.equal(a.billing_failed_attempts, 0, "the old card's failures do not count against the new one");
     o = (await svc.runDue(new Date(Date.now() + 60_000)))[0]!.outcome;
     assert.equal(o.status, "paid");
     a = await account();
