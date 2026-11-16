@@ -40,6 +40,8 @@ export const MIGRATION_0079 = join(__dirname, "../../../../db/drizzle/0079_finan
 export const MIGRATION_0080 = join(__dirname, "../../../../db/drizzle/0080_finance_v2_manual_journal_meta.sql");
 export const MIGRATION_0094 = join(__dirname, "../../../../db/drizzle/0094_finance_rent_revenue_basis.sql");
 export const LEGACY_MIN = join(__dirname, "legacy-min.sql");
+/** Recurring billing columns on users / subscription_payments — newer than legacy-schema.sql. Idempotent. */
+export const MIGRATION_0097 = join(__dirname, "../../../../db/drizzle/0097_moyasar_tokenization.sql");
 /** The full legacy schema (schema only, generated from db/src/schema), for the hook specs that run real legacy handlers. */
 export const LEGACY_FULL = join(__dirname, "legacy-schema.sql");
 
@@ -63,7 +65,11 @@ export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolea
   const apply = async (file: string) => {
     await pool.query(readFileSync(file, "utf8"));
   };
-  if (opts.legacy === "full") await apply(LEGACY_FULL);
+  if (opts.legacy === "full") {
+    await apply(LEGACY_FULL);
+    // Full-row selects of users / subscription_payments read the 0097 columns.
+    await apply(MIGRATION_0097);
+  }
   else if (opts.legacy !== false) await apply(LEGACY_MIN);
   if (opts.migrate !== false) {
     await apply(MIGRATION_0066);
