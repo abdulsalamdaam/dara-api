@@ -22,7 +22,7 @@ import {
 import { assertEmailAvailable, emailTakenException, isEmailUniqueViolation, normalizeEmail } from "../../common/user-email";
 import {
   accountRows, extraAccountListPrice, extraAccountYearlyPrice, groupMemberIds, groupOfAccount, resolveActingAccess,
-  switchableAccountIds, syncSharedSubscription,
+  switchableAccountIds, syncSharedSubscription, sharedPlanMisfit, sharedPlanMisfitMessage,
 } from "../../common/linked-accounts";
 import { deriveSubscription } from "../../common/subscription";
 
@@ -431,6 +431,11 @@ export class AdminLinkedAccountsController {
       }
     }
     if (body?.name !== undefined) set.name = body.name ? String(body.name).trim().slice(0, 120) : null;
+    if ((set.billingMode ?? g.billingMode) === "shared") {
+      const [p] = await this.db.select({ plan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, g.primaryUserId));
+      const bad = await sharedPlanMisfit(this.db, g, p?.plan);
+      if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(p?.plan, bad.name) });
+    }
     if (Object.keys(set).length) await this.db.update(accountGroupsTable).set(set).where(eq(accountGroupsTable.id, g.id));
     const next = await this.groupById(g.id);
     if (next.billingMode === "shared") await syncSharedSubscription(this.db, next.primaryUserId);
@@ -449,6 +454,11 @@ export class AdminLinkedAccountsController {
     if (u.groupId != null && u.groupId !== g.id) throw new BadRequestException("الحساب مرتبط بمجموعة أخرى — افصله أولاً");
     const members = await groupMemberIds(this.db, g);
     if (!members.includes(id) && members.length >= maxLinkedAccounts()) throw new BadRequestException("تم بلوغ الحد الأعلى للحسابات");
+    if (g.billingMode === "shared") {
+      const [p] = await this.db.select({ plan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, g.primaryUserId));
+      const bad = await sharedPlanMisfit(this.db, g, p?.plan, [id]);
+      if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(p?.plan, bad.name) });
+    }
     await this.db.update(usersTable).set({ accountGroupId: g.id }).where(eq(usersTable.id, id));
     if (g.billingMode === "shared") await syncSharedSubscription(this.db, g.primaryUserId);
     return this.view(g, id);

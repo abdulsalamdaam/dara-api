@@ -21,7 +21,7 @@ import type { Response } from "express";
 import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal";
 import { assertCustomerPlanChangeAllowed, signalPlanChanged } from "../plan-transition/plan-transition-signal";
 import { activateAddonFromPaidRow } from "./addon-activation";
-import { extraAccountListPrice, groupMemberIds, groupOfAccount, sharedBillingPayer, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
+import { extraAccountListPrice, groupMemberIds, groupOfAccount, sharedBillingPayer, sharedPlanMisfit, sharedPlanMisfitMessage, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
 import { chargedVatRate } from "../../common/packages";
 import type { AccountGroup } from "@dara/database";
 
@@ -268,6 +268,14 @@ export async function resolvePaySelection(db: Drizzle, user: AuthUser, body: any
   // account could buy a company-only plan straight from the billing screen.
   if (!planAllowedForUserType(plan, owner.userType)) {
     throw new BadRequestException(planUserTypeError(plan));
+  }
+  // Shared package: the plan lands on every member — each must be allowed it.
+  {
+    const g = await groupOfAccount(db, ownerId);
+    if (g && g.billingMode === "shared" && g.primaryUserId === ownerId) {
+      const bad = await sharedPlanMisfit(db, g, plan);
+      if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(plan, bad.name) });
+    }
   }
   // A downgrade out of accounting while the office holds client money or manages other landlords' active
   // contracts is support's call (plan transitions D2): 409 DOWNGRADE_NEEDS_SUPPORT with the preview, before

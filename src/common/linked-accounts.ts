@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { accountAccessTable, accountGroupsTable, companiesTable, rolesTable, usersTable, type AccountGroup } from "@dara/database";
 import type { AuthUser } from "./guards/jwt-auth.guard";
 import type { Drizzle } from "../database/database.module";
-import { CYCLE_MONTHS, CYCLE_UPLIFT, PLAN_YEARLY_PRICE, resolvePackage, type BillingCycle } from "./packages";
+import { CYCLE_MONTHS, CYCLE_UPLIFT, PLAN_YEARLY_PRICE, planAllowedForUserType, resolvePackage, type BillingCycle } from "./packages";
 import { signalPlanChanged } from "../modules/plan-transition/plan-transition-signal";
 import { signalFv2Entitlement } from "../modules/finance-v2/auto-provision-signal";
 
@@ -144,6 +144,27 @@ export function extraAccountListPrice(group: Pick<AccountGroup, "extraAccountPri
  * groups. Called wherever the primary's subscription changes and whenever a
  * member joins a shared group. No-op for a separate-billing group.
  */
+/**
+ * Shared package: the primary's plan is copied onto every member, so every
+ * member's account type must be allowed that plan (e.g. the Tenants plan is
+ * company-only — an individual member cannot be put on it). Returns the first
+ * member that does not fit, or null. `extraIds` checks accounts about to join.
+ */
+export async function sharedPlanMisfit(
+  db: Drizzle, group: AccountGroup, plan: string | null | undefined, extraIds: number[] = [],
+): Promise<{ id: number; name: string } | null> {
+  const ids = [...new Set([...(await groupMemberIds(db, group)), ...extraIds])].filter((id) => id !== group.primaryUserId);
+  if (!ids.length) return null;
+  const rows = await db.select({ id: usersTable.id, name: usersTable.name, userType: usersTable.userType })
+    .from(usersTable).where(inArray(usersTable.id, ids));
+  const bad = rows.find((r) => !planAllowedForUserType(plan, r.userType));
+  return bad ? { id: bad.id, name: bad.name } : null;
+}
+
+export function sharedPlanMisfitMessage(plan: string | null | undefined, name: string): string {
+  return `باقة "${resolvePackage(plan).labelAr}" لا تناسب الحساب المرتبط «${name}» (حساب فرد) — لا يمكن توحيد الباقة عليه. افصله أو اختر باقة أخرى.`;
+}
+
 export async function syncSharedSubscription(db: Drizzle, primaryUserId: number): Promise<number> {
   const [g] = await db.select().from(accountGroupsTable).where(eq(accountGroupsTable.primaryUserId, primaryUserId));
   if (!g || g.billingMode !== "shared") return 0;
@@ -155,7 +176,10 @@ export async function syncSharedSubscription(db: Drizzle, primaryUserId: number)
   if (!p) return 0;
   const ids = (await groupMemberIds(db, g)).filter((id) => id !== primaryUserId);
   for (const id of ids) {
-    const [before] = await db.select({ plan: usersTable.packagePlan }).from(usersTable).where(eq(usersTable.id, id));
+    const [before] = await db.select({ plan: usersTable.packagePlan, userType: usersTable.userType }).from(usersTable).where(eq(usersTable.id, id));
+    // Safety net — the entry points refuse this first: never put a member on a
+    // plan its account type may not hold (Tenants plan on an individual).
+    if (before && !planAllowedForUserType(p.packagePlan, before.userType)) continue;
     await db.update(usersTable).set({ ...p, desiredPackagePlan: null, desiredBillingCycle: null }).where(eq(usersTable.id, id));
     // A member whose plan moved runs the same transition steps as a paid plan change.
     if (before && before.plan !== p.packagePlan) {

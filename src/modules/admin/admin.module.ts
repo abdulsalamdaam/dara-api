@@ -6,7 +6,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, isNotNull, lte, notInArray, or, sql, sum } from "drizzle-orm";
 import { usersTable, propertiesTable, unitsTable, contractsTable, paymentsTable, loginLogsTable, tenantsTable, rolesTable, companiesTable, ownersTable, subscriptionPaymentsTable, appLogsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
-import { syncSharedSubscription } from "../../common/linked-accounts";
+import { groupOfAccount, sharedPlanMisfit, sharedPlanMisfitMessage, syncSharedSubscription } from "../../common/linked-accounts";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { SuperAdminGuard } from "../../common/guards/roles.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -1306,6 +1306,13 @@ class AdminController {
     const win = stated || !hasWindow
       ? subscriptionWindow({ endsAtIso: body?.subscriptionEndsAt, trialDays: trialDays ?? undefined })
       : null;
+    {
+      const g = await groupOfAccount(this.db, id);
+      if (g && g.billingMode === "shared" && g.primaryUserId === id) {
+        const bad = await sharedPlanMisfit(this.db, g, plan);
+        if (bad) throw new BadRequestException({ code: "SHARED_PLAN_MISFIT", message: sharedPlanMisfitMessage(plan, bad.name) });
+      }
+    }
     const [user] = await this.db.update(usersTable)
       .set({
         packagePlan: plan,
