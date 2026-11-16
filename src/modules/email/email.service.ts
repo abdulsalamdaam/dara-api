@@ -610,6 +610,65 @@ export class EmailService {
     });
   }
 
+  /* ── Recurring billing (saved card) ──────────────────────── */
+
+  /**
+   * The automatic renewal could not charge the saved card, or the card can no
+   * longer be charged. The button goes to the billing page, where the user
+   * pays and saves a new card. `final` = no more automatic retries.
+   */
+  async sendRenewalCardAction(to: string, name: string, payload: {
+    reason: "charge_failed" | "card_unusable" | "action_required";
+    amount: number;
+    final: boolean;
+    nextRetryAt?: Date | null;
+    lockAt?: Date | null;
+    cardLabel?: string | null;
+  }): Promise<boolean> {
+    if (!to) return false;
+    const safeName = escapeHtml(name || "");
+    const amount = sarAmount(payload.amount);
+    const card = payload.cardLabel ? escapeHtml(payload.cardLabel) : null;
+    const headAr = payload.reason === "card_unusable"
+      ? "بطاقتك المحفوظة لم تعد صالحة للتجديد"
+      : "تعذّر تجديد اشتراكك تلقائياً";
+    const bodyAr = payload.reason === "card_unusable"
+      ? `لم نتمكن من استخدام بطاقتك المحفوظة${card ? ` (${card})` : ""} لتجديد اشتراكك في <strong>دارا</strong> بمبلغ ${amount}. حدّث بطاقتك من صفحة الفوترة ليستمر اشتراكك.`
+      : payload.reason === "action_required"
+        ? `طلب البنك المصدر للبطاقة${card ? ` (${card})` : ""} تأكيداً إضافياً لتجديد اشتراكك في <strong>دارا</strong> بمبلغ ${amount}. ادفع من صفحة الفوترة ليستمر اشتراكك.`
+        : `رُفضت عملية تجديد اشتراكك في <strong>دارا</strong> بمبلغ ${amount} على بطاقتك المحفوظة${card ? ` (${card})` : ""}.`;
+    const retryAr = !payload.final && payload.nextRetryAt
+      ? `سنحاول مرة أخرى تلقائياً يوم <span dir="ltr">${riyadhDate(payload.nextRetryAt)}</span>، أو حدّث بطاقتك الآن.`
+      : "لن نعيد المحاولة تلقائياً. حدّث بطاقتك وادفع من صفحة الفوترة.";
+    const lockAr = payload.lockAt ? `<p style="margin:0 0 12px;color:#334155;line-height:1.7;">يبقى حسابك متاحاً حتى <strong dir="ltr">${riyadhDate(payload.lockAt)}</strong>.</p>` : "";
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${headAr}</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
+        ${greetingAr(safeName)}،<br/>
+        ${bodyAr}
+      </p>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">${payload.reason === "card_unusable" ? "" : retryAr}</p>
+      ${lockAr}
+      ${en(payload.reason === "card_unusable"
+        ? `We couldn't use your saved card to renew your Dara subscription (${amount}). Please update your card from the billing page.`
+        : `We couldn't renew your Dara subscription (${amount}) on your saved card. ${!payload.final && payload.nextRetryAt ? `We'll retry on ${riyadhDate(payload.nextRetryAt)}, or you can update your card now.` : "We won't retry automatically — please update your card and pay from the billing page."}`)}
+      <div style="margin:24px 0;text-align:center;">
+        <a href="${BILLING_PAGE_URL}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;">
+          تحديث البطاقة · Update card
+        </a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار عن الفوترة راسلنا على ${SUPPORT_EMAIL}.</p>
+      ${en(`Billing questions: ${SUPPORT_EMAIL}.`, "muted")}
+    `);
+    return this.send({
+      to,
+      subject: `${headAr} · ${payload.reason === "card_unusable" ? "Please update your card" : "Your Dara renewal failed"}`,
+      html,
+      text: `${greetingAr(name)}،\n${headAr} (${amount}). حدّث بطاقتك من صفحة الفوترة: ${BILLING_PAGE_URL}\n\nWe couldn't renew your Dara subscription on your saved card. Update your card: ${BILLING_PAGE_URL}`,
+      category: "subscription-renewal-failed",
+    });
+  }
+
   /* ── Account limits / add-ons ─────────────────────────────── */
 
   /**
