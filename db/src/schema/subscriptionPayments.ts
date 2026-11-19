@@ -14,7 +14,7 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   billingCycle: text("billing_cycle").notNull(),
   amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
   currency: text("currency").notNull().default("SAR"),
-  /** pending | paid | failed */
+  /** pending | paid | failed | cancelled | review (bank receipt awaiting an admin) | rejected */
   status: text("status").notNull().default("pending"),
   /** Moyasar hosted-invoice id + the URL the user is redirected to. */
   moyasarInvoiceId: text("moyasar_invoice_id"),
@@ -59,9 +59,10 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   /**
    * How this row is paid (migration 0097): `invoice` — a hosted invoice link
    * (the old flow); `checkout` — the first in-app payment, which saves the
-   * card; `renewal` — a server-side charge of the saved token.
+   * card; `renewal` — a server-side charge of the saved token;
+   * `bank_transfer` — the customer transferred and uploaded the receipt (0099).
    */
-  chargeType: text("charge_type").$type<"invoice" | "checkout" | "renewal">().notNull().default("invoice"),
+  chargeType: text("charge_type").$type<"invoice" | "checkout" | "renewal" | "bank_transfer">().notNull().default("invoice"),
   paymentMethodId: integer("payment_method_id"),
   /** The subscription end a renewal pays for — unique per account (no double charge). */
   renewalOf: timestamp("renewal_of", { withTimezone: true }),
@@ -69,6 +70,18 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   moyasarGivenId: text("moyasar_given_id"),
   attempt: integer("attempt").notNull().default(0),
   failureReason: text("failure_reason"),
+  /**
+   * Bank transfer (0099): the receipt the customer uploaded (MinIO object key,
+   * original name, content type) and the admin review. `review_note` is the
+   * rejection reason the customer sees.
+   */
+  receiptKey: text("receipt_key"),
+  receiptName: text("receipt_name"),
+  receiptType: text("receipt_type"),
+  receiptUploadedAt: timestamp("receipt_uploaded_at", { withTimezone: true }),
+  reviewedBy: integer("reviewed_by"),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  reviewNote: text("review_note"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

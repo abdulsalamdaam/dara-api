@@ -852,6 +852,16 @@ export async function ensureSchema(): Promise<void> {
       log.error(`ensure linked member prices failed: ${err?.message || err}`);
     }
 
+    // 0099: bank transfer — the uploaded receipt + admin review on subscription_payments.
+    // Full-row selects of subscription_payments read the columns, so a failure here is an error.
+    try {
+      const bt = findSqlFile(join("drizzle", "0099_bank_transfer.sql"));
+      if (bt) await client.query(readFileSync(bt, "utf8"));
+      else log.error("0099_bank_transfer.sql not found — subscription_payments.receipt_key missing; full payment selects will fail");
+    } catch (err: any) {
+      log.error(`ensure bank transfer failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

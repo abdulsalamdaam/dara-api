@@ -617,6 +617,13 @@
       "when": 1794355200000,
       "tag": "0098_linked_member_prices",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1794441600000,
+      "tag": "0099_bank_transfer",
+      "breakpoints": true
     }
   ]
 }
