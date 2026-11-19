@@ -91,6 +91,16 @@ describe("bank transfer (real Postgres)", { skip: fv2DbSkip }, () => {
   const account = async () => (await q(`select subscription_status, subscription_ends_at, package_plan, billing_cycle, next_billing_at, auto_renew from users where id = $1`, [U]))[0];
   const rows = () => q(`select id, status, charge_type, kind, amount, receipt_key, receipt_name, review_note, reviewed_by, paid_at, addon_id from subscription_payments where user_id = $1 order by id`, [U]);
 
+  it("quotes the exact amount the receipt row will carry", async () => {
+    const q = await svc.quote(user, { plan: "professional", cycle: "yearly" });
+    assert.equal(q.amount, planPrice("professional", "yearly"));
+    const own = await svc.quote(user, {});
+    assert.equal(own.amount, planPrice("basic", "quarterly"), "no selection → the account's own plan and cycle");
+    const r: any = await svc.submit(user, pdfReceipt(), { plan: "professional", cycle: "yearly" });
+    assert.equal(r.amount, q.amount);
+    await drainAsync();
+  });
+
   it("an uploaded receipt waits for review and activates nothing", async () => {
     const r: any = await svc.submit(user, pdfReceipt(), { plan: "basic", cycle: "yearly" });
     assert.equal(r.status, "review");

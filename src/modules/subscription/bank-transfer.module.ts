@@ -33,11 +33,12 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { PermissionsGuard, RequirePermissions } from "../../common/permissions.decorator";
 import { PERMISSIONS } from "../../common/permissions";
 import { scopeId } from "../../common/scope";
-import { CYCLE_LABEL_AR, parseCycle, resolvePackage } from "../../common/packages";
+import { CYCLE_LABEL_AR, isBillingCycle, isPackagePlan, parseCycle, planPrice, purchasableCycle, resolvePackage } from "../../common/packages";
+import { testPriceFor } from "../../common/billing-flags";
 import { UploadsService } from "../uploads/uploads.service";
 import { EmailService } from "../email/email.service";
 import { AppLogService } from "../../common/logging/app-log.service";
-import { SubscriptionModule, activateFromPaidRow, resolvePaySelection } from "./subscription.module";
+import { SubscriptionModule, activateFromPaidRow, resolvePaySelection, sharedGroupCharge } from "./subscription.module";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 import { LimitsModule } from "../limits/limits.module";
 import { AddonCatalogService } from "../limits/addon-catalog.service";
@@ -146,6 +147,32 @@ export class BankTransferService {
       .set({ paymentId: row!.id, ...(addon.status === "offered" ? { status: "pending_payment" as const } : {}) })
       .where(eq(accountLimitAddonsTable.id, addon.id));
     return row!;
+  }
+
+  /**
+   * The exact amount a transfer for `{ plan?, cycle? }` or `{ addonId }` must
+   * be — the figure the row will carry (VAT, shared package and test price
+   * included). Read-only: nothing is recorded.
+   */
+  async quote(user: AuthUser, q: any): Promise<{ amount: number | null }> {
+    const ownerId = scopeId(user);
+    if (q?.addonId) {
+      const addonId = Number(q.addonId);
+      const [addon] = await this.db.select().from(accountLimitAddonsTable)
+        .where(and(eq(accountLimitAddonsTable.id, addonId), eq(accountLimitAddonsTable.accountId, ownerId))).limit(1);
+      if (!addon) throw new NotFoundException("Add-on not found");
+      if (addon.paymentId != null) {
+        const [open] = await this.db.select().from(subscriptionPaymentsTable).where(eq(subscriptionPaymentsTable.id, addon.paymentId)).limit(1);
+        if (open && open.status !== "paid" && open.status !== "cancelled") return { amount: Number(open.amount) };
+      }
+      const [acct] = await this.db.select({ subscriptionEndsAt: usersTable.subscriptionEndsAt }).from(usersTable).where(eq(usersTable.id, ownerId)).limit(1);
+      return { amount: addonCharge(addon, addon.endsAt ?? acct?.subscriptionEndsAt ?? null)?.total ?? null };
+    }
+    const [owner] = await this.db.select({ packagePlan: usersTable.packagePlan, billingCycle: usersTable.billingCycle }).from(usersTable).where(eq(usersTable.id, ownerId)).limit(1);
+    const plan = q?.plan && isPackagePlan(q.plan) ? q.plan : owner?.packagePlan;
+    const cycle = purchasableCycle(isBillingCycle(q?.cycle) ? q.cycle : owner?.billingCycle);
+    const shared = await sharedGroupCharge(this.db, ownerId, plan, cycle);
+    return { amount: testPriceFor(ownerId) ?? (shared ? shared.charged : planPrice(plan, cycle)) };
   }
 
   /** A short-lived link to the customer's own receipt. */
@@ -288,6 +315,13 @@ export class BankTransferController {
   @UseInterceptors(FileInterceptor("file", { limits: { fileSize: RECEIPT_MAX_BYTES + 1 } }))
   submit(@CurrentUser() user: AuthUser, @UploadedFile() file: Express.Multer.File, @Body() body: any) {
     return this.bank.submit(user, file, body);
+  }
+
+  /** The amount to transfer for `?plan=&cycle=` or `?addonId=` (read-only). */
+  @Get("bank-transfer/quote")
+  @RequirePermissions(PERMISSIONS.SUBSCRIPTION_MANAGE)
+  quote(@CurrentUser() user: AuthUser, @Query() q: any) {
+    return this.bank.quote(user, q);
   }
 
   @Get("payments/:id/receipt")
