@@ -105,6 +105,13 @@ export class LimitsHousekeepingService implements OnModuleInit, OnModuleDestroy 
     for (const a of stale) {
       try {
         if (await this.paidMeanwhile(a)) { out.activated.push(a.id); continue; }
+        // A bank-transfer receipt is waiting for an admin: the customer paid
+        // within the offer — the review decides, not the clock.
+        if (a.paymentId != null) {
+          const [p] = await this.db.select({ status: subscriptionPaymentsTable.status }).from(subscriptionPaymentsTable)
+            .where(eq(subscriptionPaymentsTable.id, a.paymentId)).limit(1);
+          if (p?.status === "review") continue;
+        }
         await this.limits.cancelAddon(a.accountId, a.id, "انتهت مدة العرض دون دفع · Offer expired unpaid", { userId: null, kind: "system" });
         out.cancelled.push(a.id);
       } catch (err: any) {

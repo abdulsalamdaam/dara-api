@@ -25,6 +25,7 @@ import { activateAddonFromPaidRow } from "./addon-activation";
 import { sharedPriceLines, type SharedPriceLine, groupMemberIds, groupOfAccount, sharedBillingPayer, sharedPlanMisfit, sharedPlanMisfitMessage, syncSharedSubscription, accountRows } from "../../common/linked-accounts";
 import { chargedVatRate } from "../../common/packages";
 import type { AccountGroup } from "@dara/database";
+import { bankTransferView } from "../../common/bank-transfer";
 
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 
@@ -385,7 +386,14 @@ export class SubscriptionController {
       subscriptionEndsAt: owner?.subscriptionEndsAt ?? null,
       // Every row carries `kind` ('subscription' | 'addon'), `addonId` and
       // `description` (the add-on's line text) straight from the table.
-      payments: payments.map((p) => ({ ...p, kind: p.kind ?? "subscription", addonId: p.addonId ?? null, description: p.description ?? null })),
+      payments: payments.map(({ receiptKey, moyasarGivenId, ...p }) => ({ ...p, kind: p.kind ?? "subscription", addonId: p.addonId ?? null, description: p.description ?? null, hasReceipt: !!receiptKey })),
+      // Pay by bank transfer (0099): Dara's account, and the subscription
+      // receipt waiting for an admin (if any) so the screen can say so.
+      bankTransfer: bankTransferView(),
+      bankReview: (() => {
+        const r = payments.find((p) => p.kind !== "addon" && p.chargeType === "bank_transfer" && p.status === "review");
+        return r ? { id: r.id, plan: r.plan, billingCycle: r.billingCycle, amount: Number(r.amount), uploadedAt: r.receiptUploadedAt } : null;
+      })(),
     };
   }
 

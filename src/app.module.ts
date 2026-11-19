@@ -47,6 +47,7 @@ import { NotificationsModule } from "./modules/notifications/notifications.modul
 import { PackageModule } from "./modules/package/package.module";
 import { SubscriptionModule } from "./modules/subscription/subscription.module";
 import { RecurringBillingModule } from "./modules/subscription/recurring-billing.module";
+import { BankTransferModule } from "./modules/subscription/bank-transfer.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { ReportsModule } from "./modules/reports/reports.module";
 import { ExpenseImportModule } from "./modules/expenses-import/expense-import.module";
@@ -145,6 +146,7 @@ import { LimitsModule } from "./modules/limits/limits.module";
     PackageModule,
     SubscriptionModule,
     RecurringBillingModule,
+    BankTransferModule,
     AuditModule,
     OpsReportsModule,
     ReportsModule,
