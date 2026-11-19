@@ -173,6 +173,31 @@ export interface AdminPaymentEmailPayload {
 }
 
 /**
+ * A customer uploaded a bank-transfer receipt (0099): the admins are asked to
+ * check it against the bank statement and approve or reject it.
+ */
+export interface AdminBankTransferEmailPayload {
+  paymentId: number;
+  kind: "subscription" | "addon";
+  plan: string | null;
+  billingCycle: string | null;
+  amount: string | number;
+  description?: string | null;
+  accountId: number;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  companyName?: string | null;
+}
+
+/** The customer's bank-transfer receipt was rejected; `reason` is shown to them. */
+export interface BankTransferRejectedPayload {
+  amount: string | number;
+  label: string;
+  reason: string;
+}
+
+/**
  * Resend wrapper. We hit the REST API directly (same pattern as the Twilio
  * service) to avoid pulling in another SDK. Failures are logged but never
  * thrown to the caller — email is best-effort and must not block user flows
@@ -1087,6 +1112,87 @@ export class EmailService {
       ].filter(Boolean).join("\n"),
       replyTo: payload.email || undefined,
       category: "admin_payment_received",
+    });
+  }
+
+  /**
+   * A bank-transfer receipt is waiting for review (0099). Same audience as a
+   * paid-payment notice (`adminRegistrationRecipients`) — on staging that is
+   * `ADMIN_REGISTRATION_NOTIFY_EMAILS` only. Never throws.
+   */
+  async sendAdminBankTransferSubmitted(payload: AdminBankTransferEmailPayload, to?: string[]): Promise<boolean> {
+    const recipients = to?.length ? normaliseRecipients(to) : await this.adminRegistrationRecipients();
+    if (!recipients.length) {
+      this.log.warn("sendAdminBankTransferSubmitted: no recipient — skipping");
+      return false;
+    }
+    const staging = /staging/i.test(APP_PUBLIC_URL);
+    const name = payload.companyName || payload.name || "—";
+    const amount = Number(payload.amount);
+    const amountLabel = `${Number.isFinite(amount) ? amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : String(payload.amount)} ر.س`;
+    const what = payload.kind === "addon"
+      ? (payload.description || "إضافة على الحدود")
+      : `${payload.plan ? resolvePackage(payload.plan).labelAr : "—"} — ${isBillingCycle(payload.billingCycle) ? CYCLE_LABEL_AR[payload.billingCycle] : "—"}`;
+    const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/admin?tab=bank-transfers`;
+    const html = layout(`
+      ${staging ? `<p style="margin:0 0 12px;padding:8px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;color:#9a3412;font-size:13px;">بيئة الاختبار (staging) — ليست حوالة حقيقية على الإنتاج.</p>` : ""}
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:20px;">إيصال تحويل بنكي بانتظار المراجعة: ${escapeHtml(amountLabel)}</h1>
+      ${row("العميل", name)}
+      ${row("رقم الحساب", String(payload.accountId))}
+      ${row("البريد الإلكتروني", payload.email || "—")}
+      ${row("الجوال", payload.phone || "—")}
+      ${row("مقابل", what)}
+      ${row("المبلغ المطلوب (شامل الضريبة)", amountLabel)}
+      ${row("رقم الدفعة", String(payload.paymentId))}
+      <p style="margin:16px 0 0;color:#334155;line-height:1.7;">طابِق الإيصال مع كشف الحساب البنكي، ثم فعّل الاشتراك أو ارفض الإيصال من لوحة الإدارة.</p>
+      <div style="margin-top:24px;text-align:center;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">مراجعة الإيصال</a>
+      </div>
+    `);
+    return this.send({
+      to: recipients,
+      subject: `${staging ? "[staging] " : ""}إيصال تحويل بنكي ${amountLabel} — ${name}`,
+      html,
+      text: [
+        staging ? "بيئة الاختبار (staging) — ليست حوالة حقيقية." : "",
+        `إيصال تحويل بنكي بانتظار المراجعة: ${amountLabel}`,
+        `العميل: ${name} (حساب ${payload.accountId})`,
+        `البريد الإلكتروني: ${payload.email || "—"}`,
+        `الجوال: ${payload.phone || "—"}`,
+        `مقابل: ${what}`,
+        `رقم الدفعة: ${payload.paymentId}`,
+        `المراجعة: ${link}`,
+      ].filter(Boolean).join("\n"),
+      replyTo: payload.email || undefined,
+      category: "admin_bank_transfer",
+    });
+  }
+
+  /** The customer's bank-transfer receipt was rejected, with the admin's reason. */
+  async sendBankTransferRejected(to: string, name: string, payload: BankTransferRejectedPayload): Promise<boolean> {
+    if (!to) return false;
+    const amount = Number(payload.amount);
+    const amountLabel = `${Number.isFinite(amount) ? amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : String(payload.amount)} ر.س`;
+    const link = `${APP_PUBLIC_URL.replace(/\/$/, "")}/dashboard/settings?section=billing`;
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">${greetingAr(escapeHtml(name || ""))}،</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">راجعنا إيصال التحويل البنكي الذي أرسلته مقابل <strong>${escapeHtml(payload.label)}</strong> (${escapeHtml(amountLabel)})، ولم نتمكن من اعتماده.</p>
+      <div style="margin-top:16px;padding:12px;background:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+        <div style="color:#991b1b;font-size:12px;margin-bottom:6px;">السبب</div>
+        <div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(payload.reason)}</div>
+      </div>
+      <p style="margin:16px 0 0;color:#334155;line-height:1.7;">يمكنك رفع إيصال صحيح أو الدفع بالبطاقة من صفحة الفوترة.</p>
+      <div style="margin-top:24px;text-align:center;">
+        <a href="${link}" style="display:inline-block;background:linear-gradient(135deg,#042698,#106cf8);color:#ffffff;text-decoration:none;font-weight:700;padding:12px 28px;border-radius:10px;font-size:14px;">صفحة الفوترة</a>
+      </div>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">لأي استفسار تواصل معنا على: ${SUPPORT_EMAIL}</p>
+    `);
+    return this.send({
+      to,
+      subject: "لم نتمكن من اعتماد إيصال التحويل البنكي — دارا",
+      html,
+      text: `${greetingAr(name)}،\nراجعنا إيصال التحويل البنكي مقابل ${payload.label} (${amountLabel}) ولم نتمكن من اعتماده.\nالسبب: ${payload.reason}\nيمكنك رفع إيصال صحيح أو الدفع بالبطاقة: ${link}\nللاستفسار: ${SUPPORT_EMAIL}`,
+      category: "bank_transfer_rejected",
     });
   }
 
