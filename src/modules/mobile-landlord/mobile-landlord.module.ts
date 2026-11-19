@@ -3,7 +3,7 @@ import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsOptional, IsString } from "class-validator";
 import { and, eq, isNull, inArray, desc, sql } from "drizzle-orm";
 import type { Response } from "express";
-import { usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable, simpleInvoicesTable, companiesTable, lookupsTable } from "@dara/database";
+import { usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable, simpleInvoicesTable, companiesTable, lookupsTable, rentalOffersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -268,6 +268,31 @@ class LandlordMobileController {
     }
     return { propIds, contractIds: [...contractIds] };
   }
+  /**
+   * Rental offers (عروض التأجير) issued for each unit — newest first. Lets the
+   * landlord see in the app how many offers went out for a unit and to which
+   * companies. Only for callers who may see offers: an owner-mobile token is
+   * narrowed to its own units already; a portal login needs campaigns.view.
+   */
+  private async offersByUnit(user: AuthUser, unitIds: number[]) {
+    const out = new Map<number, { id: number; number: string; status: string; clientName: string; issueDate: string | null; validUntil: string | null; annualRent: number }[]>();
+    if (!unitIds.length || !homeMay(user, PERMISSIONS.CAMPAIGNS_VIEW)) return out;
+    const rows = await this.db.select({
+      id: rentalOffersTable.id, unitId: rentalOffersTable.unitId, number: rentalOffersTable.number,
+      status: rentalOffersTable.status, clientName: rentalOffersTable.clientName,
+      issueDate: rentalOffersTable.issueDate, validUntil: rentalOffersTable.validUntil, annualRent: rentalOffersTable.annualRent,
+    }).from(rentalOffersTable)
+      .where(and(eq(rentalOffersTable.userId, scopeId(user)), inArray(rentalOffersTable.unitId, unitIds), isNull(rentalOffersTable.deletedAt)))
+      .orderBy(desc(rentalOffersTable.issueDate), desc(rentalOffersTable.id));
+    for (const r of rows) {
+      if (r.unitId == null) continue;
+      const list = out.get(r.unitId) ?? [];
+      list.push({ id: r.id, number: r.number, status: r.status, clientName: r.clientName, issueDate: r.issueDate, validUntil: r.validUntil, annualRent: this.num(r.annualRent) });
+      out.set(r.unitId, list);
+    }
+    return out;
+  }
+
   /** Resolve a stored object key to a short-lived signed URL (or null). */
   private async sign(key: string | null | undefined): Promise<string | null> {
     if (!key) return null;
@@ -535,9 +560,11 @@ class LandlordMobileController {
       const share = rentShare.get(r.contractId);
       if (share != null) rentByUnit.set(r.unitId, this.round2(this.num(r.monthlyRent) / share));
     }
+    const offers = await this.offersByUnit(user, unitIds);
     const out = rows.map((r) => ({
       ...r, rentPrice: r.rentPrice != null ? this.num(r.rentPrice) : (rentByUnit.get(r.id) ?? null),
       tenantName: tenantByUnit.get(r.id) ?? null,
+      offersCount: offers.get(r.id)?.length ?? 0,
     }));
     await attachLookupLabels(this.db, out as any[], [{ idField: "typeLookupId", out: "type", mode: "labelAr" }]);
     return out;
@@ -1164,6 +1191,7 @@ class LandlordMobileController {
         .where(and(eq(deedsTable.id, p.deedId), isNull(deedsTable.deletedAt)));
       if (d) deed = { ...d, documentUrl: await this.sign(d.documentUrl) };
     }
+    const offers = await this.offersByUnit(user, unitIds);
     // Financial summary across the property's contracts.
     const cIds = contracts.map((c) => c.id);
     const pays = cIds.length
@@ -1192,7 +1220,7 @@ class LandlordMobileController {
         units.filter((u) => u.status === "rented").length, this.occupancyDenom(p, units.length)),
       rentedUnits: units.filter((u) => u.status === "rented").length,
       availableUnits: units.filter((u) => u.status === "available").length,
-      units: units.map((u) => ({ ...u, rentPrice: u.rentPrice ? this.num(u.rentPrice) : null, area: u.area ? this.num(u.area) : null })),
+      units: units.map((u) => ({ ...u, rentPrice: u.rentPrice ? this.num(u.rentPrice) : null, area: u.area ? this.num(u.area) : null, offersCount: offers.get(u.id)?.length ?? 0 })),
       contracts: contracts.map((c) => ({ ...c, monthlyRent: this.num(c.monthlyRent) })),
       finance,
     };
@@ -1268,6 +1296,8 @@ class LandlordMobileController {
       currentContract: cu ? { ...cu, monthlyRent: this.num(cu.monthlyRent) } : null,
       contracts: allContracts.map((c) => ({ ...c, monthlyRent: this.num(c.monthlyRent) })),
       finance,
+      // Offers issued for this unit and to whom (newest first).
+      rentalOffers: (await this.offersByUnit(user, [unitId])).get(unitId) ?? [],
     };
     // Rent: the unit's own listed rent, falling back to this unit's SHARE of
     // its active contract. `monthlyRent` is one combined figure for every unit
