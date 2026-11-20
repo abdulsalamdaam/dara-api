@@ -1235,6 +1235,49 @@ class LandlordMobileController {
   }
 
   /** One unit's FULL detail + its current active contract/tenant. */
+  /**
+   * One rental offer in full — the inputs the document is built from (the app
+   * derives the schedule and totals with the same rules as the web, and prints
+   * the same document) plus the issuing office. Narrowed like the offer list on
+   * a unit: the account's own offers, and for an owner-mobile token only offers
+   * for that landlord's units; a portal login needs campaigns.view.
+   */
+  @Get("rental-offers/:id")
+  @RequirePermissions(PERMISSIONS.UNITS_VIEW)
+  async rentalOffer(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
+    const uid = scopeId(user);
+    if (!homeMay(user, PERMISSIONS.CAMPAIGNS_VIEW)) throw new NotFoundException("Offer not found");
+    const [o] = await this.db.select().from(rentalOffersTable)
+      .where(and(eq(rentalOffersTable.id, id), eq(rentalOffersTable.userId, uid), isNull(rentalOffersTable.deletedAt))).limit(1);
+    if (!o) throw new NotFoundException("Offer not found");
+    if (user.ownerScopeId != null) {
+      // A landlord sees only offers for their own units.
+      if (o.unitId == null) throw new NotFoundException("Offer not found");
+      const [mine] = await this.db.select({ id: unitsTable.id }).from(unitsTable)
+        .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
+        .where(and(eq(unitsTable.id, o.unitId), eq(propertiesTable.userId, uid), eq(propertiesTable.ownerId, user.ownerScopeId)));
+      if (!mine) throw new NotFoundException("Offer not found");
+    }
+    const open = o.status === "draft" || o.status === "sent";
+    const effectiveStatus = open && o.validUntil && String(o.validUntil) < riyadhToday() ? "expired" : o.status;
+    // The issuing office, as the web's document header shows it (company, else the account holder).
+    const [acct] = await this.db.select({ companyId: usersTable.companyId, name: usersTable.name, email: usersTable.email, phone: usersTable.phone })
+      .from(usersTable).where(eq(usersTable.id, uid));
+    let co: typeof companiesTable.$inferSelect | undefined;
+    if (acct?.companyId) [co] = await this.db.select().from(companiesTable).where(eq(companiesTable.id, acct.companyId));
+    const address = co ? (co.address || [co.street, co.district, co.city].filter(Boolean).join("، ") || null) : null;
+    const issuer = {
+      name: co?.name || acct?.name || null,
+      commercialReg: co?.commercialReg || null,
+      vatNumber: co?.vatNumber || co?.taxNumber || null,
+      address,
+      phone: co?.companyPhone || acct?.phone || null,
+      email: co?.officialEmail || acct?.email || null,
+      logoUrl: await this.sign(co?.logoKey ?? null),
+    };
+    return { offer: { ...o, effectiveStatus }, issuer };
+  }
+
   @Get("units/:id")
   @RequirePermissions(PERMISSIONS.UNITS_VIEW) // rbac (outside finance-v2: additive)
   async unit(@CurrentUser() user: AuthUser, @Param("id", ParseIntPipe) id: number) {
