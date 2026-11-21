@@ -1,7 +1,7 @@
 import { ParseIntPipe, Body, Controller, Delete, Get, HttpCode, Inject, Module, NotFoundException, Param, Post, Query, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { IsIn, IsOptional, IsString } from "class-validator";
-import { and, eq, isNull, inArray, desc, sql } from "drizzle-orm";
+import { and, eq, isNull, inArray, desc, ne, sql } from "drizzle-orm";
 import type { Response } from "express";
 import { usersTable, ownersTable, propertiesTable, unitsTable, contractsTable, contractUnitsTable, paymentsTable, paymentCollectionsTable, tenantsTable, deedsTable, maintenanceRequestsTable, simpleInvoicesTable, companiesTable, lookupsTable, rentalOffersTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -282,7 +282,11 @@ class LandlordMobileController {
       status: rentalOffersTable.status, clientName: rentalOffersTable.clientName,
       issueDate: rentalOffersTable.issueDate, validUntil: rentalOffersTable.validUntil, annualRent: rentalOffersTable.annualRent,
     }).from(rentalOffersTable)
-      .where(and(eq(rentalOffersTable.userId, scopeId(user)), inArray(rentalOffersTable.unitId, unitIds), isNull(rentalOffersTable.deletedAt)))
+      .where(and(
+        eq(rentalOffersTable.userId, scopeId(user)), inArray(rentalOffersTable.unitId, unitIds), isNull(rentalOffersTable.deletedAt),
+        // A landlord sees an offer once the office has sent it — never a draft.
+        user.ownerScopeId != null ? ne(rentalOffersTable.status, "draft") : undefined,
+      ))
       .orderBy(desc(rentalOffersTable.issueDate), desc(rentalOffersTable.id));
     for (const r of rows) {
       if (r.unitId == null) continue;
@@ -1251,8 +1255,8 @@ class LandlordMobileController {
       .where(and(eq(rentalOffersTable.id, id), eq(rentalOffersTable.userId, uid), isNull(rentalOffersTable.deletedAt))).limit(1);
     if (!o) throw new NotFoundException("Offer not found");
     if (user.ownerScopeId != null) {
-      // A landlord sees only offers for their own units.
-      if (o.unitId == null) throw new NotFoundException("Offer not found");
+      // A landlord sees only offers for their own units, and only once sent (no drafts).
+      if (o.unitId == null || o.status === "draft") throw new NotFoundException("Offer not found");
       const [mine] = await this.db.select({ id: unitsTable.id }).from(unitsTable)
         .innerJoin(propertiesTable, eq(propertiesTable.id, unitsTable.propertyId))
         .where(and(eq(unitsTable.id, o.unitId), eq(propertiesTable.userId, uid), eq(propertiesTable.ownerId, user.ownerScopeId)));

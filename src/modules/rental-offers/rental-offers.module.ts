@@ -1,7 +1,9 @@
-import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable, Module, type CanActivate, type ExecutionContext, NotFoundException, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
-import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
+import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable, Module, type CanActivate, type ExecutionContext, NotFoundException, Param, Patch, Post, Query, ServiceUnavailableException, UploadedFile, UseGuards, UseInterceptors } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
+import { ApiBearerAuth, ApiConsumes, ApiTags } from "@nestjs/swagger";
 import { and, count, desc, eq, ilike, inArray, isNull, like, lt, or, sql } from "drizzle-orm";
-import { propertiesTable, rentalOffersTable, unitsTable, type RentalOffer } from "@dara/database";
+import { companiesTable, propertiesTable, rentalOffersTable, unitsTable, usersTable, type RentalOffer } from "@dara/database";
+import { EmailService } from "../email/email.service";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -33,6 +35,19 @@ import { formatOfferNumber, normalizeOffer, offerPrefix, offerSeq } from "./rent
  * exactly as an installment reads as overdue.
  */
 const OPEN_STATUSES = ["draft", "sent"];
+
+/** The offer PDF the web renders (a rasterised A4, usually 0.3–3 MB). */
+export const OFFER_PDF_MAX_BYTES = 8 * 1024 * 1024;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Why an emailed offer is refused, or null when it may go. Exported for the spec. */
+export function offerEmailProblem(to: string, file: { mimetype?: string; size?: number; buffer?: Buffer } | undefined): string | null {
+  if (!EMAIL_RE.test(to) || to.length > 254) return "أدخل بريداً إلكترونياً صحيحاً · Enter a valid email address";
+  if (!file?.buffer?.length) return "ملف العرض مفقود · The offer PDF is missing";
+  if ((file.size ?? file.buffer.length) > OFFER_PDF_MAX_BYTES) return "ملف العرض كبير جداً · The offer PDF is too large";
+  if (file.buffer.subarray(0, 5).toString("latin1") !== "%PDF-") return "ملف العرض ليس PDF · The offer file is not a PDF";
+  return null;
+}
 
 function withEffectiveStatus(row: RentalOffer, today = riyadhToday()) {
   const expired = OPEN_STATUSES.includes(row.status) && !!row.validUntil && String(row.validUntil) < today;
@@ -70,7 +85,7 @@ export class RentalOffersPlanGuard implements CanActivate {
 @Controller("rental-offers")
 @UseGuards(JwtAuthGuard, PermissionsGuard, RentalOffersPlanGuard)
 class RentalOffersController {
-  constructor(@Inject(DRIZZLE) private readonly db: Drizzle) {}
+  constructor(@Inject(DRIZZLE) private readonly db: Drizzle, private readonly email: EmailService) {}
 
   /**
    * Offers of the caller's account, newest first. `search` matches the number,
@@ -194,6 +209,51 @@ class RentalOffersController {
       .returning();
     if (!row) throw new NotFoundException("العرض غير موجود · Offer not found");
     return withEffectiveStatus(row);
+  }
+
+  /**
+   * Email the offer to the prospective tenant. The web renders the PDF (the
+   * same document it prints — the server never rebuilds the offer) and sends
+   * it here as `file`; `to` defaults on the web to the offer's client email.
+   * Replies go to the office (company email, else the account's). A draft
+   * becomes `sent` once the email is accepted; any other status is kept.
+   */
+  @Post(":id/email")
+  @RequirePermissions(PERMISSIONS.CAMPAIGNS_WRITE)
+  @ApiConsumes("multipart/form-data")
+  @UseInterceptors(FileInterceptor("file", { limits: { fileSize: OFFER_PDF_MAX_BYTES + 1 } }))
+  async emailOffer(@CurrentUser() user: AuthUser, @Param("id") id: string, @UploadedFile() file: Express.Multer.File, @Body() body: any) {
+    const prev = await this.load(user, id);
+    const to = String(body?.to ?? "").trim().toLowerCase();
+    const problem = offerEmailProblem(to, file);
+    if (problem) throw new BadRequestException(problem);
+    const message = String(body?.message ?? "").trim().slice(0, 2000) || null;
+
+    const [acct] = await this.db.select({ name: usersTable.name, email: usersTable.email, companyId: usersTable.companyId })
+      .from(usersTable).where(eq(usersTable.id, scopeId(user)));
+    let co: { name: string | null; officialEmail: string | null } | undefined;
+    if (acct?.companyId) {
+      [co] = await this.db.select({ name: companiesTable.name, officialEmail: companiesTable.officialEmail })
+        .from(companiesTable).where(eq(companiesTable.id, acct.companyId));
+    }
+    const snap = (prev.unitSnapshot ?? {}) as Record<string, unknown>;
+    const unitLabel = [snap.unitType, snap.unitNumber].filter(Boolean).join(" ") + (snap.propertyName ? ` — ${snap.propertyName}` : "");
+    const ok = await this.email.sendRentalOffer(to, {
+      issuerName: co?.name || acct?.name || "دارا",
+      offerNumber: prev.number,
+      clientName: prev.clientName,
+      unitLabel: unitLabel.trim() || null,
+      validUntil: prev.validUntil ? String(prev.validUntil) : null,
+      message,
+      replyTo: co?.officialEmail || acct?.email || null,
+    }, file.buffer);
+    if (!ok) throw new ServiceUnavailableException("تعذّر إرسال البريد، حاول لاحقاً · The email could not be sent, try again later");
+
+    if (prev.status !== "draft") return withEffectiveStatus(prev);
+    const [row] = await this.db.update(rentalOffersTable).set({ status: "sent", ...statusStamps("sent", prev) } as any)
+      .where(and(eq(rentalOffersTable.id, prev.id), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)))
+      .returning();
+    return withEffectiveStatus((row ?? prev) as RentalOffer);
   }
 
   @Delete(":id")
