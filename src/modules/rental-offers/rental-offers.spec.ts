@@ -5,7 +5,7 @@ import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { getTableName } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { PlanUpgradeRequiredException } from "../../common/plan-features";
-import { RentalOffersModule, RentalOffersPlanGuard } from "./rental-offers.module";
+import { OFFER_PDF_MAX_BYTES, RentalOffersModule, RentalOffersPlanGuard, offerEmailProblem } from "./rental-offers.module";
 import { MAX_GRACE_MONTHS, formatOfferNumber, normalizeOffer, offerSeq } from "./rental-offers.normalize";
 
 describe("normalizeOffer", () => {
@@ -248,5 +248,21 @@ describe("RentalOffersPlanGuard (package)", () => {
   it("the controller carries the guard", () => {
     const [C] = Reflect.getMetadata("controllers", RentalOffersModule);
     assert.ok((Reflect.getMetadata("__guards__", C) as unknown[]).includes(RentalOffersPlanGuard));
+  });
+});
+
+describe("offerEmailProblem — what an emailed offer must carry", () => {
+  const pdf = { mimetype: "application/pdf", size: 9, buffer: Buffer.from("%PDF-1.4\n") };
+  it("passes a valid address with a real PDF", () => {
+    assert.equal(offerEmailProblem("client@example.com", pdf), null);
+  });
+  it("refuses a bad address", () => {
+    assert.match(String(offerEmailProblem("not-an-email", pdf)), /email/i);
+    assert.match(String(offerEmailProblem("", pdf)), /email/i);
+  });
+  it("refuses a missing file, a non-PDF and an oversized file", () => {
+    assert.match(String(offerEmailProblem("a@b.co", undefined)), /missing/);
+    assert.match(String(offerEmailProblem("a@b.co", { buffer: Buffer.from("<html>") })), /not a PDF/);
+    assert.match(String(offerEmailProblem("a@b.co", { ...pdf, size: OFFER_PDF_MAX_BYTES + 1 })), /too large/);
   });
 });

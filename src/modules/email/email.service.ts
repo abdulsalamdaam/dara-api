@@ -836,6 +836,56 @@ export class EmailService {
    * Acknowledgment back to the person who submitted the public contact form.
    * Separate from sendContactReceived which fires off to the admin/team.
    */
+  /**
+   * A rental offer (عرض تأجيري) sent by an office to its prospective tenant,
+   * with the offer PDF the web rendered attached. Replies go to the office,
+   * never to Dara.
+   */
+  async sendRentalOffer(
+    to: string,
+    payload: {
+      issuerName: string;
+      offerNumber: string;
+      clientName?: string | null;
+      unitLabel?: string | null;
+      validUntil?: string | null;
+      message?: string | null;
+      replyTo?: string | null;
+    },
+    pdf: Buffer,
+  ): Promise<boolean> {
+    if (!to) return false;
+    const issuer = escapeHtml(payload.issuerName || "");
+    const number = escapeHtml(payload.offerNumber);
+    const rows: string[] = [
+      `<tr><td style="padding:8px 0;color:#64748b;">رقم العرض</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${number}</td></tr>`,
+    ];
+    if (payload.unitLabel) rows.push(`<tr><td style="padding:8px 0;color:#64748b;">الوحدة</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${escapeHtml(payload.unitLabel)}</td></tr>`);
+    if (payload.validUntil) rows.push(`<tr><td style="padding:8px 0;color:#64748b;">ساري حتى</td><td style="padding:8px 0;text-align:left;font-weight:700;color:#010f35;">${escapeHtml(payload.validUntil)}</td></tr>`);
+    const note = String(payload.message ?? "").trim();
+    const html = layout(`
+      <h1 style="color:#010f35;margin:0 0 16px;font-size:22px;">عرض تأجيري ${number}</h1>
+      <p style="margin:0 0 12px;color:#334155;line-height:1.7;">
+        ${payload.clientName ? `السادة ${escapeHtml(payload.clientName)} المحترمين،<br/>` : ""}
+        يسرّ <strong>${issuer}</strong> أن يقدّم لكم العرض التأجيري المرفق بهذه الرسالة بصيغة PDF.
+      </p>
+      ${en(`<strong>${issuer}</strong> has sent you rental offer ${number}. The offer is attached as a PDF.`)}
+      ${note ? `<div style="margin:16px 0;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;"><div style="color:#010f35;line-height:1.7;white-space:pre-wrap;">${escapeHtml(note)}</div></div>` : ""}
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:14px;color:#334155;">${rows.join("")}</table>
+      <p style="margin:24px 0 0;color:#64748b;font-size:13px;">للاستفسار عن العرض، تقدر ترد على هذا البريد مباشرة ليصل إلى ${issuer}.</p>
+      ${en(`To ask about this offer, reply to this email and it will reach ${issuer}.`, "muted")}
+    `);
+    return this.send({
+      to,
+      subject: `عرض تأجيري ${payload.offerNumber} · Rental offer — ${payload.issuerName}`,
+      html,
+      text: `يسرّ ${payload.issuerName} أن يقدّم لكم العرض التأجيري رقم ${payload.offerNumber}، والعرض مرفق بصيغة PDF.${note ? `\n\n${note}` : ""}\n\n${payload.issuerName} has sent you rental offer ${payload.offerNumber}. The offer is attached as a PDF.`,
+      replyTo: payload.replyTo || undefined,
+      category: "rental-offer",
+      attachments: [{ filename: `${payload.offerNumber}.pdf`, content: pdf, contentType: "application/pdf" }],
+    });
+  }
+
   async sendContactAck(to: string, payload: ContactEmailPayload): Promise<boolean> {
     if (!to) return false;
     const safeName = escapeHtml(payload.name || "");
