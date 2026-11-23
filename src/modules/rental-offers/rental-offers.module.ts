@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable,
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiConsumes, ApiTags } from "@nestjs/swagger";
 import { and, count, desc, eq, ilike, inArray, isNull, like, lt, or, sql } from "drizzle-orm";
-import { companiesTable, propertiesTable, rentalOfferSendsTable, rentalOffersTable, unitsTable, usersTable, type RentalOffer } from "@dara/database";
+import { companiesTable, ownerNotificationsTable, ownersTable, propertiesTable, rentalOfferSendsTable, rentalOffersTable, unitsTable, usersTable, type RentalOffer } from "@dara/database";
 import { EmailService } from "../email/email.service";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -15,6 +15,8 @@ import { likeContains, listQuerySchema, wantsPagination } from "../../common/pag
 import { riyadhToday } from "../../common/payment-status";
 import { accountPlan } from "../../common/account-plan";
 import { PlanUpgradeRequiredException, planHasFeature } from "../../common/plan-features";
+import { sendExpoPush } from "../../common/push";
+import { landlordOfferEvent, landlordOfferMessage } from "./rental-offers.notify";
 import { formatOfferNumber, normalizeOffer, offerPrefix, offerSeq } from "./rental-offers.normalize";
 
 /**
@@ -222,13 +224,15 @@ class RentalOffersController {
     }
     const link = await this.resolveUnit(user, body?.unitId);
     const status = (values.status as string | undefined) ?? "draft";
-    return withEffectiveStatus(await this.insertNumbered(scopeId(user), {
+    const row = await this.insertNumbered(scopeId(user), {
       ...values,
       ...link,
       status,
       ...statusStamps(status),
       createdBy: user.id,
-    }));
+    });
+    this.notifyLandlord(row, null);
+    return withEffectiveStatus(row);
   }
 
   /** A copy as a fresh draft with a new number — the usual way to re-quote. */
@@ -260,6 +264,7 @@ class RentalOffersController {
       .where(and(eq(rentalOffersTable.id, prev.id), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)))
       .returning();
     if (!row) throw new NotFoundException("العرض غير موجود · Offer not found");
+    this.notifyLandlord(row as RentalOffer, prev.status);
     return withEffectiveStatus(row);
   }
 
@@ -313,6 +318,7 @@ class RentalOffersController {
     const [row] = await this.db.update(rentalOffersTable).set({ status: "sent", ...statusStamps("sent", prev) } as any)
       .where(and(eq(rentalOffersTable.id, prev.id), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)))
       .returning();
+    if (row) this.notifyLandlord(row as RentalOffer, prev.status);
     return (await this.withSendCounts([withEffectiveStatus((row ?? prev) as RentalOffer)]))[0];
   }
 
@@ -324,6 +330,35 @@ class RentalOffersController {
     await this.db.update(rentalOffersTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(rentalOffersTable.id, oid), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)));
     return { ok: true };
+  }
+
+  /**
+   * Tell the unit's landlord (in-app inbox + Expo push) when the offer becomes
+   * visible to them or changes status — see rental-offers.notify.ts. Never
+   * for drafts. Fire-and-forget: a failure is logged, never thrown.
+   */
+  private notifyLandlord(row: RentalOffer, prevStatus: string | null) {
+    const event = landlordOfferEvent(prevStatus, row.status);
+    if (!event || row.propertyId == null) return;
+    void (async () => {
+      const [owner] = await this.db.select({ id: ownersTable.id, fcmToken: ownersTable.fcmToken })
+        .from(propertiesTable)
+        .innerJoin(ownersTable, eq(ownersTable.id, propertiesTable.ownerId))
+        .where(and(
+          eq(propertiesTable.id, row.propertyId!), eq(propertiesTable.userId, row.userId),
+          eq(ownersTable.userId, row.userId), isNull(ownersTable.deletedAt),
+        )).limit(1);
+      if (!owner) return;
+      const snap = (row.unitSnapshot ?? {}) as Record<string, unknown>;
+      const unitLabel = [snap.unitType, snap.unitNumber].filter(Boolean).join(" ") + (snap.propertyName ? ` — ${snap.propertyName}` : "");
+      const { title, body } = landlordOfferMessage(event, { number: row.number, clientName: row.clientName, unitLabel });
+      const [n] = await this.db.insert(ownerNotificationsTable).values({
+        userId: row.userId, ownerId: owner.id, title, body, type: "rental_offer",
+      }).returning({ id: ownerNotificationsTable.id });
+      if (owner.fcmToken) {
+        await sendExpoPush([{ to: owner.fcmToken, title, body, data: { type: "rental_offer", event, offerId: row.id, unitId: row.unitId, notificationId: n?.id } }]);
+      }
+    })().catch((err: any) => console.warn(`rental offer ${row.id}: landlord notify failed: ${err?.message || err}`));
   }
 
   /** Adds `sendCount`, `lastSentAt` and `lastSentTo` from the send log. */
