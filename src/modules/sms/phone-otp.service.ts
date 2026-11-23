@@ -56,11 +56,13 @@ export class PhoneOtpService {
 
   private message(code: string): string {
     // Short on purpose: Arabic is UCS-2, so ~70 characters is one SMS segment
-    // and anything past that doubles the cost of every login.
-    // No product name in the text: it goes out under the DaamTech sender, and
-    // Taqnyat flags a brand in the body that differs from the sender as
-    // "sending on behalf of others" (CST spam rules, warning of 2026-10-31).
-    return `رمز الدخول: ${code}\nصالح لمدة ${minutesAr(PHONE_OTP_TTL_MIN)}. لا تشاركه مع أحد.`;
+    // and anything past that doubles the cost of every login. This renders at
+    // 69 characters with the 2-minute TTL — re-count before adding a word.
+    // CST OTP rules (Taqnyat warning of 2026-11-23): the body must name the
+    // entity and say why the code was sent, after Taqnyat's approved template
+    // "رمز التحقق:XXXX لدخول منصة …". The sender is now "Dara app", so naming
+    // دارا matches it (the 2026-10-31 warning was about the old DaamTech sender).
+    return `رمز التحقق: ${code} لدخول منصة دارا\nصالح لمدة ${minutesAr(PHONE_OTP_TTL_MIN)}. لا تشاركه مع أحد.`;
   }
 
   /**
