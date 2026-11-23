@@ -862,6 +862,15 @@ export async function ensureSchema(): Promise<void> {
       log.error(`ensure bank transfer failed: ${err?.message || err}`);
     }
 
+    // 0100: rental offer send history. Only the Offers tab reads it — warn and boot on failure.
+    try {
+      const ros = findSqlFile(join("drizzle", "0100_rental_offer_sends.sql"));
+      if (ros) await client.query(readFileSync(ros, "utf8"));
+      else log.warn("0100_rental_offer_sends.sql not found — rental_offer_sends not ensured");
+    } catch (err: any) {
+      log.warn(`ensure rental offer sends failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a

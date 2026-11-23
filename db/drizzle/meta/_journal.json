@@ -624,6 +624,13 @@
       "when": 1794441600000,
       "tag": "0099_bank_transfer",
       "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1795392000000,
+      "tag": "0100_rental_offer_sends",
+      "breakpoints": true
     }
   ]
 }

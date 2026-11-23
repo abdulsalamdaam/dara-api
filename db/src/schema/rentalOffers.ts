@@ -88,3 +88,20 @@ export const rentalOffersTable = pgTable("rental_offers", {
 }));
 
 export type RentalOffer = typeof rentalOffersTable.$inferSelect;
+
+/** One accepted offer email (0100): the Offers tab's send history. */
+export const rentalOfferSendsTable = pgTable("rental_offer_sends", {
+  id: serial("id").primaryKey(),
+  offerId: integer("offer_id").notNull().references(() => rentalOffersTable.id, { onDelete: "cascade" }),
+  /** The account (scope), like rental_offers.user_id. */
+  userId: integer("user_id").notNull().references(() => usersTable.id, { onDelete: "cascade" }),
+  /** The signed-in user who pressed send (may be an employee). */
+  sentBy: integer("sent_by"),
+  toEmail: text("to_email").notNull(),
+  /** The offer's client at send time. */
+  clientName: text("client_name"),
+  message: text("message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type RentalOfferSend = typeof rentalOfferSendsTable.$inferSelect;

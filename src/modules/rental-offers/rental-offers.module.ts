@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Get, Inject, Injectable,
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiConsumes, ApiTags } from "@nestjs/swagger";
 import { and, count, desc, eq, ilike, inArray, isNull, like, lt, or, sql } from "drizzle-orm";
-import { companiesTable, propertiesTable, rentalOffersTable, unitsTable, usersTable, type RentalOffer } from "@dara/database";
+import { companiesTable, propertiesTable, rentalOfferSendsTable, rentalOffersTable, unitsTable, usersTable, type RentalOffer } from "@dara/database";
 import { EmailService } from "../email/email.service";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
@@ -144,7 +144,7 @@ class RentalOffersController {
         ? this.db.select({ status: effectiveSql, cnt: count() }).from(T).where(statsWhere).groupBy(effectiveSql)
         : Promise.resolve([]),
     ]);
-    const data = (rows as RentalOffer[]).map((r) => withEffectiveStatus(r, today));
+    const data = await this.withSendCounts((rows as RentalOffer[]).map((r) => withEffectiveStatus(r, today)));
     if (!paged) return data;
     const byStatus: Record<string, number> = {};
     for (const r of statusRows as Array<{ status: string; cnt: number }>) byStatus[r.status] = Number(r.cnt);
@@ -154,10 +154,62 @@ class RentalOffersController {
     };
   }
 
+  /**
+   * The account's send log across all offers, newest first: each accepted
+   * offer email with its offer number, recipient, client and sender.
+   * `search` matches the email, client and offer number; `offerId` narrows to
+   * one offer. Always paged.
+   */
+  @Get("sends")
+  @RequirePermissions(PERMISSIONS.CAMPAIGNS_VIEW)
+  async sends(@CurrentUser() user: AuthUser, @Query() rawQuery: any) {
+    const q = listQuerySchema.parse(rawQuery ?? {});
+    const S = rentalOfferSendsTable;
+    const O = rentalOffersTable;
+    const conds: any[] = [eq(S.userId, scopeId(user)), isNull(O.deletedAt)];
+    const oid = Number(rawQuery?.offerId);
+    if (rawQuery?.offerId !== undefined && rawQuery?.offerId !== "") {
+      if (!Number.isInteger(oid) || oid <= 0) throw new BadRequestException("العرض غير صالح · Invalid offer");
+      conds.push(eq(S.offerId, oid));
+    }
+    if (q.search) {
+      const p = likeContains(q.search);
+      conds.push(or(ilike(S.toEmail, p), ilike(S.clientName, p), ilike(O.number, p), ilike(O.clientName, p)));
+    }
+    const where = and(...conds);
+    const [rows, totalRow] = await Promise.all([
+      this.db.select({
+        id: S.id, offerId: S.offerId, toEmail: S.toEmail, clientName: S.clientName, message: S.message, createdAt: S.createdAt,
+        offerNumber: O.number, offerTitle: O.title, offerStatus: O.status, unitSnapshot: O.unitSnapshot,
+        sentById: S.sentBy, sentByName: usersTable.name,
+      }).from(S)
+        .innerJoin(O, eq(O.id, S.offerId))
+        .leftJoin(usersTable, eq(usersTable.id, S.sentBy))
+        .where(where).orderBy(desc(S.createdAt), desc(S.id))
+        .limit(q.pageSize).offset((q.page - 1) * q.pageSize),
+      this.db.select({ total: count() }).from(S).innerJoin(O, eq(O.id, S.offerId)).where(where),
+    ]);
+    return { data: rows, page: q.page, pageSize: q.pageSize, total: Number(totalRow[0]?.total ?? 0) };
+  }
+
+  @Get(":id/sends")
+  @RequirePermissions(PERMISSIONS.CAMPAIGNS_VIEW)
+  async offerSends(@CurrentUser() user: AuthUser, @Param("id") id: string) {
+    const offer = await this.load(user, id);
+    const S = rentalOfferSendsTable;
+    return this.db.select({
+      id: S.id, offerId: S.offerId, toEmail: S.toEmail, clientName: S.clientName, message: S.message, createdAt: S.createdAt,
+      sentById: S.sentBy, sentByName: usersTable.name,
+    }).from(S).leftJoin(usersTable, eq(usersTable.id, S.sentBy))
+      .where(and(eq(S.offerId, offer.id), eq(S.userId, scopeId(user))))
+      .orderBy(desc(S.createdAt), desc(S.id));
+  }
+
   @Get(":id")
   @RequirePermissions(PERMISSIONS.CAMPAIGNS_VIEW)
   async get(@CurrentUser() user: AuthUser, @Param("id") id: string) {
-    return withEffectiveStatus(await this.load(user, id));
+    const [row] = await this.withSendCounts([withEffectiveStatus(await this.load(user, id))]);
+    return row;
   }
 
   @Post()
@@ -248,12 +300,20 @@ class RentalOffersController {
       replyTo: co?.officialEmail || acct?.email || null,
     }, file.buffer);
     if (!ok) throw new ServiceUnavailableException("تعذّر إرسال البريد، حاول لاحقاً · The email could not be sent, try again later");
+    // The email has gone: a failed log row must not turn that into an error.
+    try {
+      await this.db.insert(rentalOfferSendsTable).values({
+        offerId: prev.id, userId: scopeId(user), sentBy: user.id, toEmail: to, clientName: prev.clientName ?? null, message,
+      } as any);
+    } catch (err: any) {
+      console.warn(`rental offer ${prev.id}: send log failed: ${err?.message || err}`);
+    }
 
-    if (prev.status !== "draft") return withEffectiveStatus(prev);
+    if (prev.status !== "draft") return (await this.withSendCounts([withEffectiveStatus(prev)]))[0];
     const [row] = await this.db.update(rentalOffersTable).set({ status: "sent", ...statusStamps("sent", prev) } as any)
       .where(and(eq(rentalOffersTable.id, prev.id), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)))
       .returning();
-    return withEffectiveStatus((row ?? prev) as RentalOffer);
+    return (await this.withSendCounts([withEffectiveStatus((row ?? prev) as RentalOffer)]))[0];
   }
 
   @Delete(":id")
@@ -264,6 +324,24 @@ class RentalOffersController {
     await this.db.update(rentalOffersTable).set({ deletedAt: new Date() } as any)
       .where(and(eq(rentalOffersTable.id, oid), eq(rentalOffersTable.userId, scopeId(user)), isNull(rentalOffersTable.deletedAt)));
     return { ok: true };
+  }
+
+  /** Adds `sendCount`, `lastSentAt` and `lastSentTo` from the send log. */
+  private async withSendCounts<T extends { id: number }>(rows: T[]): Promise<Array<T & { sendCount: number; lastSentAt: Date | null; lastSentTo: string | null }>> {
+    if (!rows.length) return [];
+    const S = rentalOfferSendsTable;
+    const ids = rows.map((r) => r.id);
+    const agg = await this.db.select({
+      offerId: S.offerId,
+      cnt: count(),
+      last: sql<Date | null>`max(${S.createdAt})`,
+      lastTo: sql<string | null>`(array_agg(${S.toEmail} order by ${S.createdAt} desc))[1]`,
+    }).from(S).where(inArray(S.offerId, ids)).groupBy(S.offerId);
+    const by = new Map((agg as Array<{ offerId: number; cnt: number; last: Date | null; lastTo: string | null }>).map((a) => [a.offerId, a]));
+    return rows.map((r) => {
+      const a = by.get(r.id);
+      return { ...r, sendCount: Number(a?.cnt ?? 0), lastSentAt: a?.last ?? null, lastSentTo: a?.lastTo ?? null };
+    });
   }
 
   private async load(user: AuthUser, id: string): Promise<RentalOffer> {
