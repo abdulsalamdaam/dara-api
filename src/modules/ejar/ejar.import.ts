@@ -39,6 +39,8 @@ export const EJAR_UNIT_TYPE: Record<string, string> = {
   shop: "shop",
   office: "office",
   showroom: "showroom",
+  // Ejar's «معرض تجاري» — e.g. the G-series shops on 20407452240 / 20008134718.
+  trade_exhibition: "showroom",
   workshop: "workshop",
   warehouse: "warehouse",
   land: "land",
