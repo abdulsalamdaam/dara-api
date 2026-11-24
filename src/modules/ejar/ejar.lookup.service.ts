@@ -2,6 +2,7 @@ import {
   BadRequestException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException,
   ConflictException, ServiceUnavailableException, UnprocessableEntityException,
 } from "@nestjs/common";
+import { nearestCityKey } from "./ejar.city-coords";
 import type { EjarPartyRole } from "../../common/plan-features";
 import type { EjarPartyCheck } from "./ejar.party-check";
 import type { AuthUser } from "../../common/guards/jwt-auth.guard";
@@ -222,8 +223,9 @@ export async function lookupContext(
     res("property_type", mapEjarValue(EJAR_PROPERTY_TYPE, p?.type)),
     // Usage from the contract type (residential / commercial), Ejar's own word.
     res("property_usage", mapEjarValue(EJAR_USAGE, mapped.contract.contractType)),
-    // City from the region, when one of our city options carries that key/name.
-    res("city", p?.region?.key, p?.region?.nameAr),
+    // Ejar sends no city. Nearest city to the property's coordinates first;
+    // else the region, when one of our city options carries that key/name.
+    res("city", nearestCityKey(p?.latitude, p?.longitude), p?.region?.key, p?.region?.nameAr),
     Promise.all(mapped.units.map((u) => res("unit_type", mapEjarValue(EJAR_UNIT_TYPE, u.unitType)))),
     Promise.all(mapped.units.map((u) => res("property_usage", mapEjarValue(EJAR_USAGE, u.usage)))),
   ]);

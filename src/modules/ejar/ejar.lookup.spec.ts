@@ -735,10 +735,34 @@ describe("Get Contracts mode (EJAR_LOOKUP_SECOND_CALL=contracts, the default)", 
     const list = contractsFor(CN);
     list.data[0].attributes.units[0].unit_type = "spaceship";
     list.data[0].attributes.region = { key: "nowhere", name_ar: "لا مكان", name_en: "Nowhere" };
+    // No coordinates either, so no nearest city can be picked.
+    list.data[0].attributes.latitude = null;
+    list.data[0].attributes.longitude = null;
     list.data[0].attributes.tenants[0].id_number = null;
     w.setRespond((url) => (url.includes("/invoices") ? baladyOk(invoicesFor(CN)) : baladyOk(list)));
     const res = await w.svc.lookup(USER, { contract_number: CN });
     assert.deepEqual(res.required.filter((r) => r.required).map((r) => r.key).sort(), ["property.city", "tenant.idNumber", "unit.unitTypeId"]);
+  });
+
+  it("Ejar's coordinates pick the city when the region names none (Eastern → Dammam); trade_exhibition → showroom", async () => {
+    w = world();
+    const list = contractsFor(CN);
+    list.data[0].attributes.region = { key: "eastern_province", name_ar: "المنطقة الشرقية", name_en: "Eastern" };
+    list.data[0].attributes.latitude = 26.38987395;
+    list.data[0].attributes.longitude = 50.062858;
+    list.data[0].attributes.units[0].unit_type = "trade_exhibition";
+    const asked: Array<[string, string]> = [];
+    const orig = w.store.resolveLookup.bind(w.store);
+    w.store.resolveLookup = async (c: string, v: string) => { asked.push([c, v]); return orig(c, v); };
+    w.store.lookupRows.push({ id: 901, category: "city", key: "dammam", labelAr: "الدمام" }, { id: 902, category: "unit_type", key: "showroom", labelAr: "معرض" });
+    w.setRespond((url) => (url.includes("/invoices") ? baladyOk(invoicesFor(CN)) : baladyOk(list)));
+    const res = await w.svc.lookup(USER, { contract_number: CN });
+    assert.deepEqual(asked.find(([c]) => c === "city"), ["city", "dammam"], "nearest city is tried first");
+    assert.equal(res.prefill.property.cityId, 901);
+    assert.equal(res.prefill.property.city, "الدمام");
+    assert.equal(res.prefill.unit.unitTypeId, 902);
+    assert.ok(!res.required.some((r) => r.required && (r.key === "property.city" || r.key === "unit.unitTypeId")));
+    assert.ok(asked.some(([c, v]) => c === "unit_type" && v === "showroom"));
   });
 
   it("falls back to Details when Get Contracts holds no such contract: 3 calls", async () => {
