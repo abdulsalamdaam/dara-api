@@ -39,6 +39,8 @@ const LANDLORD_RENT_RULES = ["E01", "E02", "E05", "E06", "E07", "E08"];
 const RULE_SQL = `coalesce(e.payload->>'rule', r.payload->>'rule')`;
 const JOIN_E = `join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
   left join journal_entries r on r.id = e.reversal_of and r.user_id = e.user_id`;
+/** The opening entry or a reversal of it (needs JOIN_E). */
+const OPENING_SQL = `(e.origin = 'opening' or (e.origin = 'reversal' and r.origin = 'opening'))`;
 
 const nameOf = (lang: Lang, x: { nameAr: string; nameEn?: string | null }) => (lang === "en" ? x.nameEn || x.nameAr : x.nameAr);
 
@@ -159,10 +161,15 @@ export class AcctReportsService {
     ].filter((id) => cash.has(id)));
     const cashIds = [...cash];
 
-    // Opening and closing per cash account.
+    // Opening and closing per cash account. The opening entry (and a reversal of it) is never a flow: its cash is the cash
+    // at the beginning of the period whatever the period (accountant, 27 Nov 2026, note 16: a range from 1 January showed
+    // the 33,000 opening balances as financing). So it counts in `opening` even when it is dated inside the range.
     const bal = (await this.pool.query(
-      `select account_id, coalesce(sum(debit - credit) filter (where entry_date < $3::date), 0)::text as opening, coalesce(sum(debit - credit), 0)::text as closing
-         from journal_lines where user_id = $1 and account_id = any($2::int[]) and entry_date <= $4::date group by account_id`,
+      `select l.account_id,
+              coalesce(sum(l.debit - l.credit) filter (where l.entry_date < $3::date or ${OPENING_SQL}), 0)::text as opening,
+              coalesce(sum(l.debit - l.credit), 0)::text as closing
+         from journal_lines l ${JOIN_E}
+        where l.user_id = $1 and l.account_id = any($2::int[]) and l.entry_date <= $4::date group by l.account_id`,
       [scope, cashIds, from, to])).rows;
     const opening = zero();
     const ledgerClosing = zero();
@@ -181,7 +188,7 @@ export class AcctReportsService {
     const rows = (await this.pool.query(
       `select l.entry_id::text as eid, l.account_id, l.debit::text as debit, l.credit::text as credit, e.origin, ${RULE_SQL} as rule
          from journal_lines l ${JOIN_E}
-        where l.user_id = $1 and l.entry_id in (
+        where l.user_id = $1 and not ${OPENING_SQL} and l.entry_id in (
           select distinct entry_id from journal_lines where user_id = $1 and account_id = any($2::int[]) and entry_date between $3::date and $4::date)
         order by l.entry_id, l.line_no`, [scope, cashIds, from, to])).rows;
     const entries = new Map<string, { origin: string; rule: string | null; lines: Array<{ acct: Acct; net: number }> }>();
@@ -212,7 +219,8 @@ export class AcctReportsService {
       const cashNet = trustNet + ownNet;
       const hit = (k: CashLine) => touched.set(k, (touched.get(k) ?? 0) + 1);
       if (!counters.length) { put("internal_transfer", { amount: 0, restricted: trustNet, own: ownNet }); hit("internal_transfer"); continue; }
-      const byRule = e.origin === "opening" ? "opening_balances" : lineOfRule(e.rule, counters, cashNet, e.origin === "reversal");
+      // (Opening entries never reach here: they are opening cash, above.)
+      const byRule = lineOfRule(e.rule, counters, cashNet, e.origin === "reversal");
       if (byRule) { put(byRule, { amount: cashNet, restricted: trustNet, own: ownNet }); hit(byRule); continue; }
       // Split over the counter-accounts (exact: the entry balances). A mixed trust/own entry routes the trust part through internal transfers.
       const mixed = trustNet !== 0 && ownNet !== 0;

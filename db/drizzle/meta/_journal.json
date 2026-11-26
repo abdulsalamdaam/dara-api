@@ -633,6 +633,13 @@
       "breakpoints": true
     },
     {
+      "idx": 101,
+      "version": "7",
+      "when": 1795478400000,
+      "tag": "0101_finance_v2_journal_bills",
+      "breakpoints": true
+    },
+    {
       "idx": 102,
       "version": "7",
       "when": 1795564800000,

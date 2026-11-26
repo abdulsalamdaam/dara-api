@@ -6,6 +6,7 @@ import { riyadhToday } from "./dates";
 import { auditRow, isoDate, mapLedgerError } from "./audit";
 import { toHalalas } from "./money";
 import { assertTrustCovers } from "./trust-guard";
+import { voidJournalBills } from "./tier3/journal-bills";
 
 const ENTRY_COLS = `e.id::int as id, e.entry_no as "entryNo", to_char(e.entry_date,'YYYY-MM-DD') as "entryDate",
   to_char(e.original_date,'YYYY-MM-DD') as "originalDate", e.is_late as "isLate", e.origin, e.source_type as "sourceType",
@@ -176,6 +177,8 @@ export class JournalQueryService {
           await assertTrustCovers(c, scope, { lines: ls.map((l: any) => ({ accountId: Number(l.account_id), debit: toHalalas(l.c), credit: toHalalas(l.d) })) },
             { actorId: user.id, source: `/finance/v2/journal/${id}/reverse` });
         }
+        // A supplier balance this entry opened (note 14) is voided with it — refused while a supplier payment settles it.
+        await voidJournalBills(c, scope, user.id, id, date);
         const res = await this.engine.reverseEntry(c, scope, id, date, { reason: "manual_reversal", createdBy: user.id,
           payload: { reason: typeof body?.reason === "string" ? body.reason.slice(0, 500) : null, reversedBy: user.id } });
         await c.query(`update manual_journals set status = 'void', updated_at = now() where user_id = $1 and posted_entry_id = $2 and status = 'posted'`, [scope, id]);

@@ -618,6 +618,7 @@ export class FinanceV2Hooks {
       "finance_property_commission", // 0075
       "finance_payout_vouchers", // 0079
       "finance_manual_journal_meta", // 0080
+      "finance_journal_bills", // 0101
       "finance_commission_run_items", "finance_commission_runs", "finance_commission_transfers"]) { // 0070 in FK order
       try {
         await this.pool.query(`delete from ${t} where user_id = $1`, [userId]);

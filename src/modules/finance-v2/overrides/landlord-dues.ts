@@ -24,6 +24,19 @@ import type { Sql } from "../hooks/sql";
  * account-holder landlord and Owner mode are principal (no 2121): unchanged.
  * Landlord rows are rebuilt with the legacy formulas, so the response keeps
  * its shape; each statement row gains `vendorBills`.
+ *
+ * Note 13 of the accountant's full cycle (27 Nov 2026): a landlord balance
+ * brought in by the opening journal (2121 with the landlord dimension — an
+ * office migrating to Dara with what it already owes its landlords) or set by
+ * a manual journal lives only in the journal, so the ledger said 7,200 while
+ * the dues report, the payout's net due and R3's sub-ledger said 1,200. Those
+ * lines now count: each row gains `journals` (Σ credit − debit on 2121 of the
+ * landlord's manual and opening entries, their reversals included), added to
+ * `net`. One exception keeps it from counting twice: the opening a cutover
+ * backfill PROPOSED (finance_backfill_runs.summary.opening) re-derives 2121
+ * from the account's own Dara history before the go-live — history the legacy
+ * report already counts — so the proposal's own 2121 lines are taken off; only
+ * what the accountant added or changed on top of it counts.
  */
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const num = (v: unknown) => Number(fromHalalas(toHalalas(String(v ?? "0"))));
@@ -33,12 +46,14 @@ export interface LandlordCharges {
   bills: Map<number, number>;
   /** ownerId → Σ confirmed contract-less commission invoices − credit notes (gross). */
   commission: Map<number, number>;
+  /** ownerId → Σ credit − debit on 2121 of his manual / opening journal lines (and their reversals), less a cutover proposal's own lines. */
+  journals: Map<number, number>;
   names: Map<number, string>;
 }
 
 export async function landlordChargesV2(q: Sql, scope: number): Promise<LandlordCharges> {
   const s = await loadSettings(q, scope);
-  const out: LandlordCharges = { bills: new Map(), commission: new Map(), names: new Map() };
+  const out: LandlordCharges = { bills: new Map(), commission: new Map(), journals: new Map(), names: new Map() };
   if (s?.mode === "owner") return out;
   const bills = await q.rows(
     `select b.owner_id, o.name, sum(b.total)::text as amt
@@ -59,18 +74,54 @@ export async function landlordChargesV2(q: Sql, scope: number): Promise<Landlord
     out.commission.set(Number(c.owner_id), num(c.amt));
     out.names.set(Number(c.owner_id), c.name ?? "—");
   }
+  for (const [id, x] of await landlordJournalBalances(q, scope)) {
+    out.journals.set(id, r2(x.amount));
+    out.names.set(id, x.name ?? "—");
+  }
+  return out;
+}
+
+/**
+ * Per agent landlord, what his manual and opening journal lines put on 2121 (credit − debit, SAR), reversals included —
+ * less the 2121 lines of a cutover backfill's proposed opening that is still posted (see the header). Zero rows dropped.
+ */
+export async function landlordJournalBalances(q: Sql, scope: number): Promise<Map<number, { name: string | null; amount: number }>> {
+  const rows = await q.rows(
+    `select l.owner_id, ow.name, sum(l.credit - l.debit)::text as amt
+       from journal_lines l join journal_entries e on e.id = l.entry_id and e.user_id = l.user_id
+       left join journal_entries o on o.id = e.reversal_of and o.user_id = e.user_id
+       join accounts a on a.id = l.account_id and a.user_id = l.user_id
+       join owners ow on ow.id = l.owner_id and ow.user_id = l.user_id
+      where l.user_id = $1 and a.system_key = 'landlord_payable' and l.owner_id is not null
+        and coalesce(o.origin, e.origin) in ('manual', 'opening') and not coalesce(ow.is_account_holder, false)
+      group by 1, 2`, [scope]);
+  const proposed = await q.rows(
+    `select (x->>'ownerId')::int as owner_id, sum(coalesce((x->>'credit')::numeric, 0) - coalesce((x->>'debit')::numeric, 0))::text as amt
+       from finance_backfill_runs r
+       join manual_journals mj on mj.user_id = r.user_id and mj.status = 'posted' and mj.id::text = r.summary->'opening'->>'manualJournalId'
+       cross join lateral jsonb_array_elements(coalesce(r.summary->'opening'->'proposal'->'lines', '[]'::jsonb)) x
+       join accounts a on a.user_id = r.user_id and a.id::text = x->>'accountId' and a.system_key = 'landlord_payable'
+      where r.user_id = $1 and not r.dry_run and x->>'ownerId' is not null and x->>'ownerId' ~ '^[0-9]+$'
+      group by 1`, [scope]);
+  const minus = new Map<number, number>(proposed.map((x: any) => [Number(x.owner_id), toHalalas(String(x.amt))]));
+  const out = new Map<number, { name: string | null; amount: number }>();
+  for (const x of rows) {
+    const id = Number(x.owner_id);
+    const v = toHalalas(String(x.amt)) - (minus.get(id) ?? 0);
+    if (v !== 0) out.set(id, { name: x.name ?? null, amount: Number(fromHalalas(v)) });
+  }
   return out;
 }
 
 /** The legacy accounting result with its landlord rows carrying the v2 landlord charges. */
 export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promise<any> {
   const ch = await landlordChargesV2(q, scope);
-  const statement: any[] = (legacy.landlordStatement ?? []).map((r: any) => ({ ...r, vendorBills: 0 }));
+  const statement: any[] = (legacy.landlordStatement ?? []).map((r: any) => ({ ...r, vendorBills: 0, journals: 0 }));
   const byOwner = new Map<number, any>(statement.filter((r) => r.ownerId != null).map((r) => [Number(r.ownerId), r]));
   const ensure = (ownerId: number) => {
     let r = byOwner.get(ownerId);
     if (!r) {
-      r = { key: `o:${ownerId}`, ownerId, landlord: ch.names.get(ownerId) ?? "—", rentCollected: 0, commission: 0, maintenance: 0, expenses: 0, vendorBills: 0, net: 0 };
+      r = { key: `o:${ownerId}`, ownerId, landlord: ch.names.get(ownerId) ?? "—", rentCollected: 0, commission: 0, maintenance: 0, expenses: 0, vendorBills: 0, journals: 0, net: 0 };
       byOwner.set(ownerId, r);
       statement.push(r);
     }
@@ -78,7 +129,8 @@ export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promis
   };
   for (const [o, amt] of ch.bills) { const r = ensure(o); r.vendorBills = r2(r.vendorBills + amt); }
   for (const [o, amt] of ch.commission) { const r = ensure(o); r.commission = r2(r.commission + amt); }
-  for (const r of statement) r.net = r2(r.rentCollected - r.commission - r.maintenance - r.expenses - r.vendorBills);
+  for (const [o, amt] of ch.journals) { const r = ensure(o); r.journals = r2(r.journals + amt); }
+  for (const r of statement) r.net = r2(r.rentCollected - r.commission - r.maintenance - r.expenses - r.vendorBills + r.journals);
   statement.sort((a, b) => b.net - a.net);
 
   const paid = new Map<number, number>((await q.rows(
@@ -116,8 +168,8 @@ export async function assertPayoutWithinDue(q: Sql, scope: number, ownerId: numb
   const netDue = fromHalalas(Math.max(0, due));
   throw new ConflictException({
     error: "PAYOUT_EXCEEDS_DUE",
-    message: `المبلغ يتجاوز صافي المستحق للمؤجر (${netDue} ر.س) بعد خصم العمولة وفواتير الموردين المحمّلة عليه والتحويلات السابقة · `
-      + `The amount exceeds the landlord's net due (SAR ${netDue}) after commission, supplier bills charged to him and earlier transfers`,
+    message: `المبلغ يتجاوز صافي المستحق للمؤجر (${netDue} ر.س) بعد خصم العمولة وفواتير الموردين المحمّلة عليه والتحويلات السابقة، مع رصيده الافتتاحي · `
+      + `The amount exceeds the landlord's net due (SAR ${netDue}) after commission, supplier bills charged to him and earlier transfers, his opening balance included`,
     netDue,
     amount: fromHalalas(toHalalas(amount.toFixed(2))),
   });

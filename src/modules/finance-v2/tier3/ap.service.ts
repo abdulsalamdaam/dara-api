@@ -20,6 +20,7 @@ import { BUCKETS, type Bucket } from "../reports/sub-math";
 import { langOf } from "../reports/common";
 import { apAgingOf, billLineAmounts, dueDateOf, paymentStatusOf } from "./ap-math";
 import { billEvents, supplierPaymentEvents } from "./ap-events";
+import { journalOfBill } from "./journal-bills";
 import type { VatCategory } from "../rules";
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
@@ -115,6 +116,8 @@ export interface BillOut {
   lines?: BillLineOut[];
   payments?: Array<{ paymentId: number; number: string; paidOn: string; amount: string; status: string }>;
   posting: { status: string; entryId: number | null; entryNo: string | null } | null;
+  /** A supplier balance from a journal line (0101): its journal entry, which is also its posting. */
+  journal: { manualJournalId: number; entryId: number; entryNo: string | null } | null;
 }
 
 export interface SupplierPaymentOut {
@@ -145,10 +148,13 @@ const BILL_SQL = `select b.*, to_char(b.bill_date,'YYYY-MM-DD') as bill_date_s, 
     to_char(b.voided_on,'YYYY-MM-DD') as voided_on_s, s.name_ar as supplier_name, s.vat_number as supplier_vat,
     coalesce((select sum(a.amount) from supplier_payment_allocations a join supplier_payments p on p.id = a.payment_id and p.user_id = a.user_id
                where a.bill_id = b.id and a.user_id = b.user_id and p.status = 'posted'), 0)::text as paid,
-    o.status as o_status, o.entry_id as o_entry, je.entry_no as o_entry_no
+    o.status as o_status, o.entry_id as o_entry, je.entry_no as o_entry_no,
+    jb.manual_journal_id as jb_mj, jb.entry_id as jb_entry, jbe.entry_no as jb_entry_no, jbe.status as jb_status
   from supplier_bills b join suppliers s on s.id = b.supplier_id and s.user_id = b.user_id
   left join ledger_outbox o on o.user_id = b.user_id and o.source_type = 'supplier_bill' and o.source_id = b.id and o.event = 'approved'
-  left join journal_entries je on je.id = o.entry_id and je.user_id = b.user_id`;
+  left join journal_entries je on je.id = o.entry_id and je.user_id = b.user_id
+  left join finance_journal_bills jb on jb.bill_id = b.id and jb.user_id = b.user_id
+  left join journal_entries jbe on jbe.id = jb.entry_id and jbe.user_id = b.user_id`;
 
 const PAYMENT_SQL = `select p.*, to_char(p.paid_on,'YYYY-MM-DD') as paid_on_s, to_char(p.voided_on,'YYYY-MM-DD') as voided_on_s, s.name_ar as supplier_name,
     o.status as o_status, o.entry_id as o_entry, je.entry_no as o_entry_no
@@ -499,6 +505,10 @@ export class ApService {
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.AP]);
       const cur = await this.lockBill(c, scope, id);
       if (cur.status === "void") throw new ConflictException({ error: "BILL_ALREADY_VOID", message: "The bill is already void" });
+      // A supplier balance from a journal line is undone by reversing its journal entry (journal-bills.ts).
+      if (await journalOfBill(c, scope, id)) {
+        throw new ConflictException({ error: "BILL_FROM_JOURNAL", message: "هذا رصيد مورد من قيد يومية؛ اعكس القيد بدلاً من إلغاء الفاتورة · This supplier balance comes from a journal entry; reverse the entry instead" });
+      }
       const paid = await c.query(
         `select 1 from supplier_payment_allocations a join supplier_payments p on p.id = a.payment_id and p.user_id = a.user_id
           where a.bill_id = $1 and a.user_id = $2 and p.status = 'posted' limit 1`, [id, scope]);
@@ -941,7 +951,9 @@ export class ApService {
       paymentStatus: approved ? paymentStatusOf(total, paid) : null, overdue: approved && remaining > 0 && r.due_date_s < riyadhToday(),
       approvedAt: iso(r.approved_at), approvedBy: r.approved_by ?? null, voidedOn: r.voided_on_s ?? null, voidReason: r.void_reason ?? null,
       createdAt: iso(r.created_at)!,
-      posting: r.o_status ? { status: r.o_status, entryId: r.o_entry == null ? null : Number(r.o_entry), entryNo: r.o_entry_no ?? null } : null,
+      posting: r.o_status ? { status: r.o_status, entryId: r.o_entry == null ? null : Number(r.o_entry), entryNo: r.o_entry_no ?? null }
+        : r.jb_entry != null ? { status: r.jb_status === "reversed" ? "reversed" : "posted", entryId: Number(r.jb_entry), entryNo: r.jb_entry_no ?? null } : null,
+      journal: r.jb_entry != null ? { manualJournalId: Number(r.jb_mj), entryId: Number(r.jb_entry), entryNo: r.jb_entry_no ?? null } : null,
     };
   }
 

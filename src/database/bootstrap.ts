@@ -880,6 +880,14 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) {
       log.warn(`ensure manual journal second approval failed: ${err?.message || err}`);
     }
+    // finance-v2: 0101 journal bills (a supplier's opening balance from a journal line). The bills list joins it, so a failure is an error.
+    try { // finance-v2:
+      const fv2Jb = findSqlFile(join("drizzle", "0101_finance_v2_journal_bills.sql")); // finance-v2:
+      if (fv2Jb) await client.query(readFileSync(fv2Jb, "utf8")); // finance-v2:
+      else log.error("0101_finance_v2_journal_bills.sql not found — finance_journal_bills missing; the Finance v2 bills list will fail"); // finance-v2:
+    } catch (err: any) { // finance-v2:
+      log.error(`ensure finance v2 journal bills failed: ${err?.message || err}`); // finance-v2:
+    } // finance-v2:
 
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS

@@ -12,7 +12,7 @@ import { isoDate } from "../audit";
  * the drafter unless the account holder approves).
  *
  * Body of create / patch: { entryDate, memo, attachmentKey?, lines: [{ accountId, debit, credit, memo?,
- * ownerId?, propertyId?, unitId?, tenantId?, contractId? }] } — amounts as decimal strings.
+ * ownerId?, propertyId?, unitId?, tenantId?, contractId?, supplierId? (a credit line of 2111 only) }] } — amounts as decimal strings.
  */
 @Controller("finance/v2/manual-journals")
 @UseGuards(JwtAuthGuard, FinanceV2Guard)

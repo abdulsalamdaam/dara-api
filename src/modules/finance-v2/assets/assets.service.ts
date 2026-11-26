@@ -185,10 +185,18 @@ export class AssetsService {
     return { ...out, schedule: rows, disposal, events };
   }
 
+  /**
+   * {…the register fields} — or an EXISTING asset («أصل قائم», accountant 27 Nov 2026, note 15): {existing: true, nameAr,
+   * category, cost, acquisitionDate (the purchase / in-service date, before the ledger start), openingAccumulated (the
+   * accumulated depreciation at the ledger start), totalLifeMonths (its whole useful life) or usefulLifeMonths (what is
+   * left), salvageValue?, addToOpening?}. See `existingBody`.
+   */
   async create(scope: number, user: { id: number }, body: any) {
     const today = this.clock();
     const res = await withTx(this.pool, async (c) => {
       await this.chart.topUp(c, scope);
+      const existing = body?.existing === true;
+      if (existing) body = await this.existingBody(c, scope, body);
       const v = await this.normalise(c, scope, body, null);
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.FIXED_ASSET]);
       const [n] = (await c.query(
@@ -205,6 +213,7 @@ export class AssetsService {
           v.acquisitionBankAccountId, v.notes, user.id]);
       const id = Number(r.rows[0].id);
       await auditRow(c, scope, user.id, "finance_v2_fixed_asset", id, "/finance/v2/assets");
+      if (existing && body.addToOpening === true) await this.addToOpening(c, scope, user.id, { number, nameAr: v.nameAr, ...v });
       await this.sync(c, scope, id, today);
       return id;
     });
@@ -488,6 +497,150 @@ export class AssetsService {
     return r.rows.map((x: any) => Number(x.id));
   }
 
+  // ── Existing assets (note 15) ──
+
+  /**
+   * Where the ledger starts: the go-live date, else the day after the opening entry (posted, else the draft), else null.
+   * An existing asset depreciates from this date, on what is left of its life.
+   */
+  async ledgerStart(q: Q, scope: number): Promise<string | null> {
+    const s = await loadSettings(sqlOf(q as any), scope);
+    if (s?.goLive) return s.goLive;
+    const [o] = (await q.query(
+      `select to_char(coalesce(
+         (select entry_date from journal_entries where user_id = $1 and origin = 'opening' and status = 'posted' order by id desc limit 1),
+         (select entry_date from manual_journals where user_id = $1 and kind = 'opening' and status not in ('void', 'rejected') order by id desc limit 1)
+       ) + 1, 'YYYY-MM-DD') as d`, [scope])).rows;
+    return o?.d ?? null;
+  }
+
+  /**
+   * An existing asset («أصل قائم») as register fields. It was bought before the ledger starts, so its cost and the
+   * depreciation to date are opening balances: it posts NO acquisition (acquisitionMode none) and depreciates from the
+   * ledger start, the net book value (cost − salvage − accumulated) over the REMAINING life:
+   *   remaining = totalLifeMonths − whole months from acquisitionDate to the ledger start (or usefulLifeMonths as given).
+   * The asset's cost and accumulated depreciation must be in the opening entry once, either typed there by hand (the
+   * register then only describes them — check GET /assets/opening-check) or added by `addToOpening` (Dr cost, Cr
+   * accumulated depreciation, Cr 3900 opening balance equity for the net book value, on the opening entry draft).
+   */
+  private async existingBody(c: Q, scope: number, body: any) {
+    const start = body?.depreciationStart ? isoDate(body.depreciationStart, "depreciationStart") : await this.ledgerStart(c, scope);
+    if (!start) {
+      throw bad("EXISTING_NEEDS_LEDGER_START",
+        "حدد تاريخ بدء الدفتر أو أنشئ القيد الافتتاحي أولاً؛ الأصل القائم يُهلك من ذلك التاريخ · Set the ledger start or create the opening entry first: an existing asset depreciates from it");
+    }
+    const acquisitionDate = isoDate(body?.acquisitionDate, "acquisitionDate");
+    if (acquisitionDate >= start) {
+      throw bad("EXISTING_AFTER_START", `الأصل القائم يكون مشترى قبل بدء الدفتر (${start})؛ سجّل الأصل المشترى بعده كأصل جديد · An existing asset was bought before the ledger start (${start}); enter a later purchase as a new asset`);
+    }
+    let life: unknown = body?.usefulLifeMonths;
+    if (body?.totalLifeMonths !== undefined && body?.totalLifeMonths !== null && body?.totalLifeMonths !== "") {
+      const total = Number(asciiDigits(String(body.totalLifeMonths)));
+      if (!Number.isInteger(total) || total < 0 || total > 1200) throw bad("BAD_LIFE", "totalLifeMonths must be 0 to 1200");
+      const remaining = total === 0 ? 0 : total - elapsedMonths(acquisitionDate, start);
+      if (total > 0 && remaining <= 0) {
+        throw bad("ASSET_LIFE_USED", "انتهى العمر الإنتاجي للأصل قبل بدء الدفتر؛ أدخل العمر المتبقي إن كان ما زال يُهلك · The useful life ended before the ledger start; enter the remaining life if it still depreciates");
+      }
+      life = remaining;
+    }
+    return { ...body, acquisitionDate, depreciationStart: start, usefulLifeMonths: life, acquisitionMode: "none", acquisitionBankAccountId: null };
+  }
+
+  /** Append the existing asset to the opening entry draft (or start one), never to a posted opening entry. */
+  private async addToOpening(c: Fv2Client, scope: number, actorId: number,
+    a: { number: string; nameAr: string; cost: number; opening: number; assetAccountId: number; accumAccountId: number | null; depreciationStart: string }) {
+    const posted = (await c.query(`select 1 from journal_entries where user_id = $1 and origin = 'opening' and status = 'posted' limit 1`, [scope])).rowCount;
+    if (posted) {
+      throw new ConflictException({ error: "OPENING_POSTED",
+        message: "القيد الافتتاحي مرحّل؛ يجب أن يكون الأصل ضمنه — راجع مطابقة الأصول القائمة مع القيد الافتتاحي، أو اعكس القيد وأعد إدخاله · The opening entry is posted: the asset must already be in it (see the existing assets vs opening entry check), or reverse it and enter it again" });
+    }
+    const [eq] = (await c.query(`select id from accounts where user_id = $1 and system_key = 'opening_balance_equity' and is_active and not is_group`, [scope])).rows;
+    if (!eq) throw bad("MISSING_ACCOUNT", "the chart has no opening balance equity account (3900)");
+    if (a.opening > 0 && !a.accumAccountId) throw bad("MISSING_ACCOUNT", "choose the accumulated depreciation account");
+    const memo = `${a.number} ${a.nameAr}`.slice(0, 500);
+    const L = (accountId: number, dr: number, cr: number) => ({ accountId, debit: fromHalalas(dr), credit: fromHalalas(cr), memo });
+    const lines = [L(a.assetAccountId, a.cost, 0)];
+    if (a.opening > 0) lines.push(L(a.accumAccountId!, 0, a.opening));
+    if (a.cost - a.opening > 0) lines.push(L(Number(eq.id), 0, a.cost - a.opening));
+    const [d] = (await c.query(
+      `select id, lines from manual_journals where user_id = $1 and kind = 'opening' and status in ('draft', 'submitted', 'rejected') order by id desc limit 1 for update`,
+      [scope])).rows;
+    let id: number;
+    if (d) {
+      id = Number(d.id);
+      // Changed content goes back to draft (as an edit does): it is submitted and approved again.
+      await c.query(
+        `update manual_journals set lines = lines || $3::jsonb, status = 'draft', submitted_at = null, rejected_by = null, rejected_reason = null, updated_at = now()
+          where id = $1 and user_id = $2`, [id, scope, JSON.stringify(lines)]);
+    } else {
+      const [y, m, dd] = a.depreciationStart.split("-").map(Number);
+      const day = new Date(Date.UTC(y, m - 1, dd - 1)).toISOString().slice(0, 10);
+      id = Number((await c.query(
+        `insert into manual_journals (user_id, kind, status, entry_date, memo, lines, created_by) values ($1, 'opening', 'draft', $2, $3, $4::jsonb, $5) returning id`,
+        [scope, day, "الأرصدة الافتتاحية / Opening balances", JSON.stringify(lines), actorId])).rows[0].id);
+    }
+    // Whoever added the lines is one of the journal's makers (maker-checker), as an edit makes him.
+    await c.query(
+      `insert into finance_manual_journal_meta (manual_journal_id, user_id, last_actor_id, maker_ids) values ($1, $2, $3, array[$3]::int[])
+       on conflict (manual_journal_id) do update set last_actor_id = excluded.last_actor_id, updated_at = now(),
+         maker_ids = case when $3 = any(finance_manual_journal_meta.maker_ids) then finance_manual_journal_meta.maker_ids
+                          else finance_manual_journal_meta.maker_ids || $3::int end`, [id, scope, actorId]);
+    await auditRow(c, scope, actorId, "finance_v2_manual_journal", id, "/finance/v2/assets", "PATCH");
+  }
+
+  /**
+   * GET /finance/v2/assets/opening-check — the existing assets against the opening entry, per account: the register
+   * (Σ cost of the non-void assets bought before the ledger start on their cost account; Σ their opening accumulated
+   * depreciation on their contra account) and the opening entry (posted, else the latest draft) on the same accounts and
+   * on every other non-current asset account (12xx) it touches. A difference means an asset is in one and not the other:
+   * no card for a balance (it will not depreciate), or a card whose balance is not in the books.
+   */
+  async openingCheck(scope: number, q: any = {}) {
+    const lang = langOf(q?.lang);
+    const start = await this.ledgerStart(this.pool, scope);
+    const [posted] = (await this.pool.query(
+      `select e.id::int as "entryId", e.entry_no as "entryNo", to_char(e.entry_date,'YYYY-MM-DD') as date, m.id as "manualJournalId"
+         from journal_entries e left join manual_journals m on m.user_id = e.user_id and m.posted_entry_id = e.id
+        where e.user_id = $1 and e.origin = 'opening' and e.status = 'posted' order by e.id desc limit 1`, [scope])).rows;
+    const [draft] = posted ? [] : (await this.pool.query(
+      `select id as "manualJournalId", status, to_char(entry_date,'YYYY-MM-DD') as date, lines from manual_journals
+        where user_id = $1 and kind = 'opening' and status in ('draft', 'submitted', 'rejected') order by id desc limit 1`, [scope])).rows;
+    const accts = new Map<number, any>((await this.pool.query(
+      `select id, code, name_ar, name_en, normal_balance from accounts where user_id = $1`, [scope])).rows.map((a: any) => [Number(a.id), a]));
+    const reg = new Map<number, number>();
+    const add = (m: Map<number, number>, k: number, v: number) => m.set(k, (m.get(k) ?? 0) + v);
+    if (start) {
+      for (const a of (await this.pool.query(
+        `select asset_account_id, accum_account_id, cost::text as cost, opening_accumulated::text as acc from fixed_assets
+          where user_id = $1 and status <> 'void' and acquisition_mode = 'none' and acquisition_date < $2::date`, [scope, start])).rows) {
+        add(reg, Number(a.asset_account_id), toHalalas(a.cost));
+        if (a.accum_account_id && toHalalas(a.acc) > 0) add(reg, Number(a.accum_account_id), toHalalas(a.acc));
+      }
+    }
+    // Opening lines, signed to each account's normal side (a contra account's credit is positive).
+    const open = new Map<number, number>();
+    const signed = (accountId: number, dr: number, cr: number) => (accts.get(accountId)?.normal_balance === "credit" ? cr - dr : dr - cr);
+    if (posted) {
+      for (const l of (await this.pool.query(
+        `select account_id, sum(debit)::text as d, sum(credit)::text as c from journal_lines where user_id = $1 and entry_id = $2 group by 1`,
+        [scope, posted.entryId])).rows) add(open, Number(l.account_id), signed(Number(l.account_id), toHalalas(l.d), toHalalas(l.c)));
+    } else if (draft) {
+      for (const l of draft.lines ?? []) add(open, Number(l.accountId), signed(Number(l.accountId), toHalalas(String(l.debit ?? "0")), toHalalas(String(l.credit ?? "0"))));
+    }
+    const keys = new Set<number>([...reg.keys(), ...[...open.keys()].filter((k) => String(accts.get(k)?.code ?? "").startsWith("12"))]);
+    const rows = [...keys].map((k) => {
+      const a = accts.get(k);
+      const r = reg.get(k) ?? 0, o = open.get(k) ?? 0;
+      return { accountId: k, code: a?.code ?? null, name: a ? (lang === "en" ? a.name_en || a.name_ar : a.name_ar) : null,
+        register: fromHalalas(r), opening: fromHalalas(o), difference: fromHalalas(o - r) };
+    }).sort((x, y) => String(x.code).localeCompare(String(y.code)));
+    return {
+      ledgerStart: start,
+      opening: posted ? { status: "posted", ...posted } : draft ? { status: draft.status, manualJournalId: Number(draft.manualJournalId), date: draft.date, entryId: null, entryNo: null } : null,
+      rows, balanced: rows.every((r) => r.difference === "0.00"),
+    };
+  }
+
   // ── internals ──
 
   /** Emit the asset's missing events through `through` in the caller's transaction; returns the new ones. */
@@ -658,6 +811,13 @@ export class AssetsService {
       notes: optStr(body?.notes, "notes", 2000),
     };
   }
+}
+
+/** Whole months from `a` to `b` (YYYY-MM-DD): 2024-11-01 → 2026-11-01 is 24; a day short of the month is one less. */
+export function elapsedMonths(a: string, b: string): number {
+  const [y1, m1, d1] = a.split("-").map(Number);
+  const [y2, m2, d2] = b.split("-").map(Number);
+  return Math.max(0, (y2 - y1) * 12 + (m2 - m1) - (d2 < d1 ? 1 : 0));
 }
 
 /** API field name → key of the normalised object. */
