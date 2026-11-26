@@ -152,6 +152,30 @@ class PropertiesController {
     if (!owner) throw new BadRequestException("المؤجر المختار غير موجود · Selected landlord not found");
   }
 
+  /** How many live landlords the account has, capped at 2 — "more than one" is all the callers ask. */
+  private async landlordCount(userId: number): Promise<number> {
+    const rows = await this.db.select({ id: ownersTable.id }).from(ownersTable)
+      .where(and(eq(ownersTable.userId, userId), isNull(ownersTable.deletedAt))).limit(2);
+    return rows.length;
+  }
+
+  /**
+   * Accountant note (27 Nov 2026): a property saved without a landlord used to
+   * be filed under the account's default landlord — for an office, the office
+   * itself — with no warning, so the landlord's rent was booked as office
+   * revenue. With more than one landlord to choose from, a finished property
+   * must name one. A draft may still be saved without one (it is then left
+   * empty, never defaulted) and is checked again when it is finalised.
+   * Scoped to the portal's POST / PATCH /properties — the Ejar import and the
+   * Excel import write properties through their own paths.
+   */
+  private landlordRequired(): never {
+    throw new BadRequestException({
+      error: "LANDLORD_REQUIRED", field: "ownerId",
+      message: "اختر المؤجر (المالك) الذي يتبعه العقار · Choose the landlord this property belongs to",
+    });
+  }
+
   /**
    * Properties, paginated and filtered by the database.
    *
@@ -458,7 +482,10 @@ class PropertiesController {
     // flagged default landlord, if any.
     let ownerId: number | null = foreignKeyId(body.ownerId, "المؤجر");
     if (ownerId != null) await this.assertOwnerInScope(ownerId, owner);
-    if (ownerId == null) {
+    if (ownerId == null && (await this.landlordCount(owner)) > 1) {
+      if (!isDraft) this.landlordRequired();
+      // A draft with several landlords to choose from stays without one — never the default.
+    } else if (ownerId == null) {
       const [def] = await this.db.select({ id: ownersTable.id })
         .from(ownersTable)
         .where(and(eq(ownersTable.userId, owner), eq(ownersTable.isDefault, true), isNull(ownersTable.deletedAt)))
@@ -617,6 +644,12 @@ class PropertiesController {
       updateData["deedId"] = nextDeedId;
     }
     if (Object.keys(updateData).length === 0) throw new BadRequestException("لا توجد حقول للتحديث · No updatable fields in request");
+    // A property finished (or kept finished) without a landlord while the account has several: name one (accountant note 27 Nov 2026).
+    {
+      const nextOwner = "ownerId" in updateData ? (updateData.ownerId as number | null) : priorProp.ownerId;
+      const losing = "ownerId" in updateData && nextOwner == null && priorProp.ownerId != null;
+      if (!isDraft && nextOwner == null && ((priorProp.isDraft && !isDraft) || losing) && (await this.landlordCount(owner)) > 1) this.landlordRequired();
+    }
     // Plan transitions. B5: no management fee SET on a property of the account holder's own landlord record
     // (re-sending the stored value passes). B2: in Owner mode, a property with an active contract cannot move to a
     // third-party landlord — the automatic Owner→Manager migration is tried first (409 OWNER_MODE_THIRD_PARTY).

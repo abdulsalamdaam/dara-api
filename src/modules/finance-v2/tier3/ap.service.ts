@@ -573,7 +573,7 @@ export class ApService {
     const out = await withTx(this.pool, async (c) => {
       const sup = (await c.query(`select id, is_active from suppliers where id = $1 and user_id = $2`, [supplierId, scope])).rows[0];
       if (!sup) throw new NotFoundException({ error: "SUPPLIER_NOT_FOUND", message: "Supplier not found" });
-      const bankAccountId = await this.banks.assertUsable(c, scope, body?.bankAccountId);
+      let bankAccountId = await this.banks.assertUsable(c, scope, body?.bankAccountId);
       await this.assertNotLocked(c, scope, paidOn, "payment");
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.AP]);
       const bills = (await c.query(`${BILL_SQL} where b.user_id = $1 and b.id = any($2::int[])`, [scope, allocs.map((a) => a.billId)])).rows;
@@ -592,6 +592,13 @@ export class ApService {
       // A bill the office bears (no landlord, the account holder's own, or charged to the company) is never paid from client money (trust);
       // charge_to = 'landlord' is only ever an agent landlord's (CHARGE_TO_NOT_ALLOWED at bill entry).
       if (allocs.some((a) => byId.get(a.billId!)?.charge_to !== "landlord")) await this.banks.assertNotTrustForOffice(c, scope, bankAccountId);
+      // Accountant note (27 Nov 2026): bills charged to the landlord are paid out of the landlord's money, so a payment
+      // that names no account and covers only such bills goes out of the default trust account — the settings default
+      // is the office's operating account. (charge_to = 'landlord' exists only for agent landlords in Manager mode.)
+      else if (bankAccountId == null) {
+        const t = await c.query(`select id from bank_accounts where user_id = $1 and kind = 'bank' and is_trust and is_default and is_active order by id limit 1`, [scope]);
+        if (t.rows[0]) bankAccountId = Number(t.rows[0].id);
+      }
       const number = await nextPvNumber(c, scope);
       const r = await c.query(
         `insert into supplier_payments (user_id, number, supplier_id, paid_on, amount, bank_account_id, method, reference, created_by)

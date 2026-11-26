@@ -280,6 +280,8 @@ export class AssetsService {
       if (s?.goLive && date < s.goLive) throw bad("BEFORE_GO_LIVE", `The disposal date is before the ledger go-live date (${s.goLive})`);
       const proceeds = money(body?.proceeds, "proceeds", { dflt: 0 });
       const bankId = await this.banks.assertUsable(c, scope, body?.bankAccountId);
+      // The office's own asset: its sale proceeds are office money and never land on client money (trust) either.
+      await this.banks.assertNotTrustForOffice(c, scope, bankId);
       const ids = await this.codeIds(c, scope);
       const f = disposalFigures(scheduleInput(a), date, proceeds);
       if (f.gain > 0 && !ids.get(DISPOSAL_ACCOUNTS.gain)) throw bad("MISSING_ACCOUNT", "the chart has no gain-on-disposal account (4420)");
