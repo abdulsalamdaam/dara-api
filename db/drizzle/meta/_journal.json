@@ -631,6 +631,13 @@
       "when": 1795392000000,
       "tag": "0100_rental_offer_sends",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1795478400000,
+      "tag": "0101_finance_v2_journal_bills",
+      "breakpoints": true
     }
   ]
 }

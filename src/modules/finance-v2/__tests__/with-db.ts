@@ -39,6 +39,8 @@ export const MIGRATION_0076 = join(__dirname, "../../../../db/drizzle/0076_finan
 export const MIGRATION_0079 = join(__dirname, "../../../../db/drizzle/0079_finance_v2_payout_vouchers.sql");
 export const MIGRATION_0080 = join(__dirname, "../../../../db/drizzle/0080_finance_v2_manual_journal_meta.sql");
 export const MIGRATION_0094 = join(__dirname, "../../../../db/drizzle/0094_finance_rent_revenue_basis.sql");
+/** Journal bills: a supplier's opening balance from a journal line (0101). */
+export const MIGRATION_0101 = join(__dirname, "../../../../db/drizzle/0101_finance_v2_journal_bills.sql");
 export const LEGACY_MIN = join(__dirname, "legacy-min.sql");
 /** Recurring billing columns on users / subscription_payments — newer than legacy-schema.sql. Idempotent. */
 export const MIGRATION_0097 = join(__dirname, "../../../../db/drizzle/0097_moyasar_tokenization.sql");
@@ -88,6 +90,7 @@ export async function withDb(opts: { legacy?: boolean | "full"; migrate?: boolea
     await apply(MIGRATION_0079);
     await apply(MIGRATION_0080);
     await apply(MIGRATION_0094);
+    await apply(MIGRATION_0101);
   }
   return {
     pool,

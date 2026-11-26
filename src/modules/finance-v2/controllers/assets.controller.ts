@@ -36,6 +36,13 @@ export class FinanceV2AssetsController {
     return this.assets.list(scopeId(req.user!), q);
   }
 
+  /** The existing assets (bought before the ledger start) against the opening entry, per account (note 15). Before `assets/:id`. */
+  @Get("assets/opening-check")
+  @RequireCapability("view")
+  openingCheck(@Req() req: Fv2Request, @Query() q: any) {
+    return this.assets.openingCheck(scopeId(req.user!), q);
+  }
+
   @Get("assets/:id")
   @RequireCapability("view")
   get(@Req() req: Fv2Request, @Param("id") id: string, @Query("lang") lang?: string) {
@@ -45,6 +52,7 @@ export class FinanceV2AssetsController {
   /**
    * {nameAr, nameEn?, category, propertyId?, acquisitionDate, cost, salvageValue?, usefulLifeMonths?, depreciationStart?,
    *  openingAccumulated?, assetAccountId?, accumAccountId?, expenseAccountId?, acquisitionMode?: none|bank, acquisitionBankAccountId?, notes?}
+   * — or an existing asset: {existing: true, …, totalLifeMonths?, addToOpening?} (AssetsService.existingBody).
    */
   @Post("assets")
   @RequireCapability("expenses")

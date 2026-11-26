@@ -8,6 +8,7 @@ import { capabilities, isAccountHolder } from "./capabilities";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, isoDate, mapLedgerError, requireReason } from "./audit";
 import { assertTrustCovers } from "./trust-guard";
+import { insertJournalBills } from "./tier3/journal-bills";
 import { manualJournalWarnings, withWarnings, assertTrustJustified, trustReasonOf, anotherApprover, TRUST_REASON_MIN, type ManualJournalWarning } from "./manual-journal-warnings";
 
 export type ManualKind = "manual" | "opening";
@@ -29,6 +30,12 @@ export interface StoredLine {
   tenantId?: number;
   contractId?: number;
   paymentId?: number;
+  /**
+   * The supplier («المورد», accountant 27 Nov 2026, note 14): only on a CREDIT line of 2111 (accounts payable). It is not
+   * a journal_lines column — on approval the line becomes an open item of that supplier (tier3/journal-bills.ts), which
+   * the AP aging, the supplier statement, supplier payments and R12 read.
+   */
+  supplierId?: number;
 }
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
@@ -239,6 +246,10 @@ export class ManualJournalsService {
             where id = $1 and user_id = $2`,
           [id, scope, user.id, res.id],
         );
+        // A credit to 2111 with a supplier becomes that supplier's open item (note 14; tier3/journal-bills.ts).
+        await insertJournalBills(c, scope, user.id, { manualJournalId: id, entryId: res.id, entryNo: res.entryNo, entryDate: v.entryDate, kind: cur.kind },
+          v.lines.flatMap((l, i) => (l.supplierId != null
+            ? [{ lineNo: i + 1, supplierId: l.supplierId, amount: toHalalas(l.credit), memo: l.memo, propertyId: l.propertyId ?? null }] : [])));
         await auditRow(c, scope, user.id, "finance_v2_manual_journal", id, withWarnings(`/finance/v2/manual-journals/${id}/approve`, warnings));
         if (selfApproved) {
           await auditRow(c, scope, user.id, "finance_v2_manual_journal_self_approval", id, withWarnings(`/finance/v2/manual-journals/${id}/approve`, warnings));
@@ -347,6 +358,7 @@ export class ManualJournalsService {
     let dr = 0;
     let cr = 0;
     const dimIds: Record<DimKey, Set<number>> = { ownerId: new Set(), propertyId: new Set(), unitId: new Set(), tenantId: new Set(), contractId: new Set(), paymentId: new Set() };
+    const supplierIds = new Set<number>();
     const lines: StoredLine[] = raw.map((l: any, i: number) => {
       const n = i + 1;
       const accountId = Number(l?.accountId);
@@ -373,19 +385,41 @@ export class ManualJournalsService {
         dimIds[k].add(id);
       }
       if (kind !== "opening" && l?.paymentId != null) throw new BadRequestException({ error: "BAD_LINE", message: `line ${n}: paymentId is only allowed on the opening entry` });
+      if (l?.supplierId != null && l.supplierId !== "") {
+        const sid = Number(l.supplierId);
+        if (!Number.isSafeInteger(sid) || sid <= 0) throw new BadRequestException({ error: "BAD_LINE", message: `line ${n}: supplierId must be an id` });
+        if (c <= 0) {
+          throw new BadRequestException({ error: "SUPPLIER_LINE_CREDIT_ONLY",
+            message: `السطر ${n}: المورد يُحدد على سطر دائن في حساب الموردين فقط؛ للسداد استخدم سند صرف المورد · line ${n}: a supplier goes on a credit line of accounts payable only; record a payment to him as a supplier payment` });
+        }
+        out.supplierId = sid;
+        supplierIds.add(sid);
+      }
       return out;
     });
     if (dr !== cr) throw new BadRequestException({ error: "UNBALANCED", message: `Debits ${fromHalalas(dr)} and credits ${fromHalalas(cr)} differ` });
     if (dr <= 0) throw new BadRequestException({ error: "ZERO_ENTRY", message: "The entry total must be positive" });
 
     const accIds = [...new Set(lines.map((l) => l.accountId))];
-    const acc = await q.query(`select id, code, is_group, is_active from accounts where user_id = $1 and id = any($2::int[])`, [scope, accIds]);
+    const acc = await q.query(`select id, code, is_group, is_active, system_key from accounts where user_id = $1 and id = any($2::int[])`, [scope, accIds]);
     const byId = new Map<number, any>(acc.rows.map((r: any) => [Number(r.id), r]));
     for (const id of accIds) {
       const a = byId.get(id);
       if (!a) throw new NotFoundException({ error: "ACCOUNT_NOT_FOUND", message: `Account ${id} not found` });
       if (a.is_group) throw new BadRequestException({ error: "ACCOUNT_GROUP", message: `Account ${a.code} is a group account` });
       if (!a.is_active) throw new BadRequestException({ error: "ACCOUNT_INACTIVE", message: `Account ${a.code} is inactive` });
+    }
+    lines.forEach((l, i) => {
+      if (l.supplierId != null && byId.get(l.accountId)?.system_key !== "accounts_payable") {
+        throw new BadRequestException({ error: "SUPPLIER_ON_NON_AP_ACCOUNT",
+          message: `السطر ${i + 1}: المورد يُحدد على حساب الموردين (2111) فقط · line ${i + 1}: a supplier goes on the accounts payable account (2111) only` });
+      }
+    });
+    if (supplierIds.size) {
+      const ids = [...supplierIds];
+      const found = new Set((await q.query(`select id from suppliers where user_id = $1 and id = any($2::int[])`, [scope, ids])).rows.map((r: any) => Number(r.id)));
+      const miss = ids.find((x) => !found.has(x));
+      if (miss != null) throw new NotFoundException({ error: "DIMENSION_NOT_FOUND", message: `supplierId ${miss} not found` });
     }
     const checks: Array<[DimKey, string]> = [
       ["ownerId", `select id from owners where user_id = $1 and id = any($2::int[])`],

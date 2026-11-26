@@ -28,6 +28,8 @@ export async function billEvents(q: Sql, userId: number, s: FinanceSettingsRow, 
     [billId, userId],
   );
   if (!b || !b.approved) return null;
+  // A supplier balance from a journal line (0101, journal-bills.ts): the journal is its entry; nothing posts for the bill.
+  if ((await q.rows(`select 1 from finance_journal_bills where bill_id = $1 and user_id = $2`, [billId, userId])).length) return null;
   const lines = await q.rows(
     `select line_no, description, gl_account_id, net_amount::text as net, vat_amount::text as vat, vat_category, vat_rate::text as rate, vat_recoverable
        from supplier_bill_lines where bill_id = $1 and user_id = $2 order by line_no`,
