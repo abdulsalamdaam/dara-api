@@ -18,10 +18,10 @@ import { fv2PlanEntitledSql } from "./flag.service";
  *  - The 21 rows map onto the reconciliation report's checks (R1–R21,
  *    reports/reconciliation.service.ts + reports/control-checks.ts); a few of
  *    his rows are the same v2 check seen from two sides (#4 and #10 → R1,
- *    #5 and #12 → R2, #6 and #11 → R3, #7 and #9 → R11). R4–R7 are v2's own
+ *    #5 and #12 → R2, #6 and #11 → R3, #7 and #9 → R11). R4–R7 and R22 are v2's own
  *    extra checks, shown under the 21.
  *  - Blocking: a check whose status is `difference` or `attention`, except
- *    R7 (integrity lists, informational). `not_applicable` passes;
+ *    R7 (integrity lists, informational) and R22 (a negative cash balance: a warning). `not_applicable` passes;
  *    `unavailable` (no sub-ledger to compare with) neither passes nor blocks.
  *  - Nightly: after the 03:30 repair sweep (BackfillService.onSweepDone), or at
  *    05:00 Riyadh when the sweep is switched off, every started flag-on account
@@ -45,7 +45,7 @@ export interface ControlRow {
   difference: string | null;
   unit: "money" | "count";
   status: string;
-  result: "pass" | "fail" | "not_applicable" | "unavailable";
+  result: "pass" | "fail" | "warning" | "not_applicable" | "unavailable";
   blocking: boolean;
   rows: any[];
   explanations: any[];
@@ -59,7 +59,8 @@ export interface ControlEvaluation {
   params: { asOf: string };
   checks: ControlRow[];
   additional: ControlRow[];
-  summary: { total: number; passed: number; failed: number; notApplicable: number; unavailable: number };
+  /** `warnings` counts warning-level checks (R22) among the 21 and the additional ones; the rest count the 21 only. */
+  summary: { total: number; passed: number; failed: number; notApplicable: number; unavailable: number; warnings: number };
   /** Check ids that block closing. */
   blocking: string[];
 }
@@ -90,9 +91,15 @@ export const CONTROL_ROWS: ReadonlyArray<{ no: number; checkId: string; ar: stri
 ];
 
 /** v2's own checks outside his 21, shown beneath them. */
-const ADDITIONAL = ["R4", "R5", "R6", "R7"];
+const ADDITIONAL = ["R4", "R5", "R6", "R7", "R22"];
 /** Lists only: never blocks. */
 const INFORMATIONAL = new Set(["R7"]);
+/**
+ * Warnings: shown as such ("warning", counted in `summary.warnings`), never blocking a close. R22 (no cash or bank
+ * account below zero, accountant 27 Nov 2026 note 4): an overdraft can be real; trust accounts are already refused
+ * by the trust guard.
+ */
+const WARNING = new Set(["R22"]);
 
 const CHECK_MS = 60_000;
 /** The fallback time (Riyadh) when the repair sweep never signals: 05:00. */
@@ -109,6 +116,7 @@ function resultOf(status: string, id: string): ControlRow["result"] {
   if (status === "ok") return "pass";
   if (status === "not_applicable") return "not_applicable";
   if (status === "unavailable") return "unavailable";
+  if (WARNING.has(id)) return "warning";
   return INFORMATIONAL.has(id) ? "pass" : "fail";
 }
 
@@ -168,6 +176,7 @@ export class ControlChecksService implements OnModuleInit, OnModuleDestroy {
         failed: checks.filter((c) => c.result === "fail").length,
         notApplicable: checks.filter((c) => c.result === "not_applicable").length,
         unavailable: checks.filter((c) => c.result === "unavailable").length,
+        warnings: [...checks, ...additional].filter((c) => c.result === "warning").length,
       },
       blocking,
     };

@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fv2DbSkip } from "../__tests__/with-db";
+import { ReconciliationService } from "../reports/reconciliation.service";
 import { attempt, enableV2, legacyEnv, seedAccount, type LegacyEnv, type Seed } from "../__tests__/legacy-env";
 import { BankAccountsService } from "../tier1/bank-accounts.service";
 import { ChartService } from "../chart.service";
@@ -18,7 +19,8 @@ import { DepreciationJobService } from "./depreciation-job.service";
  * Hand-computed (Manager mode):
  *   A  computers, cost 12,000.00, no salvage, 12 months from 2026-01-01, paid from the default bank, linked to the holder's villa:
  *      FA01 Dr 1222 12,000 / Cr 1113; FA02 1,000.00 a month (Dr 5320 / Cr 1229).
- *      On 2026-07-10: Jan–Jun queued (6,000). Run for July → dep:2026-07 (1,000).
+ *      On 2026-07-10: Jan–Jun queued (6,000); July cannot be run before its last day (MONTH_NOT_ENDED, as the
+ *      commission run). On 2026-07-31: run for July → dep:2026-07 (1,000).
  *      Disposed 2026-07-15 for 7,000.00: July's 1,000 is reversed; the disposal books 15/31 × 1,000 = 483.87,
  *      removes 6,483.87 accumulated and the 12,000 cost; NBV 5,516.13 → gain 1,483.87 (Cr 4420).
  *   B  furniture, cost 3,100.00, salvage 100.00, 30 months from 2026-03-16, recorded already (mode none):
@@ -132,11 +134,18 @@ describe("fv2 fixed assets: register, depreciation, disposal, schedule, external
     assert.equal(((await attempt(() => svc.get(OTHER, A.id))) as any).status, 404, "another account's asset");
   });
 
-  it("the monthly run is idempotent per asset and month; the current month can be run, a future one cannot", async () => {
+  it("the monthly run is idempotent per asset and month; the current month only from its last day, a future one never", async () => {
     const pre = await svc.preview(U, { month: "2026-06" });
     assert.equal(pre.count, 0);
     const again = await svc.runMonth(U, user.id, "2026-06", "manual");
     assert.deepEqual([again.queued, again.total], [0, "0.00"], "a repeated run queues nothing");
+    // Accountant, 27 Nov 2026 (note 10): on 10 July, July has not ended — neither preview nor run, nothing queued or logged.
+    const early: any = await attempt(() => svc.runMonth(U, user.id, "2026-07", "manual"));
+    assert.deepEqual([early.status, early.body.error], [400, "MONTH_NOT_ENDED"]);
+    assert.equal(((await attempt(() => svc.preview(U, { month: "2026-07" }))) as any).body.error, "MONTH_NOT_ENDED");
+    assert.equal(((await attempt(() => svc.runMonth(U, user.id, "2026-07", "manual", "2026-07-30"))) as any).body.error, "MONTH_NOT_ENDED", "the day before the last");
+    assert.equal((await env.q(`select count(*)::int as n from ledger_outbox where user_id = $1 and event = 'dep:2026-07'`, [U]))[0].n, 0);
+    svc.clock = () => "2026-07-31"; // the month's last day: it may run (dated today)
     const p7 = await svc.preview(U, { month: "2026-07" });
     assert.deepEqual(p7.rows.map((r: any) => [r.number, r.event, r.amount, r.late]), [["FA-000001", "dep:2026-07", "1000.00", false]]);
     const r7 = await svc.runMonth(U, user.id, "2026-07", "manual");
@@ -170,7 +179,7 @@ describe("fv2 fixed assets: register, depreciation, disposal, schedule, external
 
   it("financial fields freeze once anything is queued; descriptive edits and delete-before-posting work", async () => {
     C = await svc.create(U, user, { nameAr: "سيارة", category: "vehicles", acquisitionDate: "2026-07-05", cost: "60000", usefulLifeMonths: 60 });
-    assert.equal(C.posted, false, "July has not ended: nothing queued yet");
+    assert.equal(C.posted, false, "July has not ended: nothing queued yet (create books through June only)");
     C = await svc.update(U, user, C.id, { cost: "61000" });
     assert.deepEqual([C.cost, C.monthlyCharge], ["61000.00", "1016.67"]);
     await svc.runMonth(U, user.id, "2026-07", "manual");
@@ -185,8 +194,8 @@ describe("fv2 fixed assets: register, depreciation, disposal, schedule, external
   });
 
   it("disposal mid-life (A, 2026-07-15, proceeds 7,000): July reversed, the part month booked, gain 1,483.87, A off the books", async () => {
-    svc.clock = () => "2026-07-20";
-    const bad1: any = await attempt(() => svc.dispose(U, user, A.id, { date: "2026-07-25", proceeds: "7000" }));
+    svc.clock = () => "2026-08-03";
+    const bad1: any = await attempt(() => svc.dispose(U, user, A.id, { date: "2026-08-05", proceeds: "7000" }));
     assert.deepEqual([bad1.status, bad1.body.error], [400, "BAD_DATE"], "not in the future");
     A = await svc.dispose(U, user, A.id, { date: "2026-07-15", proceeds: "7000", note: "sold" });
     assert.equal(A.status, "disposed");
@@ -218,6 +227,14 @@ describe("fv2 fixed assets: register, depreciation, disposal, schedule, external
     assert.equal(open, 0);
     assert.deepEqual((await svc.list(U)).rows.map((r) => r.number), ["FA-000003", "FA-000001"], "void assets are hidden by default");
     assert.equal((await svc.list(U, { status: "all" })).rows.length, 3);
+  });
+
+  it("R4 (bank and cash vs source movements) counts the purchase and the disposal proceeds (accountant, 27 Nov 2026, note 17)", async () => {
+    const recon = new ReconciliationService(env.t.pool as any);
+    const r4 = (await recon.reconciliation(U, { asOf: "2026-08-03", only: "R4" })).checks[0];
+    assert.deepEqual([r4.status, r4.difference, r4.rows], ["ok", "0.00", []], "−12,000 paid for A and +7,000 received for it are on both sides");
+    const before = (await recon.reconciliation(U, { asOf: "2026-07-14", only: "R4" })).checks[0];
+    assert.equal(before.status, "ok", "before the disposal: the purchase alone");
   });
 
   it("the asset schedule ties: cost and accumulated roll forward to the NBV", async () => {

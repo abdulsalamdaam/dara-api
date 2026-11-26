@@ -519,7 +519,7 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
 
   // ─────────────────────────────── the 21-row view and stored runs ───────────────────────────────
   describe("the accountant's 21 rows, stored runs", () => {
-    it("maps his 21 checks onto R1–R21 in his order, with v2's R4–R7 underneath", async () => {
+    it("maps his 21 checks onto R1–R21 in his order, with v2's R4–R7 and R22 underneath", async () => {
       assert.deepEqual(CONTROL_ROWS.map((x) => x.no), Array.from({ length: 21 }, (_, i) => i + 1));
       const ev = await controls.evaluate(U_B, ASOF, "en", "2026-05-01");
       assert.equal(ev.checks.length, 21);
@@ -528,7 +528,7 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
       assert.equal(byNo(7).checkId, "R11");
       assert.equal(byNo(16).checkId, "R16");
       assert.equal(byNo(1).label, "Journal balanced (total debits = total credits)");
-      assert.deepEqual(ev.additional.map((c) => c.checkId), ["R4", "R5", "R6", "R7"]);
+      assert.deepEqual(ev.additional.map((c) => c.checkId), ["R4", "R5", "R6", "R7", "R22"]);
       assert.equal(byNo(17).unit, "count");
       assert.equal(ev.summary.total, 21);
       assert.equal(ev.summary.passed + ev.summary.failed + ev.summary.unavailable, 21);
@@ -627,6 +627,41 @@ describe("finance v2 control checks and the close gate (real Postgres)", { skip:
     it("the gate is off when no controls service is wired (legacy constructor)", async () => {
       const plain = new PeriodCloseService(t.pool, periods, repo, { runAccount: async () => null } as any, { runAccount: async () => ({}) } as any, { missingKeys: async () => [] } as any);
       assert.equal((plain as any).controls, undefined);
+    });
+  });
+
+  // ─────────────────────────────── R22 (accountant, 27 Nov 2026, note 4) ───────────────────────────────
+  describe("R22 no cash or bank account below zero: a warning, never blocking", () => {
+    const U_N = 7607;
+    before(async () => {
+      await q(`insert into users (id, email, password_hash, name, user_type) values ($1, $2, 'x', 'Synthetic Co', 'company')`, [U_N, `fv2-ctl-${U_N}@example.test`]);
+      await q(`insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, ledger_started_at) values ($1, true, 'manager', now())`, [U_N]);
+      await withTx(t.pool, (c) => new ChartService(t.pool).seedChart(c, U_N));
+      acc[U_N] = Object.fromEntries((await q(`select code, id from accounts where user_id = $1`, [U_N])).rows.map((r: any) => [r.code, r.id]));
+      await q(`insert into bank_accounts (user_id, kind, name_ar, name_en, is_default, gl_account_id) values ($1, 'bank', 'البنك', 'Bank', true, $2)`, [U_N, acc[U_N]["1113"]]);
+    });
+
+    it("pass while every cash and bank account is at or above zero", async () => {
+      const u = U_N;
+      await post(u, "2026-03-01", [L(u, "1113", "dr", "350.00"), L(u, "3100", "cr", "350.00")], { origin: "manual" });
+      const r = await check(u, "R22");
+      assert.deepEqual([r.status, r.ledger, r.subLedger, r.unit, r.rows.length], ["ok", "0", "0", "count", 0]);
+    });
+
+    it("a 500 supplier payment from a bank holding 350: the bank is listed at −150, a warning that does not block", async () => {
+      const u = U_N;
+      await post(u, "2026-03-10", [L(u, "2111", "dr", "500.00"), L(u, "1113", "cr", "500.00")], { rule: "E39" });
+      const r = await check(u, "R22");
+      assert.deepEqual([r.status, r.ledger, r.difference], ["attention", "1", "1"]);
+      assert.deepEqual(r.rows.map((x: any) => [x.code, x.kind, x.trust, x.ledger]), [["1113", "bank", false, "-150.00"]]);
+      assert.equal(r.explanations[0].amount, "-150.00");
+      assert.equal((await check(u, "R22", "2026-03-09")).status, "ok", "as of the day before the payment");
+      const ev = await controls.evaluate(u, ASOF, "en", "2026-05-01");
+      const row = ev.additional.find((c) => c.checkId === "R22")!;
+      assert.deepEqual([row.result, row.blocking], ["warning", false]);
+      assert.ok(!ev.blocking.includes("R22"));
+      assert.equal(ev.summary.warnings, 1);
+      assert.equal(ev.summary.total, 21, "the accountant's 21 rows are unchanged");
     });
   });
 

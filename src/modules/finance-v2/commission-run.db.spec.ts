@@ -10,6 +10,9 @@ import { AccountTransferService } from "./tier1/account-transfer.service";
 import { PeriodsService } from "./periods.service";
 import { JournalRepository } from "./journal.repository";
 import { FinanceSettingsService } from "./settings.service";
+import { expectedCommission } from "./commission-run";
+import { ReconciliationService } from "./reports/reconciliation.service";
+import { sqlOf } from "./hooks/sql";
 import { BillingModule } from "../billing/billing.module";
 
 /**
@@ -179,6 +182,9 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     assert.deepEqual([b.collected, b.base, b.net, b.vat, b.total, b.profile], ["3500.00", "3500.00", "262.50", "39.38", "301.88", "simplified"]);
     assert.deepEqual([b.properties[0].pct, b.properties[0].source], ["7.50", "landlord"]);
     assert.deepEqual(pv.totals, { collected: "12250.00", base: "11108.70", net: "642.94", vat: "96.45", total: "739.39" });
+    // Accountant, 27 Nov 2026 (note 1): before the run, the payout screen deducts exactly what the run will take.
+    const exp = await expectedCommission(sqlOf(env.t.pool as any), M);
+    assert.deepEqual([exp.get(s.agent), exp.get(B.owner)], [{ planned: 43751, held: 0, total: 43751 }, { planned: 30188, held: 0, total: 30188 }]);
   });
 
   it("month 1: the run issues one confirmed COM per landlord; E15 Dr 2121 gross / Cr 4210 net / Cr 2151 VAT on the landlord", async () => {
@@ -198,6 +204,9 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     // كشف الملاك: commission before VAT and its VAT, apart.
     const st: any = await statements.landlordStatement(M, { ownerId: s.agent, from: firstOf(-3), to: today });
     assert.deepEqual([st.summary.commission, st.summary.commissionNet, st.summary.commissionVat], ["-437.51", "-380.44", "-57.07"]);
+    // Issued: it is in the landlord payable now, so nothing is expected any more for those lines.
+    const exp = await expectedCommission(sqlOf(env.t.pool as any), M);
+    assert.equal(exp.get(s.agent)?.total ?? 0, 0);
   });
 
   it("idempotent: running month 1 again issues nothing; on the collected basis a rent invoice spawns no per-document commission", async () => {
@@ -301,9 +310,16 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     const periods = new PeriodsService(env.t.pool);
     const transfers = new AccountTransferService(env.t.pool as any, new JournalRepository(periods), periods);
     await transfers.create(M, { ...userOf(M), permissions: [] } as any, { fromBankAccountId: t0.defaults.toBankAccountId, toBankAccountId: trust.id, amount: t0.unsent });
+    await drain(env, M);
+    // R4 (bank and cash vs source movements) counts the commission transfer on both accounts (27 Nov 2026, note 17).
+    const recon = new ReconciliationService(env.t.pool as any);
+    const r4 = async () => (await recon.reconciliation(M, { asOf: today, only: "R4" })).checks[0];
+    const r4Before = await r4();
     const tr: any = await svc.createTransfer(M, { id: M }, {});
     assert.equal(tr.amount, t0.unsent);
     await drain(env, M);
+    const r4After = await r4();
+    assert.deepEqual([r4After.status, r4After.difference, r4After.rows], [r4Before.status, r4Before.difference, r4Before.rows], "no new R4 difference");
     const lines = await env.q(
       `select a.code, l.debit::text as debit, l.credit::text as credit, l.bank_account_id, l.owner_id from journal_entries e join journal_lines l on l.entry_id = e.id
          join accounts a on a.id = l.account_id where e.user_id = $1 and e.source_type = 'commission_transfer' and e.source_id = $2 and e.event = 'posted' order by l.line_no`, [M, tr.id]);
@@ -322,6 +338,7 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     const [rv] = await env.q(`select count(*)::int as n from journal_entries where user_id = $1 and source_type = 'commission_transfer' and source_id = $2 and event = 'reversal:posted'`, [M, tr.id]);
     assert.equal(rv.n, 1);
     assert.equal((await svc.listTransfers(M)).unsent, t0.unsent);
+    assert.deepEqual((await r4()).rows, r4Before.rows, "the void reverses it on both sides of R4 too");
 
     await env.q(`update fiscal_periods set status = 'locked' where user_id = $1 and starts_on <= $2 and ends_on >= $2`, [M, firstOf(-3)]);
     const locked: any = await attempt(() => svc.createTransfer(M, { id: M }, { date: dayOf(-3, 15) }));
@@ -376,6 +393,8 @@ describe("fv2 commission run on the collected basis (real Postgres, real legacy 
     assert.deepEqual([d.items[0].vatCategory, d.status, d.deleted_at], ["S", "draft", null]);
     const [posted] = await env.q(`select count(*)::int as n from journal_entries where user_id = $1 and source_type = 'simple_invoice' and source_id = $2`, [N, x.documentId]);
     assert.equal(posted.n, 0, "nothing posts while the tax invoice is held");
+    // Held: its lines are counted but the draft is not in the dues yet — still expected out of the landlord's money.
+    assert.deepEqual((await expectedCommission(sqlOf(env.t.pool as any), N)).get(sN.agent), { planned: 0, held: 11500, total: 11500 });
     const again = await svc.run(N, { id: N }, { month: monthOf(-1) });
     assert.equal(again.results.find((y) => y.ownerId === sN.agent)?.reason, "already_issued", "the held run is not re-created");
     // Reversing a held run withdraws the draft (nothing was issued, so there is no credit note).
