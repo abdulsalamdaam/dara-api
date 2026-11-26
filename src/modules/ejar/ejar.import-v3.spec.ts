@@ -274,7 +274,7 @@ describe("the inquiry is pinned to the account's own stored ID (عقاري: its 
     assert.equal(body.code, "party_mismatch");
   });
 
-  it("landlord: not the lessor → 422 in Arabic, the calls count, nothing saved", async () => {
+  it("landlord: not the lessor → 422 in Arabic, the contract counts once, nothing saved", async () => {
     w = prodWorld();
     w.store.plans[1] = { packagePlan: "basic", billingCycle: "yearly", subscriptionStartedAt: new Date(Date.now() - 86_400_000), subscriptionEndsAt: new Date(Date.now() + 300 * 86_400_000) };
     const before = (await w.svc.customerBudget(1)).remaining!;
@@ -288,7 +288,7 @@ describe("the inquiry is pinned to the account's own stored ID (عقاري: its 
     }
     assert.equal(w.dataCalls().length, 6, "two calls per attempt were sent");
     assert.equal(w.store.lookups.size, 0, "nothing is saved on a mismatch");
-    assert.equal((await w.svc.customerBudget(1)).remaining, before - 3, "each spent lookup counts");
+    assert.equal((await w.svc.customerBudget(1)).remaining, before - 1, "the same contract counts once, however often it is fetched");
   });
 
   it("tenant: the stored CR is the contract's tenant → through", async () => {

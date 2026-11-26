@@ -637,66 +637,17 @@ export class EjarImportService {
 /** Marks the fee row(s) that carry the extra Ejar bills beyond rent + VAT (ejar.rent.ts). */
 export const EJAR_SERVICES_SOURCE = "ejar_services";
 
-const r2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
- * The extra Ejar bills inside its rent payments — beyond rent + VAT — as fee
- * rows. Ejar does not say what it is made of (general services, fixed
- * electricity / water / gas…), so the USER splits it in the review: one or more
- * rows, each with its own type, name and VAT treatment, that must add up to
- * Ejar's figure. Only those choices and the split come from the client; the
- * total, the dates and each row's share of every bill are derived here, so the
- * rows and the rent rows they were taken out of always add up to Ejar's
- * invoices, bill by bill. A client that sent no split (an older app) gets one
- * row with no VAT, as Ejar bills it.
+ * Ejar's bills can carry more than rent + VAT (general services, fixed
+ * electricity / water…). The import used to turn that difference into fee rows
+ * the user had to split; it no longer does (user asked 2026-11-27): the rent
+ * installments stay Ejar's rent only, and the confirm popup tells the user to
+ * add any fees themselves. Rows still marked `ejar_services` by an older
+ * client are dropped, so nothing derived from the difference is ever written.
  */
 export function withServicesFee(
-  fees: Array<Record<string, unknown>>, services: EjarServices | null | undefined,
+  fees: Array<Record<string, unknown>>, _services?: EjarServices | null,
 ): Array<Record<string, unknown>> {
-  const rest = fees.filter((f) => f?.source !== EJAR_SERVICES_SOURCE);
-  if (!services) return rest;
-  const sent = fees.filter((f) => f?.source === EJAR_SERVICES_SOURCE);
-  const parts = sent.length
-    ? sent.map((f, i) => ({
-        typeKey: typeof f.typeKey === "string" && f.typeKey ? f.typeKey : "other",
-        name: typeof f.name === "string" && f.name.trim() ? f.name.trim().slice(0, 80) : `مبالغ إضافية من إيجار ${i + 1}`,
-        amount: r2(Number(f.amount)),
-        treatment: typeof f.vatCategory === "string"
-          ? { vat: f.vatCategory === "S", vatCategory: f.vatCategory, exemptionReason: f.exemptionReason, exemptionReasonText: f.exemptionReasonText }
-          : { vat: !!f.vat },
-      }))
-    : [{ typeKey: "other", name: "مبالغ إضافية من إيجار", amount: services.total, treatment: { vat: false } }];
-
-  const sum = r2(parts.reduce((s, p) => s + (Number.isFinite(p.amount) ? p.amount : 0), 0));
-  if (parts.some((p) => !(p.amount > 0)) || Math.abs(sum - services.total) > 0.009) {
-    throw new BadRequestException({
-      code: "ejar_extra_split",
-      key: "additionalFees",
-      total: services.total,
-      sent: sum,
-      message: `وزّع المبالغ الإضافية في فواتير إيجار (${services.total}) على البنود بحيث يساوي مجموعها المبلغ كاملاً · `
-        + `The extra in Ejar's bills (${services.total}) must be split into items that add up to it exactly (got ${sum}).`,
-    });
-  }
-
-  // Each bill's extra is shared out in proportion to the split; the last row
-  // takes the bill's remainder, so every bill still adds up to Ejar's.
-  const schedules = parts.map(() => [] as Array<{ dueDate: string; amount: string }>);
-  for (const bill of services.schedule) {
-    let used = 0;
-    parts.forEach((p, j) => {
-      const a = j === parts.length - 1 ? r2(bill.amount - used) : r2(bill.amount * p.amount / services.total);
-      used = r2(used + a);
-      schedules[j].push({ dueDate: bill.dueDate, amount: String(a) });
-    });
-  }
-  return [
-    ...parts.map((p, j) => ({
-      id: `${EJAR_SERVICES_SOURCE}_${j + 1}`, source: EJAR_SERVICES_SOURCE, typeKey: p.typeKey, name: p.name,
-      amount: String(r2(schedules[j].reduce((s, e) => s + Number(e.amount), 0))), recurrence: "custom",
-      customSchedule: schedules[j].filter((e) => Number(e.amount) > 0),
-      ...p.treatment,
-    })),
-    ...rest,
-  ];
+  return fees.filter((f) => f?.source !== EJAR_SERVICES_SOURCE);
 }

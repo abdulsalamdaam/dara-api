@@ -373,8 +373,12 @@ export class EjarLookupService {
     const cfg = this.config();
     const refresh = body?.refresh === true || body?.refresh === "true";
 
+    // A contract this account has fetched before is already counted against
+    // its quota (usage counts contracts, ejar.usage.ts), so fetching it again
+    // — expired saved copy or «تحديث» — needs no quota headroom of its own.
+    const saved = await this.store.getLookup(accountId, contractNumber);
+    const alreadyCounted = !!saved;
     if (!refresh) {
-      const saved = await this.store.getLookup(accountId, contractNumber);
       if (saved && Date.now() - new Date(saved.createdAt).getTime() < cfg.cacheHours * 3_600_000) {
         if (!partyCheckPasses(check, mapSaved(saved))) throw partyMismatch(check);
         if (scope.locked && !allPartyIdentifiers(mapSaved(saved).parties).includes(scope.idNumber!)) {
@@ -386,8 +390,11 @@ export class EjarLookupService {
 
     const { start } = windowBounds(cfg.window);
     const outcome = await this.store.withBudgetLock<Outcome>(async () => {
-      const [usage, plan, pool] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId), this.store.callPool()]);
-      if (!canLookup(cfg, usage, plan)) return { kind: "exhausted", budget: computeBudget(cfg, usage, new Date(), plan) };
+      const [usage, quota, pool] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId), this.store.callPool()]);
+      // Gateway-wide caps always apply; the account's own caps only to a contract not yet counted.
+      const plan = alreadyCounted ? null : quota;
+      const cfgCap = alreadyCounted ? { ...cfg, perAccount: null } : cfg;
+      if (!canLookup(cfgCap, usage, plan)) return { kind: "exhausted", budget: computeBudget(cfg, usage, new Date(), plan) };
       // Dara's purchased gateway calls (Admin › Ejar usage): room for
       // Invoices + the second call, or nothing is sent.
       if (poolLeft(pool) < 2) return { kind: "pool_exhausted" };
@@ -431,7 +438,7 @@ export class EjarLookupService {
           // version's id). Fall back to Details — a third call, so it needs
           // its own headroom; without it, stop rather than overspend.
           const [now, nowPlan, nowPool] = await Promise.all([this.store.usage(start, accountId), this.planQuota(accountId), this.store.callPool()]);
-          if (!hasHeadroom(cfg, now, "details", nowPlan) || poolLeft(nowPool) < 1) return { kind: "details_unavailable", logs };
+          if (!hasHeadroom(cfgCap, now, "details", alreadyCounted ? null : nowPlan) || poolLeft(nowPool) < 1) return { kind: "details_unavailable", logs };
           needDetails = true;
         }
       }

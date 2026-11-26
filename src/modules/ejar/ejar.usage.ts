@@ -25,6 +25,16 @@ export const WRONG_NUMBER_SQL = sql`(l.endpoint = 'rentalContractInvoices' and (
 export const SUCCESS_SQL = sql`(l.status between 200 and 299 and not ${WRONG_NUMBER_SQL})`;
 
 /**
+ * The contract a lookup call was about: its number (Invoices), else the Ejar
+ * UUID (Get Contracts / Details), else the row itself. The ACCOUNT's share is
+ * counted per contract, not per call: fetching the same contract again —
+ * after the 24 h saved copy expires, or with «تحديث» — costs the customer
+ * nothing more (user asked 2026-11-27). The gateway-wide totals still count
+ * every call, since each one is spent against Dara's Balady quota.
+ */
+export const LOOKUP_CONTRACT_SQL = sql`coalesce(l.params ->> 'contractNumber', l.params ->> 'contract_ids', l.params ->> 'uuid', l.id::text)`;
+
+/**
  * Successful Ejar lookup calls since `since` (null = all time), per endpoint,
  * and this account's share (SUCCESS_SQL — errors are never deducted) — the count both the lookup budget and
  * the account limits (common/limits.ts) read. `db` may be a transaction.
@@ -33,7 +43,7 @@ export async function ejarLookupUsage(db: Drizzle, since: Date | null, accountId
   const res: any = await db.execute(sql`
     select l.endpoint,
            count(*)::int as total,
-           (count(*) filter (where coalesce(u.owner_user_id, u.id) = ${accountId}))::int as account
+           (count(distinct ${LOOKUP_CONTRACT_SQL}) filter (where coalesce(u.owner_user_id, u.id) = ${accountId}))::int as account
       from ejar_api_logs l
       left join users u on u.id = l.user_id
      where l.endpoint in (${sql.join(LOOKUP_ENDPOINTS.map((e) => sql`${e}`), sql`, `)})

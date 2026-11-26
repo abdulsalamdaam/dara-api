@@ -367,6 +367,23 @@ describe("the plan's Ejar lookup quota", () => {
     assert.equal(w.calls.length, sent, "nothing is sent past the quota");
   });
 
+  it("fetching the same contract again (refresh / expired copy) is not counted twice", async () => {
+    w = dworld({ env: { EJAR_LOOKUP_CACHE_HOURS: "1" } });
+    w.store.plans[1] = period("tenant", "quarterly"); // 7
+    const numbers = Array.from({ length: 8 }, (_, i) => String(10000000200 + i));
+    numbers.forEach((n) => w.known.add(n));
+    for (const n of numbers.slice(0, 7)) await w.svc.lookup(USER, { contract_number: n });
+    assert.equal((await w.svc.budget(1)).plan?.used, 7);
+    // Quota used up — the same contract can still be fetched again, and costs nothing more.
+    const again = await w.svc.lookup(USER, { contract_number: numbers[0], refresh: true });
+    assert.equal(again.source, "ejar");
+    w.store.lookups.get(`1:${numbers[1]}`)!.createdAt = new Date(Date.now() - 2 * 3_600_000);
+    assert.equal((await w.svc.lookup(USER, { contract_number: numbers[1] })).source, "ejar");
+    assert.equal((await w.svc.budget(1)).plan?.used, 7, "still one per contract");
+    // A new contract is still refused.
+    assert.equal((await httpError(w.svc.lookup(USER, { contract_number: numbers[7] }))).status, 429);
+  });
+
   it("counts only the current paid period", async () => {
     w = dworld();
     w.store.plans[1] = period("tenant", "quarterly"); // floor(30 × 3/12) = 7

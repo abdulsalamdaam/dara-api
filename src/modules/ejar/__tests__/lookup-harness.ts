@@ -166,8 +166,15 @@ export class MemStore implements EjarLookupStore {
   async usage(since: Date | null, accountId: number): Promise<LookupUsage> {
     // Mirrors SUCCESS_SQL: only a 2xx that is not a wrong number is deducted, one per row.
     const rows = this.logs.filter((l) => l.env.startsWith("balady") && isSuccess(l) && (!since || l.createdAt >= since));
-    const sum = (endpoint: string, acct?: number) =>
-      rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct)).length;
+    // The account's share counts contracts, not calls (LOOKUP_CONTRACT_SQL).
+    const contractOf = (l: LogRow) => {
+      const p = (l.params ?? {}) as Record<string, unknown>;
+      return String(p.contractNumber ?? p.contract_ids ?? p.uuid ?? `row:${l.id}`);
+    };
+    const sum = (endpoint: string, acct?: number) => {
+      const hit = rows.filter((l) => l.endpoint === endpoint && (acct == null || (this.accountOf[l.userId ?? -1] ?? l.userId) === acct));
+      return acct == null ? hit.length : new Set(hit.map(contractOf)).size;
+    };
     return {
       invoices: sum("rentalContractInvoices"),
       contracts: sum("getRentalContracts"),
