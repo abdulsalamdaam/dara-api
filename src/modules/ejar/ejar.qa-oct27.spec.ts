@@ -169,20 +169,18 @@ describe("3 · rent from what Ejar bills", () => {
     schedule: ["2026-11-26", "2027-05-26", "2027-11-26", "2028-05-26", "2028-11-26", "2029-05-26"].map((dueDate) => ({ dueDate, amount: 3175 })),
   };
 
-  it("the 25% on top is 15% VAT + 6,350 a year of general services; rent is total_rent_amount ÷ 12", () => {
+  it("the 25% on top: nothing is split off any more, but the monthly rent stays total_rent_amount ÷ 12", () => {
     const b = rentBasis(m268(), true);
     assert.equal(b.gross, 238125);
     assert.equal(b.months, 36);
     assert.equal(b.annualExVat, 63500);
-    assert.deepEqual(b.services?.annual, 6350);
-    assert.deepEqual(b.services?.total, 19050);
-    assert.deepEqual(b.services?.schedule.map((e) => e.amount), [3175, 3175, 3175, 3175, 3175, 3175]);
+    assert.equal(b.services, null, "no fee is derived from the difference (2026-11-27)");
+    assert.equal(b.extra, true, "the bills carry more than rent + VAT");
     const f = rentFigures(b, true);
     assert.equal(f.monthly, 5291.67);
     assert.equal(f.annual, 63500);
     assert.equal(f.annualVat, 9525);
-    assert.equal(f.totalVat, 28575, "VAT only on the rent: 190,500 × 15%");
-    assert.equal(rentBasis(m268()).services, null, "no Ejar VAT basis given → nothing split");
+    assert.equal(f.totalVat, 31059.78, "VAT as Ejar's bills carry it: 238,125 − 238,125 ÷ 1.15");
   });
 
   it("no services remainder (rent + VAT = bills) → nothing split, rent from the bills as before", () => {
@@ -222,7 +220,7 @@ describe("3 · rent from what Ejar bills", () => {
     assert.deepEqual(scheduleExVat(bills, false), bills, "no VAT → stored as billed");
   });
 
-  it("the import stores rent 5,291.67 and rent rows less 3,175 each — no fee is made from the difference", async () => {
+  it("the import stores rent 5,291.67 and Ejar's bills as billed — no fee is made from the difference", async () => {
     w = prodWorld();
     await w.svc.lookup(USER, { contract_number: N });
     const runner = new RecordingRunner();
@@ -230,7 +228,7 @@ describe("3 · rent from what Ejar bills", () => {
     const plan = runner.plans[0];
     const c = plan.contract;
     assert.equal(c.monthlyRent, "5291.67");
-    assert.deepEqual(c.customSchedule.map((e) => e.amount), ["36512", "36512", "36512", "36512", "36512", "36515"]);
+    assert.deepEqual(c.customSchedule.map((e) => e.amount), ["39687", "39687", "39687", "39687", "39687", "39690"]);
     assert.equal((c.ejarRaw as { cycle?: string }).cycle, "semi_annual");
     assert.deepEqual(plan.additionalFees, [], "the user adds any fees themselves (2026-11-27)");
   });

@@ -65,6 +65,11 @@ export interface RentBasis {
   annualExVat: number | null;
   /** The general-services share of the invoices (see above), or null when there is none. */
   services?: EjarServices | null;
+  /**
+   * Ejar's bills carry more than its rent (+ VAT): the installments are still
+   * Ejar's bills as billed, but the contract's monthly rent stays Ejar's own.
+   */
+  extra?: boolean;
   /** False when the bills step up over the contract (a rent that changes by year — see flatBills). */
   flat?: boolean;
 }
@@ -142,7 +147,11 @@ export function rentBasis(m: {
     gross: pos(schedule) ?? pos(m.contract.totalValue ?? null),
     months: contractMonths(m.contract),
     annualExVat: pos(m.financial.totalRentAmount),
-    services: ejarVat === undefined ? null : ejarServices(m, ejarVat),
+    // Nothing is derived from what the bills carry beyond rent + VAT any more
+    // (user asked 2026-11-27): the installments are Ejar's invoices as billed,
+    // and fees are added by the user. The extra only keeps the monthly rent at Ejar's.
+    services: null,
+    extra: ejarVat === undefined ? false : ejarServices(m, ejarVat) != null,
   };
 }
 
@@ -157,7 +166,7 @@ export function rentSchedule(
 /** The monthly rent before VAT, 2 decimals (0 when Ejar gave nothing to go on). */
 export function monthlyRentFrom(b: RentBasis, vat: boolean): number {
   // Services split out: what is left is exactly Ejar's annual rent.
-  if (b.services && b.annualExVat != null) return round2(b.annualExVat / 12);
+  if ((b.services || b.extra) && b.annualExVat != null) return round2(b.annualExVat / 12);
   // A rent that steps up: Ejar's annual rent is the first year's, and the
   // contract states that — not the whole schedule averaged over its years
   // (2,161,546 over 10 years read as 187,960.56 a year for a 170,100 rent).
@@ -190,7 +199,7 @@ export function rentFigures(b: RentBasis, vat: boolean): RentFigures {
   const services = b.services ?? null;
   // With services split out the annual rent is Ejar's own figure, not
   // monthly × 12 (5,291.67 × 12 = 63,500.04 for 63,500).
-  const annual = (services || b.flat === false) && b.annualExVat != null ? round2(b.annualExVat) : round2(monthly * 12);
+  const annual = (services || b.extra || b.flat === false) && b.annualExVat != null ? round2(b.annualExVat) : round2(monthly * 12);
   // The rent's own gross: the bills less the services in them.
   const rentGross = b.gross != null ? round2(b.gross - (services?.total ?? 0)) : null;
   return {
