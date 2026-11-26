@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Client, type Fv2Pool } from "./db";
 import { FinanceFlagService, type AccountingMode } from "./flag.service";
-import { ACCOUNTING_ENABLED_KEY, FEATURE_REQUIRED_PLAN, planHasFeature } from "../../common/plan-features";
+import { ACCOUNTING_ENABLED_KEY, FEATURE_REQUIRED_PLAN, planAccountingGrantable, planHasFeature } from "../../common/plan-features";
 import { FinanceSetupService } from "./setup.service";
 import { isCustomerAccount } from "../../common/permissions";
 import { LOCK_KEYS } from "./lock-keys";
@@ -83,6 +83,14 @@ export class FinanceV2AdminService {
       // per rent invoice (account holder's decision, 26 Oct 2026). "collected" (the monthly run) stays an opt-in.
       await this.event(c, accountUserId, actorUserId, "finance_v2_enabled", cur ? wasOn : null, body.enabled, body.reason);
       if (newMode !== oldMode) await this.event(c, accountUserId, actorUserId, "accounting_mode", oldMode, newMode, body.reason);
+      if (!cur && body.enabled) {
+        // A new عقاري ledger recognises rent on collection (accountant note 5, 27 Nov 2026), as auto-provisioning does.
+        const plan = (await c.query(`select package_plan from users where id = $1`, [accountUserId])).rows[0]?.package_plan ?? null;
+        if (plan != null && planAccountingGrantable(plan) && s.rent_revenue_basis !== "cash") {
+          await c.query(`update finance_settings set rent_revenue_basis = 'cash', updated_at = now() where account_user_id = $1`, [accountUserId]);
+          await this.event(c, accountUserId, actorUserId, "rent_revenue_basis", s.rent_revenue_basis ?? "accrual", "cash", body.reason);
+        }
+      }
 
       await c.query(
         `insert into audit_logs (owner_user_id, actor_user_id, action, entity, entity_id, method, path)
@@ -239,6 +247,8 @@ export function toSettingsDto(r: any) {
     ledgerStartedAt: r.ledger_started_at,
     deferRentStraightLine: r.defer_rent_straight_line,
     rentRevenueBasis: r.rent_revenue_basis ?? "accrual",
+    manualJournalSecondApproval: r.manual_journal_second_approval === true, // 0102
+    manualJournalSecondApprovalMin: r.manual_journal_second_approval_min == null ? "0.00" : String(r.manual_journal_second_approval_min),
     inputVatMethod: r.input_vat_method,
     enabledAt: r.enabled_at,
     enabledBy: r.enabled_by,

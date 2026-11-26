@@ -7,6 +7,8 @@ import { BankAccountsService } from "./tier1/bank-accounts.service";
 import { FinanceFlagService } from "./flag.service";
 import { recordCollectedCutover } from "./commission-run";
 import { RecognizerService } from "./recognizer.service";
+import { fromHalalas, toHalalas } from "./money";
+import { manualJournalApprovers } from "./manual-journal-policy";
 
 /** The fields `PATCH /finance/v2/settings` may change (DESIGN §10.2), camelCase → column. */
 const EDITABLE = {
@@ -18,6 +20,9 @@ const EDITABLE = {
   agencyCollectionsToTrust: "agency_collections_to_trust",
   // 0094: accrual (straight line) or cash. The recognizer restates open periods to it right after the change.
   rentRevenueBasis: "rent_revenue_basis",
+  // 0102 (accountant note 18): a manual journal of this total (SAR) or more needs a second person to approve it.
+  manualJournalSecondApproval: "manual_journal_second_approval",
+  manualJournalSecondApprovalMin: "manual_journal_second_approval_min",
 } as const;
 type Editable = keyof typeof EDITABLE;
 
@@ -58,7 +63,13 @@ export class FinanceSettingsService {
   async get(scope: number) {
     const r = await this.pool.query(`select * from finance_settings where account_user_id = $1`, [scope]);
     if (!r.rows[0]) throw new NotFoundException();
-    return this.shape(r.rows[0]);
+    return { ...this.shape(r.rows[0]), ...(await this.approvers(this.pool, scope)) };
+  }
+
+  /** How many active users can approve a manual journal (the holder + employees with `approve`); the UI explains 1. */
+  private async approvers(q: Pick<Fv2Client, "query">, scope: number) {
+    const n = await manualJournalApprovers(q, scope);
+    return { manualJournalApprovers: n, manualJournalSecondApproverAvailable: n >= 2 };
   }
 
   async patch(scope: number, actorId: number, body: any) {
@@ -82,7 +93,8 @@ export class FinanceSettingsService {
       await c.query(`select pg_advisory_xact_lock($1, $2)`, [scope, LOCK_KEYS.SETUP]);
       const cur = (await c.query(`select * from finance_settings where account_user_id = $1 for update`, [scope])).rows[0];
       if (!cur) throw new NotFoundException();
-      const changed = (Object.keys(want) as Editable[]).filter((k) => cur[EDITABLE[k]] !== want[k]);
+      const curOf = (k: Editable) => (k === "manualJournalSecondApprovalMin" && cur[EDITABLE[k]] != null ? fromHalalas(toHalalas(String(cur[EDITABLE[k]]))) : cur[EDITABLE[k]]);
+      const changed = (Object.keys(want) as Editable[]).filter((k) => curOf(k) !== want[k]);
 
       for (const k of changed) {
         if (k === "defaultBankAccountId" || k === "defaultCashAccountId") {
@@ -97,6 +109,13 @@ export class FinanceSettingsService {
         if (k === "agencyCollectionsToTrust" && want[k] === false && cur.accounting_mode === "manager") {
           // Accountant round 3 (7 Oct 2026): in Manager mode client money always goes to the trust account.
           throw new ConflictException({ error: "TRUST_ROUTING_REQUIRED", message: "في وضع مدير الأملاك يُحصَّل إيجار المؤجرين والتأمين في حساب الأمانات دائماً · In Manager mode landlords' rent and deposits always go to the trust account" });
+        }
+        if (k === "manualJournalSecondApproval" && want[k] === true && (await manualJournalApprovers(c, scope)) < 2) {
+          // Turning it on with one approver would leave every large journal unapprovable.
+          throw new ConflictException({
+            error: "SECOND_APPROVER_REQUIRED",
+            message: "تفعيل الاعتماد من شخص ثانٍ يتطلب مستخدماً آخر في الحساب لديه صلاحية الاعتماد · Second-person approval needs another active user on the account who can approve",
+          });
         }
         if (k === "agencyCollectionsToTrust" && want[k] === true) {
           if (cur.accounting_mode !== "manager") throw bad("NOT_MANAGER_MODE", "Trust routing applies in Manager mode only");
@@ -118,17 +137,18 @@ export class FinanceSettingsService {
           // this month; a collection on rent that already has a billed COM document is never counted again.
           await recordCollectedCutover(c, scope, actorId);
         }
-        await settingsEvent(c, scope, actorId, EDITABLE[k], cur[EDITABLE[k]], want[k], reason);
+        await settingsEvent(c, scope, actorId, EDITABLE[k], curOf(k), want[k], reason);
       }
       if (changed.length) await auditRow(c, scope, actorId, "finance_v2_settings", scope, "/finance/v2/settings", "PATCH");
-      return (await c.query(`select * from finance_settings where account_user_id = $1`, [scope])).rows[0];
+      const row = (await c.query(`select * from finance_settings where account_user_id = $1`, [scope])).rows[0];
+      return { row, approvers: await this.approvers(c, scope) };
     });
     this.flag?.invalidate(scope);
     if ("rentRevenueBasis" in want && this.recognizer) {
       // Restate now rather than at tonight's run: cash releases what was received, accrual resumes the monthly releases.
       try { await this.recognizer.runAccount(scope); } catch { /* the daily run retries */ }
     }
-    return this.shape(out);
+    return { ...this.shape(out.row), ...out.approvers };
   }
 
   private parse(body: any, keys: Editable[]): Partial<Record<Editable, unknown>> {
@@ -153,6 +173,14 @@ export class FinanceSettingsService {
           // collected: the monthly commission run (commission-run.service.ts); billed: one COM per approved rent document.
           want[k] = oneOf(k, ["billed", "collected"]);
           break;
+        case "manualJournalSecondApprovalMin": {
+          let h: number;
+          try { h = toHalalas(String(body[k] ?? "")); } catch { throw bad("BAD_VALUE", `${k} must be an amount in SAR with at most 2 decimals`); }
+          if (typeof body[k] === "boolean" || h < 0 || h > 99_999_999_999_999) throw bad("BAD_VALUE", `${k} must be an amount of 0 or more`);
+          want[k] = fromHalalas(h);
+          break;
+        }
+        case "manualJournalSecondApproval":
         case "agencyCollectionsToTrust":
           if (typeof body[k] !== "boolean") throw bad("BAD_VALUE", `${k} must be a boolean`);
           want[k] = body[k];
@@ -185,6 +213,8 @@ export class FinanceSettingsService {
       depositForfeitVat: d.depositForfeitVat,
       deferRentStraightLine: d.deferRentStraightLine,
       rentRevenueBasis: d.rentRevenueBasis,
+      manualJournalSecondApproval: d.manualJournalSecondApproval,
+      manualJournalSecondApprovalMin: d.manualJournalSecondApprovalMin,
       inputVatMethod: d.inputVatMethod,
       ledgerGoLiveDate: d.ledgerGoLiveDate,
       ledgerStarted: d.ledgerStartedAt != null,

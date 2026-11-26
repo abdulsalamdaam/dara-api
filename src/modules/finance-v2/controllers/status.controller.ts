@@ -38,6 +38,8 @@ export class FinanceV2StatusController {
     // Entitled but still off (never provisioned, or a missed trigger): queue the automatic provisioning. Fire-and-forget;
     // the service skips accounts an admin switched off, and this response is unchanged either way.
     if (!s.flagOn && !planLocked) this.auto?.signal(scopeId(user), "status", STATUS_SIGNAL_MEMO_MS);
+    // On but the ledger never started (accountant note 3): the same nudge, so a new account does not wait for the sweep.
+    else if (s.on && s.ledgerStartedAt == null) this.auto?.signal(scopeId(user), "status", STATUS_SIGNAL_MEMO_MS);
     if (!s.on || user.ownerScopeId != null) return { enabled: false, ...plan };
     return {
       enabled: true,

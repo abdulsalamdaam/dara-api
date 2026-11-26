@@ -66,7 +66,9 @@ export class PostingErrorsService {
       [userId],
     );
     const autoInvoice = await this.autoInvoiceFailures(userId);
+    const ledger = await this.ledgerState(userId, Number(counts.rows[0].pending ?? 0));
     return {
+      ledger,
       tab,
       total: total.rows[0].n as number,
       counts: { ...counts.rows[0], autoInvoiceFailed: autoInvoice.total },
@@ -78,6 +80,33 @@ export class PostingErrorsService {
         state: r.status === "failed" ? "failed" : r.status === "skipped" ? "skipped" : r.blockedOn ? "blocked" : "retrying",
         message: r.lastErrorCode ? ERROR_TEXT[r.lastErrorCode] ?? ERROR_TEXT.POST_ERROR : null,
       })),
+    };
+  }
+
+  /**
+   * Why queued events are not posting (accountant note 3, 27 Nov 2026): the list used to say "every event posted"
+   * while a ledger that had never started held its whole queue. `started` false → nothing posts until the ledger is
+   * started (the first real backfill); `waiting` = pending events not yet failing, which a started ledger posts on
+   * the worker's next tick. `lastAttempt`: the latest automatic start attempt (auto-provision.service.ts) — outcome
+   * and when — so the screen can say why it did not start.
+   */
+  private async ledgerState(userId: number, pending: number) {
+    const [s] = (await this.pool.query(
+      `select fs.ledger_started_at as "startedAt",
+              (select count(*)::int from ledger_outbox o where o.user_id = fs.account_user_id and o.status = 'pending'
+                  and o.attempts = 0 and o.blocked_on is null) as waiting,
+              (select json_build_object('outcome', e.new_value->>'outcome', 'at', e.created_at)
+                 from finance_settings_events e where e.account_user_id = fs.account_user_id and e.field = 'auto_provision'
+                order by e.created_at desc, e.id desc limit 1) as "lastAttempt"
+         from finance_settings fs where fs.account_user_id = $1`,
+      [userId],
+    )).rows;
+    return {
+      started: s?.startedAt != null,
+      startedAt: s?.startedAt ?? null,
+      pending,
+      waiting: Number(s?.waiting ?? 0),
+      lastAttempt: s?.lastAttempt ?? null,
     };
   }
 

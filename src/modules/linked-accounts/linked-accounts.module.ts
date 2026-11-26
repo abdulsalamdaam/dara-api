@@ -25,6 +25,7 @@ import {
   switchableAccountIds, syncSharedSubscription, sharedPlanMisfit, sharedPlanMisfitMessage,
 } from "../../common/linked-accounts";
 import { deriveSubscription } from "../../common/subscription";
+import { signalFv2Entitlement } from "../finance-v2/auto-provision-signal"; // finance-v2: accountant note 3 — provision a new account at creation
 
 /** Most member accounts a group may hold (primary included). */
 export function maxLinkedAccounts(): number {
@@ -249,6 +250,7 @@ export class LinkedAccountsService {
       return u!;
     });
     if (shared) await syncSharedSubscription(this.db, group.primaryUserId);
+    signalFv2Entitlement(created.id, "linked_account_create"); // finance-v2: start accounting at creation when the plan includes it (async, never throws)
     return { id: created.id, groupId: group.id };
   }
 

@@ -871,6 +871,16 @@ export async function ensureSchema(): Promise<void> {
       log.warn(`ensure rental offer sends failed: ${err?.message || err}`);
     }
 
+    // 0102: finance_settings — second-person approval for large manual journals. Read by the
+    // manual-journal approval and the finance settings; a missing column only stops finance v2.
+    try {
+      const mj2 = findSqlFile(join("drizzle", "0102_finance_manual_journal_second_approval.sql"));
+      if (mj2) await client.query(readFileSync(mj2, "utf8"));
+      else log.warn("0102_finance_manual_journal_second_approval.sql not found — finance_settings.manual_journal_second_approval not ensured");
+    } catch (err: any) {
+      log.warn(`ensure manual journal second approval failed: ${err?.message || err}`);
+    }
+
     // Phase 1.6: refresh system role permissions on every boot. Keeps the
     // roles table in sync with code-side ROLE_PRESETS + EMPLOYEE_PRESETS
     // without requiring a hand-written migration each time we add a
