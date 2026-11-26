@@ -10,6 +10,7 @@ import { PeriodsService } from "./periods.service";
 import { FinanceV2AdminService } from "./admin.service";
 import { FinanceV2AutoProvisionService } from "./auto-provision.service";
 import { COA_TEMPLATE } from "./coa-template";
+import { PostingErrorsService } from "./posting-errors.service";
 
 /**
  * Finance v2 ON by default for plan-entitled accounts (auto-provision.service.ts)
@@ -158,11 +159,86 @@ describe("finance v2 auto-provisioning for plan-entitled accounts (real Postgres
     assert.equal(await count(`select count(*) n from accounts where user_id = $1`, [C]), 0, "nothing seeded");
   });
 
-  it("an account an ADMIN enabled and has not backfilled yet is left to the admin", async () => {
+  it("an account an ADMIN enabled and never backfilled is started too (accountant note 3: nothing sits queued)", async () => {
     await admin.toggle(staff, E, { enabled: true, accountingMode: "manager", reason: "Synthetic: admin enable" });
-    assert.deepEqual(await auto.candidates(E), []);
-    assert.equal((await auto.ensure(E, "spec", { today: TODAY })).outcome, "not_eligible");
-    assert.equal((await settings(E)).ledger_started_at, null);
+    assert.deepEqual((await auto.candidates(E)).map((c) => c.action), ["backfill"]);
+    const r = await auto.ensure(E, "admin_enable", { today: TODAY });
+    assert.equal(r.outcome, "started", JSON.stringify(r));
+    assert.equal(r.provisioned, false, "the admin's provisioning is kept");
+    const s = await settings(E);
+    assert.ok(s.ledger_started_at);
+    assert.equal(s.enabled_by, staff, "still the admin's enable");
+    assert.equal(await count(`select count(*) n from ledger_outbox where user_id = $1 and status = 'pending'`, [E]), 0, "nothing left queued");
+  });
+
+  it("a ledger an admin reset is still left to the admin (ledger_reset / restore / mode migration hold it)", async () => {
+    const G = 6907;
+    await q(`insert into users (id, email, password_hash, name, user_type, package_plan) values ($1, 'g@example.test', 'x', 'Synthetic G', 'company', 'professional')`, [G]);
+    await admin.toggle(staff, G, { enabled: true, accountingMode: "manager", reason: "Synthetic: admin enable" });
+    await q(`insert into finance_settings_events (account_user_id, actor_user_id, field, old_value, new_value, reason)
+             values ($1, $2, 'ledger_reset', '{}'::jsonb, '{}'::jsonb, 'Synthetic reset')`, [G, staff]);
+    assert.deepEqual(await auto.candidates(G), []);
+    assert.equal((await auto.ensure(G, "spec", { today: TODAY })).outcome, "not_eligible");
+    assert.equal((await settings(G)).ledger_started_at, null);
+  });
+
+  it("عقاري with accounting granted: provisioned in Owner mode with cash-basis rent, and started (accountant note 5)", async () => {
+    const H = 6908;
+    await q(`insert into users (id, email, password_hash, name, user_type, package_plan) values ($1, 'h@example.test', 'x', 'Synthetic H', 'individual', 'basic')`, [H]);
+    assert.equal((await auto.ensure(H, "spec", { today: TODAY })).outcome, "not_eligible", "not entitled before the grant");
+    await q(`insert into account_limit_overrides (account_id, limit_key, value, note) values ($1, 'accounting.enabled', 1, 'Synthetic grant')`, [H]);
+    const r = await auto.ensure(H, "admin_accounting_grant", { today: TODAY });
+    assert.equal(r.outcome, "started", JSON.stringify(r));
+    const s = await settings(H);
+    assert.equal(s.accounting_mode, "owner");
+    assert.equal(s.rent_revenue_basis, "cash");
+    assert.ok(s.ledger_started_at);
+    assert.equal(await count(`select count(*) n from bank_accounts where user_id = $1 and is_trust`, [H]), 0, "no trust account in Owner mode");
+    const ev = await q(`select field, new_value from finance_settings_events where account_user_id = $1 and field in ('accounting_mode', 'rent_revenue_basis') order by id`, [H]);
+    assert.deepEqual(ev.map((e: any) => [e.field, e.new_value]), [["accounting_mode", "owner"], ["rent_revenue_basis", "cash"]]);
+  });
+
+  it("an admin's first enable of an عقاري account also starts on cash-basis rent; an office account keeps accrual", async () => {
+    const I = 6909, J = 6910;
+    await q(`insert into users (id, email, password_hash, name, user_type, package_plan) values ($1, 'i@example.test', 'x', 'Synthetic I', 'individual', 'basic'), ($2, 'j@example.test', 'x', 'Synthetic J', 'company', 'professional')`, [I, J]);
+    await admin.toggle(staff, I, { enabled: true, accountingMode: "owner", reason: "Synthetic: admin enable" });
+    await admin.toggle(staff, J, { enabled: true, accountingMode: "manager", reason: "Synthetic: admin enable" });
+    assert.equal((await settings(I)).rent_revenue_basis, "cash");
+    assert.equal((await settings(J)).rent_revenue_basis, "accrual");
+  });
+
+  it("posting errors say the ledger has not started while events are queued, and «start the ledger» starts it", async () => {
+    const K = 6916;
+    const errors = new PostingErrorsService(env.t.pool);
+    const sd = await seedAccount(env, K);
+    await admin.toggle(staff, K, { enabled: true, accountingMode: "manager", reason: "Synthetic: admin enable" });
+    // Written with the flag on and the ledger not started: queued, not posted.
+    const ct: any = await env.contracts.create(userOf(K), {
+      unitIds: [sd.unitH1], tenantId: sd.tenant, tenantName: "Synthetic Tenant", startDate: "2026-01-01", endDate: "2026-12-31",
+      monthlyRent: "2000", paymentFrequency: "quarterly", vatEnabled: false, depositAmount: "0",
+    });
+    const [p1] = await q(`select id from payments where contract_id = $1 and deleted_at is null order by due_date limit 1`, [ct.id]);
+    await env.payments.addCollection(userOf(K), String(p1.id), { amount: "6000", collectedDate: "2026-01-05", method: "cash" });
+    const before = await errors.list(K);
+    assert.equal(before.ledger.started, false);
+    assert.ok(before.ledger.pending > 0 && before.ledger.waiting > 0, JSON.stringify(before.ledger));
+    assert.equal(before.total, 0, "no errors — but not 'everything posted' either");
+
+    const saved = { a: process.env.FINANCE_V2_AUTO_PROVISION_DISABLED, w: process.env.FINANCE_V2_WORKER_DISABLED };
+    delete process.env.FINANCE_V2_AUTO_PROVISION_DISABLED;
+    delete process.env.FINANCE_V2_WORKER_DISABLED;
+    try {
+      const r = await auto.startNow(K);
+      assert.equal(r.outcome, "started", JSON.stringify(r));
+    } finally {
+      if (saved.a !== undefined) process.env.FINANCE_V2_AUTO_PROVISION_DISABLED = saved.a;
+      if (saved.w !== undefined) process.env.FINANCE_V2_WORKER_DISABLED = saved.w;
+    }
+    const after = await errors.list(K);
+    assert.equal(after.ledger.started, true);
+    assert.ok(after.ledger.lastAttempt?.outcome === "started");
+    // The kill switch is honoured.
+    if (saved.w !== undefined || saved.a !== undefined) assert.equal((await auto.startNow(K)).outcome, "not_eligible");
   });
 
   it("an unclean dry run leaves it enabled but NOT started, never posts, and says why", async () => {
@@ -219,6 +295,6 @@ describe("finance v2 auto-provisioning for plan-entitled accounts (real Postgres
     assert.ok(ids.includes(6911), JSON.stringify(r));
     for (const x of [6912, 6913, 6914, 6915]) assert.ok(!ids.includes(x), `${x} must be skipped`);
     assert.equal(r.find((x) => x.accountUserId === 6911)!.outcome, "started");
-    for (const x of [A, B, C, E, F]) assert.ok(!ids.includes(x), `${x} is already settled`);
+    for (const x of [A, B, C, E, F, 6907]) assert.ok(!ids.includes(x), `${x} is already settled`);
   });
 });

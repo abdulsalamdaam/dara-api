@@ -68,7 +68,7 @@ describe("finance v2 auto-provisioning (unit)", () => {
     assert.deepEqual(calls, [3, 4], "the handler is removed on destroy");
   });
 
-  it("/status keeps its shape and nudges only an entitled account that is still off", async () => {
+  it("/status keeps its shape and nudges only an entitled account that is still off, or on with its ledger not started", async () => {
     const nudged: number[] = [];
     const auto = { signal: (id: number) => nudged.push(id) } as any;
     const flagWith = (s: any) => ({ state: async () => s }) as any;
@@ -78,6 +78,8 @@ describe("finance v2 auto-provisioning (unit)", () => {
     await new FinanceV2StatusController(flagWith({ on: false, flagOn: false, planLocked: true }), auto).status(req(12));
     await new FinanceV2StatusController(flagWith({ on: true, flagOn: true, planLocked: false, mode: "manager", ledgerStartedAt: null }), auto).status(req(13));
     await new FinanceV2StatusController(flagWith({ on: false, flagOn: true, planLocked: true }), auto).status(req(14));
-    assert.deepEqual(nudged, [11]);
+    await new FinanceV2StatusController(flagWith({ on: true, flagOn: true, planLocked: false, mode: "manager", ledgerStartedAt: new Date() }), auto).status(req(15));
+    // 13: on, ledger not started (accountant note 3) — nudged; 15: started — not.
+    assert.deepEqual(nudged, [11, 13]);
   });
 });

@@ -8,6 +8,7 @@ import { capabilities, isAccountHolder } from "./capabilities";
 import { fromHalalas, toHalalas } from "./money";
 import { auditRow, isoDate, mapLedgerError, requireReason } from "./audit";
 import { assertTrustCovers } from "./trust-guard";
+import { needsSecondApprover, secondApprovalPolicy, SECOND_APPROVAL_MESSAGE } from "./manual-journal-policy";
 import { manualJournalWarnings, withWarnings, assertTrustJustified, trustReasonOf, anotherApprover, TRUST_REASON_MIN, type ManualJournalWarning } from "./manual-journal-warnings";
 
 export type ManualKind = "manual" | "opening";
@@ -66,6 +67,11 @@ function withTotal(r: any) {
  *    included, unless the account has no other active user who can approve:
  *    then the holder may approve his own, with a written reason, and an audit
  *    row `finance_v2_manual_journal_self_approval` records it.
+ *  - Second-person approval (0102, accountant note 18): when the account's
+ *    setting is on, a manual journal whose total is at or above its amount is
+ *    approved by someone other than every user who created, edited or
+ *    submitted it — the account holder included, with no one-person exception
+ *    (403 SECOND_APPROVAL_REQUIRED). Off: unchanged.
  *  - An attachment (an `acct/<scope>/…` upload key) is required on approval
  *    above 10,000 SAR.
  *  - Period: open, or closed when the approver holds `settings` (an audit
@@ -196,6 +202,9 @@ export class ManualJournalsService {
         }
         const v = await this.validate(c, scope, cur, cur.kind);
         const total = v.lines.reduce((s, l) => s + toHalalas(l.debit), 0);
+        if (needsSecondApprover(await secondApprovalPolicy(c, scope), cur.kind, total) && (await this.isMaker(c, scope, cur, Number(user.id)))) {
+          throw new ForbiddenException({ error: "SECOND_APPROVAL_REQUIRED", message: SECOND_APPROVAL_MESSAGE });
+        }
         if (total > ATTACHMENT_THRESHOLD_HALALAS && !v.attachmentKey) {
           throw new BadRequestException({ error: "ATTACHMENT_REQUIRED", message: "An attachment is required above 10,000 SAR" });
         }
@@ -301,6 +310,12 @@ export class ManualJournalsService {
       message: "قيد يستخدم حساب الأمانات مقابل حساب للمكتب يعتمده مستخدم آخر غير من أنشأه أو عدّله أو أرسله (المدير المالي مثلاً)"
         + " · A journal that sets the trust account against an office account must be approved by another user than the one who created, edited or submitted it (e.g. the finance manager)",
     });
+  }
+
+  /** Whether the user created, edited or submitted this journal (the trust maker-checker's notion of a maker). */
+  private async isMaker(c: Fv2Client, scope: number, cur: any, userId: number): Promise<boolean> {
+    const m = await this.meta(c, scope, Number(cur.id));
+    return Number(cur.createdBy) === userId || m.lastActorId === userId || m.makerIds.includes(userId);
   }
 
   /** Every line a money box, trust credited and a non-trust box debited: a transfer from trust to the office by hand. */

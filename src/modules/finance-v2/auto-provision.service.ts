@@ -11,6 +11,14 @@ import { toHalalas } from "./money";
 import { STAFF_ROLE_KEYS } from "../../common/permissions";
 import { setFv2EntitlementHandler } from "./auto-provision-signal";
 import { ModeMigrationService } from "./mode-migration.service";
+import { FinanceV2AdminService } from "./admin.service";
+import { planAccountingGrantable } from "../../common/plan-features";
+
+/**
+ * Settings events that hand a not-started ledger to the admin: after a reset / restore / mode migration the admin
+ * decides when the history is posted again (ledger-reset.service.ts), so those accounts are never started here.
+ */
+const ADMIN_HELD_FIELDS = ["ledger_reset", "ledger_restore", "mode_migration"];
 
 /** 02:30 Riyadh: after the recognizer (00:10), before the nightly pg_dump (03:00) and the repair sweep (03:30). */
 const SWEEP_AT_MIN = 2 * 60 + 30;
@@ -101,9 +109,12 @@ const STAFF_SQL = STAFF_ROLE_KEYS.map((k) => `'${k}'`).join(", ");
  *
  *  1. PROVISION — exactly what the admin first enable does (FinanceSetupService:
  *     chart, two fiscal years of periods, cash + bank + trust, collected
- *     commission basis), in MANAGER mode. Owner mode is never chosen
- *     automatically: DESIGN §4.2 makes it a suggestion an admin confirms, and
- *     the mode is frozen at the first posting.
+ *     commission basis), in MANAGER mode — except the عقاري package (an
+ *     individual landlord whose accounting an admin granted): OWNER mode when
+ *     the owner-mode precondition holds (admin.service.ts suggestMode), and
+ *     rent revenue on the CASH basis (accountant notes, 27 Nov 2026, note 5).
+ *     Only a NEW settings row gets these defaults; an existing ledger keeps its
+ *     mode and basis (the mode is frozen at the first posting).
  *  2. BACKFILL — a full dry run; only if it is balanced with 0 failed and 0
  *     pending does the real run follow (it sets `ledger_started_at`).
  *     Otherwise the account stays enabled-but-not-started (reports say "ledger
@@ -115,9 +126,12 @@ const STAFF_SQL = STAFF_ROLE_KEYS.map((k) => `'${k}'`).join(", ");
  * active, not deleted) whose plan is entitled, that is either
  *   - off, and the latest `finance_v2_enabled` event is not an explicit OFF
  *     (an admin's OFF is sticky; an admin's ON re-enables as before), or
- *   - auto-enabled (latest `finance_v2_enabled` event by actor 0) but not
- *     started — the backfill is retried (the sweep: once a day).
- * An account an admin enabled and has not backfilled yet is left to the admin.
+ *   - enabled (latest `finance_v2_enabled` event ON) but not started — the
+ *     backfill is retried (the sweep: once a day). Since 27 Nov 2026 (accountant
+ *     note 3) this includes an account an ADMIN enabled and never backfilled: a
+ *     new account must not sit with its operations queued. Still left to the
+ *     admin: a ledger an admin reset, restored or that a mode migration left
+ *     not started (ADMIN_HELD_FIELDS) — unless the latest enable was automatic.
  *
  * Triggers: `signalFv2Entitlement()` from the plan/activation paths and
  * `/finance/v2/status`, plus a daily sweep at 02:30 Riyadh (catch-up on boot).
@@ -180,13 +194,13 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
   }
 
   /** Queue `ensure` on the serial queue; a second request for an account already queued joins nothing. */
-  enqueue(accountUserId: number, trigger: string): Promise<AutoResult | null> {
+  enqueue(accountUserId: number, trigger: string, opts: { retryMinutes?: number } = {}): Promise<AutoResult | null> {
     if (this.queued.has(accountUserId)) return Promise.resolve(null);
     this.queued.add(accountUserId);
     const p = this.chain.then(async () => {
       this.queued.delete(accountUserId);
       try {
-        return await this.ensure(accountUserId, trigger);
+        return await this.ensure(accountUserId, trigger, opts);
       } catch (err: any) {
         if (err?.code !== "42P01") this.log.warn(`finance v2 auto-provision failed for scope ${accountUserId}: ${err?.message ?? err}`);
         return null;
@@ -194,6 +208,16 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
     });
     this.chain = p.catch(() => undefined);
     return p;
+  }
+
+  /**
+   * "Start the ledger" from the account's own posting-errors screen (accountant note 3): the same idempotent `ensure`
+   * a trigger runs — provision if needed, a full dry run, the real backfill only when it is clean — awaited, so the
+   * screen can say what happened. Retried at most every 2 minutes. Honours the kill switches.
+   */
+  async startNow(accountUserId: number): Promise<AutoResult> {
+    if (fv2AutoProvisionDisabled()) return { accountUserId, outcome: "not_eligible", provisioned: false, detail: "automatic provisioning is switched off" };
+    return (await this.enqueue(accountUserId, "account_start", { retryMinutes: 2 })) ?? { accountUserId, outcome: "busy", provisioned: false };
   }
 
   private async maybeSweep(): Promise<void> {
@@ -252,8 +276,10 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
           and ${fv2PlanEntitledSql("u.id")}
           and (
             (not coalesce(fs.finance_v2_enabled, false) and coalesce(ev.new_value, 'null'::jsonb) <> 'false'::jsonb)
-            or (fs.finance_v2_enabled and fs.ledger_started_at is null
-                and ev.actor_user_id = ${AUTO_ACTOR} and ev.new_value = 'true'::jsonb)
+            or (fs.finance_v2_enabled and fs.ledger_started_at is null and ev.new_value = 'true'::jsonb
+                and (ev.actor_user_id = ${AUTO_ACTOR}
+                     or not exists (select 1 from finance_settings_events h
+                                     where h.account_user_id = u.id and h.field in (${ADMIN_HELD_FIELDS.map((f) => `'${f}'`).join(", ")}))))
           )
         order by u.id`,
       [accountUserId],
@@ -311,7 +337,9 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
       if (cand.action !== "provision") return false;
       const cur = (await c.query(`select * from finance_settings where account_user_id = $1 for update`, [accountUserId])).rows[0];
       const oldMode: string | null = cur?.accounting_mode ?? null;
-      const mode = oldMode ?? "manager";
+      // عقاري (accounting granted to an individual landlord): Owner mode and cash-basis rent — for a new row only.
+      const defaults = oldMode ? null : await this.packageDefaults(c, accountUserId);
+      const mode = oldMode ?? defaults?.mode ?? "manager";
       await c.query(
         `insert into finance_settings (account_user_id, finance_v2_enabled, accounting_mode, enabled_at, enabled_by)
          values ($1, true, $2, now(), null)
@@ -323,6 +351,13 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
       const why = `Automatic: the plan includes accounting (${trigger})`;
       await settingsEvent(c, accountUserId, AUTO_ACTOR, "finance_v2_enabled", cur ? cur.finance_v2_enabled === true : null, true, why);
       if (mode !== oldMode) await settingsEvent(c, accountUserId, AUTO_ACTOR, "accounting_mode", oldMode, mode, why);
+      if (defaults?.basis === "cash") {
+        const was = (await c.query(`select rent_revenue_basis from finance_settings where account_user_id = $1`, [accountUserId])).rows[0]?.rent_revenue_basis ?? "accrual";
+        if (was !== "cash") {
+          await c.query(`update finance_settings set rent_revenue_basis = 'cash', updated_at = now() where account_user_id = $1`, [accountUserId]);
+          await settingsEvent(c, accountUserId, AUTO_ACTOR, "rent_revenue_basis", was, "cash", `${why}; عقاري package default: rent revenue on collection`);
+        }
+      }
       await this.setup.firstEnable(c, accountUserId, null);
       return true;
     });
@@ -435,6 +470,20 @@ export class FinanceV2AutoProvisionService implements OnModuleInit, OnModuleDest
       }
       lockClient.release(broken || undefined);
     }
+  }
+
+  /**
+   * Defaults for a NEW settings row by package. عقاري (a plan whose accounting is granted on request): Owner mode
+   * when the owner-mode precondition holds (suggestMode: no third-party landlord with an active contract — else
+   * Manager, so client money is never posted as the account's income), and cash-basis rent revenue (an individual
+   * landlord expects revenue when the rent is received; accrual showed a loss mid-month). Others: null (Manager,
+   * accrual — unchanged).
+   */
+  private async packageDefaults(c: Pick<Fv2Client, "query">, accountUserId: number): Promise<{ mode: "owner" | "manager"; basis: "cash" } | null> {
+    const plan = (await c.query(`select package_plan from users where id = $1`, [accountUserId])).rows[0]?.package_plan ?? null;
+    if (plan == null || !planAccountingGrantable(plan)) return null;
+    const mode = await new FinanceV2AdminService(this.pool, this.flag, this.setup).suggestMode(accountUserId, c as Fv2Client);
+    return { mode, basis: "cash" };
   }
 
   private async recordCatchUp(accountUserId: number, actor: number, value: Record<string, unknown>, reason: string): Promise<void> {
