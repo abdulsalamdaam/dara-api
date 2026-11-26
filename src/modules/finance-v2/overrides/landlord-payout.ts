@@ -30,7 +30,8 @@ import { assertTrustCovers } from "../trust-guard";
  *    400/404. Omitted → the posting engine's default, which for an agent
  *    landlord in Manager mode with trust routing is the default trust account
  *    (1114), so the entry is Dr 2121 / Cr 1114 (E19);
- *  - the net-due check: 409 PAYOUT_EXCEEDS_DUE, with no way round it (accountant, 15 Oct 2026: «اهم حاجه
+ *  - the net-due check: 409 PAYOUT_EXCEEDS_DUE (and, after the commission the month-end run will take on what is
+ *    collected so far, 409 PAYOUT_EXCEEDS_AVAILABLE — 27 Nov 2026), with no way round it (accountant, 15 Oct 2026: «اهم حاجه
  *    مايتعداش رصيد مستحقاته» — `allowAdvance` is ignored on this path; the flag-off legacy route is unchanged);
  *  - the trust balance (trust-guard.ts): paid from a trust account, never more than it holds (409 TRUST_INSUFFICIENT,
  *    policy `block`), and never more than THIS landlord's money in trust (409 LANDLORD_TRUST_INSUFFICIENT — another
@@ -143,7 +144,9 @@ export async function createPayoutV2(
         landlordDues: (report?.landlordDues ?? []).map((d: any) => {
           if (Number(d.ownerId) !== ownerId) return d;
           const since = paidNow - toHalalas(Number(d.transferred ?? 0).toFixed(2));
-          return { ...d, transferred: Number(fromHalalas(paidNow)), remaining: Number(fromHalalas(toHalalas(Number(d.remaining ?? 0).toFixed(2)) - since)) };
+          const remaining = toHalalas(Number(d.remaining ?? 0).toFixed(2)) - since;
+          const expected = toHalalas(Number(d.expectedCommission ?? 0).toFixed(2));
+          return { ...d, transferred: Number(fromHalalas(paidNow)), remaining: Number(fromHalalas(remaining)), available: Number(fromHalalas(remaining - expected)) };
         }),
       };
     });

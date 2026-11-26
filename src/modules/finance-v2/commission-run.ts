@@ -421,6 +421,65 @@ export async function previewMonth(q: Sql, scope: number, month: string, today =
   };
 }
 
+// ─── The commission the next run will take (for «المتاح للتحويل») ─────────
+
+export interface ExpectedCommission {
+  /** What the next run would charge on what is collected so far (net + VAT), halalas. */
+  planned: number;
+  /** Runs already issued whose tax invoice is still a draft (held: the office is not linked to ZATCA yet), halalas. */
+  held: number;
+  /** planned + held: not yet out of the landlord payable (2121), but it will be. */
+  total: number;
+}
+
+/**
+ * Per agent landlord: the commission that is going to leave his money but has
+ * not yet (accountant, 27 Nov 2026, note 1: on 24 Nov the payout screen offered
+ * 9,000 − 800 = 8,200, the full amount was paid, and the month-end run took 450
+ * → the landlord stood at −450 on 30 Nov).
+ *
+ *  - planned: exactly what a run dated `today` would charge — the same not-yet-counted collected lines from
+ *    the cutover (`collectedLines`), the same rates (`rateResolver`), the same plan (`planLandlord`, VAT
+ *    included when the office's commission carries it). Nothing else is guessed: a property with no rate, or
+ *    whose refunds outweigh its collections, expects nothing, as the run would defer it.
+ *  - held: a run issued for a registered office not yet linked to ZATCA keeps its invoice as a DRAFT; its
+ *    lines are counted (so not in `planned`) but the draft is not yet in the dues report either.
+ *
+ * Empty unless the account runs collected-basis commission (flag on, ledger started, Manager mode, the
+ * account or a property on "collected"). Read-only.
+ */
+export async function expectedCommission(q: Sql, scope: number, today = riyadhToday()): Promise<Map<number, ExpectedCommission>> {
+  const out = new Map<number, ExpectedCommission>();
+  const s = await commissionSettings(q, scope);
+  if (!s || !s.enabled || !s.ledgerStarted || s.mode !== "manager") return out;
+  if (s.basis !== "collected" && !(await anyCollectedProperty(q, scope))) return out;
+  const get = (o: number) => {
+    let r = out.get(o);
+    if (!r) out.set(o, (r = { planned: 0, held: 0, total: 0 }));
+    return r;
+  };
+  const lines = await collectedLines(q, scope, s.collectedFrom, today);
+  const owners = [...new Set(lines.map((l) => l.ownerId))];
+  if (owners.length) {
+    const info = await landlordInfo(q, scope, owners);
+    const { rateFor, names } = await rateResolver(q, scope, lines, info);
+    const vatRegistered = await commissionCarriesVat(q, scope);
+    for (const o of owners) {
+      const p = planLandlord(o, lines, rateFor(o), vatRegistered, names);
+      if (!p.skip && p.total > 0) get(o).planned += p.total;
+    }
+  }
+  for (const r of await q.rows(
+    `select r.owner_id, sum(r.total)::text as total
+       from finance_commission_runs r join simple_invoices d on d.id = r.document_id and d.user_id = r.user_id
+      where r.user_id = $1 and r.status = 'issued' and d.status::text = 'draft' and d.deleted_at is null
+      group by 1`, [scope])) {
+    get(Number(r.owner_id)).held += toHalalas(r.total);
+  }
+  for (const r of out.values()) r.total = r.planned + r.held;
+  return out;
+}
+
 // ─── The commission still in the trust account (for تحويل عمولات) ──────────
 
 /**

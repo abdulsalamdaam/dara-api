@@ -591,7 +591,9 @@ async function assertReconciled(rec: ReconciliationService, U: number, mode: str
   // The accountant's checks R9–R21 hold too, except R18/R19 (invoicing discipline, not a ledger property: the
   // sequences leave due installments uninvoiced on purpose); a check that does not apply (no trust account,
   // no bank statement, Owner mode) is fine.
-  const policy = new Set(["R18", "R19"]);
+  // R22 (no cash account below zero) is a warning about the user's money, not a ledger property: the random sequences
+  // pay out more than they collected on purpose.
+  const policy = new Set(["R18", "R19", "R22"]);
   const extra = (c: any) => Number(c.id.slice(1)) >= 9;
   const bad = r.checks.filter((c: any) => !(c.status === "ok" || (c.id === "R3" && mode === "owner" && c.status === "not_applicable")
     || (c.id === "R7" && c.difference == null) || (c.id === "R3" && c.status === "difference" && r3Residual(c) === 0)

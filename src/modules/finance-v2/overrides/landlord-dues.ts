@@ -2,6 +2,7 @@ import { ConflictException } from "@nestjs/common";
 import { fromHalalas, toHalalas } from "../money";
 import { loadSettings } from "../hooks/facts-loader";
 import type { Sql } from "../hooks/sql";
+import { expectedCommission } from "../commission-run";
 
 /**
  * Finding #2 of the accountant's test (5 Oct 2026): the landlord side of
@@ -64,6 +65,7 @@ export async function landlordChargesV2(q: Sql, scope: number): Promise<Landlord
 
 /** The legacy accounting result with its landlord rows carrying the v2 landlord charges. */
 export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promise<any> {
+  const s = await loadSettings(q, scope);
   const ch = await landlordChargesV2(q, scope);
   const statement: any[] = (legacy.landlordStatement ?? []).map((r: any) => ({ ...r, vendorBills: 0 }));
   const byOwner = new Map<number, any>(statement.filter((r) => r.ownerId != null).map((r) => [Number(r.ownerId), r]));
@@ -84,9 +86,14 @@ export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promis
   const paid = new Map<number, number>((await q.rows(
     `select owner_id, sum(amount)::text as amt from landlord_payouts where user_id = $1 and deleted_at is null and owner_id is not null group by 1`, [scope]))
     .map((x: any) => [Number(x.owner_id), num(x.amt)]));
+  // Accountant, 27 Nov 2026 (note 1): the commission the month-end run will take on what is collected so far is
+  // not in `remaining` yet; `available` is what may be paid out now without the landlord going negative at the run.
+  const expected = s?.mode === "owner" ? new Map() : await expectedCommission(q, scope);
   const landlordDues = statement.map((r) => {
     const transferred = r.ownerId != null ? (paid.get(Number(r.ownerId)) ?? 0) : 0;
-    return { landlord: r.landlord, ownerId: r.ownerId, net: r.net, transferred, remaining: r2(r.net - transferred) };
+    const remaining = r2(r.net - transferred);
+    const exp = r.ownerId != null ? Number(fromHalalas(expected.get(Number(r.ownerId))?.total ?? 0)) : 0;
+    return { landlord: r.landlord, ownerId: r.ownerId, net: r.net, transferred, remaining, expectedCommission: exp, available: r2(remaining - exp) };
   });
   const landlordTransfers = landlordDues.map((r) => ({
     landlord: r.landlord, ownerId: r.ownerId, net: r.net, transferred: r.transferred,
@@ -101,6 +108,8 @@ export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promis
  * PAYOUT_EXCEEDS_DUE. Every v2 caller passes `allowAdvance = false` since the
  * accountant's decision (15 Oct 2026: no advance, «مايتعداش رصيد مستحقاته»);
  * the parameter stays for the shape of the call.
+ * Nor above `available` (remaining − the commission the next collected-basis run will take on what is
+ * collected so far, `expectedCommission` in commission-run.ts): 409 PAYOUT_EXCEEDS_AVAILABLE (27 Nov 2026).
  * The account holder and Owner mode are drawings, not dues: never refused.
  */
 export async function assertPayoutWithinDue(q: Sql, scope: number, ownerId: number, amount: number, allowAdvance: boolean, accounting: () => Promise<any>): Promise<void> {
@@ -112,13 +121,29 @@ export async function assertPayoutWithinDue(q: Sql, scope: number, ownerId: numb
   const report = await accounting();
   const row = (report?.landlordDues ?? []).find((d: any) => Number(d.ownerId) === ownerId);
   const due = toHalalas(Number(row?.remaining ?? 0).toFixed(2));
-  if (toHalalas(amount.toFixed(2)) <= due) return;
+  const cents = toHalalas(amount.toFixed(2));
   const netDue = fromHalalas(Math.max(0, due));
-  throw new ConflictException({
-    error: "PAYOUT_EXCEEDS_DUE",
-    message: `المبلغ يتجاوز صافي المستحق للمؤجر (${netDue} ر.س) بعد خصم العمولة وفواتير الموردين المحمّلة عليه والتحويلات السابقة · `
-      + `The amount exceeds the landlord's net due (SAR ${netDue}) after commission, supplier bills charged to him and earlier transfers`,
-    netDue,
-    amount: fromHalalas(toHalalas(amount.toFixed(2))),
-  });
+  if (cents > due) {
+    throw new ConflictException({
+      error: "PAYOUT_EXCEEDS_DUE",
+      message: `المبلغ يتجاوز صافي المستحق للمؤجر (${netDue} ر.س) بعد خصم العمولة وفواتير الموردين المحمّلة عليه والتحويلات السابقة · `
+        + `The amount exceeds the landlord's net due (SAR ${netDue}) after commission, supplier bills charged to him and earlier transfers`,
+      netDue,
+      amount: fromHalalas(cents),
+    });
+  }
+  // Accountant, 27 Nov 2026 (note 1): nor the commission the month-end run will take on what is collected so far —
+  // paid out now, it would leave the landlord negative when the run posts. Same rule as the net due: no advance.
+  const exp = toHalalas(Number(row?.expectedCommission ?? 0).toFixed(2));
+  if (exp > 0 && cents > due - exp) {
+    const available = fromHalalas(Math.max(0, due - exp));
+    const expected = fromHalalas(exp);
+    throw new ConflictException({
+      error: "PAYOUT_EXCEEDS_AVAILABLE",
+      message: `المبلغ يتجاوز المتاح للتحويل للمؤجر (${available} ر.س) بعد عمولة متوقعة ${expected} ر.س على المحصّل حتى الآن تُخصم في تشغيل عمولة نهاية الشهر · `
+        + `The amount exceeds what is available to transfer to the landlord (SAR ${available}) after an expected commission of SAR ${expected} on rent collected so far, taken by the month-end commission run`,
+      netDue, expectedCommission: expected, available,
+      amount: fromHalalas(cents),
+    });
+  }
 }

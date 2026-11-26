@@ -20,7 +20,8 @@ import { EXTRA_LABELS, ExtraChecks } from "./control-checks";
  *  R1 AR control            1121 + 1122 per tenant  vs  the §7.6 open items (+ advance VAT not yet netted)
  *  R2 Deposits held         2141 per contract       vs  vouchers + deposit-row collections − refunds − conversions − offsets − forfeits
  *  R3 Landlord payable      2121 per landlord       vs  the landlord-dues `remaining` + v2 landlord charges (agency-fee collections excluded)
- *  R4 Bank and cash         each cash/bank account  vs  collections, vouchers, refunds, payouts, expenses and supplier payments, routed like the engine
+ *  R4 Bank and cash         each cash/bank account  vs  collections, vouchers, refunds, payouts, expenses, supplier payments,
+ *                                                       fixed-asset purchases and disposal proceeds, commission transfers, routed like the engine
  *  R5 Output VAT            Σ output VAT lines      vs  documents' VAT + due-date charges' VAT + advance VAT not yet invoiced
  *  R6 Posting completeness  entries                 vs  the source records that should have one
  *  R7 Sub-ledger integrity  —                       lists only
@@ -126,6 +127,12 @@ export class ReconciliationService {
         withDifferences: checks.filter((c) => c.status === "difference" || c.status === "attention").map((c) => c.id),
       },
     };
+  }
+
+  /** Is a table there? (A failed migration reads as "no such records", not a failed check.) */
+  private async hasTable(name: string): Promise<boolean> {
+    const r = await this.pool.query(`select to_regclass($1) is not null as ok`, [name]);
+    return r.rows[0]?.ok === true;
   }
 
   private async ledgerBy(scope: number, asOf: string, keys: string[], col: "tenant_id" | "contract_id" | "owner_id" | "account_id", sign: 1 | -1) {
@@ -452,6 +459,44 @@ export class ReconciliationService {
       if (p.paid_on <= asOf) put(ref, -h(p.amount));
       const voidOn = p.voided_on && p.voided_on > p.paid_on ? p.voided_on : p.paid_on;
       if (p.status === "void" && voidOn <= asOf) put(ref, h(p.amount));
+    }
+    // Fixed assets (accountant, 27 Nov 2026, note 17: R4 was off by −900, exactly an asset bought from the bank).
+    // FA01 Cr BANK the cost on the acquisition date (acquisition_mode 'bank' only); FA03 Dr BANK the disposal proceeds
+    // on the disposal date; a void reverses both on its void date (never before the event). Depreciation moves no cash.
+    if (await this.hasTable("fixed_assets")) {
+      for (const a of (await this.pool.query(
+        `select cost::text as cost, acquisition_mode, acquisition_bank_account_id, to_char(acquisition_date, 'YYYY-MM-DD') as acquired_on,
+                disposal_proceeds::text as proceeds, disposal_bank_account_id, to_char(disposed_on, 'YYYY-MM-DD') as disposed_on,
+                status, to_char(voided_on, 'YYYY-MM-DD') as voided_on
+           from fixed_assets where user_id = $1`, [scope])).rows) {
+        const voided = (d: string) => a.status === "void" && a.voided_on && (a.voided_on > d ? a.voided_on : d) <= asOf;
+        if (a.acquisition_mode === "bank" && a.acquired_on <= asOf) {
+          const ref = { bankAccountId: a.acquisition_bank_account_id };
+          put(ref, -h(a.cost));
+          if (voided(a.acquired_on)) put(ref, h(a.cost));
+        }
+        if (a.disposed_on && h(a.proceeds ?? "0") > 0 && a.disposed_on <= asOf) {
+          const ref = { bankAccountId: a.disposal_bank_account_id };
+          put(ref, h(a.proceeds));
+          if (voided(a.disposed_on)) put(ref, -h(a.proceeds));
+        }
+      }
+    }
+    // Commission transfers (E15T Dr operating / Cr trust on the transfer date; a void reverses it on its void date).
+    if (await this.hasTable("finance_commission_transfers")) {
+      for (const t of (await this.pool.query(
+        `select amount::text as amount, from_bank_account_id, to_bank_account_id, status, to_char(transfer_date, 'YYYY-MM-DD') as d,
+                to_char((voided_at at time zone 'Asia/Riyadh')::date, 'YYYY-MM-DD') as void_d
+           from finance_commission_transfers where user_id = $1`, [scope])).rows) {
+        if (t.d > asOf) continue;
+        put({ bankAccountId: t.to_bank_account_id }, h(t.amount));
+        put({ bankAccountId: t.from_bank_account_id }, -h(t.amount));
+        const voidOn = t.void_d && t.void_d > t.d ? t.void_d : t.d;
+        if (t.status === "void" && voidOn <= asOf) {
+          put({ bankAccountId: t.to_bank_account_id }, -h(t.amount));
+          put({ bankAccountId: t.from_bank_account_id }, h(t.amount));
+        }
+      }
     }
 
     for (const k of [...sub.keys()]) if (!ids.has(k)) sub.delete(k);

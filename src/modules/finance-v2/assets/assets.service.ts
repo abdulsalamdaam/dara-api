@@ -13,7 +13,7 @@ import { ChartService } from "../chart.service";
 import { riyadhNow } from "../reports/core-math";
 import { langOf } from "../reports/common";
 import { ASSET_COLS, ASSET_SOURCE, assetCols, assetEvents, lastDueMonth, scheduleInput, type AssetRow } from "./asset-events";
-import { addMonths, depreciableBase, disposalFigures, lastChargeMonth, monthOf, schedule } from "./asset-math";
+import { addMonths, depreciableBase, disposalFigures, lastChargeMonth, monthEnd, monthOf, schedule } from "./asset-math";
 import { fv2PlanEntitledSql } from "../flag.service";
 
 type Q = Pick<Fv2Client, "query"> | Fv2Pool;
@@ -517,8 +517,17 @@ export class AssetsService {
     return new Set(r.rows.map((x: any) => (x.d instanceof Date ? x.d.toISOString().slice(0, 10) : String(x.d).slice(0, 10))));
   }
 
+  /**
+   * A month is run only once it has ended (accountant, 27 Nov 2026, note 10 — the same rule as the commission run,
+   * commission-run.ts MONTH_NOT_ENDED): on its last day at the earliest, so a run never books an entry dated after
+   * today (a depreciation dated the 30th, run on the 24th, was missing from every report opened on the 24th).
+   * A future month stays 400 FUTURE_MONTH; the current month before its last day is 400 MONTH_NOT_ENDED.
+   */
   private assertRunnable(month: string, today: string) {
     if (month > monthOf(today)) throw bad("FUTURE_MONTH", "لا يمكن تشغيل الإهلاك لشهر مستقبلي · Depreciation cannot run for a future month");
+    if (monthEnd(month) > today) {
+      throw bad("MONTH_NOT_ENDED", `لم ينته الشهر بعد: يُشغّل إهلاك ${month} من ${monthEnd(month)} · The month has not ended yet: depreciation for ${month} runs from ${monthEnd(month)}`);
+    }
   }
 
   private async decorate(q: Q, scope: number, rows: AssetRow[], lang: "ar" | "en"): Promise<AssetOut[]> {

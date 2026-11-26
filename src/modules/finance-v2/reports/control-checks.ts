@@ -28,6 +28,7 @@ import { clientMoneyPosition } from "../client-money";
  *  R19  Due, not invoiced       installments due with no document     vs  0
  *  R20  Closed-period documents documents dated in a closed period    vs  0
  *  R21  Postable accounts       lines on group accounts               vs  0
+ *  R22  No negative cash        cash / bank accounts below zero       vs  0   (a warning: "attention", never blocks)
  */
 
 export const EXTRA_LABELS: Record<string, { ar: string; en: string }> = {
@@ -44,6 +45,7 @@ export const EXTRA_LABELS: Record<string, { ar: string; en: string }> = {
   R19: { ar: "لا توجد دفعات مستحقة لم تُفوتر", en: "No installments due but not invoiced" },
   R20: { ar: "لا توجد مستندات بتاريخ داخل فترة مقفلة", en: "No documents dated inside a closed period" },
   R21: { ar: "كل سطور القيود على حسابات تقبل الترحيل", en: "Every journal line is on a postable account" },
+  R22: { ar: "لا يوجد حساب نقدي برصيد سالب", en: "No cash or bank account with a negative balance" },
 };
 
 export const LIST_LIMIT = 200;
@@ -102,6 +104,7 @@ export class ExtraChecks {
     if (want("R19")) out.push(mk("R19", "due_not_invoiced", await this.r19(scope, asOf, ctx.goLive)));
     if (want("R20")) out.push(mk("R20", "closed_period_documents", await this.r20(scope, asOf)));
     if (want("R21")) out.push(mk("R21", "postable_accounts", await this.r21(scope, asOf)));
+    if (want("R22")) out.push(mk("R22", "no_negative_cash", await this.r22(scope, asOf)));
     return out;
   }
 
@@ -398,6 +401,36 @@ export class ExtraChecks {
       `select count(*)::int as n from journal_lines l join accounts a on a.id = l.account_id and a.user_id = l.user_id
         where l.user_id = $1 and l.entry_date <= $2::date and a.is_group`, [scope, asOf])).rows;
     return countCheck(n.n, r.rows.map((x: any) => ({ ...x, lineId: Number(x.lineId), entryId: Number(x.entryId) })), [], ["the database refuses a line on a group account"]);
+  }
+
+  // ─── R22 (accountant, 27 Nov 2026, note 4) ───
+  /**
+   * A supplier paid 500 from a bank holding 350 left it at −150 with no warning. Every leaf of the 1110 "cash and
+   * cash equivalents" group whose book balance as of `asOf` is below zero is listed. A warning ("attention"):
+   * an overdraft can be real, so it never blocks a close; the forms warn before such a payment, and trust
+   * accounts are refused outright by the trust guard.
+   */
+  async r22(scope: number, asOf: string): Promise<CheckBody> {
+    const r = (await this.pool.query(
+      `with recursive g as (select id from accounts where user_id = $1 and code = '1110'
+                             union all select a.id from accounts a join g on a.parent_id = g.id where a.user_id = $1)
+       select a.id, a.code, a.name_ar, a.name_en, b.id as bank_account_id, b.kind, coalesce(b.is_trust, false) as is_trust,
+              coalesce(sum(l.debit - l.credit), 0)::text as bal
+         from accounts a join g on g.id = a.id
+         left join bank_accounts b on b.gl_account_id = a.id and b.user_id = a.user_id
+         left join journal_lines l on l.account_id = a.id and l.user_id = a.user_id and l.entry_date <= $2::date
+        where a.user_id = $1 and not a.is_group
+        group by a.id, b.id having coalesce(sum(l.debit - l.credit), 0) < 0 order by a.code`, [scope, asOf])).rows;
+    const rows = r.map((x: any) => ({
+      accountId: x.id, code: x.code, name: x.name_ar, nameEn: x.name_en, kind: x.kind ?? null, trust: x.is_trust === true, ledger: fromHalalas(h(x.bal)),
+    }));
+    const total = r.reduce((s: number, x: any) => s + h(x.bal), 0);
+    return {
+      status: rows.length ? "attention" : "ok", ledger: String(rows.length), subLedger: "0", difference: String(rows.length), unit: "count",
+      rows: rows.slice(0, LIST_LIMIT),
+      explanations: rows.length ? [{ code: "negative_total", count: rows.length, amount: money(total) }] : [],
+      notes: ["warning only: never blocks the period close"],
+    };
   }
 
   private async names(scope: number, table: "owners" | "tenants", ids: number[]) {

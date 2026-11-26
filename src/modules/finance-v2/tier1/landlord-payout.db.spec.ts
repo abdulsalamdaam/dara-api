@@ -205,3 +205,53 @@ describe("fv2 landlord payout: trust by default, PV- voucher, idempotent (real P
     assert.equal(await due(), 699.5 - max);
   });
 });
+
+/**
+ * Accountant, 27 Nov 2026 (note 1): on a collected-basis account the month-end run has not taken its commission yet,
+ * so the net due alone overstates what may leave. Rent 9,000 (no VAT) collected this month at 5% (the property's
+ * rate); the office is not VAT-registered here → expected commission 450.00, available 8,550.00.
+ */
+describe("fv2 landlord payout: never above the net due less the commission the month-end run will take", { skip: fv2DbSkip }, () => {
+  const U3 = 6413;
+  const user3 = { ...userOf(U3), permissions: PERMS };
+  let env: LegacyEnv;
+  let s: Seed;
+  const row = async () => (await env.reports.accounting(user3)).landlordDues.find((d: any) => d.ownerId === s.agent);
+
+  before(async () => {
+    env = await legacyEnv("wired");
+    s = await seedAccount(env, U3);
+    await enableV2(env, U3, "manager");
+    await env.q(`update finance_settings set commission_basis = 'collected' where account_user_id = $1`, [U3]);
+    await env.q(`insert into finance_commission_settings (account_user_id, collected_from) values ($1, $2)
+                 on conflict (account_user_id) do update set collected_from = excluded.collected_from`, [U3, firstOf(0)]);
+    await env.q(`update owners set tax_number = null where user_id = $1 and is_account_holder`, [U3]); // the office: no VAT on commission
+    const c: any = await env.contracts.create(user3, {
+      unitIds: [s.unitA1], tenantId: s.tenant, tenantName: "Synthetic Tenant",
+      startDate: firstOf(0), endDate: lastOf(11), monthlyRent: "9000", paymentFrequency: "monthly", vatEnabled: false,
+    });
+    const [p] = await env.q(`select id from payments where contract_id = $1 and deleted_at is null order by due_date limit 1`, [c.id]);
+    await env.payments.addCollection(user3, String(p.id), { amount: "9000", collectedDate: today, method: "cash" });
+    await drain(env, U3);
+  });
+  after(async () => { await env?.t.drop(); });
+
+  it("the dues report carries the expected commission and what is available to transfer", async () => {
+    const r = await row();
+    assert.deepEqual([r.remaining, r.expectedCommission, r.available], [9000, 450, 8550]);
+  });
+
+  it("above the available (but within the net due): 409 PAYOUT_EXCEEDS_AVAILABLE, nothing written; the available itself is paid", async () => {
+    const over: any = await attempt(() => env.reports.createPayout(user3, { ownerId: s.agent, amount: "8550.01", method: "bank_transfer", transferDate: today }));
+    assert.deepEqual([over.status, over.body.error, over.body.netDue, over.body.expectedCommission, over.body.available], [409, "PAYOUT_EXCEEDS_AVAILABLE", "9000.00", "450.00", "8550.00"]);
+    assert.equal((await env.q(`select count(*)::int as n from landlord_payouts where user_id = $1`, [U3]))[0].n, 0);
+    const full: any = await attempt(() => env.reports.createPayout(user3, { ownerId: s.agent, amount: "9000", method: "bank_transfer", transferDate: today }));
+    assert.equal(full.body.error, "PAYOUT_EXCEEDS_AVAILABLE", "the whole net due is refused too");
+    const ok: any = await env.reports.createPayout(user3, { ownerId: s.agent, amount: "8550", method: "bank_transfer", transferDate: today });
+    assert.equal(ok.amount, "8550.00");
+    const r = await row();
+    assert.deepEqual([r.remaining, r.expectedCommission, r.available], [450, 450, 0]);
+    const more: any = await attempt(() => env.reports.createPayout(user3, { ownerId: s.agent, amount: "0.01", method: "bank_transfer", transferDate: today }));
+    assert.equal(more.body.error, "PAYOUT_EXCEEDS_AVAILABLE");
+  });
+});
