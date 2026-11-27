@@ -38,6 +38,15 @@ import { expectedCommission } from "../commission-run";
  * from the account's own Dara history before the go-live — history the legacy
  * report already counts — so the proposal's own 2121 lines are taken off; only
  * what the accountant added or changed on top of it counts.
+ *
+ * Found in the staging re-test of those notes (28 Nov 2026): the legacy
+ * statement subtracts EVERY expense filed under a landlord (by owner, or by the
+ * property's owner), but a v2 expense the office bears itself
+ * (finance_expense_details.charge_to = 'company') posts to the office's
+ * expense accounts, never to 2121. So an office repair on a landlord's building
+ * cut his dues (and the payout's net due) while 2121 did not move, and R3 showed
+ * the difference. Those expenses are taken back out: each row gains
+ * `officeExpenses`, and `expenses` keeps only what the landlord bears.
  */
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const num = (v: unknown) => Number(fromHalalas(toHalalas(String(v ?? "0"))));
@@ -49,12 +58,14 @@ export interface LandlordCharges {
   commission: Map<number, number>;
   /** ownerId → Σ credit − debit on 2121 of his manual / opening journal lines (and their reversals), less a cutover proposal's own lines. */
   journals: Map<number, number>;
+  /** ownerId → Σ v2 expenses filed under the landlord (or his property) that the office bears (charge_to = company). */
+  officeExpenses: Map<number, number>;
   names: Map<number, string>;
 }
 
 export async function landlordChargesV2(q: Sql, scope: number): Promise<LandlordCharges> {
   const s = await loadSettings(q, scope);
-  const out: LandlordCharges = { bills: new Map(), commission: new Map(), journals: new Map(), names: new Map() };
+  const out: LandlordCharges = { bills: new Map(), commission: new Map(), journals: new Map(), officeExpenses: new Map(), names: new Map() };
   if (s?.mode === "owner") return out;
   const bills = await q.rows(
     `select b.owner_id, o.name, sum(b.total)::text as amt
@@ -75,6 +86,15 @@ export async function landlordChargesV2(q: Sql, scope: number): Promise<Landlord
     out.commission.set(Number(c.owner_id), num(c.amt));
     out.names.set(Number(c.owner_id), c.name ?? "—");
   }
+  // Same attribution as the legacy statement: the expense's landlord, else its property's landlord.
+  const office = await q.rows(
+    `select coalesce(e.owner_id, p.owner_id) as owner_id, sum(e.amount)::text as amt
+       from expenses e
+       join finance_expense_details d on d.expense_id = e.id and d.user_id = e.user_id
+       left join properties p on p.id = e.property_id and p.user_id = e.user_id
+      where e.user_id = $1 and e.deleted_at is null and d.charge_to = 'company' and coalesce(e.owner_id, p.owner_id) is not null
+      group by 1`, [scope]);
+  for (const x of office) out.officeExpenses.set(Number(x.owner_id), num(x.amt));
   for (const [id, x] of await landlordJournalBalances(q, scope)) {
     out.journals.set(id, r2(x.amount));
     out.names.set(id, x.name ?? "—");
@@ -118,12 +138,15 @@ export async function landlordJournalBalances(q: Sql, scope: number): Promise<Ma
 export async function landlordDuesV2(q: Sql, scope: number, legacy: any): Promise<any> {
   const s = await loadSettings(q, scope);
   const ch = await landlordChargesV2(q, scope);
-  const statement: any[] = (legacy.landlordStatement ?? []).map((r: any) => ({ ...r, vendorBills: 0, journals: 0 }));
+  const statement: any[] = (legacy.landlordStatement ?? []).map((r: any) => {
+    const office = r.ownerId != null ? (ch.officeExpenses.get(Number(r.ownerId)) ?? 0) : 0;
+    return { ...r, expenses: r2(Number(r.expenses ?? 0) - office), officeExpenses: office, vendorBills: 0, journals: 0 };
+  });
   const byOwner = new Map<number, any>(statement.filter((r) => r.ownerId != null).map((r) => [Number(r.ownerId), r]));
   const ensure = (ownerId: number) => {
     let r = byOwner.get(ownerId);
     if (!r) {
-      r = { key: `o:${ownerId}`, ownerId, landlord: ch.names.get(ownerId) ?? "—", rentCollected: 0, commission: 0, maintenance: 0, expenses: 0, vendorBills: 0, journals: 0, net: 0 };
+      r = { key: `o:${ownerId}`, ownerId, landlord: ch.names.get(ownerId) ?? "—", rentCollected: 0, commission: 0, maintenance: 0, expenses: 0, officeExpenses: 0, vendorBills: 0, journals: 0, net: 0 };
       byOwner.set(ownerId, r);
       statement.push(r);
     }
