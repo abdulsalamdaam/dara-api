@@ -6,8 +6,8 @@ type Q = Pick<Fv2Client, "query"> | Fv2Pool;
 /**
  * Second-person approval for large manual journals (accountant notes, 27 Nov 2026, note 18; migration 0102).
  *
- * The account's finance settings carry a switch and an amount. When the switch is on, a MANUAL journal (not the
- * opening entry) whose total is at or above the amount is approved by someone other than every user who created,
+ * The account's finance settings carry a switch and an amount. When the switch is on, a manual journal or the opening
+ * entry (the user's decision, 28 Nov 2026) whose total is at or above the amount is approved by someone other than every user who created,
  * edited or submitted it — the account holder included, with no one-person exception (the trust maker-checker's
  * written-reason self-approval does not apply to it either). Off, or below the amount: approval is unchanged.
  * Turning it on needs at least two users who can approve (settings.service.ts refuses it otherwise).
@@ -27,7 +27,7 @@ export async function secondApprovalPolicy(q: Q, scope: number): Promise<SecondA
 
 /** Whether `totalHalalas` of a `kind` journal needs a second person under the policy. */
 export function needsSecondApprover(p: SecondApprovalPolicy, kind: string, totalHalalas: number): boolean {
-  return p.on && kind === "manual" && totalHalalas >= p.minHalalas;
+  return p.on && (kind === "manual" || kind === "opening") && totalHalalas >= p.minHalalas;
 }
 
 /**
@@ -45,5 +45,5 @@ export async function manualJournalApprovers(q: Q, scope: number): Promise<numbe
 }
 
 export const SECOND_APPROVAL_MESSAGE =
-  "هذا القيد اليدوي يتجاوز حدّ الاعتماد من شخص ثانٍ في إعدادات المحاسبة، فيعتمده مستخدم آخر غير من أنشأه أو عدّله أو أرسله"
-  + " · This manual journal is at or above the second-person approval amount in the accounting settings, so it must be approved by a user other than the one who created, edited or submitted it";
+  "هذا القيد (اليدوي أو الافتتاحي) يتجاوز حدّ الاعتماد من شخص ثانٍ في إعدادات المحاسبة، فيعتمده مستخدم آخر غير من أنشأه أو عدّله أو أرسله"
+  + " · This journal (manual or opening) is at or above the second-person approval amount in the accounting settings, so it must be approved by a user other than the one who created, edited or submitted it";
