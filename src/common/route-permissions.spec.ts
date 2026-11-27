@@ -49,6 +49,7 @@ const PUBLIC: Record<string, string> = {
   "GET /public/trial": "landing-page trial offer",
   "POST /public/contact": "landing-page contact form",
   "POST /subscription/webhook": "Moyasar webhook (verified in the handler)",
+  "POST /subscription/dhamen/notify": "Dhamen notifications (header credentials; each payment re-verified with Dhamen)",
 };
 
 /** Authenticated, but open to every portal login on purpose. */

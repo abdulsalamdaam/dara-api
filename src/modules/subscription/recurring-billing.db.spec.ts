@@ -122,6 +122,7 @@ describe("recurring billing with saved Moyasar tokens (real Postgres)", { skip: 
     await t.apply(MIG_0097);
     await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0099_bank_transfer.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0103_subscription_gateway.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
