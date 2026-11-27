@@ -100,6 +100,7 @@ describe("subscription: no PAID email or paid state before a verified payment (r
     await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0099_bank_transfer.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0103_subscription_gateway.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {
@@ -335,6 +336,7 @@ describe("subscription vs add-on payments are independent (real Postgres)", { sk
     await t.apply(join(__dirname, "../../../db/drizzle/0097_moyasar_tokenization.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0098_linked_member_prices.sql"));
     await t.apply(join(__dirname, "../../../db/drizzle/0099_bank_transfer.sql"));
+    await t.apply(join(__dirname, "../../../db/drizzle/0103_subscription_gateway.sql"));
     const db = drizzle(t.pool, { schema }) as any;
     const pdf = { htmlToPdf: async () => Buffer.from("%PDF-1.4 stub") } as any;
     const email = {

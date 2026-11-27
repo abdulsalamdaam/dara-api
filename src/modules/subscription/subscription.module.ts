@@ -1,4 +1,4 @@
-import { tokenizationEnabled, testPriceFor } from "../../common/billing-flags";
+import { tokenizationEnabled, testPriceFor, dhamenEnabled } from "../../common/billing-flags";
 import { BadRequestException, Body, Controller, Get, Inject, Module, NotFoundException, Param, Post, Req, Res, UseGuards } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { and, desc, eq, ne } from "drizzle-orm";
@@ -367,6 +367,8 @@ export class SubscriptionController {
       // In-app checkout with a saved card (recurring-billing.service.ts). When
       // false the web keeps the hosted-invoice link flow.
       tokenizationEnabled: tokenizationEnabled(ownerId),
+      // Dhamen (Elm) embedded checkout instead of Moyasar — staging trial (dhamen-billing.module.ts).
+      dhamenEnabled: !user.ownerUserId && dhamenEnabled(ownerId),
       autoRenew: !!owner?.autoRenew,
       nextBillingAt: owner?.nextBillingAt ?? null,
       billingState: owner?.billingState ?? "ok",

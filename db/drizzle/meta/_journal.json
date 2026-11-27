@@ -645,6 +645,13 @@
       "when": 1795564800000,
       "tag": "0102_finance_manual_journal_second_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1795824000000,
+      "tag": "0103_subscription_gateway",
+      "breakpoints": true
     }
   ]
 }
