@@ -18,7 +18,7 @@ import { planAccountingGrantable } from "../../common/plan-features";
  * Settings events that hand a not-started ledger to the admin: after a reset / restore / mode migration the admin
  * decides when the history is posted again (ledger-reset.service.ts), so those accounts are never started here.
  */
-const ADMIN_HELD_FIELDS = ["ledger_reset", "ledger_restore", "mode_migration"];
+export const ADMIN_HELD_FIELDS = ["ledger_reset", "ledger_restore", "mode_migration"];
 
 /** 02:30 Riyadh: after the recognizer (00:10), before the nightly pg_dump (03:00) and the repair sweep (03:30). */
 const SWEEP_AT_MIN = 2 * 60 + 30;

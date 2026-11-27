@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { FV2_POOL, withTx, type Fv2Pool } from "./db";
 import { AUTO_INVOICE_ERROR_TEXT } from "./auto-invoice/errors";
+import { ADMIN_HELD_FIELDS, AUTO_ACTOR } from "./auto-provision.service";
 
 export type PostingErrorsTab = "errors" | "skipped";
 
@@ -97,12 +98,21 @@ export class PostingErrorsService {
                   and o.attempts = 0 and o.blocked_on is null) as waiting,
               (select json_build_object('outcome', e.new_value->>'outcome', 'at', e.created_at)
                  from finance_settings_events e where e.account_user_id = fs.account_user_id and e.field = 'auto_provision'
-                order by e.created_at desc, e.id desc limit 1) as "lastAttempt"
+                order by e.created_at desc, e.id desc limit 1) as "lastAttempt",
+              -- Same rule as auto-provision's candidates(): a ledger an admin reset / restored / migrated is left to the admin
+              -- unless the latest enable was automatic. Then neither the sweep nor «ابدأ الدفتر الآن» starts it.
+              (exists (select 1 from finance_settings_events h where h.account_user_id = fs.account_user_id
+                         and h.field = any($2::text[]))
+               and coalesce((select e.actor_user_id from finance_settings_events e
+                              where e.account_user_id = fs.account_user_id and e.field = 'finance_v2_enabled'
+                              order by e.created_at desc, e.id desc limit 1), -1) <> $3) as "heldByAdmin"
          from finance_settings fs where fs.account_user_id = $1`,
-      [userId],
+      [userId, ADMIN_HELD_FIELDS, AUTO_ACTOR],
     )).rows;
     return {
       started: s?.startedAt != null,
+      /** Not started and left to Dara's admin (reset / restore / mode migration): the start button cannot start it. */
+      heldByAdmin: s?.startedAt == null && s?.heldByAdmin === true,
       startedAt: s?.startedAt ?? null,
       pending,
       waiting: Number(s?.waiting ?? 0),
