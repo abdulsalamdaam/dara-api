@@ -880,6 +880,15 @@ export async function ensureSchema(): Promise<void> {
     } catch (err: any) {
       log.warn(`ensure manual journal second approval failed: ${err?.message || err}`);
     }
+    // 0103: subscription_payments.gateway / gateway_ref / gateway_invoice_id (Dhamen trial).
+    // Full-row selects of subscription_payments read the columns, so a failure here is an error.
+    try {
+      const gw = findSqlFile(join("drizzle", "0103_subscription_gateway.sql"));
+      if (gw) await client.query(readFileSync(gw, "utf8"));
+      else log.error("0103_subscription_gateway.sql not found — subscription_payments.gateway missing; full payment selects will fail");
+    } catch (err: any) {
+      log.error(`ensure subscription gateway failed: ${err?.message || err}`);
+    }
     // finance-v2: 0101 journal bills (a supplier's opening balance from a journal line). The bills list joins it, so a failure is an error.
     try { // finance-v2:
       const fv2Jb = findSqlFile(join("drizzle", "0101_finance_v2_journal_bills.sql")); // finance-v2:

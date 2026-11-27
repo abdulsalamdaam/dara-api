@@ -13,6 +13,7 @@
  * Account ids are the paying account (the owner), never an employee.
  */
 import { isMoyasarConfigured, moyasarPublishableKey } from "./moyasar";
+import { isDhamenConfigured } from "./dhamen";
 
 const flag = (k: string) => String(process.env[k] || "").toLowerCase() === "true";
 
@@ -40,4 +41,15 @@ export function tokenizationEnabled(accountId?: number | null): boolean {
 export function testPriceFor(accountId?: number | null): number | null {
   if (accountId == null) return null;
   return priceMap(process.env.BILLING_TEST_PRICE_USERS).get(accountId) ?? null;
+}
+
+/**
+ * Dhamen (Elm) embedded checkout instead of Moyasar for this account — staging
+ * trial (28 Nov 2026). On for everyone with BILLING_DHAMEN_ENABLED=true, or for
+ * the ids in BILLING_DHAMEN_USERS. Needs the DHAMEN_* keys.
+ */
+export function dhamenEnabled(accountId?: number | null): boolean {
+  if (!isDhamenConfigured()) return false;
+  if (flag("BILLING_DHAMEN_ENABLED")) return true;
+  return accountId != null && idList(process.env.BILLING_DHAMEN_USERS).has(accountId);
 }

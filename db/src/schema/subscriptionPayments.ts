@@ -82,6 +82,14 @@ export const subscriptionPaymentsTable = pgTable("subscription_payments", {
   reviewedBy: integer("reviewed_by"),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   reviewNote: text("review_note"),
+  /**
+   * The gateway that took this payment (0103): `moyasar` (every row before
+   * Dhamen) or `dhamen`. For Dhamen, `gateway_ref` is our paymentReferenceId
+   * there and `gateway_invoice_id` the invoice the embedded widget mounts.
+   */
+  gateway: text("gateway").$type<"moyasar" | "dhamen">().notNull().default("moyasar"),
+  gatewayRef: text("gateway_ref"),
+  gatewayInvoiceId: text("gateway_invoice_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
