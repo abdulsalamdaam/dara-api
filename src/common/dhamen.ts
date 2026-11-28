@@ -17,6 +17,8 @@
  *   DHAMEN_API_VERSION  default 2
  */
 
+import { randomBytes } from "node:crypto";
+
 export function dhamenBaseUrl(): string | null {
   const b = (process.env.DHAMEN_BASE_URL || "").trim().replace(/\/$/, "");
   return b || null;
@@ -142,3 +144,66 @@ export async function cancelDhamenPayment(paymentReferenceId: string): Promise<b
   const r = await dhamenPost<{ messageCode?: number | string }>("/api/payments/cancel", { paymentReferenceId });
   return r.status === 200 && String(r.data?.messageCode ?? "") === "200";
 }
+
+/**
+ * POST /api/payments/customer-payment-subsequent — charge the card of an
+ * earlier, paid, recurring-enabled payment again, with no cardholder present.
+ *
+ * Idempotent by our reference: a repeat of `paymentReferenceId` is refused
+ * with C033 ("already exist"), which we report as `duplicate` so the caller
+ * looks the payment up instead of charging again. C037 means the original
+ * cannot be charged again (never paid, or not recurring) — the saved method
+ * is unusable.
+ */
+export async function chargeDhamenSubsequent(input: {
+  paymentReferenceId: string;
+  originalPaymentReferenceId: string;
+  customerIdentifier: string;
+  amountSar: number;
+}): Promise<{ kind: "created"; invoiceId: string | null } | { kind: "duplicate" } | { kind: "unusable"; code: string } | { kind: "refused"; code: string; message: string }> {
+  const r = await dhamenPost<{ invoiceId?: string; messageCode?: string; messageDescription?: string }>("/api/payments/customer-payment-subsequent", {
+    paymentReferenceId: input.paymentReferenceId,
+    originalPaymentReferenceId: input.originalPaymentReferenceId,
+    customerIdentifier: input.customerIdentifier,
+    amount: Math.round(input.amountSar * 100) / 100,
+  });
+  if (r.status === 200 && r.data && !r.data.messageCode) return { kind: "created", invoiceId: r.data.invoiceId ?? null };
+  const code = String(r.data?.messageCode ?? "");
+  if (code === "C033") return { kind: "duplicate" };
+  if (code === "C037" || code === "C104") return { kind: "unusable", code };
+  // 4xx with a business code: Dhamen answered and did not charge.
+  if (r.status >= 400 && r.status < 500 && code) return { kind: "refused", code, message: String(r.data?.messageDescription ?? "").slice(0, 200) };
+  throw new Error(`DHAMEN_SUBSEQUENT_FAILED: ${r.status} ${r.text.slice(0, 300)}`);
+}
+
+/* ── References and verification (shared by checkout, renewals and notifications) ── */
+
+function envTag(): string {
+  return (process.env.DHAMEN_ENV_TAG || "S").replace(/[^A-Z]/gi, "").slice(0, 2).toUpperCase() || "S";
+}
+
+/** Our paymentReferenceId at Dhamen: unique, ≤ 50, names the environment and the row. */
+export function dhamenRef(rowId: number): string {
+  return `DARA-${envTag()}-${rowId}-${randomBytes(4).toString("hex")}`;
+}
+
+/** The row id a reference of ours names, or null for one that is not ours / not this environment's. */
+export function rowIdFromRef(ref: string): number | null {
+  const m = /^DARA-([A-Z]{1,2})-(\d{1,10})-[0-9a-f]{8}$/.exec(String(ref || ""));
+  if (!m || m[1] !== envTag()) return null;
+  const id = Number(m[2]);
+  return Number.isSafeInteger(id) && id > 0 && id < 2 ** 31 ? id : null;
+}
+
+/** Is this status a full, settled-or-settling payment of exactly this row? */
+export function verifyDhamenPaid(row: { amount: string | number; gatewayRef: string | null }, s: DhamenPaymentStatus | null): { ok: boolean; reason?: string } {
+  if (!s) return { ok: false, reason: "not_found" };
+  if (s.paymentReferenceId !== row.gatewayRef) return { ok: false, reason: "reference_mismatch" };
+  if (Number(s.paymentStatus) !== 1 || Number(s.paymentStatusDetail) !== DHAMEN_DETAIL.PAID) {
+    return { ok: false, reason: `not_paid:${s.paymentStatus}/${s.paymentStatusDetail}` };
+  }
+  if (Math.round(Number(s.amount) * 100) !== Math.round(Number(row.amount) * 100)) return { ok: false, reason: "amount_mismatch" };
+  if ((s.refundPayments ?? []).length > 0) return { ok: false, reason: "refunded" };
+  return { ok: true };
+}
+

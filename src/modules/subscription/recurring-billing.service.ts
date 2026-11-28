@@ -13,6 +13,10 @@ import {
   fetchMoyasarPayment, findMoyasarPayment, chargeMoyasarToken, fetchMoyasarToken, deleteMoyasarToken,
   type MoyasarPaymentFull,
 } from "../../common/moyasar";
+import {
+  DHAMEN_DETAIL, chargeDhamenSubsequent, dhamenBaseUrl, dhamenCustomerIdentifier, dhamenRef,
+  fetchDhamenPaymentStatus, isDhamenConfigured, verifyDhamenPaid, type DhamenPaymentStatus,
+} from "../../common/dhamen";
 import { EmailService } from "../email/email.service";
 import { AppLogService } from "../../common/logging/app-log.service";
 import { SubscriptionInvoiceService } from "./subscription-invoice.service";
@@ -127,7 +131,7 @@ export class RecurringBillingService {
       nextBillingAt: u.nextBillingAt ?? null,
       paymentMethod: method && method.status !== "deleted"
         ? {
-          id: method.id, type: method.type, brand: method.brand, last4: method.last4,
+          id: method.id, type: method.type, gateway: method.gateway, brand: method.brand, last4: method.last4,
           expMonth: method.expMonth, expYear: method.expYear, status: method.status, label: cardLabel(method),
         }
         : null,
@@ -317,7 +321,8 @@ export class RecurringBillingService {
   }
 
   private async removeMethod(m: PaymentMethod) {
-    try { await deleteMoyasarToken(m.moyasarTokenId); } catch (err) {
+    // A Dhamen method is only our pointer to an earlier payment: nothing to delete there.
+    if (m.gateway !== "dhamen") try { await deleteMoyasarToken(m.moyasarTokenId); } catch (err) {
       // Not fatal: the token is unusable to us once it is off the account, and
       // Moyasar invalidates it when the card expires. Logged for a retry by hand.
       this.appLog?.record({ level: "warn", event: "moyasar_token_delete_failed", context: "RecurringBilling", userId: m.userId, message: "could not delete a Moyasar token", error: err, meta: { paymentMethodId: m.id } });
@@ -455,7 +460,6 @@ export class RecurringBillingService {
    */
   async renewOne(userId: number, opts: { now?: Date; force?: boolean } = {}): Promise<RenewOutcome> {
     const now = opts.now ?? new Date();
-    if (!isMoyasarConfigured()) return { status: "skipped", reason: "moyasar_not_configured" };
     const [u] = await this.db.select().from(usersTable).where(eq(usersTable.id, userId));
     if (!u) return { status: "skipped", reason: "no_account" };
     if (!opts.force) {
@@ -479,6 +483,10 @@ export class RecurringBillingService {
     if (!amount || amount <= 0) return { status: "skipped", reason: "no_amount" };
 
     const method = await this.defaultMethod(userId, u.defaultPaymentMethodId);
+    const viaDhamen = method?.gateway === "dhamen";
+    if (viaDhamen ? !isDhamenConfigured() : !isMoyasarConfigured()) {
+      return { status: "skipped", reason: viaDhamen ? "dhamen_not_configured" : "moyasar_not_configured" };
+    }
 
     // 1. Claim this period's renewal row (or the retry of a failed one).
     const claim = await this.claim(userId, renewalOf, { plan, cycle, amount, methodId: method?.id ?? null, description: shared && shared.extras > 0 ? `اشتراك باقة «${resolvePackage(plan).labelAr}» الموحدة — ${CYCLE_LABEL_AR[cycle]} — تشمل ${shared.extras + 1} حسابات مرتبطة` : null }, now);
@@ -488,6 +496,7 @@ export class RecurringBillingService {
     }
     if (claim.kind === "busy") return { status: "in_flight", paymentRowId: claim.row.id };
     let row = claim.row;
+    if (viaDhamen) return this.renewDhamen(u, row, method!, claim.kind, amount, renewalOf, now);
 
     // 2. Recovery: an earlier run died mid-call with this given_id — look it up first.
     if (claim.kind === "recover") {
@@ -575,6 +584,7 @@ export class RecurringBillingService {
   /** Why `m` cannot be charged right now, or null. Refreshes the token status from Moyasar. */
   private async unusableReason(m: PaymentMethod | null): Promise<string | null> {
     if (!m || m.status === "deleted") return "no_card";
+    if (m.gateway === "dhamen") return m.status === "active" ? null : `method_${m.status}`;
     if (m.type !== "card" && !applePayRecurringEnabled()) return "applepay_not_recurring";
     const tok = await fetchMoyasarToken(m.moyasarTokenId).catch(() => null);
     if (tok && tok.status !== m.status) {
@@ -611,6 +621,11 @@ export class RecurringBillingService {
       return { status: "failed", paymentRowId: row.id, reason, final: true, nextRetryAt: null };
     }
 
+    return this.renewalFailed(u, row, method, amount, renewalOf, now, reason, needsAction);
+  }
+
+  /** A declined renewal (the row is already marked failed): past due, next retry or stop, tell the customer. */
+  private async renewalFailed(u: typeof usersTable.$inferSelect, row: Row, method: PaymentMethod | null, amount: number, renewalOf: Date, now: Date, reason: string, needsAction = false): Promise<RenewOutcome> {
     const failures = (u.billingFailedAttempts ?? 0) + 1;
     const retryAt = needsAction ? null : nextRetryAt(renewalOf, failures, now);
     const final = retryAt == null;
@@ -619,6 +634,149 @@ export class RecurringBillingService {
     this.appLog?.record({ level: "warn", event: "renewal_failed", context: "RecurringBilling", userId: u.id, message: `renewal attempt ${failures} failed: ${reason}`, meta: { paymentRowId: row.id, final, retryAt } });
     await this.notify(u, { reason: needsAction ? "action_required" : "charge_failed", amount, final, nextRetryAt: retryAt, cardLabel: cardLabel(method) });
     return { status: "failed", paymentRowId: row.id, reason, final, nextRetryAt: retryAt };
+  }
+
+  /* ── Dhamen (Elm) — staging trial ─────────────────────────────────── */
+
+  /**
+   * A Dhamen payment (checkout or renewal) Dhamen itself reported paid,
+   * fetched with our keys. Checked against the row; a paid checkout also
+   * becomes the saved "payment method" renewals charge. Idempotent.
+   */
+  async applyDhamenPaid(row: Row, s: DhamenPaymentStatus): Promise<{ status: string; activated?: boolean; reason?: string; autoRenew?: boolean }> {
+    const check = verifyDhamenPaid(row, s);
+    if (!check.ok) {
+      this.appLog?.record({ level: "error", event: "dhamen_paid_unverified", context: "RecurringBilling", userId: row.userId, message: `subscription payment ${row.id}: Dhamen status does not match the row — not activated`, meta: { paymentId: row.id, reason: check.reason } });
+      return { status: "mismatch", reason: check.reason };
+    }
+    let autoRenew: boolean | undefined;
+    if (row.chargeType === "checkout" && row.gatewayRef) autoRenew = await this.saveDhamenMethod(row.userId, row.gatewayRef, s);
+    const won = await activateFromPaidRow(this.db, row, { paidAt: new Date() }, this.invoices);
+    await this.scheduleNext(row.userId);
+    return { status: "paid", activated: won, autoRenew };
+  }
+
+  /**
+   * The first Dhamen payment (enableRecurring) is what later renewals charge:
+   * keep its reference as the account's default payment method. Brand and
+   * last four come from Dhamen's status; there is no card data to keep.
+   */
+  private async saveDhamenMethod(userId: number, ref: string, s: DhamenPaymentStatus): Promise<boolean> {
+    const key = `dhamen:${ref}`;
+    const [existing] = await this.db.select().from(paymentMethodsTable).where(eq(paymentMethodsTable.moyasarTokenId, key));
+    if (existing && existing.userId !== userId) return false;
+    const fields = {
+      type: "card" as const,
+      gateway: "dhamen" as const,
+      gatewayRef: ref,
+      brand: s.paymentBrand ? String(s.paymentBrand).toLowerCase() : null,
+      last4: s.cardLast4Digits ? String(s.cardLast4Digits).slice(-4) : null,
+      status: "active",
+      live: !/demo/i.test(dhamenBaseUrl() || ""),
+    };
+    const id = existing
+      ? (await this.db.update(paymentMethodsTable).set({ ...fields, deletedAt: null }).where(eq(paymentMethodsTable.id, existing.id)).returning())[0]!.id
+      : (await this.db.insert(paymentMethodsTable).values({ userId, moyasarTokenId: key, ...fields }).returning())[0]!.id;
+    await this.makeDefault(userId, id);
+    const [u] = await this.db.select({ billingState: usersTable.billingState }).from(usersTable).where(eq(usersTable.id, userId));
+    await this.db.update(usersTable).set({ autoRenew: true, billingState: u?.billingState === "past_due" ? "past_due" : "ok" }).where(eq(usersTable.id, userId));
+    return true;
+  }
+
+  /**
+   * Charge a renewal through Dhamen (customer-payment-subsequent). The row is
+   * already claimed. Its Dhamen reference is stored BEFORE the call, and
+   * Dhamen refuses a repeated reference (C033), so a run that died mid-call is
+   * recovered by looking that reference up — never by charging again.
+   */
+  private async renewDhamen(u: typeof usersTable.$inferSelect, row: Row, method: PaymentMethod, kind: "fresh" | "retry" | "recover", amount: number, renewalOf: Date, now: Date): Promise<RenewOutcome> {
+    if (!method.gatewayRef || method.status !== "active") {
+      const reason = method.gatewayRef ? `method_${method.status}` : "no_dhamen_reference";
+      await this.db.update(subscriptionPaymentsTable).set({ status: "failed", failureReason: reason }).where(eq(subscriptionPaymentsTable.id, row.id));
+      await this.cardUnusable(u, method, amount, reason);
+      return { status: "card_unusable", reason };
+    }
+    if (kind === "recover" && row.gatewayRef) {
+      const existing = await fetchDhamenPaymentStatus(row.gatewayRef).catch(() => undefined);
+      if (existing === undefined) {
+        await this.release(row, "processing");
+        return { status: "pending_unknown", paymentRowId: row.id, reason: "dhamen_unreachable" };
+      }
+      if (existing) return this.settleDhamenRenewal(u, row, method, existing, amount, renewalOf, now);
+      // Never created at Dhamen: charge below with the same reference.
+    } else {
+      const [r] = await this.db.update(subscriptionPaymentsTable)
+        .set({ gateway: "dhamen", gatewayRef: dhamenRef(row.id), moyasarGivenId: null })
+        .where(eq(subscriptionPaymentsTable.id, row.id)).returning();
+      row = r!;
+    }
+
+    let res: Awaited<ReturnType<typeof chargeDhamenSubsequent>>;
+    try {
+      res = await chargeDhamenSubsequent({
+        paymentReferenceId: row.gatewayRef!,
+        originalPaymentReferenceId: method.gatewayRef,
+        customerIdentifier: dhamenCustomerIdentifier(u.id),
+        amountSar: amount,
+      });
+    } catch (err) {
+      // Unknown whether Dhamen charged: the row stays `processing` with its
+      // reference, and the next run (after STALE_PROCESSING_MS) looks it up.
+      this.appLog?.record({ level: "error", event: "renewal_charge_unknown", context: "RecurringBilling", userId: u.id, message: "Dhamen subsequent payment failed without an answer — will look it up by reference", error: err, meta: { paymentRowId: row.id, ref: row.gatewayRef } });
+      return { status: "pending_unknown", paymentRowId: row.id, reason: "charge_error" };
+    }
+    if (res.kind === "unusable") {
+      const reason = `dhamen_${res.code}`;
+      await this.db.update(subscriptionPaymentsTable).set({ status: "failed", failureReason: reason }).where(eq(subscriptionPaymentsTable.id, row.id));
+      await this.db.update(paymentMethodsTable).set({ status: "inactive" }).where(eq(paymentMethodsTable.id, method.id));
+      await this.cardUnusable(u, method, amount, reason);
+      return { status: "card_unusable", reason };
+    }
+    if (res.kind === "refused") {
+      const reason = `dhamen_${res.code}`;
+      await this.db.update(subscriptionPaymentsTable).set({ status: "failed", failureReason: `${reason}: ${res.message}`.slice(0, 300) }).where(eq(subscriptionPaymentsTable.id, row.id));
+      return this.renewalFailed(u, row, method, amount, renewalOf, now, reason);
+    }
+    // Created (or created earlier under this reference): ask Dhamen how it went.
+    const s = await fetchDhamenPaymentStatus(row.gatewayRef!).catch(() => null);
+    if (!s) return { status: "pending_unknown", paymentRowId: row.id, reason: "dhamen_status_unknown" };
+    return this.settleDhamenRenewal(u, row, method, s, amount, renewalOf, now);
+  }
+
+  /** Record Dhamen's status for a renewal row. A still-pending charge leaves the row `processing`. */
+  private async settleDhamenRenewal(u: typeof usersTable.$inferSelect, row: Row, method: PaymentMethod | null, s: DhamenPaymentStatus, amount: number, renewalOf: Date, now: Date): Promise<RenewOutcome> {
+    if (Number(s.paymentStatus) === 1 && Number(s.paymentStatusDetail) === DHAMEN_DETAIL.PAID) {
+      const r = await this.applyDhamenPaid(row, s);
+      if (r.status === "paid") return { status: "paid", paymentRowId: row.id, moyasarPaymentId: row.gatewayRef ?? "" };
+      // Paid at Dhamen but not provably this row — a human must look; never retry-charge it.
+      await this.db.update(subscriptionPaymentsTable).set({ status: "failed", failureReason: `unverified:${r.reason}` }).where(eq(subscriptionPaymentsTable.id, row.id));
+      await this.db.update(usersTable).set({ nextBillingAt: null }).where(eq(usersTable.id, u.id));
+      return { status: "failed", paymentRowId: row.id, reason: `unverified:${r.reason}`, final: true, nextRetryAt: null };
+    }
+    const detail = Number(s.paymentStatusDetail);
+    if (detail === DHAMEN_DETAIL.REJECTED || detail === DHAMEN_DETAIL.EXPIRED || detail === DHAMEN_DETAIL.CANCELLED) {
+      const reason = detail === DHAMEN_DETAIL.REJECTED ? "dhamen_rejected" : detail === DHAMEN_DETAIL.EXPIRED ? "dhamen_expired" : "dhamen_cancelled";
+      await this.db.update(subscriptionPaymentsTable).set({ status: "failed", failureReason: reason }).where(eq(subscriptionPaymentsTable.id, row.id));
+      return this.renewalFailed(u, row, method, amount, renewalOf, now, reason);
+    }
+    // Unpaid / pending: the charge is still running at Dhamen. The notification
+    // or a later run (stale-processing recovery) settles it.
+    return { status: "pending_unknown", paymentRowId: row.id, reason: "dhamen_pending" };
+  }
+
+  /**
+   * Dhamen notified about a renewal row: re-check and settle it, exactly like
+   * the job would. Only a row still in flight (`processing`) moves.
+   */
+  async settleDhamenRenewalRow(row: Row): Promise<{ status: string; reason?: string }> {
+    if (row.chargeType !== "renewal" || row.status !== "processing" || !row.gatewayRef || !row.renewalOf) return { status: row.status };
+    const s = await fetchDhamenPaymentStatus(row.gatewayRef);
+    if (!s) return { status: "pending", reason: "not_found" };
+    const [u] = await this.db.select().from(usersTable).where(eq(usersTable.id, row.userId));
+    if (!u) return { status: "skipped", reason: "no_account" };
+    const method = row.paymentMethodId ? (await this.db.select().from(paymentMethodsTable).where(eq(paymentMethodsTable.id, row.paymentMethodId)))[0] ?? null : null;
+    const out = await this.settleDhamenRenewal(u, row, method, s, Number(row.amount), new Date(row.renewalOf), new Date());
+    return { status: out.status, reason: "reason" in out ? out.reason : undefined };
   }
 
   /** The saved card cannot be charged: stop automatic attempts and ask for a new card. */

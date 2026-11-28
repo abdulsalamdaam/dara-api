@@ -163,5 +163,7 @@ export class RecurringBillingScheduler implements OnModuleInit, OnModuleDestroy 
   imports: [SubscriptionModule],
   controllers: [RecurringBillingController, RecurringBillingAdminController],
   providers: [RecurringBillingService, RecurringBillingScheduler],
+  // Dhamen checkout/notifications settle through the same service (dhamen-billing.module.ts).
+  exports: [RecurringBillingService],
 })
 export class RecurringBillingModule {}

@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Get, Headers, HttpCode, HttpException, HttpStatus, Inject, Injectable, Module, NotFoundException, Optional, Param, Post, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { usersTable, subscriptionPaymentsTable } from "@dara/database";
 import { DRIZZLE, type Drizzle } from "../../database/database.module";
@@ -14,11 +14,13 @@ import { dhamenEnabled } from "../../common/billing-flags";
 import { resolvePackage, CYCLE_LABEL_AR } from "../../common/packages";
 import {
   DHAMEN_DETAIL, cancelDhamenPayment, createDhamenPayment, dhamenCustomerIdentifier, dhamenSdkUrl,
-  fetchDhamenPaymentStatus, isDhamenConfigured, type DhamenPaymentStatus,
+  fetchDhamenPaymentStatus, isDhamenConfigured, dhamenRef, rowIdFromRef, verifyDhamenPaid,
 } from "../../common/dhamen";
+export { dhamenRef, rowIdFromRef, verifyDhamenPaid } from "../../common/dhamen";
 import { AppLogService } from "../../common/logging/app-log.service";
-import { SubscriptionModule, activateFromPaidRow, resolvePaySelection } from "./subscription.module";
-import { SubscriptionInvoiceService } from "./subscription-invoice.service";
+import { resolvePaySelection } from "./subscription.module";
+import { RecurringBillingModule } from "./recurring-billing.module";
+import { RecurringBillingService } from "./recurring-billing.service";
 
 /**
  * Subscription payments through Dhamen (Elm) — staging trial, 28 Nov 2026.
@@ -46,35 +48,6 @@ import { SubscriptionInvoiceService } from "./subscription-invoice.service";
 const APP_PUBLIC_URL = (process.env.APP_PUBLIC_URL || "https://app.dara-sa.com").replace(/\/$/, "");
 type Row = typeof subscriptionPaymentsTable.$inferSelect;
 
-function envTag(): string {
-  return (process.env.DHAMEN_ENV_TAG || "S").replace(/[^A-Z]/gi, "").slice(0, 2).toUpperCase() || "S";
-}
-
-/** Our paymentReferenceId at Dhamen: unique, ≤ 50, names the environment and the row. */
-export function dhamenRef(rowId: number): string {
-  return `DARA-${envTag()}-${rowId}-${randomBytes(4).toString("hex")}`;
-}
-
-/** The row id a reference of ours names, or null for one that is not ours / not this environment's. */
-export function rowIdFromRef(ref: string): number | null {
-  const m = /^DARA-([A-Z]{1,2})-(\d{1,10})-[0-9a-f]{8}$/.exec(String(ref || ""));
-  if (!m || m[1] !== envTag()) return null;
-  const id = Number(m[2]);
-  return Number.isSafeInteger(id) && id > 0 && id < 2 ** 31 ? id : null;
-}
-
-/** Is this status a full, settled-or-settling payment of exactly this row? */
-export function verifyDhamenPaid(row: Pick<Row, "amount" | "gatewayRef">, s: DhamenPaymentStatus | null): { ok: boolean; reason?: string } {
-  if (!s) return { ok: false, reason: "not_found" };
-  if (s.paymentReferenceId !== row.gatewayRef) return { ok: false, reason: "reference_mismatch" };
-  if (Number(s.paymentStatus) !== 1 || Number(s.paymentStatusDetail) !== DHAMEN_DETAIL.PAID) {
-    return { ok: false, reason: `not_paid:${s.paymentStatus}/${s.paymentStatusDetail}` };
-  }
-  if (Math.round(Number(s.amount) * 100) !== Math.round(Number(row.amount) * 100)) return { ok: false, reason: "amount_mismatch" };
-  if ((s.refundPayments ?? []).length > 0) return { ok: false, reason: "refunded" };
-  return { ok: true };
-}
-
 /** Constant-time compare that tolerates different lengths. */
 function sameSecret(given: unknown, expected: string): boolean {
   const a = Buffer.from(String(given ?? ""), "utf8");
@@ -93,7 +66,7 @@ function pick(o: any, key: string): any {
 export class DhamenBillingService {
   constructor(
     @Inject(DRIZZLE) private readonly db: Drizzle,
-    private readonly invoices: SubscriptionInvoiceService,
+    private readonly recurring: RecurringBillingService,
     @Optional() private readonly appLog?: AppLogService,
   ) {}
 
@@ -179,15 +152,17 @@ export class DhamenBillingService {
    * Ask Dhamen about this row and settle it on the answer. Idempotent: the
    * paid transition inside `activateFromPaidRow` is a conditional UPDATE.
    */
-  async settle(row: Row): Promise<{ status: string; activated?: boolean; reason?: string }> {
+  async settle(row: Row): Promise<{ status: string; activated?: boolean; reason?: string; autoRenew?: boolean }> {
     if (row.status === "paid") return { status: "paid", activated: false };
+    // A renewal is the renewal job's to settle (dunning, retries, next date).
+    if (row.chargeType === "renewal") return this.recurring.settleDhamenRenewalRow(row);
     if (!row.gatewayRef) return { status: "unknown", reason: "no_reference" };
     const s = await fetchDhamenPaymentStatus(row.gatewayRef);
     const check = verifyDhamenPaid(row, s);
     if (check.ok) {
-      const won = await activateFromPaidRow(this.db, row, { paidAt: new Date() }, this.invoices);
-      if (won) this.appLog?.record({ level: "log", event: "dhamen_paid", context: "DhamenBilling", userId: row.userId, message: `subscription payment ${row.id} paid through Dhamen`, meta: { paymentId: row.id, brand: s?.paymentBrand ?? null, rrn: s?.rrn ?? null } });
-      return { status: "paid", activated: won };
+      const r = await this.recurring.applyDhamenPaid(row, s!);
+      if (r.activated) this.appLog?.record({ level: "log", event: "dhamen_paid", context: "DhamenBilling", userId: row.userId, message: `subscription payment ${row.id} paid through Dhamen`, meta: { paymentId: row.id, brand: s?.paymentBrand ?? null, rrn: s?.rrn ?? null, autoRenew: r.autoRenew ?? null } });
+      return r;
     }
     const detail = Number(s?.paymentStatusDetail);
     if (s && (detail === DHAMEN_DETAIL.REJECTED || detail === DHAMEN_DETAIL.EXPIRED || detail === DHAMEN_DETAIL.CANCELLED) && row.status === "pending") {
@@ -288,7 +263,7 @@ export class DhamenNotifyController {
 }
 
 @Module({
-  imports: [SubscriptionModule],
+  imports: [RecurringBillingModule],
   controllers: [DhamenBillingController, DhamenNotifyController],
   providers: [DhamenBillingService],
 })

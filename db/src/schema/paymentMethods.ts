@@ -21,6 +21,14 @@ export const paymentMethodsTable = pgTable("payment_methods", {
   isDefault: boolean("is_default").notNull().default(false),
   live: boolean("live"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  /**
+   * 0103: `moyasar` (a Moyasar token) or `dhamen` — then `gateway_ref` is the
+   * reference of the first recurring-enabled Dhamen payment, which renewals
+   * charge with customer-payment-subsequent, and `moyasar_token_id` holds
+   * `dhamen:<ref>` only to keep that column NOT NULL + unique.
+   */
+  gateway: text("gateway").$type<"moyasar" | "dhamen">().notNull().default("moyasar"),
+  gatewayRef: text("gateway_ref"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });
